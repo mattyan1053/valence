@@ -31,7 +31,7 @@ readonly MAX_REPEATS="${LOOP_MAX_STALL_REPEATS:-3}"
 # 表示と検査が同じ文字列から出るので、片方だけずれることがない。
 readonly STOP_IDS=(
   "dirty|worker: 作業ツリーが dirty"
-  "main-sync-failed|worker: main の最新化に失敗"
+  "main-sync-failed|両方: origin/main への追随に失敗 (worker は main、master は worktree)"
   "wrong-branch:<PR番号>|worker: PR の head ブランチに切り替わっていない"
   "too-many-own-prs:<件数>|worker: 自分の open PR が 2 件以上"
   "local-ci-failed:<PR番号>|worker: ./task check が通らない"

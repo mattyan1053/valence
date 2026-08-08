@@ -28,6 +28,29 @@ master ループを **1 周だけ** 実行する。`/loop` が本コマンドを
 `git rev-parse --show-toplevel` が `~/valence` を指すなら、worker の作業ツリーにいる。
 `bin/loop-stall wrong-worktree` を通して停止する。
 
+### 1.1 手順とスクリプトを最新にする
+
+**master は checkout しない設計なので、`./task loop:setup` で作った時点の commit に
+貼り付いたままになる。** worker と違い、ここで追随しないと**マージした改善が master 自身に
+届かない**。手順書もスクリプトも古い版を実行し続ける。
+
+実際に踏んだ。2 コミット遅れたまま周回しており、**「一覧に無い停止識別子を弾く」検査が
+master 側だけ無効**だった。古い手順でも一見正常に動くのでエラーにならず、
+worktree の commit を人が見るまで気づけなかった。
+
+```bash
+before="$(git rev-parse HEAD)"
+git fetch origin main && git switch --detach origin/main
+git rev-parse HEAD          # before と比べる
+```
+
+どちらかに失敗したら `bin/loop-stall main-sync-failed` を通して停止する。
+**古い手順で走り続けるより止まるほうがよい。**
+
+**HEAD が動いたなら、この周回はここで終わり。** いま読んでいる手順書と、これから
+実行する手順書が入れ替わっている。次の周回から新しい版で走る。
+変わっていなければそのままステップ 2 へ進む。
+
 ## 2. open PR を見て、見る順番を決める
 
 ```bash
