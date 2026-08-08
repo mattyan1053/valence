@@ -83,6 +83,26 @@ docker compose exec app pnpm <script>
 
 ホストで `pnpm` / `npx` / `node` を直接実行しないこと。
 
+### Supabase ローカルスタック
+
+```bash
+./task db:up      # 起動
+./task db:status  # 接続情報 (.env に貼る値)
+./task db:psql    # psql で入る
+./task db:reset   # マイグレーションから作り直す
+./task db:down    # 停止
+```
+
+起動するのは **db / auth / rest / kong の 4 つだけ**。realtime・storage・edge_runtime・
+local_smtp・analytics・studio は `supabase/config.toml` で無効にしてある。
+MVP で使わないうえ、イメージだけで数 GB になるため。必要になったら個別に有効化する。
+
+Supabase CLI は「ホストの Docker daemon にスタックを立てさせる」一方で「疎通確認は
+自身の 127.0.0.1 を見る」ため、docker socket とホストのネットワーク名前空間の両方を要求する。
+これを `app` に持たせるとアプリのコンテナがホスト root 相当の権限を常時抱えることになるので、
+CLI 実行専用の使い捨てコンテナ (`supabase-cli` サービス) に切り出してある。
+`app` は素の bridge ネットワークのままで、docker socket も持たない。
+
 手元 PC からのアクセスは SSH ポートフォワーディングを使う:
 
 ```bash
@@ -252,6 +272,17 @@ Codex へ: **レビューコメントは日本語で書くこと。** 指摘は�
 - ユーザーが閲覧権限を持つリポジトリのデータしか返さないこと。Supabase では RLS を有効にし、`service_role` キーをクライアントへ渡さない。
 - 外部からの入力（Webhook ペイロード、API レスポンス、クエリパラメータ）は Zod で検証してから使う。
 - ログにトークン・秘密鍵・個人情報を出さない。
+
+### ローカル Supabase のポートについて
+
+Supabase CLI はローカルスタックのポート (54321 / 54322) を必ず `0.0.0.0` に publish する。
+bind アドレスを変える設定は CLI に無い（`db.network_restrictions` はホスト版プロジェクト向けで、
+ローカルには効かない）。しかも Docker の port publish は firewalld を迂回するため、
+VM が属するネットワークからは既定パスワードの Postgres に到達できる。
+
+**開発 VM が直接インターネットに公開されておらず、上位の仮想ルーター越しである前提で許容している。**
+公開されたホストでこのスタックを上げないこと。塞ぐ場合は外部インターフェース側だけを
+`DOCKER-USER` チェーンで落とせばよい（`app` は `host.docker.internal` 経由なので影響を受けない）。
 
 ---
 

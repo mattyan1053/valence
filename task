@@ -96,14 +96,34 @@ cmd_test() { ready; exec_app pnpm test "$@"; }
 # テストを watch モードで実行する
 cmd_test_watch() { ready; exec_app_it pnpm test:watch; }
 
+# Supabase CLI は docker socket とホストのネットワーク名前空間を必要とする。
+# それを app に持たせたくないので、専用の使い捨てコンテナで実行する。
+supabase_cli() {
+  local tty_flag=()
+  [[ -t 0 ]] || tty_flag=(-T)
+  compose run --rm --quiet-pull "${tty_flag[@]}" supabase-cli "$@"
+}
+
 # Supabase ローカルスタックを起動する
-cmd_db_up() { ready; exec_app pnpm supabase start; }
+cmd_db_up() { ready; supabase_cli pnpm supabase start; }
 
 # Supabase ローカルスタックを停止する
-cmd_db_down() { ready; exec_app pnpm supabase stop; }
+cmd_db_down() { supabase_cli pnpm supabase stop; }
 
 # ローカル DB をマイグレーションから作り直す
-cmd_db_reset() { ready; exec_app pnpm supabase db reset; }
+cmd_db_reset() { ready; supabase_cli pnpm supabase db reset; }
+
+# ローカルスタックの接続情報を表示する (.env に貼る値)
+cmd_db_status() { supabase_cli pnpm supabase status; }
+
+# ローカル DB に psql で入る 例: ./task db:psql -c "select 1"
+cmd_db_psql() {
+  # コンテナ名は config.toml の project_id から決まる
+  local exec_flags=(-i)
+  [[ -t 0 ]] && exec_flags+=(-t)
+  supabase_cli docker exec "${exec_flags[@]}" supabase_db_valence \
+    psql -U postgres -d postgres "$@"
+}
 
 # GitHub Webhook の転送を開始する (.env の SMEE_URL が必要)
 cmd_smee() {
