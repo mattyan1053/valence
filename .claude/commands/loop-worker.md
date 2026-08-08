@@ -160,7 +160,7 @@ bin/loop-stall --reset
 | 作業ツリーが dirty | `dirty` |
 | PR の head ブランチに切り替わっていない | `wrong-branch:<PR番号>` |
 | `main` の最新化に失敗 | `main-sync-failed` |
-| open PR が 2 件以上 | `too-many-prs:<件数>` |
+| 自分の open PR が 2 件以上 | `too-many-own-prs:<件数>` |
 | `./task check` が通らない | `local-ci-failed:<PR番号>` |
 | 実装が完了条件を満たせない | `implementation-blocked:<Issue番号>` |
 | push / PR 作成に失敗 | `publish-failed:<Issue番号>` |

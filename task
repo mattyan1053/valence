@@ -146,7 +146,19 @@ cmd_smee() {
 cmd_loop_setup() {
   local wt="${PWD}-master"
   if [[ -d $wt ]]; then
-    echo "==> worktree は既にある: $wt"
+    # 作った時点の commit に固定されたままだと、master は古いゲートと古い手順で
+    # 判定し続ける。main にマージした修正が反映されない。毎回追いつかせる。
+    if ! git worktree list --porcelain | grep -qxF "worktree $wt"; then
+      echo "==> $wt は worktree として登録されていません。中身を確認してください" >&2
+      return 1
+    fi
+    if [[ -n "$(git -C "$wt" status --porcelain)" ]]; then
+      echo "==> $wt に未コミットの変更があります。master は読み取り専用のはずです" >&2
+      return 1
+    fi
+    git fetch origin main --quiet
+    git -C "$wt" checkout --detach --quiet origin/main
+    echo "==> worktree を origin/main へ更新: $wt ($(git -C "$wt" rev-parse --short HEAD))"
   else
     # detached で作る。ブランチとして main を掴むと worker 側が main を
     # checkout できなくなり、worker の main 最新化が毎周失敗する。

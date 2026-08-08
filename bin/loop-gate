@@ -180,7 +180,13 @@ else
   elif [[ $reviewed_head == "yes" ]]; then
     pass "レビュー: 現 head に対するレビューあり (${rounds} 回)"
   elif ((rounds < MAX_ROUNDS_GATE)); then
-    fail "レビュー: 現 head (${head_sha:0:8}) は未レビュー。@codex review を要求してください (${rounds}/${MAX_ROUNDS_GATE})"
+    fail "レビュー: 現 head (${head_sha:0:8}) は未レビュー。レビューを要求してください (${rounds}/${MAX_ROUNDS_GATE})"
+  elif [[ -z $last_reviewed ]]; then
+    # 応答が 👍 だけで上限に達した場合。信用できる SHA が 1 つも無いので、
+    # 手直し量を測る基準が存在しない。空のまま compare を組み立てると
+    # "...<head>" という無効な指定になり、必ず失敗して原因が分からなくなる。
+    # 追加レビューも要求できないので、ここは人へ渡すのが唯一の出口。
+    fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したが、SHA を伴う応答が 1 件も無い (👍 のみ)。人の判断が要ります"
   elif ! cmp_json="$(gh api "repos/{owner}/{repo}/compare/${last_reviewed}...${head_sha}" \
     --jq '{lines: ([.files[]? | .changes] | add // 0)}' 2>/dev/null)"; then
     fail "レビュー: レビュー済み commit から head までの差分を取得できません"
