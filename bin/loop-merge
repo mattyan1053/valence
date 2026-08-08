@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# ゲートを通った PR を squash マージし、**成否を PR の状態で判定する**。
+#
+#   bin/loop-merge <PR番号> <ゲートが検証した head SHA>
+#
+# master は worktree の detached HEAD で動く。その状態で
+#
+#   gh pr merge <PR> --squash --delete-branch --match-head-commit <SHA>
+#
+# を実行すると、**マージは成功しているのに gh が終了コード 1 を返す**。
+# --delete-branch がローカルの後始末で現在のブランチを引こうとして
+# 「could not determine current branch: not on any branch」で落ちるためで、
+# API 側のマージは完了している。実際に PR #17 / #27 で踏んだ。
+#
+# 終了コードだけを見ると、**成功したマージのたびに「失敗」と報告する**。
+# 嘘の失敗が毎回混ざると、本物の失敗と区別がつかなくなる。
+#
+# そこで gh の終了コードは判定に使わず、**マージ後の PR の state を正とする**。
+# 逆側 (失敗を成功に倒す) は絶対に作らない。state を取れないときは失敗として扱う。
+#
+#   exit 0 = マージされた (merge commit を出力)
+#   exit 1 = マージされていない / 確認できない (呼び出し側は停止する)
+#   exit 2 = 使い方の誤り
+#
+# 入力の検査は gh を呼ぶ前に済ませる。誤った SHA でマージを試みさせない。
+#
+# 状態の取り出しは gh の --jq だけで行い、外部の jq に依存しない。
+# 他のループ用スクリプトと違い、**このスクリプトはテストから gh を差し替えて動かす**
+# (本物の gh では実際にマージしてしまうため)。依存が少ないほど差し替えが素直になる。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-merge <PR番号> <ゲートが検証した head SHA>" >&2
+  echo "  SHA は 40 桁すべてを渡す (--match-head-commit は短縮形を受け付けない)" >&2
+  exit 2
+}
+
+[[ $# -eq 2 ]] || usage
+readonly PR="$1"
+readonly HEAD_SHA="$2"
+
+[[ $PR =~ ^[0-9]+$ ]] || {
+  echo "[FAIL] PR 番号は数字で指定してください: $PR" >&2
+  exit 2
+}
+
+# 短縮形を許すと、ゲートが検証したものと別の commit をマージしうる。
+[[ $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] || {
+  echo "[FAIL] head SHA は 40 桁の 16 進で指定してください: $HEAD_SHA" >&2
+  exit 2
+}
+
+# --match-head-commit を必ず付ける。判定後に push された commit を取り込まないため。
+merge_out="$(gh pr merge "$PR" --squash --delete-branch --match-head-commit "$HEAD_SHA" 2>&1)"
+merge_status=$?
+
+# ここから先が本判定。gh の終了コードは参考情報としてしか使わない。
+# 1 行 1 値で受ける。TSV を IFS=タブ の read で割ると、**タブは IFS の空白文字なので
+# 連続が 1 区切りに畳まれ、空のフィールドがずれる** (mergedAt が空のとき
+# headRefName が mergedAt として読まれ、未マージを「マージ済み」と誤判定した)。
+if ! pr_fields="$(gh pr view "$PR" --json state,mergedAt,mergeCommit,headRefName,headRefOid \
+  --jq '[.state, (.mergedAt // ""), (.mergeCommit.oid // ""), (.headRefName // ""),
+         (.headRefOid // "")] | .[]' \
+  2>/dev/null)"; then
+  echo "[FAIL] PR #$PR の状態を確認できません。マージされたか不明なので失敗として扱います" >&2
+  [[ -n $merge_out ]] && printf '%s\n' "$merge_out" >&2
+  exit 1
+fi
+
+mapfile -t fields <<<"$pr_fields"
+state="${fields[0]-}"
+merged_at="${fields[1]-}"
+merge_commit="${fields[2]-}"
+head_ref="${fields[3]-}"
+head_oid="${fields[4]-}"
+
+if [[ $state != "MERGED" || -z $merged_at ]]; then
+  echo "[FAIL] PR #$PR はマージされていません (state=$state)" >&2
+  [[ -n $merge_out ]] && printf '%s\n' "$merge_out" >&2
+  exit 1
+fi
+
+# --match-head-commit は **このマージ要求にだけ** 効き、あとから読む state には効かない。
+# ゲート後に別の commit が push され、それを誰かが手でマージしていると、
+# こちらのマージは失敗したのに state は MERGED になる。**ゲートしていない head を
+# 成功として扱わない**ため、マージされた head がゲートしたものかを必ず確かめる。
+# 嘘の失敗を消すために嘘の成功を作らない。
+if [[ $head_oid != "$HEAD_SHA" ]]; then
+  echo "[FAIL] PR #$PR はゲートした SHA と違う head でマージされています" >&2
+  echo "       ゲート済み: $HEAD_SHA" >&2
+  echo "       実際の head: ${head_oid:-unknown}" >&2
+  [[ -n $merge_out ]] && printf '%s\n' "$merge_out" >&2
+  exit 1
+fi
+
+echo "MERGED pr=$PR commit=${merge_commit:-unknown} at=$merged_at"
+
+# gh が非ゼロで終わったのに state は MERGED、が detached HEAD での既定の姿。
+# 黙って隠すと本物の異常に気づけないので、何が起きたかは残す。
+if ((merge_status != 0)); then
+  echo "[NOTE] gh は exit $merge_status で終了しましたが、マージは完了しています"
+  [[ -n $merge_out ]] && printf '%s\n' "$merge_out"
+fi
+
+# remote の head ブランチは --delete-branch が消す。消え残りは掃除の話なので
+# 失敗にはしないが、黙って溜まると後で分からなくなるので報告する。
+if [[ -n $head_ref ]] \
+  && gh api "repos/{owner}/{repo}/git/ref/heads/$head_ref" >/dev/null 2>&1; then
+  echo "[WARN] remote ブランチが残っています: $head_ref"
+fi
+exit 0

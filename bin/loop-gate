@@ -227,8 +227,11 @@ printf '%s\n' "${results[@]}"
 if ((ok == 1)); then
   echo
   echo "GATE PASS pr=$PR head=$head_sha"
-  echo "マージは head を固定して実行すること:"
-  echo "  gh pr merge $PR --squash --delete-branch --match-head-commit $head_sha"
+  # gh pr merge を直接案内しない。master は detached HEAD の worktree で動くので、
+  # --delete-branch のローカル後始末で落ち、マージが成功しても非ゼロが返る。
+  # 案内する場所が古いと、ラッパーを用意しても呼ばれない。
+  echo "マージは次で実行すること (成否は PR の state と head で判定される):"
+  echo "  bin/loop-merge $PR $head_sha"
   exit 0
 fi
 echo
