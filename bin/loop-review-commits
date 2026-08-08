@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# 指定 PR について、Codex がレビュー済みの commit を 1 行 1 件で出す。
+#
+# Codex の応答は 2 通りある。**どちらか片方しか見ないと判定を誤る。**
+#
+#   指摘あり → review オブジェクト。commit_id を持つ (完全な SHA)
+#   指摘なし → 会話コメント。本文に「Reviewed commit: `<短縮SHA>`」を含む
+#
+# review だけを数えると、指摘ゼロの PR が「未レビュー」と判定され、
+# **きれいな PR ほどマージできない**という逆転が起きる。実際に踏んだ。
+#
+# 出力される SHA は短縮形が混ざる。呼び出し側は前方一致で突き合わせること。
+#
+#   exit 0 = 取得できた (0 件のこともある)
+#   exit 2 = 使い方の誤り / 取得不能
+#
+# jq の変数はシェルに展開させない。値を文字列として組み立てず --arg で渡すことで、
+# 名前に $(...) や ' が混ざっても注入にならない。
+# shellcheck disable=SC2016
+set -uo pipefail
+
+readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
+
+usage() {
+  echo "使い方: bin/loop-review-commits <PR番号>" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+[[ $1 =~ ^[0-9]+$ ]] || usage
+readonly PR="$1"
+
+# gh api には --arg が無いので jq へパイプして渡す。
+if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
+  | jq -rs --arg bot "$REVIEW_BOT" \
+    'add | map(select(.user.login == $bot) | .commit_id) | .[]')"; then
+  echo "[FAIL] PR #$PR のレビューを取得できません" >&2
+  exit 2
+fi
+
+# 「Reviewed commit: `<sha>`」からバッククォートに挟まれた 16 進を抜く。
+if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
+  | jq -rs --arg bot "$REVIEW_BOT" \
+    'add | map(select(.user.login == $bot) | .body)
+     | map(capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha // empty)
+     | .[]')"; then
+  echo "[FAIL] PR #$PR のコメントを取得できません" >&2
+  exit 2
+fi
+
+printf '%s\n%s\n' "$reviews" "$comments" | grep -E '^[0-9a-f]{7,40}$' | sort -u
+exit 0

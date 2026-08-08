@@ -47,32 +47,60 @@ if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/nu
   exit 2
 fi
 
-# --- Codex レビューの一覧 -----------------------------------------------------
-# --paginate を付ける。件数を決め打ちすると、上限を超えた PR でラウンド数を
-# 過少に数え、上限を超えてレビューを要求し続けることになる。
-# gh api には --arg が無い。bot 名を --jq の中へ文字列連結すると、名前に
-# クォートが混ざったときにフィルタを壊せるので、jq へパイプして --arg で渡す。
-if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
-  | jq -r --arg bot "$REVIEW_BOT" '.[] | select(.user.login == $bot) | .commit_id')"; then
-  echo "[FAIL] PR #$PR のレビューを取得できません" >&2
+# --- Codex がレビュー済みの commit ---------------------------------------------
+# 指摘ありは review オブジェクト、指摘なしは会話コメントで返る。両方を数える。
+if ! reviewed="$("$(dirname "$0")/loop-review-commits" "$PR")"; then
+  echo "[FAIL] PR #$PR のレビュー済み commit を取得できません" >&2
   exit 2
 fi
-
 rounds=0
 reviewed_head="no"
-while IFS= read -r commit_id; do
-  [[ -n $commit_id ]] || continue
+while IFS= read -r sha; do
+  [[ -n $sha ]] || continue
   ((rounds++))
-  [[ $commit_id == "$head_sha" ]] && reviewed_head="yes"
-done <<<"$reviews"
+  [[ $head_sha == "$sha"* ]] && reviewed_head="yes"
+done <<<"$reviewed"
+last_at=""
 
-echo "pr=$PR head=${head_sha:0:8} rounds=$rounds max=$MAX_ROUNDS reviewed_head=$reviewed_head"
+# --- 会話コメント -------------------------------------------------------------
+# 「受け取ったレビュー」だけを数えると、レビューが返ってこない場合に上限へ到達せず、
+# 要求だけを毎周投げ続ける。実際にレビュー機能が使えない状態を踏んだ。
+# 投げた要求と、bot からの応答不能通知も数える。
+if ! comments_json="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
+  | jq -rs --arg bot "$REVIEW_BOT" --arg since "$last_at" \
+    'add
+     | {pending: (map(select(.user.login != $bot
+                             and (.body | test("@codex\\s+review"; "i"))
+                             and ($since == "" or .created_at > $since))) | length),
+        notice: (map(select(.user.login == $bot
+                            and (.body | test("create an environment"; "i")))) | length)}')"; then
+  echo "[FAIL] PR #$PR のコメントを取得できません" >&2
+  exit 2
+fi
+pending="$(jq -r '.pending' <<<"$comments_json")"
+notice="$(jq -r '.notice' <<<"$comments_json")"
+
+echo "pr=$PR head=${head_sha:0:8} rounds=$rounds max=$MAX_ROUNDS reviewed_head=$reviewed_head pending=$pending"
 
 # --- 判定 ---------------------------------------------------------------------
 # 現 head が既にレビュー済みなら、再要求は純粋な浪費でしかない。
 # 何も変わっていないものを二度レビューさせない。これが浪費を止める本丸。
 if [[ $reviewed_head == "yes" ]]; then
   echo "[NO] 現 head は既にレビュー済み。push してからでないと要求しない"
+  exit 1
+fi
+
+# レビュー機能そのものが使えない状態。要求しても永久に返らないので投げない。
+if ((notice > 0)) && ((rounds == 0)); then
+  echo "[NO] Codex がこのリポジトリでレビューできない状態を通知している"
+  echo "     https://chatgpt.com/codex/cloud/settings/environments で環境を作る必要がある"
+  exit 1
+fi
+
+# 直近のレビュー以降に投げた要求が未応答なら、重ねて投げない。
+# レビューが遅いのか使えないのかは区別できないが、どちらでも「待つ」が正しい。
+if ((pending > 0)); then
+  echo "[NO] 要求済みで未応答 ($pending 件)。返るまで待つ。重ねて要求しない"
   exit 1
 fi
 

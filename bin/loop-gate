@@ -136,52 +136,51 @@ else
 fi
 
 # --- 4. レビュー済み ----------------------------------------------------------
-# 原則は「現 head に対する Codex のレビューが存在すること」。古い commit への
-# レビューで通すと、レビュー後に押し込まれた変更が素通りする。
+# Codex の応答は 2 通りある。指摘ありは review オブジェクト、指摘なしは会話コメント。
+# review だけを見ると、指摘ゼロの PR が「未レビュー」となり、きれいな PR ほど
+# マージできなくなる。bin/loop-review-commits が両方を吸収する。
 #
-# ただしこれを無条件に必須にすると詰む。レビュー上限に達したあとで指摘を直して
-# push すると head が変わり、追加レビューは要求できないので二度と通らなくなる。
-# 「レビューが止まらない」を防ぐ上限が、そのまま「永久にマージされない」を作る。
-#
-# そこで上限到達後は、最後にレビューされた commit から head までの差分が
-# 手直しの範囲 (LOOP_MAX_FIXUP_LINES) に収まっていれば通す。それを超える変更は
-# 実質レビュー未了なので落とし、人へ渡す。どちらの経路も必ず終わる。
+# 原則は「現 head がレビュー済み」。ただしこれを無条件に必須にすると詰む。
+# 上限到達後に指摘を直して push すると head が変わり、追加レビューは要求できないので
+# 二度と通らない。「レビューが止まらない」を防ぐ上限が「永久にマージされない」を作る。
+# そこで上限到達後は、レビュー済み commit から head までの差分が手直しの範囲に
+# 収まっていれば通す。どちらの経路も必ず終わる。
 readonly MAX_ROUNDS_GATE="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 readonly MAX_FIXUP_LINES="${LOOP_MAX_FIXUP_LINES:-80}"
 
 if [[ -z $head_sha || $head_sha == "null" ]]; then
   fail "レビュー: head SHA が不明なため判定できません"
+elif ! reviewed="$("$(dirname "$0")/loop-review-commits" "$PR")"; then
+  fail "レビュー: レビュー済み commit を取得できません"
 else
-  # gh api には --arg が無い。bot 名を --jq の中へ文字列連結すると、名前に
-  # クォートが混ざったときにフィルタを壊せるので、jq へパイプして --arg で渡す。
-  if ! reviews_json="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
-    | jq -rs --arg bot "$REVIEW_BOT" \
-      'add | map(select(.user.login == $bot)) | sort_by(.submitted_at)
-       | {n: length, last: (last.commit_id // "")}')"; then
-    fail "レビュー: レビュー一覧を取得できません"
+  rounds=0
+  last_reviewed=""
+  reviewed_head="no"
+  while IFS= read -r sha; do
+    [[ -n $sha ]] || continue
+    ((rounds++))
+    last_reviewed="$sha"
+    # コメント由来は短縮 SHA なので前方一致で突き合わせる
+    [[ $head_sha == "$sha"* ]] && reviewed_head="yes"
+  done <<<"$reviewed"
+
+  if ((rounds == 0)); then
+    fail "レビュー: $REVIEW_BOT のレビューが 1 件もありません"
+  elif [[ $reviewed_head == "yes" ]]; then
+    pass "レビュー: 現 head に対するレビューあり (${rounds} 回)"
+  elif ((rounds < MAX_ROUNDS_GATE)); then
+    fail "レビュー: 現 head (${head_sha:0:8}) は未レビュー。@codex review を要求してください (${rounds}/${MAX_ROUNDS_GATE})"
+  elif ! cmp_json="$(gh api "repos/{owner}/{repo}/compare/${last_reviewed}...${head_sha}" \
+    --jq '{lines: ([.files[]? | .changes] | add // 0)}' 2>/dev/null)"; then
+    fail "レビュー: レビュー済み commit から head までの差分を取得できません"
   else
-    rounds="$(jq -r '.n' <<<"$reviews_json")"
-    last_reviewed="$(jq -r '.last' <<<"$reviews_json")"
-    if ! [[ $rounds =~ ^[0-9]+$ ]]; then
-      fail "レビュー: レビュー数を数値として読めません"
-    elif ((rounds == 0)); then
-      fail "レビュー: $REVIEW_BOT のレビューが 1 件もありません"
-    elif [[ $last_reviewed == "$head_sha" ]]; then
-      pass "レビュー: 現 head に対するレビューあり (${rounds} 回)"
-    elif ((rounds < MAX_ROUNDS_GATE)); then
-      fail "レビュー: 現 head (${head_sha:0:8}) は未レビュー。@codex review を要求してください (${rounds}/${MAX_ROUNDS_GATE})"
-    elif ! cmp_json="$(gh api "repos/{owner}/{repo}/compare/${last_reviewed}...${head_sha}" \
-      --jq '{files: (.files // [] | length), lines: ([.files[]? | .changes] | add // 0)}' 2>/dev/null)"; then
-      fail "レビュー: レビュー済み commit から head までの差分を取得できません"
+    fixup_lines="$(jq -r '.lines' <<<"$cmp_json")"
+    if ! [[ $fixup_lines =~ ^[0-9]+$ ]]; then
+      fail "レビュー: 手直し量を数値として読めません"
+    elif ((fixup_lines > MAX_FIXUP_LINES)); then
+      fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したうえ、レビュー後の変更が ${fixup_lines} 行 > ${MAX_FIXUP_LINES} 行。人の判断が要ります"
     else
-      fixup_lines="$(jq -r '.lines' <<<"$cmp_json")"
-      if ! [[ $fixup_lines =~ ^[0-9]+$ ]]; then
-        fail "レビュー: 手直し量を数値として読めません"
-      elif ((fixup_lines > MAX_FIXUP_LINES)); then
-        fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したうえ、レビュー後の変更が ${fixup_lines} 行 > ${MAX_FIXUP_LINES} 行。人の判断が要ります"
-      else
-        pass "レビュー: 上限到達。レビュー後の変更は ${fixup_lines} 行で手直しの範囲"
-      fi
+      pass "レビュー: 上限到達。レビュー後の変更は ${fixup_lines} 行で手直しの範囲"
     fi
   fi
 fi
