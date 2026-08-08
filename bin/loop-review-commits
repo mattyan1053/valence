@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 指定 PR について、Codex がレビューした commit を **時刻順** に 1 行 1 件で出す。
 #
-#   <ISO8601 の時刻><TAB><commit SHA><TAB><出どころ>
+#   <ISO8601 の時刻><TAB><commit SHA>
 #
 # 古い順に並べる。呼び出し側は最終行を「最新のレビュー」として使える。
 #
@@ -14,15 +14,19 @@
 # review だけを数えると、指摘ゼロの PR が「未レビュー」と判定され、
 # **きれいな PR ほどマージできない**という逆転が起きる。実際に踏んだ。
 #
-# 出力は 3 列。第 3 列は SHA の出どころで、呼び出し側の扱いを変えるために要る。
+# 👍 が何を見たのかは、応答側からは分からない。commit の日付から推定していた時期が
+# あるが、committer date は push 時刻ではないので「そのとき見られていた head」である
+# 保証が無く、**未レビューの変更をマージ可能にしてしまう**。
 #
-#   review   / comment  … SHA が明示されている。head 一致の判定に使ってよい
-#   reaction … SHA が無い。時刻から推定した commit を入れているが **信用できない**
+# そこで推定をやめ、**レビューが走る直前の head を先に記録しておく**
+# (bin/loop-review-head)。応答は 3 種類まとめて時刻順に並べ、記録と **古い順に
+# 1 対 1 で対応させる** (--pair)。時刻の前後だけで選ぶと、遅れて届いた 👍 が
+# あとから積まれた新しい記録に結び付き、未レビューの head を通してしまう。
+# 対応する記録が無い 👍 は **数えない** (安全側に倒す)。
+# その PR は「レビュー 0 件」として扱われ、レビューを要求する経路へ進む。
 #
-# committer date は push 時刻ではない。リアクションより古い日付の commit を
-# あとから push できるので、推定した commit が「そのとき見られていた head」で
-# ある保証が無い。これを head 一致に使うと、**未レビューの変更をマージ可能に
-# してしまう**。リアクションはレビュー回数を数えるためだけに使う。
+# ここを通った行はすべて信用できる SHA を持つので、呼び出し側は出どころで
+# 場合分けしない。**3 列目 (出どころ) は廃止した。**
 #
 # 時刻を落とすと別の事故になる。SHA だけを sort すると辞書順に並び、
 # 「最新のレビュー」を取り違えて手直し量を過大に見積もる。呼び出し側が
@@ -53,7 +57,7 @@ readonly PR="$1"
 if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
   | jq -rs --arg bot "$REVIEW_BOT" \
     'add | map(select(.user.login == $bot and (.commit_id // "") != ""))
-     | map("\(.submitted_at)\t\(.commit_id)\treview") | .[]')"; then
+     | map("\(.submitted_at)\t\(.commit_id)") | .[]')"; then
   echo "[FAIL] PR #$PR のレビューを取得できません" >&2
   exit 2
 fi
@@ -64,38 +68,34 @@ if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>
     'add | map(select(.user.login == $bot))
      | map(. as $c
            | ($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha? // empty)
-           | "\($c.created_at)\t\(.)\tcomment")
+           | "\($c.created_at)\t\(.)")
      | .[]')"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
   exit 2
 fi
 
-# 👍 リアクション。SHA を持たないので、時刻から commit を引き当てる。
+# 👍 リアクション。SHA を持たないので、時刻だけを取って空の SHA 欄で流す。
 if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" 2>/dev/null \
   | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot and .content == "+1") | .created_at) | .[]')"; then
+    'add | map(select(.user.login == $bot and .content == "+1") | "\(.created_at)\t") | .[]')"; then
   echo "[FAIL] PR #$PR のリアクションを取得できません" >&2
   exit 2
 fi
 
-reaction_rows=""
-if [[ -n ${reactions//[[:space:]]/} ]]; then
-  if ! pr_commits="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/commits" 2>/dev/null \
-    | jq -rs 'add | map("\(.commit.committer.date)\t\(.sha)") | sort | .[]')"; then
-    echo "[FAIL] PR #$PR の commit 一覧を取得できません" >&2
-    exit 2
-  fi
-  while IFS= read -r at; do
-    [[ -n $at ]] || continue
-    # リアクション時刻以前で最も新しい commit を選ぶ
-    picked="$(awk -F'\t' -v t="$at" '$1 <= t {sha=$2} END {print sha}' <<<"$pr_commits")"
-    # 二重引用符の中では \t はリテラルになる。$'...' でタブを埋め込む。
-    [[ -n $picked ]] && reaction_rows+="${at}"$'\t'"${picked}"$'\treaction\n'
-  done <<<"$reactions"
+# 3 種類を時刻で昇順に並べて 1 本の応答列にする。ISO8601 は辞書順と時系列が一致する。
+# **順序が結び付けの前提**なので、ここを崩さない (同時刻は安定ソートで入力順)。
+#
+# 応答が 1 件も無い PR は正常である (開いた直後など)。grep は一致なしで 1 を返し、
+# pipefail がそれをパイプライン全体の失敗にするので、**1 だけ**を通す。
+# `|| true` にすると grep 自体のエラー (2 以上) まで飲み込んでしまう。
+responses="$(printf '%s\n%s\n%s' "$reviews" "$comments" "$reactions" \
+  | { grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t([0-9a-f]{7,40})?$' || (( $? == 1 )); } \
+  | sort -s -k1,1)"
+
+if ! paired="$(printf '%s' "$responses" | "$(dirname "$0")/loop-review-head" --pair "$PR")"; then
+  echo "[FAIL] PR #$PR の応答をレビュー対象 head へ対応させられません" >&2
+  exit 2
 fi
 
-# 時刻で昇順に並べる。ISO8601 は辞書順と時系列が一致するので -k1,1 で足りる。
-printf '%s\n%s\n%s' "$reviews" "$comments" "$reaction_rows" \
-  | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}\t(review|comment|reaction)$' \
-  | sort -k1,1
+printf '%s' "$paired" | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}$'
 exit 0

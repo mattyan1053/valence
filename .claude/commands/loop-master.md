@@ -100,7 +100,17 @@ gh pr merge <PR番号> --squash --delete-branch --match-head-commit <ゲート�
 bin/loop-review-budget <PR番号>
 ```
 
-- exit 0 → `gh pr comment <PR番号> --body "@codex review"` を投げる。この周回は終わり
+- exit 0 → **先に head を記録してから**要求を投げる。この周回は終わり
+
+```bash
+bin/loop-review-head <PR番号> "$(gh pr view <PR番号> --json headRefOid --jq '.headRefOid')"
+gh pr comment <PR番号> --body "@codex review"
+```
+
+**順番を守る。** 指摘ゼロのとき Codex は 👍 リアクションだけで返すことがあり、
+それは SHA を持たない。要求を先に投げると、記録より前に応答が返りうる。
+その応答は「何を見たか分からない」ものとして数えられず、レビューが 1 往復無駄になる。
+
 - exit 1 → **投げない。** 現 head がレビュー済みか、上限に達している。
   未解決スレッドがあるならステップ 4 へ。無いのに落ちているなら、
   ゲートの他の条件が原因なのでそちらを見る

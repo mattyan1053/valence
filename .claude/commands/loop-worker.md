@@ -175,7 +175,13 @@ gh issue edit <N> --remove-label ready --add-label in-progress
 ./task check          # 緑を確認してから push
 git push -u origin <ブランチ>
 gh pr create --base main --title "<日本語>" --body-file <file>
+bin/loop-review-head "<PR番号>" "$(git rev-parse HEAD)"
 ```
+
+**作った直後に head を記録する。** PR を開くと自動でレビューが走り、その対象は今の head
+である。指摘ゼロのとき Codex は 👍 リアクションだけで返すことがあり、それは SHA を
+持たないので、記録が無いと「何を見たか分からない」ものとして数えられない。
+記録し忘れると、きれいな PR ほど余計なレビュー要求を 1 往復ぶん増やす。
 
 本文には **「なぜ変えたか」と「どう検証したか」**を書く。`Closes #<Issue番号>` を入れる。
 「通したコマンド」ではなく「何が起きることを確認したか」を書く。
