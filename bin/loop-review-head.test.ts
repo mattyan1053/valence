@@ -81,6 +81,60 @@ describe("bin/loop-review-head", () => {
     expect(run(["", "e".repeat(40)]).status).toBe(2);
   });
 
+  /** 応答（`<時刻><TAB><SHA or 空>`）を渡して、SHA が確定した行だけを受け取る。 */
+  function pair(pr: string, responses: string[]): string[] {
+    const result = spawnSync(SCRIPT, ["--pair", pr], {
+      cwd: sandbox,
+      encoding: "utf8",
+      input: responses.join("\n"),
+    });
+    expect(result.status).toBe(0);
+    return result.stdout.split("\n").filter((line) => line !== "");
+  }
+
+  it("記録より後に来た SHA 無しの応答は、その記録に結び付く", () => {
+    run(["20", "1".repeat(40)]);
+
+    expect(pair("20", ["2099-01-01T00:00:00Z\t"])).toEqual([
+      `2099-01-01T00:00:00Z\t${"1".repeat(40)}`,
+    ]);
+  });
+
+  it("記録より前の応答は結び付けない（何を見たか分からない）", () => {
+    run(["21", "2".repeat(40)]);
+
+    expect(pair("21", ["2000-01-01T00:00:00Z\t"])).toEqual([]);
+  });
+
+  it("SHA を持つ応答はその SHA のまま返す", () => {
+    expect(pair("22", [`2099-01-01T00:00:00Z\t${"3".repeat(40)}`])).toEqual([
+      `2099-01-01T00:00:00Z\t${"3".repeat(40)}`,
+    ]);
+  });
+
+  it("遅れて届いた応答を、あとから積んだ新しい記録に結び付けない", () => {
+    // 自動レビュー(A) → 要求(A) → 指摘つき応答(A) → 直して要求(B) → **A の 👍 が今ごろ届く**
+    // 時刻の前後だけで選ぶと B に結び付き、未レビューの B がマージ可能になる。
+    const a = "a".repeat(40);
+    const b = "b".repeat(40);
+    // 記録は古い順に積まれる（同一秒に複数入りうるので追記順が保たれること自体も効く）
+    run(["23", a]);
+    run(["23", a]);
+    run(["23", b]);
+
+    const rows = pair("23", [`2099-01-01T00:00:00Z\t${a}`, "2099-01-01T00:00:01Z\t"]);
+
+    expect(rows).toEqual([`2099-01-01T00:00:00Z\t${a}`, `2099-01-01T00:00:01Z\t${a}`]);
+  });
+
+  it("記録より多い応答が来ても、余った応答は結び付けない", () => {
+    run(["24", "4".repeat(40)]);
+
+    const rows = pair("24", ["2099-01-01T00:00:00Z\t", "2099-01-01T00:00:01Z\t"]);
+
+    expect(rows).toEqual([`2099-01-01T00:00:00Z\t${"4".repeat(40)}`]);
+  });
+
   it("記録は作業ツリーの外に置く（コミットされない）", () => {
     run(["16", "f".repeat(40)]);
 

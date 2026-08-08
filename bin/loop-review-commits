@@ -19,8 +19,10 @@
 # 保証が無く、**未レビューの変更をマージ可能にしてしまう**。
 #
 # そこで推定をやめ、**レビューが走る直前の head を先に記録しておく**
-# (bin/loop-review-head)。記録より後に来た 👍 は、その記録の SHA を見たと確定できる。
-# 記録より前の 👍 は何を見たか分からないので **数えない** (安全側に倒す)。
+# (bin/loop-review-head)。応答は 3 種類まとめて時刻順に並べ、記録と **古い順に
+# 1 対 1 で対応させる** (--pair)。時刻の前後だけで選ぶと、遅れて届いた 👍 が
+# あとから積まれた新しい記録に結び付き、未レビューの head を通してしまう。
+# 対応する記録が無い 👍 は **数えない** (安全側に倒す)。
 # その PR は「レビュー 0 件」として扱われ、レビューを要求する経路へ進む。
 #
 # ここを通った行はすべて信用できる SHA を持つので、呼び出し側は出どころで
@@ -72,31 +74,23 @@ if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>
   exit 2
 fi
 
-# 👍 リアクション。SHA を持たないので、記録しておいた head と時刻で突き合わせる。
+# 👍 リアクション。SHA を持たないので、時刻だけを取って空の SHA 欄で流す。
 if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" 2>/dev/null \
   | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot and .content == "+1") | .created_at) | .[]')"; then
+    'add | map(select(.user.login == $bot and .content == "+1") | "\(.created_at)\t") | .[]')"; then
   echo "[FAIL] PR #$PR のリアクションを取得できません" >&2
   exit 2
 fi
 
-reaction_rows=""
-if [[ -n ${reactions//[[:space:]]/} ]]; then
-  if ! recorded="$("$(dirname "$0")/loop-review-head" --list "$PR")"; then
-    echo "[FAIL] PR #$PR のレビュー対象 head の記録を取得できません" >&2
-    exit 2
-  fi
-  while IFS= read -r at; do
-    [[ -n $at ]] || continue
-    # リアクション時刻以前で最も新しい記録を選ぶ。無ければその応答は数えない。
-    picked="$(awk -F'\t' -v t="$at" '$1 <= t {sha=$2} END {print sha}' <<<"$recorded")"
-    # 二重引用符の中では \t はリテラルになる。$'...' でタブを埋め込む。
-    [[ -n $picked ]] && reaction_rows+="${at}"$'\t'"${picked}"$'\n'
-  done <<<"$reactions"
+# 3 種類を時刻で昇順に並べて 1 本の応答列にする。ISO8601 は辞書順と時系列が一致する。
+# **順序が結び付けの前提**なので、ここを崩さない (同時刻は安定ソートで入力順)。
+if ! paired="$(printf '%s\n%s\n%s' "$reviews" "$comments" "$reactions" \
+  | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t([0-9a-f]{7,40})?$' \
+  | sort -s -k1,1 \
+  | "$(dirname "$0")/loop-review-head" --pair "$PR")"; then
+  echo "[FAIL] PR #$PR の応答をレビュー対象 head へ対応させられません" >&2
+  exit 2
 fi
 
-# 時刻で昇順に並べる。ISO8601 は辞書順と時系列が一致するので -k1,1 で足りる。
-printf '%s\n%s\n%s' "$reviews" "$comments" "$reaction_rows" \
-  | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}$' \
-  | sort -k1,1
+printf '%s' "$paired" | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}$'
 exit 0
