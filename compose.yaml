@@ -55,6 +55,11 @@ services:
       - ${PWD}:${PWD}
       - pnpm-store:/home/node/.local/share/pnpm/store
       - /var/run/docker.sock:/var/run/docker.sock
+    # config.toml の env() 置換はこのコンテナのプロセス環境から解決される。
+    # 渡し忘れると GitHub OAuth の資格情報が空のままスタックが起動する。
+    env_file:
+      - path: .env
+        required: false
     network_mode: host
 
   # GitHub Webhook をローカルの Next.js へ転送する。
