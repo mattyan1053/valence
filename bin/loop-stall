@@ -35,7 +35,7 @@ readonly STOP_IDS=(
   "wrong-branch:<PR番号>|worker: PR の head ブランチに切り替わっていない"
   "too-many-own-prs:<件数>|worker: 自分の open PR が 2 件以上"
   "local-ci-failed:<PR番号>|worker: ./task check が通らない"
-  "implementation-blocked:<Issue番号>|worker: 実装が完了条件を満たせない"
+  "implementation-blocked:<Issue番号>|worker: blocked にして人へ渡した (完了条件を満たせない / PR が人手で閉じられた)"
   "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
   "wrong-worktree|master: worker の作業ツリーにいる"
   "pr-lookup-failed|master: open PR の一覧を取得できない"

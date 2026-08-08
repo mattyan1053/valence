@@ -71,8 +71,20 @@ git log --oneline main..<ブランチ>                          # コミット�
 gh pr list --state all --limit 200 --head <ブランチ> --json number,state
 ```
 
-- **PR が既にある**（state を問わず）→ 公開は済んでいる。作り直さない。label が
-  残っているだけなので、Issue にその旨をコメントしてこの周回は終わり
+- **PR が既にある**（state を問わず）→ 公開は済んでいる。作り直さない。ただし
+  **コメントして終わってはいけない。** `in-progress` が残ったままだと次の周回も
+  必ずここへ入り、`ready` の Issue へ進めないまま Issue にコメントだけが積もる。
+  停止も記録されないので 3 周で止まる仕組みも働かない。**state ごとに、label を
+  動かして収束させるか、停止を記録するかのどちらかへ必ず倒す。**
+  - **MERGED** → 作業は終わっている。`in-progress` を外し、マージ済みである旨を
+    Issue にコメントする（閉じるのは master）。次の周回はこの経路に入らない
+  - **CLOSED**（マージされていない）→ なぜ閉じられたかは worker には判断できない。
+    `in-progress` を外して `blocked` を付け、状況を Issue にコメントしたうえで
+    `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
+  - **OPEN** → ステップ 2 の「自分の open PR」に出ていないのにここで見つかる状態
+    （他人が作った PR など）。推測で触らず、同じく
+    `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
+    （状態が変わらなければ同じ識別子が積み上がり、3 周で止まる）
 - **PR が無く、コミットが載ったブランチがある** → 公開に失敗した周回の続きである。
   そのブランチへ切り替え、ステップ 4 の「PR を作る」から再開する。再び失敗したら
   同じ `publish-failed:<Issue番号>` を記録するので、3 周で止まる
