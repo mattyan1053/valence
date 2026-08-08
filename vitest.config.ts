@@ -11,7 +11,8 @@ export default defineConfig({
     // UI コンポーネントのテストを書くときに jsdom の project を足す。
     // それまでは node で足りるので増やさない。
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // bin/ のループ用スクリプトもテストする。ここが壊れるとループが空転し続ける。
+    include: ["src/**/*.test.ts", "bin/**/*.test.ts"],
     coverage: {
       provider: "v8",
       // 内側のレイヤだけを対象にする。app/ui は E2E で担保する方針。

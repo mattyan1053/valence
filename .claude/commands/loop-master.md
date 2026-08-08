@@ -26,7 +26,7 @@ master ループを **1 周だけ** 実行する。`/loop` が本コマンドを
 
 存在しない場合、自分が worktree 側（`~/valence-master`）にいることを確認する。
 `git rev-parse --show-toplevel` が `~/valence` を指すなら、worker の作業ツリーにいる。
-停止識別子 `wrong-worktree` で停止する。
+`bin/loop-stall wrong-worktree` を通して停止する。
 
 ## 2. open PR を見て、見る順番を決める
 
@@ -35,7 +35,7 @@ gh pr list --state open --limit 200 --json number,headRefOid,title,isDraft,baseR
 ```
 
 `--limit` を明示する。既定 30 件では、それを超えたときに古い PR を取りこぼす。
-取得に失敗したら `pr-lookup-failed` で停止する。
+取得に失敗したら `bin/loop-stall pr-lookup-failed` を通して停止する。
 
 0 件ならステップ 5（起票）へ。draft は worker が作業中なので触らない。
 
@@ -76,7 +76,7 @@ gh pr merge <PR番号> --squash --delete-branch --match-head-commit <ゲート�
 ```
 
 `--match-head-commit` を必ず付ける。判定後に push された commit を取り込まないため。
-マージに失敗したら `merge-failed:<PR番号>@<SHA>` で停止する。
+マージに失敗したら `bin/loop-stall "merge-failed:<PR番号>@<SHA>"` を通して停止する。
 
 マージできたら、対応する Issue が閉じたかを確認する（PR 本文に `Closes #N` があれば自動）。
 閉じていなければ閉じる。この周回はここで終わり。
@@ -92,7 +92,7 @@ gh pr merge <PR番号> --squash --delete-branch --match-head-commit <ゲート�
 | 未解決スレッドがある | worker に対応させる（ステップ 4） |
 | 現 head が未レビュー | ステップ 3.1 へ |
 | 規模上限を超えている | worker に PR を割らせる（ステップ 4） |
-| 上限到達＋手直しが上限超え | `review-exhausted:<PR番号>@<SHA>` で停止。人の判断が要る |
+| 上限到達＋手直しが上限超え | `bin/loop-stall "review-exhausted:<PR番号>@<SHA>"` で停止。人の判断が要る |
 
 ### 3.1 レビューを要求してよいか確かめる
 
@@ -104,11 +104,11 @@ bin/loop-review-budget <PR番号>
 - exit 1 → **投げない。** 現 head がレビュー済みか、上限に達している。
   未解決スレッドがあるならステップ 4 へ。無いのに落ちているなら、
   ゲートの他の条件が原因なのでそちらを見る
-- exit 2 → `review-budget-unknown:<PR番号>` で停止
+- exit 2 → `bin/loop-stall "review-budget-unknown:<PR番号>"` を通して停止
 
 ### exit 2 — 設定か使い方の誤り
 
-`gate-misconfigured:<PR番号>` で停止する。ゲート自体が壊れている状態でマージしない。
+`bin/loop-stall "gate-misconfigured:<PR番号>"` を通して停止する。ゲート自体が壊れている状態でマージしない。
 
 ## 4. 対応を確認し、resolve するか worker へ返す
 
@@ -129,7 +129,7 @@ resolve しない。**返信を書いた本人が自分で閉じると、確認�
 未解決が残っていて、かつレビュー上限に達している場合は**打ち切り基準を適用する**。
 
 - 優先度 1（正しさ）・2（セキュリティ）が残る → **resolve しない。**
-  `blocking-findings:<PR番号>@<SHA>` で停止し、人へ渡す
+  `bin/loop-stall "blocking-findings:<PR番号>@<SHA>"` を通して停止し、人へ渡す
 - 優先度 3 以下だけ → 「対応しない理由」を返信して resolve してよい
 
 CI の失敗・規模超過・コンフリクトなど、worker に作業させる必要があるものは
@@ -186,23 +186,20 @@ bin/loop-stall --reset
 後日の独立した 1 回で「3 周連続」と数えて全ループを止めてしまう。
 
 
-停止するときは **種別と対象の状態** の組で識別子を作る。
-
-**識別子を持たない停止を作らない。** 表に無い理由で止まる場合も、場面を表す短い名前と、
-判定に使った状態を組にする。識別子が無い経路は、何周しても数えられないので永久に空転する。
-
-**識別子に、状態が同じでも毎回変わる値を入れない。** 時刻がその典型。SHA のように
-「変われば前へ進んだ」ことを表す値だけを入れる。
-
-**停止するときは必ず次を通す。** 回数を自分で覚えない。セッションをまたぐと
-忘れて空転し続ける。カウンタは git の共通ディレクトリに持つので、worktree を
-またいでも同じ値を見る。
-
-```bash
-bin/loop-stall "<識別子>"
-```
+**停止するときは必ず `bin/loop-stall` を通す。** 回数を自分で覚えない。セッションを
+またぐと忘れて空転し続ける。カウンタは git の共通ディレクトリに持つので、worktree を
+またいでも同じ値を見る。使う識別子は上の各判定箇所に書いてある。
 
 - exit 0 → まだ上限未満。そのまま停止して次の周回を待つ
 - exit 1 → 上限に達した。**全ループが停止済み**。人の判断を待つ
+- exit 2 → 識別子が一覧に無い。`bin/loop-stall --list` で正しい書式を確認して呼び直す
+
+**識別子を勝手に作らない。** 一覧の正は `bin/loop-stall --list`（スクリプト内の定数）で、
+ここに一覧を写さないのは、2 箇所に置くと表記がゆれるからである。連続回数は文字列一致で
+数えるので、綴りが 1 文字違うだけで**別状態として数え直され、3 周続いても止まらない**。
+
+一覧に無い場面で止まる必要が出たら、`bin/loop-stall` の `STOP_IDS` に足す Issue を起票する。
+**識別子に、状態が同じでも毎回変わる値を入れない。** 時刻がその典型。SHA のように
+「変われば前へ進んだ」ことを表す値だけを入れる。
 
 `./task loop:stop` を直接呼ばない（`bin/loop-stall` が上限に達したときだけ呼ぶ）。

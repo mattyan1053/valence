@@ -22,7 +22,7 @@ worker ループを **1 周だけ** 実行する。`/loop` が本コマンドを
 `loop/STOP` が存在するなら、**何もせず直ちに停止する。**
 
 存在しない場合、作業ツリーが clean であることを確認する。dirty なら、
-前の周回が中断している。`dirty` で停止し、何が残っているかを報告する。
+前の周回が中断している。`bin/loop-stall dirty` を通して停止し、何が残っているかを報告する。
 
 `main` を最新化する。
 
@@ -30,7 +30,7 @@ worker ループを **1 周だけ** 実行する。`/loop` が本コマンドを
 git switch main && git fetch origin main && git merge --ff-only origin/main
 ```
 
-どれかに失敗したら `main-sync-failed` で停止する。
+どれかに失敗したら `bin/loop-stall main-sync-failed` を通して停止する。
 
 ## 2. やることを決める
 
@@ -50,7 +50,7 @@ gh pr list --state open --limit 200 --author @me --json number,headRefName,isDra
 - 無い → ステップ 4（新規実装）
 
 自分の open PR が 2 件以上あるなら、着手中の作業を放置して次を始めている。
-`too-many-own-prs:<件数>` で停止する。**1 人が同時に持つ PR は 1 本。**
+`bin/loop-stall "too-many-own-prs:<件数>"` を通して停止する。**1 人が同時に持つ PR は 1 本。**
 
 ## 3. レビュー指摘に対応する
 
@@ -63,7 +63,7 @@ gh pr checkout <PR番号>
 git branch --show-current      # PR の headRefName と一致することを確認する
 ```
 
-一致しない場合は `wrong-branch:<PR番号>` で停止する。**確認せずに編集しない。**
+一致しない場合は `bin/loop-stall "wrong-branch:<PR番号>"` を通して停止する。**確認せずに編集しない。**
 
 未解決スレッドを**ページングして**取る。件数を決め打ちすると、20 件を超えた PR で
 取りこぼし、ブランチ保護でマージできない原因が分からなくなる。
@@ -90,7 +90,7 @@ git push
 
 push したらこの周回は終わり。**レビュー要求は投げない。** master が判断する。
 
-`./task check` が通らないまま 3 周した場合は `local-ci-failed:<PR番号>` で停止する。
+`./task check` が通らないまま 3 周した場合は `bin/loop-stall "local-ci-failed:<PR番号>"` を通して停止する。
 
 ## 4. Issue を 1 つ取って実装する
 
@@ -121,7 +121,7 @@ gh issue edit <N> --remove-label ready --add-label in-progress
 **ルールを緩めて通さない。** 落ちたら設計を直す。
 
 完了条件を満たせない、または Issue の記述だけでは判断できない場合は、
-`blocked` label を付けて理由をコメントし、`implementation-blocked:<Issue番号>` で停止する。
+`blocked` label を付けて理由をコメントし、`bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する。
 **推測で埋めない。**
 
 ### PR を作る
@@ -138,6 +138,8 @@ gh pr create --base main --title "<日本語>" --body-file <file>
 **PR 本文に `@codex` を literal で書かない。** レビュー依頼ではなく「作業させるタスク」
 として解釈され、その PR はレビューされなくなる（`AGENTS.md` 参照）。実際に踏んだ。
 
+push または PR 作成に失敗したら `bin/loop-stall "publish-failed:<Issue番号>"` を通して停止する。
+
 PR を作ったらこの周回は終わり。master がレビューとマージを判断する。
 
 ## 5. 空転を検出する
@@ -153,26 +155,16 @@ bin/loop-stall --reset
 後日の独立した 1 回で「3 周連続」と数えて全ループを止めてしまう。
 
 
-停止するときは **種別と対象の状態** の組で識別子を作る。
-
-| 場面 | 識別子 |
-| --- | --- |
-| 作業ツリーが dirty | `dirty` |
-| PR の head ブランチに切り替わっていない | `wrong-branch:<PR番号>` |
-| `main` の最新化に失敗 | `main-sync-failed` |
-| 自分の open PR が 2 件以上 | `too-many-own-prs:<件数>` |
-| `./task check` が通らない | `local-ci-failed:<PR番号>` |
-| 実装が完了条件を満たせない | `implementation-blocked:<Issue番号>` |
-| push / PR 作成に失敗 | `publish-failed:<Issue番号>` |
-
-**識別子を持たない停止を作らない。時刻のように毎回変わる値を入れない。**
-
-**停止するときは必ず次を通す。** 回数を自分で覚えない。セッションをまたぐと
-忘れて空転し続ける。
-
-```bash
-bin/loop-stall "<識別子>"
-```
+**停止するときは必ず `bin/loop-stall` を通す。** 回数を自分で覚えない。セッションを
+またぐと忘れて空転し続ける。使う識別子は上の各判定箇所に書いてある。
 
 - exit 0 → まだ上限未満。そのまま停止して次の周回を待つ
 - exit 1 → 上限に達した。**全ループが停止済み**。人の判断を待つ
+- exit 2 → 識別子が一覧に無い。`bin/loop-stall --list` で正しい書式を確認して呼び直す
+
+**識別子を勝手に作らない。** 一覧の正は `bin/loop-stall --list`（スクリプト内の定数）で、
+ここに一覧を写さないのは、2 箇所に置くと表記がゆれるからである。連続回数は文字列一致で
+数えるので、綴りが 1 文字違うだけで**別状態として数え直され、3 周続いても止まらない**。
+
+一覧に無い場面で止まる必要が出たら、`bin/loop-stall` の `STOP_IDS` に足す PR を出す。
+**時刻のように、状態が同じでも毎回変わる値を識別子に入れない。**
