@@ -64,22 +64,18 @@ export default {
       },
     },
     {
-      name: "application-stays-inside",
+      name: "application-depends-on-domain-only",
       severity: "error",
       comment:
         "application は port (interface) を定義するだけで、その実装を知らない。" +
-        "infrastructure を触りたくなったら、それは port の設計漏れ。",
+        "他レイヤはもちろん npm パッケージも禁止する。Octokit や Supabase の " +
+        "SDK をここで掴むと、それは infrastructure がユースケースに漏れている状態。" +
+        "触りたくなったら port の設計漏れなので、interface を切り直すこと。",
       from: { path: "^src/application/", pathNot: TEST_FILE },
-      to: { path: "^src/(infrastructure|ui|app|composition)/" },
-    },
-    {
-      name: "application-is-framework-free",
-      severity: "error",
-      comment:
-        "ユースケースを UI フレームワークから切り離しておく。" +
-        "React や Next が必要になったら、それは app/ui の仕事。",
-      from: { path: "^src/(domain|application)/", pathNot: TEST_FILE },
-      to: { dependencyTypes: ["npm"], path: "node_modules/(next|react|react-dom)/" },
+      to: {
+        pathNot: "^src/(application|domain)/",
+        dependencyTypesNot: ["core"],
+      },
     },
     {
       name: "infrastructure-does-not-reach-out",

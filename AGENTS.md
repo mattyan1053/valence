@@ -113,7 +113,7 @@ src/
 | レイヤ | import してよい先 | 禁止 |
 | --- | --- | --- |
 | `domain` | Node 標準ライブラリと `domain` 自身**のみ** | npm パッケージを含むすべて |
-| `application` | `domain` | `infrastructure` `ui` `app` `composition`、React / Next |
+| `application` | `domain` と Node 標準ライブラリ**のみ** | 他レイヤすべて、および npm パッケージ全般 |
 | `infrastructure` | `application`, `domain`, npm | `ui` `app` `composition` |
 | `ui` | `domain`, 他の `ui`, React | `application` `infrastructure` `composition` |
 | `composition` | すべて | — |
@@ -121,6 +121,9 @@ src/
 
 差し替えたい実装を握るのは `composition` だけ。`app` や `ui` が `infrastructure` を直接掴むと、
 テストで差し替えられなくなる。
+
+`application` で Octokit や Supabase SDK を import したくなったら、それは port の設計漏れ。
+SDK を隠す interface を `application/ports/` に切り、実装を `infrastructure` に置くこと。
 
 違反は `./task check`（`.dependency-cruiser.mjs`）で落ちる。テストファイル（`*.test.ts`）は対象外。
 **ルールを緩めて通すのではなく、設計を直すこと。**

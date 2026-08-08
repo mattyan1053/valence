@@ -26,16 +26,19 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
-    # node ユーザーは既定で 1000:1000。ホストが違う場合だけ付け替える
-    if [ "$HOST_GID" != "1000" ]; then groupmod -g "$HOST_GID" node; fi; \
-    if [ "$HOST_UID" != "1000" ]; then usermod -u "$HOST_UID" -g "$HOST_GID" node; fi; \
+    # ホストの GID がイメージ内で既に使われている場合 (macOS の staff=20 が
+    # Debian の dialout と衝突する等) は、そのグループを node の主グループとして
+    # 流用する。空いていれば node グループの GID を付け替える。
+    if ! getent group "$HOST_GID" >/dev/null; then groupmod -g "$HOST_GID" node; fi; \
+    usermod -g "$HOST_GID" node; \
+    if [ "$(id -u node)" != "$HOST_UID" ]; then usermod -u "$HOST_UID" node; fi; \
     # ホストの docker socket の gid を持つグループを用意し、node を所属させる
     if ! getent group "$DOCKER_GID" >/dev/null; then groupadd -g "$DOCKER_GID" hostdocker; fi; \
     usermod -aG "$(getent group "$DOCKER_GID" | cut -d: -f1)" node; \
     # pnpm ストアは名前付きボリュームでマウントする。マウント先がイメージ内に
     # 存在しないと root 所有で作られてしまうため、先に node 所有で掘っておく
     mkdir -p "$PNPM_HOME/store"; \
-    chown -R node:node /home/node
+    chown -R "$HOST_UID:$HOST_GID" /home/node
 
 RUN corepack enable
 

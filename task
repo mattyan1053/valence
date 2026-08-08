@@ -37,6 +37,18 @@ ensure_up() {
   fi
 }
 
+# 新規 clone 直後は node_modules が無く、next も vitest も解決できない。
+# 毎回 install を叩くのは遅いので、無いときだけ入れる。
+ensure_deps() {
+  if [[ ! -d node_modules ]]; then
+    echo "==> node_modules が無いため依存をインストールします" >&2
+    exec_app pnpm install
+  fi
+}
+
+# node_modules を必要とするコマンドの前準備。
+ready() { ensure_up; ensure_deps; }
+
 # 開発コンテナを起動する (冪等)
 cmd_up() { compose up -d app; }
 
@@ -56,44 +68,44 @@ cmd_sh() { ensure_up; exec_app_it bash; }
 cmd_install() { ensure_up; exec_app pnpm install --frozen-lockfile; }
 
 # Next.js 開発サーバーを起動する (http://localhost:3000)
-cmd_dev() { ensure_up; exec_app_it pnpm dev; }
+cmd_dev() { ready; exec_app_it pnpm dev; }
 
 # 任意の pnpm コマンドを流す 例: ./task pnpm add zod
-cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
+cmd_pnpm() { ready; exec_app pnpm "$@"; }
 
 # lint + typecheck + 依存方向 + テスト をまとめて実行する
-cmd_check() { ensure_up; exec_app pnpm check; }
+cmd_check() { ready; exec_app pnpm check; }
 
 # Biome で lint する
-cmd_lint() { ensure_up; exec_app pnpm lint; }
+cmd_lint() { ready; exec_app pnpm lint; }
 
 # 自動修正できるものを直す (Biome)
-cmd_fix() { ensure_up; exec_app pnpm fix; }
+cmd_fix() { ready; exec_app pnpm fix; }
 
 # 型検査する
-cmd_typecheck() { ensure_up; exec_app pnpm typecheck; }
+cmd_typecheck() { ready; exec_app pnpm typecheck; }
 
 # レイヤ間の依存方向を検査する
-cmd_depcruise() { ensure_up; exec_app pnpm depcruise; }
+cmd_depcruise() { ready; exec_app pnpm depcruise; }
 
 # テストを実行する
-cmd_test() { ensure_up; exec_app pnpm test "$@"; }
+cmd_test() { ready; exec_app pnpm test "$@"; }
 
 # テストを watch モードで実行する
-cmd_test_watch() { ensure_up; exec_app_it pnpm test:watch; }
+cmd_test_watch() { ready; exec_app_it pnpm test:watch; }
 
 # Supabase ローカルスタックを起動する
-cmd_db_up() { ensure_up; exec_app pnpm supabase start; }
+cmd_db_up() { ready; exec_app pnpm supabase start; }
 
 # Supabase ローカルスタックを停止する
-cmd_db_down() { ensure_up; exec_app pnpm supabase stop; }
+cmd_db_down() { ready; exec_app pnpm supabase stop; }
 
 # ローカル DB をマイグレーションから作り直す
-cmd_db_reset() { ensure_up; exec_app pnpm supabase db reset; }
+cmd_db_reset() { ready; exec_app pnpm supabase db reset; }
 
 # GitHub Webhook の転送を開始する (.env の SMEE_URL が必要)
 cmd_smee() {
-  ensure_up
+  ready
   compose --profile webhook up -d smee
   compose logs -f smee
 }
