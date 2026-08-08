@@ -25,6 +25,10 @@ readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
 # その場合は打ち切り基準 (AGENTS.md) に従って判断するか、人へエスカレーションする。
 readonly MAX_ROUNDS="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 
+# PR を開くと自動で 1 度レビューが入る。それが届く前に要求を投げると、
+# 同じ内容を二重にレビューさせることになる。開いた直後は黙って待つ。
+readonly INITIAL_GRACE_MIN="${LOOP_INITIAL_REVIEW_GRACE_MIN:-10}"
+
 usage() {
   echo "使い方: bin/loop-review-budget <PR番号>" >&2
   exit 2
@@ -107,6 +111,21 @@ if ((pending > 0)); then
     echo "     メンションを literal で含めていないか確認する (AGENTS.md 参照)"
   fi
   exit 1
+fi
+
+# 初回の自動レビューを待つ。猶予を過ぎても来ないなら、こちらから要求してよい。
+if ((rounds == 0)); then
+  if ! created_at="$(gh pr view "$PR" --json createdAt --jq '.createdAt' 2>/dev/null)" \
+    || [[ -z $created_at ]]; then
+    echo "[FAIL] PR #$PR の作成時刻を取得できません" >&2
+    exit 2
+  fi
+  created_epoch="$(date -d "$created_at" +%s 2>/dev/null || echo "")"
+  now_epoch="$(date +%s)"
+  if [[ -n $created_epoch ]] && ((now_epoch - created_epoch < INITIAL_GRACE_MIN * 60)); then
+    echo "[NO] PR を開いた直後。自動で入る初回レビューを待つ (${INITIAL_GRACE_MIN} 分)"
+    exit 1
+  fi
 fi
 
 if ((rounds >= MAX_ROUNDS)); then
