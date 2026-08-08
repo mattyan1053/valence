@@ -14,6 +14,7 @@
 | `.claude/skills/dev-environment/` | コンテナ・Supabase の操作と、詰まったときの調べ方 |
 | `.claude/skills/respond-to-review/` | レビュー指摘への対応と返信の手順 |
 | `.claude/rules/git-workflow.md` | ブランチ運用とコミットメッセージ規約 |
+| `loop/README.md` | 2 エージェント・ループの運用（master / worker） |
 
 ---
 

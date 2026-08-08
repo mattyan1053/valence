@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# 自動 squash マージの直前に、5 条件を AND 評価する。
+# **これが 0 を返さない限り、理由を問わず gh pr merge を実行してはならない。**
+#
+# 判定不能を合格として扱わない。失敗し得るコマンドはすべて明示的に判定する。
+#
+#   exit 0 = マージしてよい
+#   exit 1 = マージしてはいけない (理由は標準出力)
+#   exit 2 = 使い方の誤り / 設定の誤り
+#
+# -e は使わない。5 条件は途中終了させず最後まで評価し、末尾で AND 集計する。
+# 1 つ落ちるたびに止めると、直すべき点を 1 周に 1 つしか知れずループが伸びる。
+# -x も使わない。判定結果の出力にトレースが混ざるとゲートの読み取りを誤らせる。
+# jq / GraphQL の変数 ($bot, $endCursor 等) はシェルに展開させない。値を文字列として
+# 組み立てず --arg / -F で渡すことで、名前に $(...) や ' が混ざっても注入にならない。
+# shellcheck disable=SC2016
+set -uo pipefail
+
+# 自動レビューを行う bot のログイン名。環境変数での差し替えを許さない。
+# 差し替えられると、自分のアカウントでレビューを 1 つ出すだけでゲートを通過でき、
+# レビュー要件が無意味になる。
+readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
+
+# .github/workflows/*.yml のジョブ名。これらが pass として存在することを個別に要求する。
+# 「全部 pass」だけでは、ワークフローが起動しなかった PR が 0 件で通ってしまう。
+readonly DEFAULT_REQUIRED_CHECKS="lint / typecheck / boundaries / test
+build
+shell scripts
+dependency vulnerabilities
+new dependencies
+analyze"
+
+readonly MAX_FILES="${LOOP_MAX_FILES:-40}"
+readonly MAX_LINES="${LOOP_MAX_LINES:-1500}"
+
+usage() {
+  echo "使い方: bin/loop-gate <PR番号>" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+[[ $1 =~ ^[0-9]+$ ]] || usage
+readonly PR="$1"
+
+if ! [[ $MAX_FILES =~ ^[0-9]+$ ]] || ((MAX_FILES < 1)); then
+  echo "[FAIL] 設定: LOOP_MAX_FILES は正の整数で指定してください" >&2
+  exit 2
+fi
+if ! [[ $MAX_LINES =~ ^[0-9]+$ ]] || ((MAX_LINES < 1)); then
+  echo "[FAIL] 設定: LOOP_MAX_LINES は正の整数で指定してください" >&2
+  exit 2
+fi
+
+# 必須チェックは行単位で読む。空白のみの上書きを通すと必須チェックが 0 件になり、
+# CI が動いていない commit が素通りする。
+mapfile -t REQUIRED_CHECKS <<<"${LOOP_REQUIRED_CHECKS:-$DEFAULT_REQUIRED_CHECKS}"
+required=()
+for name in "${REQUIRED_CHECKS[@]}"; do
+  [[ -n ${name//[[:space:]]/} ]] && required+=("$name")
+done
+if ((${#required[@]} == 0)); then
+  echo "[FAIL] 設定: 必須チェックが空です。空にすることはできません" >&2
+  exit 2
+fi
+
+results=()
+ok=1
+fail() { results+=("[FAIL] $1"); ok=0; }
+pass() { results+=("[ OK ] $1"); }
+
+# --- 1. 判定対象 --------------------------------------------------------------
+# open / draft でない / base が main であることを確認する。
+# base を見ないと、別ブランチ宛ての PR を main 相当として扱ってしまう。
+head_sha=""
+if ! pr_json="$(gh pr view "$PR" --json state,isDraft,baseRefName,headRefOid 2>/dev/null)"; then
+  fail "判定対象: PR #$PR の情報を取得できません"
+else
+  state="$(jq -r '.state' <<<"$pr_json")"
+  draft="$(jq -r '.isDraft' <<<"$pr_json")"
+  base="$(jq -r '.baseRefName' <<<"$pr_json")"
+  head_sha="$(jq -r '.headRefOid' <<<"$pr_json")"
+  if [[ $state != "OPEN" ]]; then
+    fail "判定対象: PR #$PR は open ではありません ($state)"
+  elif [[ $draft == "true" ]]; then
+    fail "判定対象: PR #$PR は draft です"
+  elif [[ $base != "main" ]]; then
+    fail "判定対象: PR #$PR の base が main ではありません ($base)"
+  elif [[ -z $head_sha || $head_sha == "null" ]]; then
+    fail "判定対象: PR #$PR の head SHA を取得できません"
+  else
+    pass "判定対象: open / base=main / head=${head_sha:0:8}"
+  fi
+fi
+
+# --- 2. 規模上限 --------------------------------------------------------------
+if ! size_json="$(gh pr view "$PR" --json changedFiles,additions,deletions 2>/dev/null)"; then
+  fail "規模上限: 差分の規模を取得できません"
+else
+  files="$(jq -r '.changedFiles' <<<"$size_json")"
+  lines="$(jq -r '.additions + .deletions' <<<"$size_json")"
+  if ! [[ $files =~ ^[0-9]+$ && $lines =~ ^[0-9]+$ ]]; then
+    fail "規模上限: 差分の規模を数値として読めません"
+  elif ((files > MAX_FILES)); then
+    fail "規模上限: 変更ファイル数 $files > $MAX_FILES。PR を割ってください"
+  elif ((lines > MAX_LINES)); then
+    fail "規模上限: 変更行数 $lines > $MAX_LINES。PR を割ってください"
+  else
+    pass "規模上限: ${files} files / ${lines} lines"
+  fi
+fi
+
+# --- 3. GHA CI ----------------------------------------------------------------
+# gh の失敗、チェック 0 件、pass 以外の bucket はすべて不合格にする。
+if ! checks_json="$(gh pr checks "$PR" --json name,bucket 2>/dev/null)"; then
+  fail "GHA CI: gh pr checks で結果を取得できません"
+elif [[ "$(jq -r 'length' <<<"$checks_json")" == "0" ]]; then
+  fail "GHA CI: チェックが 1 件も登録されていません"
+else
+  missing=()
+  bad=()
+  for name in "${required[@]}"; do
+    bucket="$(jq -r --arg n "$name" '.[] | select(.name == $n) | .bucket' <<<"$checks_json" | head -1)"
+    if [[ -z $bucket ]]; then
+      missing+=("$name")
+    elif [[ $bucket != "pass" ]]; then
+      bad+=("$name=$bucket")
+    fi
+  done
+  if ((${#missing[@]} > 0)); then
+    fail "GHA CI: 必須チェックが見つかりません: ${missing[*]}"
+  elif ((${#bad[@]} > 0)); then
+    fail "GHA CI: pass していないチェック: ${bad[*]}"
+  else
+    pass "GHA CI: 必須 ${#required[@]} 件すべて pass"
+  fi
+fi
+
+# --- 4. レビュー済み ----------------------------------------------------------
+# 原則は「現 head に対する Codex のレビューが存在すること」。古い commit への
+# レビューで通すと、レビュー後に押し込まれた変更が素通りする。
+#
+# ただしこれを無条件に必須にすると詰む。レビュー上限に達したあとで指摘を直して
+# push すると head が変わり、追加レビューは要求できないので二度と通らなくなる。
+# 「レビューが止まらない」を防ぐ上限が、そのまま「永久にマージされない」を作る。
+#
+# そこで上限到達後は、最後にレビューされた commit から head までの差分が
+# 手直しの範囲 (LOOP_MAX_FIXUP_LINES) に収まっていれば通す。それを超える変更は
+# 実質レビュー未了なので落とし、人へ渡す。どちらの経路も必ず終わる。
+readonly MAX_ROUNDS_GATE="${LOOP_MAX_REVIEW_ROUNDS:-2}"
+readonly MAX_FIXUP_LINES="${LOOP_MAX_FIXUP_LINES:-80}"
+
+if [[ -z $head_sha || $head_sha == "null" ]]; then
+  fail "レビュー: head SHA が不明なため判定できません"
+else
+  # gh api には --arg が無い。bot 名を --jq の中へ文字列連結すると、名前に
+  # クォートが混ざったときにフィルタを壊せるので、jq へパイプして --arg で渡す。
+  if ! reviews_json="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
+    | jq -rs --arg bot "$REVIEW_BOT" \
+      'add | map(select(.user.login == $bot)) | sort_by(.submitted_at)
+       | {n: length, last: (last.commit_id // "")}')"; then
+    fail "レビュー: レビュー一覧を取得できません"
+  else
+    rounds="$(jq -r '.n' <<<"$reviews_json")"
+    last_reviewed="$(jq -r '.last' <<<"$reviews_json")"
+    if ! [[ $rounds =~ ^[0-9]+$ ]]; then
+      fail "レビュー: レビュー数を数値として読めません"
+    elif ((rounds == 0)); then
+      fail "レビュー: $REVIEW_BOT のレビューが 1 件もありません"
+    elif [[ $last_reviewed == "$head_sha" ]]; then
+      pass "レビュー: 現 head に対するレビューあり (${rounds} 回)"
+    elif ((rounds < MAX_ROUNDS_GATE)); then
+      fail "レビュー: 現 head (${head_sha:0:8}) は未レビュー。@codex review を要求してください (${rounds}/${MAX_ROUNDS_GATE})"
+    elif ! cmp_json="$(gh api "repos/{owner}/{repo}/compare/${last_reviewed}...${head_sha}" \
+      --jq '{files: (.files // [] | length), lines: ([.files[]? | .changes] | add // 0)}' 2>/dev/null)"; then
+      fail "レビュー: レビュー済み commit から head までの差分を取得できません"
+    else
+      fixup_lines="$(jq -r '.lines' <<<"$cmp_json")"
+      if ! [[ $fixup_lines =~ ^[0-9]+$ ]]; then
+        fail "レビュー: 手直し量を数値として読めません"
+      elif ((fixup_lines > MAX_FIXUP_LINES)); then
+        fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したうえ、レビュー後の変更が ${fixup_lines} 行 > ${MAX_FIXUP_LINES} 行。人の判断が要ります"
+      else
+        pass "レビュー: 上限到達。レビュー後の変更は ${fixup_lines} 行で手直しの範囲"
+      fi
+    fi
+  fi
+fi
+
+# --- 5. 未解決スレッド --------------------------------------------------------
+# --paginate と pageInfo を使う。件数を決め打ちすると、上限を超えた PR で
+# 未解決を見落とし、ブランチ保護で弾かれる SHA をマージしようとする。
+if ! threads="$(gh api graphql --paginate -f query='
+query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { isResolved }
+      }
+    }
+  }
+}' -F owner='{owner}' -F repo='{repo}' -F pr="$PR" \
+  --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null)"; then
+  fail "未解決スレッド: 取得できません"
+else
+  total=0
+  while IFS= read -r n; do
+    [[ $n =~ ^[0-9]+$ ]] && ((total += n))
+  done <<<"$threads"
+  if ((total > 0)); then
+    fail "未解決スレッド: $total 件。返信して resolve してください"
+  else
+    pass "未解決スレッド: 0 件"
+  fi
+fi
+
+# --- 集計 ---------------------------------------------------------------------
+printf '%s\n' "${results[@]}"
+if ((ok == 1)); then
+  echo
+  echo "GATE PASS pr=$PR head=$head_sha"
+  echo "マージは head を固定して実行すること:"
+  echo "  gh pr merge $PR --squash --delete-branch --match-head-commit $head_sha"
+  exit 0
+fi
+echo
+echo "GATE FAIL pr=$PR head=${head_sha:0:8}"
+exit 1

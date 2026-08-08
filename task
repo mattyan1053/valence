@@ -142,6 +142,90 @@ cmd_smee() {
   compose --profile webhook up smee
 }
 
+# master 用の worktree と label を用意する
+cmd_loop_setup() {
+  local wt="${PWD}-master"
+  if [[ -d $wt ]]; then
+    echo "==> worktree は既にある: $wt"
+  else
+    git worktree add "$wt" main
+    echo "==> worktree を作成: $wt"
+  fi
+  # master は判定役。実装側の操作を settings で塞いでおく。
+  # このファイルは worktree ごとに別で、gitignore されている。
+  mkdir -p "$wt/.claude"
+  cat > "$wt/.claude/settings.local.json" <<'JSON'
+{
+  "permissions": {
+    "deny": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git cherry-pick:*)"
+    ]
+  }
+}
+JSON
+  echo "==> master 側の deny を設定: $wt/.claude/settings.local.json"
+
+  local label
+  for label in ready in-progress blocked; do
+    if gh label list --limit 200 --json name --jq '.[].name' | grep -qxF "$label"; then
+      echo "==> label は既にある: $label"
+    else
+      gh label create "$label" && echo "==> label を作成: $label"
+    fi
+  done
+
+  echo
+  echo "次の 2 つの端末で起動する:"
+  echo "  cd $wt && claude   → /loop /loop-master"
+  echo "  cd $PWD && claude  → /loop /loop-worker"
+}
+
+# worktree は作業ツリーが独立しているので、loop/STOP は共有されない。
+# 片方に置いただけでは、もう片方のループは走り続ける。全 worktree へ配る。
+loop_stop_paths() {
+  git worktree list --porcelain | awk '/^worktree /{print $2 "/loop/STOP"}'
+}
+
+# 全ループを次の周回の冒頭で停止させる
+cmd_loop_stop() {
+  local reason="${1:-手動停止}" p
+  while read -r p; do
+    mkdir -p "$(dirname "$p")"
+    printf '%s\n' "$reason" > "$p"
+    echo "==> 作成: $p"
+  done < <(loop_stop_paths)
+  echo "全ループが次の周回の冒頭で停止する"
+}
+
+# 停止を解除する
+cmd_loop_resume() {
+  local p found=0
+  while read -r p; do
+    if [[ -f $p ]]; then rm "$p"; echo "==> 削除: $p"; found=1; fi
+  done < <(loop_stop_paths)
+  ((found == 1)) || echo "==> STOP は無い（停止していない）"
+}
+
+# ループの現在地を表示する (open PR / Issue / STOP)
+cmd_loop_status() {
+  if [[ -f loop/STOP ]]; then
+    echo "STOP: あり"
+    sed 's/^/  /' loop/STOP
+  else
+    echo "STOP: なし"
+  fi
+  echo "open PR:"
+  gh pr list --state open --limit 200 \
+    --json number,title,isDraft --jq '.[] | "  #\(.number) \(.title)\(if .isDraft then " (draft)" else "" end)"'
+  echo "Issue:"
+  gh issue list --limit 100 --json number,title,labels \
+    --jq '.[] | "  #\(.number) [\(.labels | map(.name) | join(","))] \(.title)"'
+}
+
 # 使えるコマンドの一覧を表示する
 cmd_help() {
   echo "使い方: ./task <コマンド> [引数...]"

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# 追加のレビュー要求 (@codex review) を出してよいかを判定する。
+#
+# レビューを回し続けてトークンを溶かす事故を、モデルの自制ではなく機械的に防ぐ。
+# 判定不能は「要求してはいけない」に倒す。浪費を防ぐ側が安全側だからである。
+#
+#   exit 0 = 要求してよい
+#   exit 1 = 要求してはいけない
+#   exit 2 = 使い方の誤り / 判定不能
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+# -x も使わない。判定結果にトレースが混ざると読み取りを誤らせる。
+# jq / GraphQL の変数 ($bot, $endCursor 等) はシェルに展開させない。値を文字列として
+# 組み立てず --arg / -F で渡すことで、名前に $(...) や ' が混ざっても注入にならない。
+# shellcheck disable=SC2016
+set -uo pipefail
+
+# 自動レビューを行う bot のログイン名。環境変数で差し替えられないようにする。
+# 差し替えられると、自分のアカウントでレビューを 1 つ出すだけで
+# 「現 head はレビュー済み」を捏造でき、レビュー要件が無意味になる。
+readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
+
+# 1 つの PR に対して許すレビューの回数。
+# 上限に達したら、未解決が残っていても追加のレビューは要求しない。
+# その場合は打ち切り基準 (AGENTS.md) に従って判断するか、人へエスカレーションする。
+readonly MAX_ROUNDS="${LOOP_MAX_REVIEW_ROUNDS:-2}"
+
+usage() {
+  echo "使い方: bin/loop-review-budget <PR番号>" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+# 数字だけを受け付ける。PR 番号以外が渡る経路を作らない。
+[[ $1 =~ ^[0-9]+$ ]] || usage
+readonly PR="$1"
+
+if ! [[ $MAX_ROUNDS =~ ^[0-9]+$ ]] || ((MAX_ROUNDS < 1)); then
+  echo "[FAIL] 設定: LOOP_MAX_REVIEW_ROUNDS は 1 以上の整数で指定してください" >&2
+  exit 2
+fi
+
+# --- PR の head SHA -----------------------------------------------------------
+if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
+  || [[ -z $head_sha ]]; then
+  echo "[FAIL] PR #$PR の head SHA を取得できません" >&2
+  exit 2
+fi
+
+# --- Codex レビューの一覧 -----------------------------------------------------
+# --paginate を付ける。件数を決め打ちすると、上限を超えた PR でラウンド数を
+# 過少に数え、上限を超えてレビューを要求し続けることになる。
+# gh api には --arg が無い。bot 名を --jq の中へ文字列連結すると、名前に
+# クォートが混ざったときにフィルタを壊せるので、jq へパイプして --arg で渡す。
+if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
+  | jq -r --arg bot "$REVIEW_BOT" '.[] | select(.user.login == $bot) | .commit_id')"; then
+  echo "[FAIL] PR #$PR のレビューを取得できません" >&2
+  exit 2
+fi
+
+rounds=0
+reviewed_head="no"
+while IFS= read -r commit_id; do
+  [[ -n $commit_id ]] || continue
+  ((rounds++))
+  [[ $commit_id == "$head_sha" ]] && reviewed_head="yes"
+done <<<"$reviews"
+
+echo "pr=$PR head=${head_sha:0:8} rounds=$rounds max=$MAX_ROUNDS reviewed_head=$reviewed_head"
+
+# --- 判定 ---------------------------------------------------------------------
+# 現 head が既にレビュー済みなら、再要求は純粋な浪費でしかない。
+# 何も変わっていないものを二度レビューさせない。これが浪費を止める本丸。
+if [[ $reviewed_head == "yes" ]]; then
+  echo "[NO] 現 head は既にレビュー済み。push してからでないと要求しない"
+  exit 1
+fi
+
+if ((rounds >= MAX_ROUNDS)); then
+  echo "[NO] レビュー回数が上限 ($MAX_ROUNDS) に達している。これ以上は要求しない"
+  echo "     未解決が残る場合は打ち切り基準で判断するか、人へエスカレーションする"
+  exit 1
+fi
+
+echo "[OK] レビューを要求してよい (${rounds}/${MAX_ROUNDS} 回目)"
+exit 0
