@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# 同じ停止識別子が続いた回数を数え、上限に達したら全ループを止める。
+#
+#   bin/loop-stall <停止識別子>
+#
+# 「同じ状態で 3 周続いたら止める」をモデルの記憶に任せると、セッションを
+# またいだ時点で忘れて空転し続ける。**回数はディスクに持つ。**
+#
+# 記録先は git の共通ディレクトリ配下。worktree をまたいで同じ場所を指すので、
+# master と worker が別ツリーにいても同じカウンタを見る。作業ツリーの外なので
+# コミットもされない。
+#
+#   exit 0 = まだ上限に達していない (呼び出し側はそのまま停止してよい)
+#   exit 1 = 上限に達した。全ループを止めた
+#   exit 2 = 使い方の誤り / 判定不能
+#
+set -uo pipefail
+
+readonly MAX_REPEATS="${LOOP_MAX_STALL_REPEATS:-3}"
+
+usage() {
+  echo "使い方: bin/loop-stall <停止識別子>" >&2
+  echo "  識別子は種別と対象の状態の組にする (例: gate:14@adb2d5c1)" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+readonly ID="$1"
+# 識別子はファイル名の一部にしないが、制御文字や改行が混ざるものは受けない。
+[[ $ID =~ ^[A-Za-z0-9:@._/-]+$ ]] || {
+  echo "[FAIL] 識別子に使えない文字が含まれています" >&2
+  exit 2
+}
+
+if ! [[ $MAX_REPEATS =~ ^[0-9]+$ ]] || ((MAX_REPEATS < 1)); then
+  echo "[FAIL] 設定: LOOP_MAX_STALL_REPEATS は 1 以上の整数で指定してください" >&2
+  exit 2
+fi
+
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+# --git-common-dir は worktree からだと相対パスを返すことがある。
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+readonly STATE="$common_dir/valence-loop-stall"
+
+prev_id=""
+prev_count=0
+if [[ -f $STATE ]]; then
+  # 1 行目が識別子、2 行目が回数。壊れていたら 0 から数え直す。
+  { read -r prev_id; read -r prev_count; } < "$STATE" 2>/dev/null || true
+  [[ $prev_count =~ ^[0-9]+$ ]] || prev_count=0
+fi
+
+if [[ $ID == "$prev_id" ]]; then
+  count=$((prev_count + 1))
+else
+  count=1
+fi
+
+printf '%s\n%s\n' "$ID" "$count" > "$STATE" || {
+  echo "[FAIL] 停止カウンタを書き込めません: $STATE" >&2
+  exit 2
+}
+
+echo "stall id=$ID count=$count max=$MAX_REPEATS"
+
+if ((count >= MAX_REPEATS)); then
+  echo "[STOP] 同じ状態で $count 周続いた。全ループを止める"
+  "$(dirname "$0")/../task" loop:stop "$ID: 同じ状態で $count 周続いたため停止。人の判断が要る"
+  exit 1
+fi
+exit 0

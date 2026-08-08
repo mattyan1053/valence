@@ -63,7 +63,7 @@ last_at=""
 # ヘルパーは <時刻><TAB><SHA> を時刻順で返す。最終行の時刻が最後の応答時刻で、
 # これを落とすと「応答済みの古い要求」まで未応答として数えてしまい、
 # 2 周目へ永久に進めなくなる。
-while IFS=$'\t' read -r ts sha; do
+while IFS=$'\t' read -r ts sha _src; do
   [[ -n $sha ]] || continue
   ((rounds++))
   last_at="$ts"
@@ -77,16 +77,32 @@ done <<<"$reviewed"
 if ! comments_json="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
   | jq -rs --arg bot "$REVIEW_BOT" --arg since "$last_at" \
     'add
-     | {pending: (map(select(.user.login != $bot
+     | {requests: (map(select(.user.login != $bot
+                              and (.body | test("@codex\\s+review"; "i"))
+                              and ($since == "" or .created_at > $since))
+                       | .created_at)),
+        pending: (map(select(.user.login != $bot
                              and (.body | test("@codex\\s+review"; "i"))
                              and ($since == "" or .created_at > $since))) | length),
         notice: (map(select(.user.login == $bot
-                            and (.body | test("create an environment"; "i")))) | length)}')"; then
+                            and (.body | test("create an environment"; "i")))) | length),
+        notice_at: (map(select(.user.login == $bot
+                               and (.body | test("create an environment"; "i")))
+                        | .created_at) | max)}')"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
   exit 2
 fi
 pending="$(jq -r '.pending' <<<"$comments_json")"
 notice="$(jq -r '.notice' <<<"$comments_json")"
+notice_at="$(jq -r '.notice_at' <<<"$comments_json")"
+
+# 「環境が無い」通知は SHA を持たないのでレビュー扱いにはできないが、
+# 要求に対する応答ではある。これを消化しないと、元の要求が永久に未応答として
+# 残り、原因を直しても再要求できなくなる。通知より前の要求は応答済みとみなす。
+if [[ -n $notice_at && $notice_at != "null" ]] && [[ -z $last_at || $notice_at > $last_at ]]; then
+  pending="$(jq -rn --argjson c "$comments_json" --arg at "$notice_at" \
+    '$c.requests | map(select(. > $at)) | length' 2>/dev/null || echo "$pending")"
+fi
 
 echo "pr=$PR head=${head_sha:0:8} rounds=$rounds max=$MAX_ROUNDS reviewed_head=$reviewed_head pending=$pending"
 

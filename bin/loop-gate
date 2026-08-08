@@ -111,7 +111,11 @@ fi
 
 # --- 3. GHA CI ----------------------------------------------------------------
 # gh の失敗、チェック 0 件、pass 以外の bucket はすべて不合格にする。
-if ! checks_json="$(gh pr checks "$PR" --json name,bucket 2>/dev/null)"; then
+# gh pr checks は「取得の失敗」でも「チェックが pending / fail」でも非ゼロで終わる
+# (pending は exit 8)。終了コードだけで弾くと、CI が落ちている PR を「取得できません」
+# として片付けてしまい、worker へ修正を返す経路が死ぬ。出力の有無で切り分ける。
+checks_json="$(gh pr checks "$PR" --json name,bucket 2>/dev/null)"
+if [[ -z ${checks_json//[[:space:]]/} ]] || ! jq -e 'type == "array"' <<<"$checks_json" >/dev/null 2>&1; then
   fail "GHA CI: gh pr checks で結果を取得できません"
 elif [[ "$(jq -r 'length' <<<"$checks_json")" == "0" ]]; then
   fail "GHA CI: チェックが 1 件も登録されていません"
@@ -158,9 +162,14 @@ else
   reviewed_head="no"
   # ヘルパーは <時刻><TAB><SHA> を時刻順で返す。最終行が最新のレビュー。
   # SHA だけを並べ替えると辞書順になり、最新を取り違えて手直し量を過大に見積もる。
-  while IFS=$'\t' read -r _ts sha; do
+  while IFS=$'\t' read -r _ts sha src; do
     [[ -n $sha ]] || continue
     ((rounds++))
+    # 👍 リアクションは SHA を持たず、時刻から推定した値しか無い。
+    # committer date は push 時刻ではないので、リアクションより古い日付の
+    # commit をあとから push すると未レビューの変更を通してしまう。
+    # 回数には数えるが、head 一致とマージ基準には使わない。
+    [[ $src == "reaction" ]] && continue
     last_reviewed="$sha"
     # コメント由来は短縮 SHA なので前方一致で突き合わせる
     [[ $head_sha == "$sha"* ]] && reviewed_head="yes"
