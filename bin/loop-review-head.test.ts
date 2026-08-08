@@ -127,6 +127,25 @@ describe("bin/loop-review-head", () => {
     expect(rows).toEqual([`2099-01-01T00:00:00Z\t${a}`, `2099-01-01T00:00:01Z\t${a}`]);
   });
 
+  it("応答が 0 件でも正常に空を返す", () => {
+    const result = spawnSync(SCRIPT, ["--pair", "25"], {
+      cwd: sandbox,
+      encoding: "utf8",
+      input: "",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("");
+  });
+
+  it("空行は応答として数えず、記録を消費しない", () => {
+    run(["26", "5".repeat(40)]);
+
+    const rows = pair("26", ["", "2099-01-01T00:00:00Z\t"]);
+
+    expect(rows).toEqual([`2099-01-01T00:00:00Z\t${"5".repeat(40)}`]);
+  });
+
   it("記録より多い応答が来ても、余った応答は結び付けない", () => {
     run(["24", "4".repeat(40)]);
 

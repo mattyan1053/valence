@@ -84,10 +84,15 @@ fi
 
 # 3 種類を時刻で昇順に並べて 1 本の応答列にする。ISO8601 は辞書順と時系列が一致する。
 # **順序が結び付けの前提**なので、ここを崩さない (同時刻は安定ソートで入力順)。
-if ! paired="$(printf '%s\n%s\n%s' "$reviews" "$comments" "$reactions" \
-  | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t([0-9a-f]{7,40})?$' \
-  | sort -s -k1,1 \
-  | "$(dirname "$0")/loop-review-head" --pair "$PR")"; then
+#
+# 応答が 1 件も無い PR は正常である (開いた直後など)。grep は一致なしで 1 を返し、
+# pipefail がそれをパイプライン全体の失敗にするので、**1 だけ**を通す。
+# `|| true` にすると grep 自体のエラー (2 以上) まで飲み込んでしまう。
+responses="$(printf '%s\n%s\n%s' "$reviews" "$comments" "$reactions" \
+  | { grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t([0-9a-f]{7,40})?$' || (( $? == 1 )); } \
+  | sort -s -k1,1)"
+
+if ! paired="$(printf '%s' "$responses" | "$(dirname "$0")/loop-review-head" --pair "$PR")"; then
   echo "[FAIL] PR #$PR の応答をレビュー対象 head へ対応させられません" >&2
   exit 2
 fi
