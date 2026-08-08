@@ -131,15 +131,21 @@ push したらこの周回は終わり。**レビュー要求は投げない。*
 
 `./task check` が通らないまま 3 周した場合は `bin/loop-stall "local-ci-failed:<PR番号>"` を通して停止する。
 
-## 4. Issue を 1 つ取って実装する
+## 4. `ready` の 1 件を実装する
+
+**着手順は master が決める。worker は選ばない。** `ready` は「次にやる 1 件」で、
+同時に 1 件だけ付く。`backlog` は着手順が未定のものなので**触らない**。
 
 ```bash
 gh issue list --label ready --limit 100 --json number,title,body
 ```
 
-0 件なら、master が起票する番なので何もしない。この周回は終わり。
+- **0 件** → master が `backlog` から次の 1 件を上げる番。何もしない。この周回は終わり
+- **1 件** → それを取る。**他の Issue と比べない。順序を判断しない**
+- **2 件以上** → 着手順が一意に決まらない。どれを取っても master の意図と食い違いうるので、
+  `bin/loop-stall "too-many-ready:<件数>"` を通して停止する
 
-1 件取り、label を付け替えて着手を示す。
+label を付け替えて着手を示す。
 
 ```bash
 gh issue edit <N> --remove-label ready --add-label in-progress
