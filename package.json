@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@11.20.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
@@ -28,11 +28,11 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.7",
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^22.19.0",
+    "@types/node": "^24.13.3",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitest/coverage-v8": "^4.1.10",
-    "dependency-cruiser": "^17.0.1",
+    "dependency-cruiser": "^18.1.1",
     "supabase": "^2.112.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
