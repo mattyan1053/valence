@@ -43,7 +43,7 @@ Valence は GitHub を**置き換えず拡張する** GitHub App として、レ
 
 | 領域 | 採用技術 |
 | --- | --- |
-| ランタイム | Node.js 22 (LTS) |
+| ランタイム | Node.js 24 (Active LTS) |
 | パッケージマネージャ | pnpm（`packageManager` フィールドで固定。npm / yarn は使わない） |
 | フレームワーク | Next.js App Router + React 19 |
 | 言語 | TypeScript（`strict` + `noUncheckedIndexedAccess`） |
@@ -68,12 +68,15 @@ Valence は GitHub を**置き換えず拡張する** GitHub App として、レ
 
 ```bash
 ./task help      # コマンド一覧
-./task up        # 開発コンテナを起動
-./task dev       # Next.js 開発サーバー (http://localhost:3000)
+./task up        # 開発コンテナを起動 = アプリが動き出す (http://localhost:3000)
+./task dev       # 開発サーバーのログを追う
 ./task sh        # 開発コンテナのシェルに入る
 ./task check     # lint + typecheck + depcruise + test を一括実行（コミット前に必ず）
 ./task down      # 停止
 ```
+
+コンテナの `CMD` が `pnpm dev` なので、**起動していればアプリは動いている**。
+依存の導入は entrypoint が面倒を見るため、clone 直後でも `./task up` だけでよい。
 
 `./task` を経由せず直接叩く場合も、必ずコンテナ内で実行する:
 
@@ -103,10 +106,15 @@ Supabase CLI は「ホストの Docker daemon にスタックを立てさせる�
 CLI 実行専用の使い捨てコンテナ (`supabase-cli` サービス) に切り出してある。
 `app` は素の bridge ネットワークのままで、docker socket も持たない。
 
+`app` は Supabase と同じ docker network にも参加している。**サーバー側から Supabase を
+叩くときは、ホストの公開ポートではなく `http://kong:8000` を使うこと。**
+ブラウザ側 (`NEXT_PUBLIC_*`) はコンテナ名を解決できないので、SSH ポートフォワード先の
+`http://localhost:54321` を使う。この二重性を取り違えると原因が分かりにくい。
+
 手元 PC からのアクセスは SSH ポートフォワーディングを使う:
 
 ```bash
-ssh -L 3000:localhost:3000 -L 54323:localhost:54323 <user>@<remote-vm>
+ssh -L 3000:localhost:3000 -L 54321:localhost:54321 <user>@<remote-vm>
 ```
 
 ---

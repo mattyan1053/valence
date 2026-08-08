@@ -10,7 +10,8 @@ x-dev-image: &dev-image
       DOCKER_GID: ${DOCKER_GID:-999}
 
 services:
-  # 開発用コンテナ。常駐させておき、pnpm 系のコマンドは exec で流し込む。
+  # 開発コンテナ兼 dev サーバー。`compose up` した時点でアプリが動いている。
+  # lint やテストはここへ exec で流し込む (dev サーバーと併存できる)。
   # Supabase のローカルスタックは supabase CLI が別途コンテナ群を立てるので、
   # ここには DB を定義しない (`./task db:up` を参照)。
   app:
@@ -32,10 +33,13 @@ services:
     # 公開インターフェースには晒さない。手元 PC からは SSH ポートフォワードで繋ぐ
     ports:
       - "127.0.0.1:3000:3000"
-    extra_hosts:
-      # Supabase のポートはホスト側に出るため、そこ経由で参照する
-      - "host.docker.internal:host-gateway"
-    command: sleep infinity
+    # Supabase のローカルスタックと同じ docker network に相乗りする。
+    # サーバー側から Supabase を叩くときは、ホストの公開ポートを経由せず
+    # コンテナ名で解決できる (http://kong:8000)。
+    networks:
+      - default
+      - supabase
+    # CMD は Dockerfile 側で `pnpm dev`。ここで上書きしない。
 
   # Supabase CLI 専用の使い捨てコンテナ (`./task db:*` から compose run で叩く)。
   #
@@ -65,7 +69,7 @@ services:
   # GitHub Webhook をローカルの Next.js へ転送する。
   # SMEE_URL を .env に設定したうえで `./task smee` で起動する。
   smee:
-    image: node:22-bookworm-slim
+    image: node:24-bookworm-slim
     init: true
     profiles: ["webhook"]
     env_file:
@@ -77,6 +81,14 @@ services:
       --target http://app:3000/api/github/webhook
     depends_on:
       - app
+
+networks:
+  default:
+  # supabase CLI が作る network。同名のものが既にあれば CLI はそれを再利用するため、
+  # ./task が先に用意しておく。ライフサイクルは Supabase 側にあるので external 扱い。
+  supabase:
+    name: supabase_network_valence
+    external: true
 
 volumes:
   pnpm-store:

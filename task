@@ -32,27 +32,23 @@ exec_app_it() {
   compose exec "${tty_flag[@]}" app "$@"
 }
 
+# supabase CLI が作る network を先に用意しておく。
+# 同名のものがあれば CLI はそれを再利用するので、先に作っておいて問題ない。
+ensure_network() {
+  docker network inspect supabase_network_valence >/dev/null 2>&1 \
+    || docker network create supabase_network_valence >/dev/null
+}
+
 ensure_up() {
+  ensure_network
   if [[ -z "$(compose ps -q app 2>/dev/null)" ]] || \
      [[ -z "$(docker ps -q --filter "id=$(compose ps -q app)" 2>/dev/null)" ]]; then
     compose up -d app
   fi
 }
 
-# 新規 clone 直後は node_modules が無く、next も vitest も解決できない。
-# 毎回 install を叩くのは遅いので、無いときだけ入れる。
-ensure_deps() {
-  if [[ ! -d node_modules ]]; then
-    echo "==> node_modules が無いため依存をインストールします" >&2
-    exec_app pnpm install
-  fi
-}
-
-# node_modules を必要とするコマンドの前準備。
-ready() { ensure_up; ensure_deps; }
-
-# 開発コンテナを起動する (冪等)
-cmd_up() { compose up -d app; }
+# 開発コンテナを起動する = アプリが起動する (冪等)
+cmd_up() { ensure_network; compose up -d app; }
 
 # 開発コンテナを停止する
 cmd_down() { compose down; }
@@ -69,32 +65,38 @@ cmd_sh() { ensure_up; exec_app_it bash; }
 # 依存をインストールする (lockfile 準拠)
 cmd_install() { ensure_up; exec_app pnpm install --frozen-lockfile; }
 
-# Next.js 開発サーバーを起動する (http://localhost:3000)
-cmd_dev() { ready; exec_app_it pnpm dev; }
+# 開発サーバーのログを追う (コンテナ起動時から動いている)
+cmd_dev() {
+  ensure_up
+  compose logs -f app
+}
+
+# 開発サーバーを再起動する
+cmd_restart() { ensure_up; compose restart app; }
 
 # 任意の pnpm コマンドを流す 例: ./task pnpm add zod
-cmd_pnpm() { ready; exec_app pnpm "$@"; }
+cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
 
 # lint + typecheck + 依存方向 + テスト をまとめて実行する
-cmd_check() { ready; exec_app pnpm check; }
+cmd_check() { ensure_up; exec_app pnpm check; }
 
 # Biome で lint する
-cmd_lint() { ready; exec_app pnpm lint; }
+cmd_lint() { ensure_up; exec_app pnpm lint; }
 
 # 自動修正できるものを直す (Biome)
-cmd_fix() { ready; exec_app pnpm fix; }
+cmd_fix() { ensure_up; exec_app pnpm fix; }
 
 # 型検査する
-cmd_typecheck() { ready; exec_app pnpm typecheck; }
+cmd_typecheck() { ensure_up; exec_app pnpm typecheck; }
 
 # レイヤ間の依存方向を検査する
-cmd_depcruise() { ready; exec_app pnpm depcruise; }
+cmd_depcruise() { ensure_up; exec_app pnpm depcruise; }
 
 # テストを実行する
-cmd_test() { ready; exec_app pnpm test "$@"; }
+cmd_test() { ensure_up; exec_app pnpm test "$@"; }
 
 # テストを watch モードで実行する
-cmd_test_watch() { ready; exec_app_it pnpm test:watch; }
+cmd_test_watch() { ensure_up; exec_app_it pnpm test:watch; }
 
 # Supabase CLI は docker socket とホストのネットワーク名前空間を必要とする。
 # それを app に持たせたくないので、専用の使い捨てコンテナで実行する。
@@ -105,13 +107,13 @@ supabase_cli() {
 }
 
 # Supabase ローカルスタックを起動する
-cmd_db_up() { ready; supabase_cli pnpm supabase start; }
+cmd_db_up() { ensure_up; supabase_cli pnpm supabase start; }
 
 # Supabase ローカルスタックを停止する
 cmd_db_down() { supabase_cli pnpm supabase stop; }
 
 # ローカル DB をマイグレーションから作り直す
-cmd_db_reset() { ready; supabase_cli pnpm supabase db reset; }
+cmd_db_reset() { ensure_up; supabase_cli pnpm supabase db reset; }
 
 # ローカルスタックの接続情報を表示する (.env に貼る値)
 cmd_db_status() { supabase_cli pnpm supabase status; }
