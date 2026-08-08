@@ -134,8 +134,23 @@ if [[ $mode == "pair" ]]; then
     $1 == "R" { at[++n] = $2; sha[n] = $3; used[n] = 0; next }
     {
       if ($3 != "") {
+        matched = 0
         for (i = 1; i <= n; i++) {
-          if (!used[i] && (index(sha[i], $3) == 1 || index($3, sha[i]) == 1)) { used[i] = 1; break }
+          if (!used[i] && (index(sha[i], $3) == 1 || index($3, sha[i]) == 1)) {
+            used[i] = 1
+            matched = 1
+            break
+          }
+        }
+        # どの記録とも一致しないなら、SHA の分からない実行への応答である
+        # (ループ外で作られた PR の自動レビューが SHA 付きで返った場合など)。
+        # ここで消費しないと印が残り、**次の SHA 無しの応答がそこへ吸われて、
+        # 実際の head の記録が未消費のまま残る** (現 head が永久にレビュー済みに
+        # ならず、再要求もできない行き止まりになる)。
+        if (!matched) {
+          for (i = 1; i <= n; i++) {
+            if (!used[i] && sha[i] == unknown && at[i] <= $2) { used[i] = 1; break }
+          }
         }
         print $2 "\t" $3
         next
