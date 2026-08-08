@@ -1,5 +1,10 @@
 # Valence
 
+[![CI](https://github.com/mattyan1053/valence/actions/workflows/ci.yml/badge.svg)](https://github.com/mattyan1053/valence/actions/workflows/ci.yml)
+[![Audit](https://github.com/mattyan1053/valence/actions/workflows/audit.yml/badge.svg)](https://github.com/mattyan1053/valence/actions/workflows/audit.yml)
+[![CodeQL](https://github.com/mattyan1053/valence/actions/workflows/codeql.yml/badge.svg)](https://github.com/mattyan1053/valence/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 **AI 時代の PR コントロールセンター。**
 
 AI によるコード生成が高速化した結果、開発のボトルネックは「書くこと」から「レビューしてマージすること」へ移った。
@@ -21,6 +26,7 @@ LLM による要約や自動レビューは MVP スコープ外。まずは決�
 Next.js (App Router) / React / TypeScript / Tailwind CSS / React Flow / Supabase / GitHub App (GraphQL API + Webhooks)
 
 開発環境は Docker Compose に閉じており、ホスト環境には何もインストールしない。
+本番は Vercel にデプロイする想定のため、リポジトリの `Dockerfile` は開発専用で本番では使われない。
 
 ## 開発
 
@@ -28,9 +34,15 @@ Next.js (App Router) / React / TypeScript / Tailwind CSS / React Flow / Supabase
 
 ```bash
 cp .env.example .env  # 値を埋める
-./task dev            # 初回はイメージのビルドと依存インストールが自動で走る
+./task up             # 起動 = アプリが動く。初回はビルドと依存インストールも走る
 ./task check          # lint + typecheck + 依存方向検査 + テスト
 ./task help           # コマンド一覧
+```
+
+リモート VM で動かす場合は SSH ポートフォワードで繋ぐ。
+
+```bash
+ssh -L 3000:localhost:3000 -L 54321:localhost:54321 <user>@<remote-vm>
 ```
 
 詳細な開発ルール・アーキテクチャ方針は [AGENTS.md](./AGENTS.md) を参照。
