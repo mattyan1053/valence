@@ -18,20 +18,102 @@ set -uo pipefail
 
 readonly MAX_REPEATS="${LOOP_MAX_STALL_REPEATS:-3}"
 
+# 停止識別子の正はここ。`.claude/commands/loop-*.md` の判定箇所は、識別子を
+# 別途一覧にせずこの表を引く (bin/loop-stall --list)。
+#
+# 一覧を 2 箇所に持つと、片方だけ直したときに表記がゆれる。数え方は文字列一致
+# なので、周回ごとに違う綴りで呼ばれると **別状態として数え直し、3 周続いても
+# 止まらない**。空転検出を機械化した意味が消えるため、ここに無い識別子は弾く。
+#
+#   <識別子の書式>|<どういう場面か>
+#
+# 書式のプレースホルダはそのまま検査用の正規表現になる (spec_to_regex)。
+# 表示と検査が同じ文字列から出るので、片方だけずれることがない。
+readonly STOP_IDS=(
+  "dirty|worker: 作業ツリーが dirty"
+  "main-sync-failed|worker: main の最新化に失敗"
+  "wrong-branch:<PR番号>|worker: PR の head ブランチに切り替わっていない"
+  "too-many-own-prs:<件数>|worker: 自分の open PR が 2 件以上"
+  "local-ci-failed:<PR番号>|worker: ./task check が通らない"
+  "implementation-blocked:<Issue番号>|worker: blocked にして人へ渡した (完了条件を満たせない / PR が人手で閉じられた)"
+  "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
+  "wrong-worktree|master: worker の作業ツリーにいる"
+  "pr-lookup-failed|master: open PR の一覧を取得できない"
+  "gate-misconfigured:<PR番号>|master: bin/loop-gate が exit 2"
+  "review-budget-unknown:<PR番号>|master: bin/loop-review-budget が exit 2"
+  "merge-failed:<PR番号>@<SHA>|master: マージに失敗"
+  "review-exhausted:<PR番号>@<SHA>|master: レビュー上限に達し、手直しも上限超え"
+  "blocking-findings:<PR番号>@<SHA>|master: 優先度 1 / 2 の指摘が残っている"
+)
+
 usage() {
   echo "使い方: bin/loop-stall <停止識別子>" >&2
   echo "       bin/loop-stall --reset        周回が前へ進んだときに呼ぶ" >&2
-  echo "  識別子は種別と対象の状態の組にする (例: gate:14@adb2d5c1)" >&2
+  echo "       bin/loop-stall --list         使える識別子を一覧する" >&2
+  echo "  識別子は一覧にあるものだけ。書式まで一致しないと受け付けない" >&2
   exit 2
+}
+
+# 桁を揃えない。printf の幅指定はバイト数で数えるので、書式に混じる日本語の
+# ぶんだけ列がずれ、揃えたつもりの表示が崩れる。
+print_stop_ids() {
+  local entry
+  for entry in "${STOP_IDS[@]}"; do
+    printf '%s  —  %s\n' "${entry%%|*}" "${entry#*|}"
+  done
+}
+
+# 書式を検査用の正規表現へ変換する。未知のプレースホルダが残ったら失敗させる。
+# 置換し損ねた `<...>` をそのまま正規表現にすると、意図しない文字列まで通る。
+spec_to_regex() {
+  local re="$1"
+  # 置換文字列を直書きしない。`}` が ${...} を閉じてしまい、余った `}` が
+  # 正規表現の末尾に残る (どの識別子にも一致しなくなる)。
+  local sha_re='[0-9a-f]{7,40}'
+  re="${re//<PR番号>/[0-9]+}"
+  re="${re//<Issue番号>/[0-9]+}"
+  re="${re//<件数>/[0-9]+}"
+  re="${re//<SHA>/$sha_re}"
+  [[ $re == *"<"* || $re == *">"* ]] && return 1
+  printf '%s' "$re"
+}
+
+id_is_known() {
+  local entry spec re
+  for entry in "${STOP_IDS[@]}"; do
+    spec="${entry%%|*}"
+    if ! re="$(spec_to_regex "$spec")"; then
+      echo "[FAIL] 内部エラー: 識別子の書式を検査できません: $spec" >&2
+      exit 2
+    fi
+    # $re はパターンとして展開させる。ここを引用符で囲むとリテラル一致になる。
+    [[ $1 =~ ^$re$ ]] && return 0
+  done
+  return 1
 }
 
 [[ $# -eq 1 ]] || usage
 readonly ID="$1"
+
+if [[ $ID == "--list" ]]; then
+  print_stop_ids
+  exit 0
+fi
+
 # 識別子はファイル名の一部にしないが、制御文字や改行が混ざるものは受けない。
 [[ $ID == "--reset" ]] || [[ $ID =~ ^[A-Za-z0-9:@._/-]+$ ]] || {
-  echo "[FAIL] 識別子に使えない文字が含まれています" >&2
+  echo "[FAIL] 識別子に使えない文字が含まれています (bin/loop-stall --list)" >&2
   exit 2
 }
+
+# 綴りの検査はカウンタを触る前に行う。ゆれた識別子で 1 度でも書き込むと、
+# そこで連続回数が切れてしまう。
+if [[ $ID != "--reset" ]] && ! id_is_known "$ID"; then
+  echo "[FAIL] 未知の停止識別子: $ID" >&2
+  echo "       使えるのは次のものだけ:" >&2
+  print_stop_ids | sed 's/^/       /' >&2
+  exit 2
+fi
 
 if ! [[ $MAX_REPEATS =~ ^[0-9]+$ ]] || ((MAX_REPEATS < 1)); then
   echo "[FAIL] 設定: LOOP_MAX_STALL_REPEATS は 1 以上の整数で指定してください" >&2
