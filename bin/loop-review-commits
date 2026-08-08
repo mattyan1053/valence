@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# 指定 PR について、Codex がレビュー済みの commit を 1 行 1 件で出す。
+# 指定 PR について、Codex がレビューした commit を **時刻順** に 1 行 1 件で出す。
+#
+#   <ISO8601 の時刻><TAB><commit SHA>
+#
+# 古い順に並べる。呼び出し側は最終行を「最新のレビュー」として使える。
 #
 # Codex の応答は 2 通りある。**どちらか片方しか見ないと判定を誤る。**
 #
@@ -8,6 +12,10 @@
 #
 # review だけを数えると、指摘ゼロの PR が「未レビュー」と判定され、
 # **きれいな PR ほどマージできない**という逆転が起きる。実際に踏んだ。
+#
+# 時刻を落とすと別の事故になる。SHA だけを sort すると辞書順に並び、
+# 「最新のレビュー」を取り違えて手直し量を過大に見積もる。呼び出し側が
+# 最終レビュー時刻を必要とする場面もあるので、ここで一緒に返す。
 #
 # 出力される SHA は短縮形が混ざる。呼び出し側は前方一致で突き合わせること。
 #
@@ -33,7 +41,8 @@ readonly PR="$1"
 # gh api には --arg が無いので jq へパイプして渡す。
 if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
   | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot) | .commit_id) | .[]')"; then
+    'add | map(select(.user.login == $bot and (.commit_id // "") != ""))
+     | map("\(.submitted_at)\t\(.commit_id)") | .[]')"; then
   echo "[FAIL] PR #$PR のレビューを取得できません" >&2
   exit 2
 fi
@@ -41,12 +50,17 @@ fi
 # 「Reviewed commit: `<sha>`」からバッククォートに挟まれた 16 進を抜く。
 if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
   | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot) | .body)
-     | map(capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha // empty)
+    'add | map(select(.user.login == $bot))
+     | map(. as $c
+           | ($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha? // empty)
+           | "\($c.created_at)\t\(.)")
      | .[]')"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
   exit 2
 fi
 
-printf '%s\n%s\n' "$reviews" "$comments" | grep -E '^[0-9a-f]{7,40}$' | sort -u
+# 時刻で昇順に並べる。ISO8601 は辞書順と時系列が一致するので -k1,1 で足りる。
+printf '%s\n%s\n' "$reviews" "$comments" \
+  | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^[:space:]]*[[:space:]]+[0-9a-f]{7,40}$' \
+  | sort -k1,1
 exit 0

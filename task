@@ -148,7 +148,10 @@ cmd_loop_setup() {
   if [[ -d $wt ]]; then
     echo "==> worktree は既にある: $wt"
   else
-    git worktree add "$wt" main
+    # detached で作る。ブランチとして main を掴むと worker 側が main を
+    # checkout できなくなり、worker の main 最新化が毎周失敗する。
+    # master は判定役で、ブランチを進める必要がない。
+    git worktree add --detach "$wt" main
     echo "==> worktree を作成: $wt"
   fi
   # master は判定役。実装側の操作を settings で塞いでおく。

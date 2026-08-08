@@ -156,7 +156,9 @@ else
   rounds=0
   last_reviewed=""
   reviewed_head="no"
-  while IFS= read -r sha; do
+  # ヘルパーは <時刻><TAB><SHA> を時刻順で返す。最終行が最新のレビュー。
+  # SHA だけを並べ替えると辞書順になり、最新を取り違えて手直し量を過大に見積もる。
+  while IFS=$'\t' read -r _ts sha; do
     [[ -n $sha ]] || continue
     ((rounds++))
     last_reviewed="$sha"
