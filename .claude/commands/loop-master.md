@@ -184,10 +184,22 @@ Issue には次を書く（`.github/ISSUE_TEMPLATE/task.yml` の形）。
 古い Issue が永久に後回しになるうえ、割り込みを伝える手段も無くなる。
 
 ```bash
-gh issue list --label ready --limit 100 --json number,title
-gh issue list --label in-progress --limit 100 --json number,title
-gh issue list --label backlog --limit 100 --json number,title,body
+gh issue list --label ready --limit 200 --json number,title
+gh issue list --label in-progress --limit 200 --json number,title
+gh issue list --label backlog --limit 200 --search "sort:created-asc" --json number,title,body
 ```
+
+**3 つとも取得できたことを確認してから label を触る。** `gh` は失敗時に exit 1、
+認証が要るときに exit 4 を返す。**失敗を「0 件」として扱うと、worker が作業中でも
+別の Issue を `ready` へ昇格させてしまう**（この手順が保証しようとしている
+「`ready` は同時に 1 件」が API 障害で崩れる）。1 つでも取れなかったら **label を触らずに**
+`bin/loop-stall issue-lookup-failed` を通して停止する。黙って周回を終えると、
+障害が続いても停止が記録されず全ループが止まらない。
+
+**`backlog` は古い順に取る。** `gh issue list` の既定は新しい順で、`--limit` を超えた分は
+返らない。件数が増えると古いものが常に候補から外れ、**このステップが消そうとしている
+「永久に後回し」を master 側で作り直す**ことになる。`--search "sort:created-asc"` で
+古い順へ倒し、`--limit` も明示する（ステップ 2 の PR 取得と同じ理由）。
 
 - **`ready` が 2 件以上** → 運用が壊れている。どれを次にするか決まらないので、
   `bin/loop-stall "too-many-ready:<件数>"` を通して停止する

@@ -40,6 +40,7 @@ readonly STOP_IDS=(
   "too-many-ready:<件数>|両方: ready の Issue が 2 件以上ある (着手順が一意に決まらない)"
   "wrong-worktree|master: worker の作業ツリーにいる"
   "pr-lookup-failed|master: open PR の一覧を取得できない"
+  "issue-lookup-failed|master: Issue の一覧を取得できない (label を触らずに止める)"
   "gate-misconfigured:<PR番号>|master: bin/loop-gate が exit 2"
   "review-budget-unknown:<PR番号>|master: bin/loop-review-budget が exit 2"
   "merge-failed:<PR番号>@<SHA>|master: マージに失敗"
