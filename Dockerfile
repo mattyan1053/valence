@@ -32,7 +32,9 @@ RUN set -eux; \
     # ホストの docker socket の gid を持つグループを用意し、node を所属させる
     if ! getent group "$DOCKER_GID" >/dev/null; then groupadd -g "$DOCKER_GID" hostdocker; fi; \
     usermod -aG "$(getent group "$DOCKER_GID" | cut -d: -f1)" node; \
-    mkdir -p "$PNPM_HOME"; \
+    # pnpm ストアは名前付きボリュームでマウントする。マウント先がイメージ内に
+    # 存在しないと root 所有で作られてしまうため、先に node 所有で掘っておく
+    mkdir -p "$PNPM_HOME/store"; \
     chown -R node:node /home/node
 
 RUN corepack enable

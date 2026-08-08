@@ -97,8 +97,8 @@ DDD / クリーンアーキテクチャの**依存関係逆転**の考え方を�
 形式主義には陥らず、「ビジネスルールがフレームワークに依存しない」ことだけを厳守する。
 
 ```
-app/                    Next.js App Router。ルーティングと配線のみ。ロジックを書かない
 src/
+  app/                  Next.js App Router。ルーティングと配線のみ。ロジックを書かない
   domain/               ビジネスルール。外部依存ゼロ（import できるのは Node 標準と自分自身だけ）
   application/          ユースケース。ports/ に interface を定義し、実装は知らない
   infrastructure/       ports の実装（GitHub GraphQL アダプタ、Supabase リポジトリ等）
@@ -106,19 +106,25 @@ src/
   composition/          合成ルート。ports に adapter を束ねて注入する唯一の場所
 ```
 
+内側（`domain`）ほど安定し、外側（`app`）ほど変わりやすい。依存の矢印は常に内向き。
+
 ### 依存方向（dependency-cruiser で機械的に強制）
 
-| レイヤ | import してよい先 |
-| --- | --- |
-| `domain` | **なし**（Node 標準ライブラリのみ） |
-| `application` | `domain` |
-| `infrastructure` | `application`, `domain` |
-| `ui` | `domain`（型のみ）, 他の `ui` |
-| `composition` | すべて |
-| `app` | `composition`, `ui`, `application`（型のみ） |
+| レイヤ | import してよい先 | 禁止 |
+| --- | --- | --- |
+| `domain` | Node 標準ライブラリと `domain` 自身**のみ** | npm パッケージを含むすべて |
+| `application` | `domain` | `infrastructure` `ui` `app` `composition`、React / Next |
+| `infrastructure` | `application`, `domain`, npm | `ui` `app` `composition` |
+| `ui` | `domain`, 他の `ui`, React | `application` `infrastructure` `composition` |
+| `composition` | すべて | — |
+| `app` | `composition`, `ui`, `application`, `domain` | `infrastructure`（直接 import） |
 
-違反は `./task check` で落ちる。**ルールを緩めて通すのではなく、設計を直すこと。**
-どうしても例外が必要なら、`.dependency-cruiser.jsonc` に理由をコメントで書いてから追加する。
+差し替えたい実装を握るのは `composition` だけ。`app` や `ui` が `infrastructure` を直接掴むと、
+テストで差し替えられなくなる。
+
+違反は `./task check`（`.dependency-cruiser.mjs`）で落ちる。テストファイル（`*.test.ts`）は対象外。
+**ルールを緩めて通すのではなく、設計を直すこと。**
+どうしても例外が必要なら、なぜ必要かを `.dependency-cruiser.mjs` にコメントで書いてから追加する。
 
 ### 具体的な指針
 
