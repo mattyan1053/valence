@@ -75,7 +75,10 @@ function runWithFakeGh(prFields: string[], mergeExit: number): Run {
 describe("bin/loop-merge の成否判定", () => {
   it("gh が非ゼロでも、マージされていれば成功として返す", () => {
     // detached HEAD の worktree で毎回起きる姿。終了コードだけ見ると誤判定する
-    const result = runWithFakeGh(["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA], 1);
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      1,
+    );
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("MERGED pr=12 commit=6e8a472");
