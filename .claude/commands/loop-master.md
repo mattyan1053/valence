@@ -104,11 +104,19 @@ bin/loop-gate <PR番号>
 ゲートが出力した SHA をそのまま使う。
 
 ```bash
-gh pr merge <PR番号> --squash --delete-branch --match-head-commit <ゲートが検証したSHA>
+bin/loop-merge <PR番号> <ゲートが検証したSHA>
 ```
 
-`--match-head-commit` を必ず付ける。判定後に push された commit を取り込まないため。
-マージに失敗したら `bin/loop-stall "merge-failed:<PR番号>@<SHA>"` を通して停止する。
+**`gh pr merge` を直接呼ばない。** master は detached HEAD の worktree で動くので、
+`--delete-branch` のローカル後始末が「not on any branch」で落ち、**マージが成功していても
+gh は非ゼロを返す**。終了コードだけを見ると、成功したマージのたびに停止することになる。
+`bin/loop-merge` は gh の終了コードではなく **マージ後の PR の state** で判定し、
+`--match-head-commit` も内側で付ける（判定後に push された commit を取り込まないため）。
+
+- exit 0 → マージされた。出力の merge commit を控える
+- exit 1 → **マージされていない、または確認できない。**
+  `bin/loop-stall "merge-failed:<PR番号>@<SHA>"` を通して停止する
+- exit 2 → 引数の誤り。同じく `bin/loop-stall "merge-failed:<PR番号>@<SHA>"` で停止する
 
 マージできたら、対応する Issue が閉じたかを確認する（PR 本文に `Closes #N` があれば自動）。
 閉じていなければ閉じる。この周回はここで終わり。

@@ -44,8 +44,10 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
 > **`bin/loop-gate <PR番号>` が終了コード 0 を返さない限り、理由を問わず
 > `gh pr merge` を実行してはならない。**
 
-- マージは `--match-head-commit <ゲートが検証した SHA>` を必ず付ける。
-  付けないと、判定後に push された別の commit をマージしうる。
+- マージは `bin/loop-merge <PR番号> <ゲートが検証した SHA>` で行う。`--match-head-commit` を
+  内側で付ける（付けないと判定後に push された別の commit をマージしうる）。
+  master は detached HEAD の worktree なので、`gh pr merge` は成功しても非ゼロを返す。
+  **成否は終了コードではなくマージ後の PR の state で判定する。**
 - `@codex review` は `bin/loop-review-budget` が 0 を返したときだけ投げる。
 - `main` へ直接 push しない。
 - **同時に open にしてよい PR は 1 本**。並行させるとレビュー量が本数倍で増える。
