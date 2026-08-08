@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# 「次に来るレビューが対象にする head SHA」を記録し、あとで引けるようにする。
+#
+#   bin/loop-review-head <PR番号> <head SHA>   記録する
+#   bin/loop-review-head --list <PR番号>       記録を古い順に出す (<時刻><TAB><SHA>)
+#
+# Codex の応答のうち **👍 リアクションは SHA を持たない**。何をレビューしたのかを
+# 応答側から知る手段が無いので、以前は commit の日付から推定していた。committer date は
+# push 時刻ではないため、推定した commit が「そのとき見られていた head」である保証が無く、
+# **未レビューの変更をマージ可能にしてしまう**。かといって推定を捨てると、👍 だけで返る
+# PR が永久にマージできない。推定を足したり引いたりするたびに新しい詰みが出ていた。
+#
+# 出どころは応答側ではなく **こちら側** にある。レビューが走る直前の head を先に
+# 書いておけば、あとから来た応答が何を見たかは確定する。推定が要らなくなる。
+#
+# 記録するのは 2 箇所。
+#
+#   PR を作った直後 (worker)      … 自動で入る初回レビューの対象
+#   レビューを要求する直前 (master) … その要求に対する応答の対象
+#
+# **記録より後に来た応答だけを、その記録に結び付ける。** 記録より前の応答は
+# 何を見たか分からないので使わない (安全側に倒す)。
+#
+# 記録先は git の共通ディレクトリ配下。worktree をまたいで同じ場所を指すので、
+# master と worker が別ツリーにいても同じ記録を見る。作業ツリーの外なので
+# コミットもされない (bin/loop-stall と同じ置き方)。
+#
+#   exit 0 = 記録した / 一覧を出した (0 件のこともある)
+#   exit 2 = 使い方の誤り / 記録不能
+#
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-review-head <PR番号> <head SHA>   記録する" >&2
+  echo "       bin/loop-review-head --list <PR番号>       記録を古い順に出す" >&2
+  exit 2
+}
+
+[[ $# -eq 2 ]] || usage
+
+if [[ $1 == "--list" ]]; then
+  mode="list"
+  pr="$2"
+  sha=""
+else
+  mode="record"
+  pr="$1"
+  sha="$2"
+fi
+readonly mode pr sha
+
+# PR 番号はファイル名になる。数字だけに絞ってパス操作を成立させない。
+[[ $pr =~ ^[0-9]+$ ]] || {
+  echo "[FAIL] PR 番号は数字で指定してください: $pr" >&2
+  exit 2
+}
+
+# ブランチ名や短すぎる値を記録すると、head との前方一致が誤爆する。
+if [[ $mode == "record" ]] && ! [[ $sha =~ ^[0-9a-f]{7,40}$ ]]; then
+  echo "[FAIL] head SHA として読めません: $sha" >&2
+  exit 2
+fi
+
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+# --git-common-dir は worktree からだと相対パスを返すことがある。
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+readonly STORE="$common_dir/valence-loop-review-heads"
+readonly FILE="$STORE/$pr"
+
+if [[ $mode == "list" ]]; then
+  # 記録が無いのは異常ではない (まだ 1 度も走っていない PR)。空を返す。
+  [[ -f $FILE ]] || exit 0
+  # 追記順が時刻順だが、壊れた行を混ぜないために書式で絞る。
+  # 同じ秒に 2 件入ることがあるので -s で安定ソートし、追記順を保つ。
+  grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\t[0-9a-f]{7,40}$' "$FILE" \
+    | sort -s -k1,1
+  exit 0
+fi
+
+mkdir -p "$STORE" || {
+  echo "[FAIL] 記録先を作成できません: $STORE" >&2
+  exit 2
+}
+
+# 応答の時刻 (GitHub API は UTC の ISO8601) と直接比べられる形で持つ。
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '%s\t%s\n' "$now" "$sha" >> "$FILE" || {
+  echo "[FAIL] 記録を書き込めません: $FILE" >&2
+  exit 2
+}
+
+echo "review head recorded pr=$pr sha=${sha:0:8} at=$now"
+exit 0

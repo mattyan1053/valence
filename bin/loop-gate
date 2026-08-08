@@ -140,9 +140,10 @@ else
 fi
 
 # --- 4. レビュー済み ----------------------------------------------------------
-# Codex の応答は 2 通りある。指摘ありは review オブジェクト、指摘なしは会話コメント。
-# review だけを見ると、指摘ゼロの PR が「未レビュー」となり、きれいな PR ほど
-# マージできなくなる。bin/loop-review-commits が両方を吸収する。
+# Codex の応答は 3 通りある。指摘ありは review オブジェクト、指摘なしは会話コメントか
+# 👍 リアクション。review だけを見ると、指摘ゼロの PR が「未レビュー」となり、
+# きれいな PR ほどマージできなくなる。bin/loop-review-commits が 3 つとも吸収し、
+# SHA が確定した行だけを返す。
 #
 # 原則は「現 head がレビュー済み」。ただしこれを無条件に必須にすると詰む。
 # 上限到達後に指摘を直して push すると head が変わり、追加レビューは要求できないので
@@ -162,14 +163,11 @@ else
   reviewed_head="no"
   # ヘルパーは <時刻><TAB><SHA> を時刻順で返す。最終行が最新のレビュー。
   # SHA だけを並べ替えると辞書順になり、最新を取り違えて手直し量を過大に見積もる。
-  while IFS=$'\t' read -r _ts sha src; do
+  # 👍 だけの応答も bin/loop-review-head の記録で SHA が確定しているので、
+  # 出どころによる場合分けは要らない。ここへ来る行はすべて信用してよい。
+  while IFS=$'\t' read -r _ts sha; do
     [[ -n $sha ]] || continue
     ((rounds++))
-    # 👍 リアクションは SHA を持たず、時刻から推定した値しか無い。
-    # committer date は push 時刻ではないので、リアクションより古い日付の
-    # commit をあとから push すると未レビューの変更を通してしまう。
-    # 回数には数えるが、head 一致とマージ基準には使わない。
-    [[ $src == "reaction" ]] && continue
     last_reviewed="$sha"
     # コメント由来は短縮 SHA なので前方一致で突き合わせる
     [[ $head_sha == "$sha"* ]] && reviewed_head="yes"
@@ -181,12 +179,6 @@ else
     pass "レビュー: 現 head に対するレビューあり (${rounds} 回)"
   elif ((rounds < MAX_ROUNDS_GATE)); then
     fail "レビュー: 現 head (${head_sha:0:8}) は未レビュー。レビューを要求してください (${rounds}/${MAX_ROUNDS_GATE})"
-  elif [[ -z $last_reviewed ]]; then
-    # 応答が 👍 だけで上限に達した場合。信用できる SHA が 1 つも無いので、
-    # 手直し量を測る基準が存在しない。空のまま compare を組み立てると
-    # "...<head>" という無効な指定になり、必ず失敗して原因が分からなくなる。
-    # 追加レビューも要求できないので、ここは人へ渡すのが唯一の出口。
-    fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したが、SHA を伴う応答が 1 件も無い (👍 のみ)。人の判断が要ります"
   elif ! cmp_json="$(gh api "repos/{owner}/{repo}/compare/${last_reviewed}...${head_sha}" \
     --jq '{lines: ([.files[]? | .changes] | add // 0)}' 2>/dev/null)"; then
     fail "レビュー: レビュー済み commit から head までの差分を取得できません"
