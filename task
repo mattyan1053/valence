@@ -185,7 +185,7 @@ JSON
   echo "==> master 側の deny を設定: $wt/.claude/settings.local.json"
 
   local label
-  for label in ready in-progress blocked; do
+  for label in backlog ready in-progress blocked; do
     if gh label list --limit 200 --json name --jq '.[].name' | grep -qxF "$label"; then
       echo "==> label は既にある: $label"
     else

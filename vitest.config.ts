@@ -12,7 +12,7 @@ export default defineConfig({
     // それまでは node で足りるので増やさない。
     environment: "node",
     // bin/ のループ用スクリプトもテストする。ここが壊れるとループが空転し続ける。
-    include: ["src/**/*.test.ts", "bin/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "bin/**/*.test.ts", "loop/**/*.test.ts"],
     coverage: {
       provider: "v8",
       // 内側のレイヤだけを対象にする。app/ui は E2E で担保する方針。

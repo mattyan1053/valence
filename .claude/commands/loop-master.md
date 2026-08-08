@@ -149,18 +149,22 @@ PR にコメントで渡す。**何を直すかと、なぜそれが必要か**�
 
 起票するのは「手が空いたとき」だけではない。次のいずれかに当てはまれば起票する。
 
-- **着手可能な作業が無い**（open PR が 0 件で、`ready` / `in-progress` の Issue も無い）
+- **着手可能な作業が無い**（open PR が 0 件で、`backlog` / `ready` / `in-progress` の
+  Issue も無い）
 - **レビュー中に、この PR の範囲外で直すべきものを見つけた** — その PR を膨らませず、
   別 Issue に切り出す。打ち切り基準で見送った指摘もここへ落とす
 - **人から直接依頼を受けた**
 - **人が立てた Issue が大きい** — 1 PR で終わる大きさに分解する。元の Issue は
   親として残し、分解した Issue から参照する
 
-`ready` の Issue が既にあり、上のどれにも当てはまらないなら何もしない。この周回は終わり。
+上のどれにも当てはまらないなら起票しない。ステップ 6（着手順の整理）へ進む。
 
 ```bash
-gh issue create --label ready --title "<何をするか>" --body-file <file>
+gh issue create --label backlog --title "<何をするか>" --body-file <file>
 ```
+
+**起票時は `backlog` を付ける。`ready` を直接付けない。** `ready` は「次にやる 1 件」で、
+昇格させるのはステップ 6 の仕事である。ここで付けると 2 件以上になり、着手順が壊れる。
 
 **1 つの Issue は 1 つの PR で終わる大きさにする。** `bin/loop-gate` の規模上限
 （既定 40 files / 1500 lines）を超える見込みなら、その時点で割る。
@@ -171,9 +175,51 @@ Issue には次を書く（`.github/ISSUE_TEMPLATE/task.yml` の形）。
 - **やること** — 箇条書き
 - **完了条件** — 何が確認できたら閉じてよいか
 
-選ぶ順は `AGENTS.md` の MVP スコープに従う。スコープ外のものを起票しない。
+起票する対象は `AGENTS.md` の MVP スコープに従う。スコープ外のものを起票しない。
 
-## 6. 空転を検出する
+## 6. 着手順を決める（`ready` を 1 件に保つ）
+
+**着手順は master が決める。** worker は `ready` の 1 件を取るだけで順序を判断しない。
+`gh issue list` は新しい順に返すので、worker に選ばせると実質 LIFO になり、
+古い Issue が永久に後回しになるうえ、割り込みを伝える手段も無くなる。
+
+```bash
+gh issue list --label ready --limit 100 --json number,title
+gh issue list --label in-progress --limit 100 --json number,title
+gh issue list --label backlog --limit 100 --json number,title,body
+```
+
+- **`ready` が 2 件以上** → 運用が壊れている。どれを次にするか決まらないので、
+  `bin/loop-stall "too-many-ready:<件数>"` を通して停止する
+- **`in-progress` がある** → worker が動いている。何もしない。この周回は終わり
+- **`ready` が 1 件** → worker の番。何もしない。この周回は終わり
+- **`ready` も `in-progress` も 0 件** → `backlog` から次の 1 件を選んで昇格させる
+
+```bash
+gh issue edit <N> --remove-label backlog --add-label ready
+```
+
+選ぶ基準は次の順。**なぜその 1 件を選んだかを Issue にコメントで残す。**
+順序の理由が残っていないと、割り込みが入ったときに元の並びを復元できない。
+
+1. **他の作業の前提になっているもの** — これが入らないと後続が正しく作れないもの
+2. **無人運転を止めているもの** — 人の介入が要る状態を作っているもの
+3. **小さいもの** — 同じ効きなら、早く回るほうを先にする
+
+### 割り込ませるとき
+
+急ぎのものを先にやらせたい場合、**現在の `ready` を `backlog` へ戻してから**
+割り込みを `ready` にする。順番を守って 2 件同時に `ready` を作らない。
+
+```bash
+gh issue edit <元の N> --remove-label ready --add-label backlog
+gh issue edit <割り込みの N> --remove-label backlog --add-label ready
+```
+
+worker が既に着手している（`in-progress`）ものは、label を戻しても止まらない。
+**手を止めさせたいときは PR / Issue にコメントで伝える。**
+
+## 7. 空転を検出する
 
 **周回が前へ進んだら、必ず次でカウンタを消す。**
 

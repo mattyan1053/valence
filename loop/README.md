@@ -8,7 +8,7 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
   ├ open PR を見る                                ├ ready の Issue を取る
   ├ レビュー状況を判断                            ├ TDD で実装 → PR
   ├ bin/loop-gate → 合格ならマージ                ├ レビュー指摘に対応
-  └ 作業を割って Issue 起票                       └ 完了報告
+  └ Issue 起票と着手順の決定                      └ 完了報告
                         ↕ GitHub (Issue / PR / label)
 ```
 
@@ -64,7 +64,7 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
 | 作業場所 | `~/valence-master`（worktree） | `~/valence` |
 | コード | 読むだけ（`git show`） | 書く |
 | コンテナ / `./task check` | 使わない | 使う |
-| Issue | **起票する** | label を更新する |
+| Issue | **起票する・着手順を決める** | label を更新する |
 | PR | **マージする** | 作る・直す |
 | `@codex review` | **要求する** | 要求しない |
 
@@ -75,9 +75,17 @@ master が実装に手を出さないのは、権限の話ではなく**判定�
 
 | label | 意味 | 付ける人 |
 | --- | --- | --- |
-| `ready` | 着手してよい | master |
+| `backlog` | 起票済み。着手順は未定 | master |
+| `ready` | **次にやる 1 件。同時に 1 件だけ** | master |
 | `in-progress` | worker が着手中 | worker |
 | `blocked` | 判断が要る。ループは触らない | どちらでも |
+
+**着手順は master が決める。** worker は `ready` の 1 件を取るだけで、順序を判断しない。
+`gh issue list` は新しい順に返すため、worker に選ばせると実質 LIFO になり、
+古い Issue が後回しになるうえ、割り込みを伝える手段も無くなる。
+
+`ready` が 2 件以上あると着手順が一意に決まらない。どちらのループも
+`bin/loop-stall "too-many-ready:<件数>"` を通して止める。
 
 ## セットアップ
 

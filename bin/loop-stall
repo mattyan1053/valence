@@ -37,6 +37,7 @@ readonly STOP_IDS=(
   "local-ci-failed:<PR番号>|worker: ./task check が通らない"
   "implementation-blocked:<Issue番号>|worker: blocked にして人へ渡した (完了条件を満たせない / PR が人手で閉じられた)"
   "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
+  "too-many-ready:<件数>|両方: ready の Issue が 2 件以上ある (着手順が一意に決まらない)"
   "wrong-worktree|master: worker の作業ツリーにいる"
   "pr-lookup-failed|master: open PR の一覧を取得できない"
   "gate-misconfigured:<PR番号>|master: bin/loop-gate が exit 2"
