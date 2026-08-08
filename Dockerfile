@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1
 
+# Supabase CLI はローカルスタックの起動に docker コマンドそのものを要求する
+# (socket を渡すだけでは足りない)。公式イメージから CLI バイナリだけ借りる。
+FROM docker:29-cli AS docker-cli
+
 # 開発用イメージ。ホスト環境に Node / pnpm を入れずに済ませるためのもの。
 # 本番は Vercel にデプロイする想定なので、ここに production ステージは置かない。
 FROM node:22-bookworm-slim AS dev
@@ -49,6 +53,8 @@ RUN set -eux; \
     # 存在しないと root 所有で作られてしまうため、先に node 所有で掘っておく
     mkdir -p "$PNPM_HOME/store"; \
     chown -R "$HOST_UID:$HOST_GID" /home/node
+
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 RUN corepack enable
 

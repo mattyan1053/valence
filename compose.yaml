@@ -1,19 +1,22 @@
 name: valence
 
+x-dev-image: &dev-image
+  build:
+    context: .
+    target: dev
+    args:
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
+      DOCKER_GID: ${DOCKER_GID:-999}
+
 services:
   # 開発用コンテナ。常駐させておき、pnpm 系のコマンドは exec で流し込む。
   # Supabase のローカルスタックは supabase CLI が別途コンテナ群を立てるので、
-  # ここには DB を定義しない (`make db-up` を参照)。
+  # ここには DB を定義しない (`./task db:up` を参照)。
   app:
-    build:
-      context: .
-      target: dev
-      args:
-        HOST_UID: ${HOST_UID:-1000}
-        HOST_GID: ${HOST_GID:-1000}
-        DOCKER_GID: ${DOCKER_GID:-999}
+    <<: *dev-image
     init: true
-    # ホストと同一パスにマウントする。Supabase CLI はコンテナ内から
+    # ホストと同一パスにマウントする。Supabase CLI (supabase-cli サービス) が
     # ホストの Docker daemon を操作するため、パスが一致していないと
     # マイグレーションや seed の bind mount が解決できなくなる。
     working_dir: ${PWD}
@@ -21,9 +24,6 @@ services:
       - ${PWD}:${PWD}
       # pnpm のグローバルストア。再ビルドのたびに再ダウンロードしないため
       - pnpm-store:/home/node/.local/share/pnpm/store
-      # Supabase CLI からホストの Docker daemon を操作する (Docker-out-of-Docker)。
-      # コンテナにホスト root 相当の権限を与えることになるので、開発用途に限る
-      - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - path: .env
         required: false
@@ -33,12 +33,37 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     extra_hosts:
-      # Supabase ローカルスタックはホスト側のポートに出るため、そこ経由で参照する
+      # Supabase のポートはホスト側に出るため、そこ経由で参照する
       - "host.docker.internal:host-gateway"
     command: sleep infinity
 
+  # Supabase CLI 専用の使い捨てコンテナ (`./task db:*` から compose run で叩く)。
+  #
+  # CLI はホストの Docker daemon にスタックを立てさせる一方、その疎通確認は
+  # 自分自身の 127.0.0.1 を見に行く。そのため docker socket とホストの
+  # ネットワーク名前空間の両方が要る。
+  #
+  # これを app に持たせると、アプリのコンテナがホスト root 相当の権限と
+  # ホストのネットワークを常時抱えることになる。必要なのは CLI だけなので
+  # 切り出し、app 側は素の bridge ネットワークのままにしてある。
+  supabase-cli:
+    <<: *dev-image
+    init: true
+    profiles: ["tools"]
+    working_dir: ${PWD}
+    volumes:
+      - ${PWD}:${PWD}
+      - pnpm-store:/home/node/.local/share/pnpm/store
+      - /var/run/docker.sock:/var/run/docker.sock
+    # config.toml の env() 置換はこのコンテナのプロセス環境から解決される。
+    # 渡し忘れると GitHub OAuth の資格情報が空のままスタックが起動する。
+    env_file:
+      - path: .env
+        required: false
+    network_mode: host
+
   # GitHub Webhook をローカルの Next.js へ転送する。
-  # SMEE_URL を .env に設定したうえで `make smee` で起動する。
+  # SMEE_URL を .env に設定したうえで `./task smee` で起動する。
   smee:
     image: node:22-bookworm-slim
     init: true
