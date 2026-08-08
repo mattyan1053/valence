@@ -1,0 +1,64 @@
+name: Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 依存の脆弱性は自分のコミットと無関係に増える。週次で気づけるようにする。
+    - cron: "0 0 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies:
+    name: dependency vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # low は誤検知と開発時のみ影響するものが多く、止めると形骸化する。
+      - name: Audit
+        run: pnpm audit --audit-level moderate
+
+  # PR で新しく入る依存だけを見る。既存の負債で毎回落ちると形骸化するため、
+  # 「今の総量」を見る dependencies ジョブとは役割を分けている。
+  review:
+    name: new dependencies
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      # major の移動タグが無いためバージョン固定。更新は Dependabot に任せる。
+      - uses: actions/dependency-review-action@v5.0.0
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+
+  shell:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # ./task と entrypoint は開発の入口。壊れると何も動かせなくなる。
+      - name: ShellCheck
+        run: shellcheck --shell=bash task docker-entrypoint.sh

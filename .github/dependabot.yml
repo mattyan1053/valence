@@ -10,6 +10,14 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # ランタイムと型定義はセットで上げる。Node のメジャーは LTS だけを追うので
+      # 自動 PR に任せず、Dockerfile と一緒に手で上げる。
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # TypeScript のメジャーは Next のサポート状況を見てから上げる。
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: "⬆️ deps:"
 
@@ -28,5 +36,10 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # Node のメジャーは奇数系が LTS にならない。Dependabot は最新を取りに行くので
+      # (例: 25)、メジャーの追従は LTS を確認したうえで手で行う。
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: "⬆️ deps:"
