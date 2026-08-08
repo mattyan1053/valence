@@ -10,7 +10,7 @@ FROM docker:29-cli AS docker-cli
 #
 # Node 24 は Active LTS (2025-10-28〜)。26 は 2026-10-28 まで LTS にならず、
 # かつ corepack が同梱されなくなっているため、まだ上げない。
-FROM node:24-bookworm-slim AS dev
+FROM node:25-bookworm-slim AS dev
 
 # bind mount したファイルの所有者がホストとずれないように uid/gid を合わせる。
 # Supabase CLI がホストの Docker daemon を叩けるように docker group の gid も渡す。
