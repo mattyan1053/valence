@@ -63,10 +63,15 @@ last_at=""
 # ヘルパーは <時刻><TAB><SHA> を時刻順で返す。最終行の時刻が最後の応答時刻で、
 # これを落とすと「応答済みの古い要求」まで未応答として数えてしまい、
 # 2 周目へ永久に進めなくなる。
-while IFS=$'\t' read -r ts sha _src; do
+while IFS=$'\t' read -r ts sha src; do
   [[ -n $sha ]] || continue
   ((rounds++))
   last_at="$ts"
+  # 👍 リアクション由来の SHA は時刻からの推定でしかない。gate 側は信用せず
+  # 「現 head は未レビュー」と判定するので、ここで信用すると
+  # 「gate はマージ不可、budget は要求不可」で 両側から塞がれて詰む。
+  # 判定は gate に合わせる。
+  [[ $src == "reaction" ]] && continue
   [[ $head_sha == "$sha"* ]] && reviewed_head="yes"
 done <<<"$reviewed"
 

@@ -20,6 +20,7 @@ readonly MAX_REPEATS="${LOOP_MAX_STALL_REPEATS:-3}"
 
 usage() {
   echo "使い方: bin/loop-stall <停止識別子>" >&2
+  echo "       bin/loop-stall --reset        周回が前へ進んだときに呼ぶ" >&2
   echo "  識別子は種別と対象の状態の組にする (例: gate:14@adb2d5c1)" >&2
   exit 2
 }
@@ -27,7 +28,7 @@ usage() {
 [[ $# -eq 1 ]] || usage
 readonly ID="$1"
 # 識別子はファイル名の一部にしないが、制御文字や改行が混ざるものは受けない。
-[[ $ID =~ ^[A-Za-z0-9:@._/-]+$ ]] || {
+[[ $ID == "--reset" ]] || [[ $ID =~ ^[A-Za-z0-9:@._/-]+$ ]] || {
   echo "[FAIL] 識別子に使えない文字が含まれています" >&2
   exit 2
 }
@@ -47,6 +48,14 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd)" || {
   exit 2
 }
 readonly STATE="$common_dir/valence-loop-stall"
+
+# 進捗があった周回は数え直す。これが無いと、同じエラーが 2 回起きたあと何周
+# 正常に進んでも、後日の独立した 1 回を「3 周連続」と数えて全ループを止める。
+if [[ $ID == "--reset" ]]; then
+  rm -f "$STATE"
+  echo "stall reset"
+  exit 0
+fi
 
 prev_id=""
 prev_count=0
