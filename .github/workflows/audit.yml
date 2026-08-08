@@ -35,23 +35,6 @@ jobs:
       - name: Audit
         run: pnpm audit --audit-level moderate
 
-  # PR で新しく入る依存だけを見る。既存の負債で毎回落ちないようにするため。
-  review:
-    name: new dependencies
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v7
-      # major の移動タグが無いためバージョン固定。更新は Dependabot に任せる。
-      - uses: actions/dependency-review-action@v5.0.0
-        with:
-          fail-on-severity: moderate
-          comment-summary-in-pr: on-failure
-
   shell:
     name: shell scripts
     runs-on: ubuntu-latest

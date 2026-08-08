@@ -26,7 +26,8 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
-          # security-extended は誤検知が増えるため、まずは既定の security クエリで運用する。
-          queries: security-and-quality
+          # queries は指定しない。既定の security クエリだけで運用する。
+          # security-extended / security-and-quality は精度の低いクエリや
+          # 保守性のアラートまで拾い、ノイズで本命の指摘が埋もれる。
 
       - uses: github/codeql-action/analyze@v4
