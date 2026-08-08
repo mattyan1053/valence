@@ -58,8 +58,9 @@ merge_status=$?
 # 1 行 1 値で受ける。TSV を IFS=タブ の read で割ると、**タブは IFS の空白文字なので
 # 連続が 1 区切りに畳まれ、空のフィールドがずれる** (mergedAt が空のとき
 # headRefName が mergedAt として読まれ、未マージを「マージ済み」と誤判定した)。
-if ! pr_fields="$(gh pr view "$PR" --json state,mergedAt,mergeCommit,headRefName \
-  --jq '[.state, (.mergedAt // ""), (.mergeCommit.oid // ""), (.headRefName // "")] | .[]' \
+if ! pr_fields="$(gh pr view "$PR" --json state,mergedAt,mergeCommit,headRefName,headRefOid \
+  --jq '[.state, (.mergedAt // ""), (.mergeCommit.oid // ""), (.headRefName // ""),
+         (.headRefOid // "")] | .[]' \
   2>/dev/null)"; then
   echo "[FAIL] PR #$PR の状態を確認できません。マージされたか不明なので失敗として扱います" >&2
   [[ -n $merge_out ]] && printf '%s\n' "$merge_out" >&2
@@ -71,9 +72,23 @@ state="${fields[0]-}"
 merged_at="${fields[1]-}"
 merge_commit="${fields[2]-}"
 head_ref="${fields[3]-}"
+head_oid="${fields[4]-}"
 
 if [[ $state != "MERGED" || -z $merged_at ]]; then
   echo "[FAIL] PR #$PR はマージされていません (state=$state)" >&2
+  [[ -n $merge_out ]] && printf '%s\n' "$merge_out" >&2
+  exit 1
+fi
+
+# --match-head-commit は **このマージ要求にだけ** 効き、あとから読む state には効かない。
+# ゲート後に別の commit が push され、それを誰かが手でマージしていると、
+# こちらのマージは失敗したのに state は MERGED になる。**ゲートしていない head を
+# 成功として扱わない**ため、マージされた head がゲートしたものかを必ず確かめる。
+# 嘘の失敗を消すために嘘の成功を作らない。
+if [[ $head_oid != "$HEAD_SHA" ]]; then
+  echo "[FAIL] PR #$PR はゲートした SHA と違う head でマージされています" >&2
+  echo "       ゲート済み: $HEAD_SHA" >&2
+  echo "       実際の head: ${head_oid:-unknown}" >&2
   [[ -n $merge_out ]] && printf '%s\n' "$merge_out" >&2
   exit 1
 fi

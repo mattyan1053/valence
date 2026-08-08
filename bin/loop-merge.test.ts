@@ -7,6 +7,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-merge", import.meta.url));
 
+/** テストが渡す「ゲートが検証した SHA」。 */
+const GATED_SHA = "a".repeat(40);
+
 type Run = { status: number; stdout: string; stderr: string };
 
 /** bash だけを置いた PATH。gh がここに無いので、到達すれば別の失敗になる。 */
@@ -61,7 +64,7 @@ function runWithFakeGh(prFields: string[], mergeExit: number): Run {
     { mode: 0o755 },
   );
 
-  const result = spawnSync(SCRIPT, ["12", "a".repeat(40)], {
+  const result = spawnSync(SCRIPT, ["12", GATED_SHA], {
     encoding: "utf8",
     env: { ...process.env, PATH: dir },
   });
@@ -72,7 +75,7 @@ function runWithFakeGh(prFields: string[], mergeExit: number): Run {
 describe("bin/loop-merge の成否判定", () => {
   it("gh が非ゼロでも、マージされていれば成功として返す", () => {
     // detached HEAD の worktree で毎回起きる姿。終了コードだけ見ると誤判定する
-    const result = runWithFakeGh(["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x"], 1);
+    const result = runWithFakeGh(["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA], 1);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("MERGED pr=12 commit=6e8a472");
@@ -81,14 +84,27 @@ describe("bin/loop-merge の成否判定", () => {
   });
 
   it("gh が成功しても、マージされていなければ失敗として返す", () => {
-    const result = runWithFakeGh(["OPEN", "", "", "feat/x"], 0);
+    const result = runWithFakeGh(["OPEN", "", "", "feat/x", GATED_SHA], 0);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("マージされていません (state=OPEN)");
   });
 
+  it("ゲートした SHA と違う head がマージされていたら成功にしない", () => {
+    // ゲート後に別の commit が push され、人が UI から手でマージした場合。
+    // --match-head-commit はこちらのマージ要求にしか効かないので、state だけ見ると
+    // **ゲートしていない head を成功として扱う**
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", "b".repeat(40)],
+      1,
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("ゲートした SHA");
+  });
+
   it("mergedAt が無ければ MERGED でも信用しない", () => {
-    const result = runWithFakeGh(["MERGED", "", "", "feat/x"], 0);
+    const result = runWithFakeGh(["MERGED", "", "", "feat/x", GATED_SHA], 0);
 
     expect(result.status).toBe(1);
   });
