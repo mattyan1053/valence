@@ -16,10 +16,15 @@ PR 作成時に Codex が自動でレビューする。再レビューは PR に
 gh api repos/<owner>/<repo>/pulls/<n>/comments \
   --jq '.[] | "id=\(.id) \(.path):\(.line // .original_line)\n\(.body)\n"'
 
-# 個別に返信する
+# 個別に返信する。本文はファイル経由で渡すこと
 gh api --method POST repos/<owner>/<repo>/pulls/<n>/comments/<comment-id>/replies \
-  -f body='...'
+  -F body=@reply.md
 ```
+
+**`-f body='...'` に本文を直書きしない。** 返信にはコマンド例を載せることが多く、
+本文中の `'` がシェルのクォートを閉じてしまって、途中で切れた返信が投稿される。
+気づきにくいので、最初からファイルに書いて `-F body=@<file>` で渡す。
+一時ファイルはリポジトリ外（スクラッチパッド）に置く。
 
 ## 返信に書くこと
 
