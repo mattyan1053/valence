@@ -129,7 +129,12 @@ cmd_db_psql() {
 
 # GitHub Webhook の転送を開始する (.env の SMEE_URL が必要)
 cmd_smee() {
-  ready
+  # 未設定のまま起動すると smee-client が npm のエラーで落ち、原因が分かりにくい
+  if [[ -z "${SMEE_URL:-}" ]] && ! grep -qE '^SMEE_URL=.+' .env 2>/dev/null; then
+    echo "SMEE_URL が未設定です。https://smee.io/new で払い出して .env に書いてください。" >&2
+    exit 1
+  fi
+  ensure_up
   compose --profile webhook up -d smee
   compose logs -f smee
 }
