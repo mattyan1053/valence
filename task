@@ -137,8 +137,9 @@ cmd_smee() {
     exit 1
   fi
   ensure_up
-  compose --profile webhook up -d smee
-  compose logs -f smee
+  # フォアグラウンドで起動する。-d で起こしてログだけ追うと、Ctrl-C で
+  # 止まるのはログ追跡だけで、Webhook の転送は裏で動き続けてしまう。
+  compose --profile webhook up smee
 }
 
 # 使えるコマンドの一覧を表示する

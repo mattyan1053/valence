@@ -16,7 +16,7 @@ description: Valence の開発環境（コンテナ、./task、Supabase ロー�
 | --- | --- | --- | --- |
 | `app` | bridge（`127.0.0.1:3000` のみ publish）＋ Supabase の network | **持たない** | 常駐 |
 | `supabase-cli` | host | 持つ | コマンド実行中のみ |
-| `smee` | bridge | 持たない | `./task smee` の間 |
+| `smee` | bridge | 持たない | `./task smee` の間（フォアグラウンド） |
 
 `app` の `CMD` は `pnpm dev`。**コンテナが起動していればアプリは動いている。**
 依存の導入は entrypoint が面倒を見るので、clone 直後でも `./task up` だけでよい。
@@ -35,8 +35,14 @@ docker compose exec -T app pgrep -a node    # コンテナ内に next がいる�
 ./task restart                              # 動いていなければ再起動
 ```
 
-dev サーバーを止めたいときは `docker compose restart app` を使う。
-`pkill -f "next dev"` はパターンが自分の親シェルにも一致して巻き添えで死ぬ。
+`pkill -f "next dev"` で止めようとしないこと。パターンが自分の親シェルにも
+一致して巻き添えで死ぬ。用途ごとに使い分ける。
+
+| やりたいこと | コマンド |
+| --- | --- |
+| 再起動する（設定を読み直す等） | `./task restart` |
+| 止めたままにする | `docker compose stop app` |
+| 環境ごと落とす | `./task down` |
 
 ### Supabase に繋がらない
 

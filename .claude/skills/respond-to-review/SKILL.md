@@ -32,12 +32,23 @@ gh api --method POST repos/<owner>/<repo>/pulls/<n>/comments/<comment-id>/replie
 
 `main` のマージルールで**未解決スレッドがあるとマージできない**。返信したら resolve する。
 
+**スレッドは必ずページングして取る。** 件数を決め打ちすると、超えた分の未解決
+スレッドに気づけず、ブランチ保護でマージできない状態の原因が分からなくなる。
+
 ```bash
-# 未解決スレッドの id を取る
-gh api graphql -f query='{repository(owner:"<owner>",name:"<repo>"){
-  pullRequest(number:<n>){reviewThreads(first:20){nodes{id isResolved
-  comments(first:1){nodes{path}}}}}}}' \
-  --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .id'
+# 未解決スレッドの id を取る (--paginate と pageInfo が要る)
+gh api graphql --paginate -f query='
+query($endCursor: String) {
+  repository(owner: "<owner>", name: "<repo>") {
+    pullRequest(number: <n>) {
+      reviewThreads(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id isResolved comments(first: 1) { nodes { path } } }
+      }
+    }
+  }
+}' --jq '.data.repository.pullRequest.reviewThreads.nodes[]
+         | select(.isResolved==false) | "\(.id)\t\(.comments.nodes[0].path)"'
 
 gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:"<id>"}){thread{isResolved}}}'
 ```
