@@ -1,0 +1,32 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 新しいクエリが追加されることがあるので、変更が無くても定期的に回す。
+    - cron: "0 1 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          # security-extended は誤検知が増えるため、まずは既定の security クエリで運用する。
+          queries: security-and-quality
+
+      - uses: github/codeql-action/analyze@v4

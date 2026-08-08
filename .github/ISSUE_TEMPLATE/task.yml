@@ -1,0 +1,37 @@
+name: 作業・改善
+description: 実装したいこと、直したい設計、気になっている点をまとめる
+labels: ["task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        仕様書は作らない方針です（`AGENTS.md` §6）。
+        ここには**コードを読んでも分からないこと**——なぜやるのか、何をもって完了とするか——を書いてください。
+
+  - type: textarea
+    id: why
+    attributes:
+      label: なぜやるか
+      description: 解決したい問題、放置した場合に何が困るか
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: やること
+      description: 箇条書きで。分割して別 PR にする想定なら、その単位も書いておく
+    validations:
+      required: true
+
+  - type: textarea
+    id: done
+    attributes:
+      label: 完了条件
+      description: 何が確認できたら閉じてよいか
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: やらないこと
+      description: 意図的にスコープから外すもの（無ければ空欄で構いません）

@@ -12,7 +12,9 @@ set -euo pipefail
 
 # どこから呼ばれてもリポジトリルートで動くようにする。
 # `readlink -f` は GNU 依存なので使わない (BSD/macOS の readlink は -f を持たない)。
-cd -- "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# CDPATH が設定されていると cd が意図しない場所へ飛ぶため、先に潰しておく。
+CDPATH=''
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 # ホストの実値をビルド引数として渡す。これで環境固有の値を .env に書かずに済む。
 HOST_UID="$(id -u)"
