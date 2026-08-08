@@ -47,10 +47,37 @@ gh pr list --state open --limit 200 --author @me --json number,headRefName,isDra
 ```
 
 - 自分の open PR がある → ステップ 3（レビュー対応）
-- 無い → ステップ 4（新規実装）
+- 無い → ステップ 2.1（公開に失敗した周回が残っていないか見る）
 
 自分の open PR が 2 件以上あるなら、着手中の作業を放置して次を始めている。
 `bin/loop-stall "too-many-own-prs:<件数>"` を通して停止する。**1 人が同時に持つ PR は 1 本。**
+
+### 2.1 公開に失敗した周回を再開する
+
+push / PR 作成に失敗した周回は、**Issue が `in-progress` のままブランチだけが残る**。
+ここを見ないと、ステップ 4 は `ready` の Issue しか探さないのでその Issue へ二度と戻れない。
+`publish-failed:<Issue番号>` も 1 周目の 1 回しか記録されず、3 周に到達しないので
+`loop/STOP` も置かれない。**失敗したまま誰も気づかない状態になる。**
+
+```bash
+gh issue list --label in-progress --limit 100 --json number,title
+```
+
+0 件ならステップ 4（新規実装）へ。あるなら、その Issue のブランチの状態を見る。
+
+```bash
+git branch --format='%(refname:short)' | grep -v '^main$'
+git log --oneline main..<ブランチ>                          # コミットが載っているか
+gh pr list --state all --limit 200 --head <ブランチ> --json number,state
+```
+
+- **PR が既にある**（state を問わず）→ 公開は済んでいる。作り直さない。label が
+  残っているだけなので、Issue にその旨をコメントしてこの周回は終わり
+- **PR が無く、コミットが載ったブランチがある** → 公開に失敗した周回の続きである。
+  そのブランチへ切り替え、ステップ 4 の「PR を作る」から再開する。再び失敗したら
+  同じ `publish-failed:<Issue番号>` を記録するので、3 周で止まる
+- **ブランチが無い / コミットが載っていない** → 実装が途中。ステップ 4 の実装から続ける
+  （label は `in-progress` のままでよい。付け替え直さない）
 
 ## 3. レビュー指摘に対応する
 
