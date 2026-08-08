@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,8 @@ const SCRIPT = fileURLToPath(new URL("./loop-merge", import.meta.url));
 const GATED_SHA = "a".repeat(40);
 
 type Run = { status: number; stdout: string; stderr: string };
+/** gh へ渡された引数列も見る。安全装置が消えたことに気づけるようにする。 */
+type FakeRun = Run & { calls: string[] };
 
 /** bash だけを置いた PATH。gh がここに無いので、到達すれば別の失敗になる。 */
 let binDir: string;
@@ -41,13 +43,17 @@ function run(args: string[]): Run {
  * gh を差し替えて判定だけを動かす。**この判定こそが本題**で、
  * 実際にマージしてしまうため本物の gh では試せない。
  */
-function runWithFakeGh(prFields: string[], mergeExit: number): Run {
+function runWithFakeGh(prFields: string[], mergeExit: number): FakeRun {
   const dir = mkdtempSync(join(tmpdir(), "loop-merge-fake-"));
   symlinkSync("/usr/bin/bash", join(dir, "bash"));
+  const callLog = join(dir, "calls");
   writeFileSync(
     join(dir, "gh"),
     [
       "#!/usr/bin/env bash",
+      // 何をどう呼んだかを残す。呼び出しの中身を見ないと、安全装置が
+      // 実装から消えても全部通ってしまう
+      `printf '%s\\n' "$*" >> '${callLog}'`,
       'if [[ $1 == "pr" && $2 == "merge" ]]; then',
       '  echo "could not determine current branch: not on any branch" >&2',
       `  exit ${mergeExit}`,
@@ -68,8 +74,13 @@ function runWithFakeGh(prFields: string[], mergeExit: number): Run {
     encoding: "utf8",
     env: { ...process.env, PATH: dir },
   });
+  const calls = existsSync(callLog)
+    ? readFileSync(callLog, "utf8")
+        .split("\n")
+        .filter((line) => line !== "")
+    : [];
   rmSync(dir, { recursive: true, force: true });
-  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr, calls };
 }
 
 describe("bin/loop-merge の成否判定", () => {
@@ -91,6 +102,19 @@ describe("bin/loop-merge の成否判定", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("マージされていません (state=OPEN)");
+  });
+
+  it("マージはゲートした SHA に固定して要求する", () => {
+    // --match-head-commit が、ゲート後に push された未検証 commit のマージを防ぐ唯一の装置。
+    // 呼び出しの中身を見ないと、実装から消えてもどのテストも落ちない
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+    );
+
+    const mergeCall = result.calls.find((call) => call.startsWith("pr merge"));
+
+    expect(mergeCall).toBe(`pr merge 12 --squash --delete-branch --match-head-commit ${GATED_SHA}`);
   });
 
   it("ゲートした SHA と違う head がマージされていたら成功にしない", () => {
