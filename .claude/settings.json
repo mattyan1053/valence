@@ -31,7 +31,10 @@
       "Bash(gh issue view:*)",
       "Bash(gh issue list:*)",
       "Bash(gh run list:*)",
-      "Bash(df -h:*)"
+      "Bash(df -h:*)",
+      "Bash(bin/loop-gate:*)",
+      "Bash(bin/loop-review-budget:*)",
+      "Bash(./task loop:status)"
     ],
     "deny": [
       "Read(./.env)",

@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# 追加のレビュー要求 (@codex review) を出してよいかを判定する。
+#
+# レビューを回し続けてトークンを溶かす事故を、モデルの自制ではなく機械的に防ぐ。
+# 判定不能は「要求してはいけない」に倒す。浪費を防ぐ側が安全側だからである。
+#
+#   exit 0 = 要求してよい
+#   exit 1 = 要求してはいけない
+#   exit 2 = 使い方の誤り / 判定不能
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+# -x も使わない。判定結果にトレースが混ざると読み取りを誤らせる。
+# jq / GraphQL の変数 ($bot, $endCursor 等) はシェルに展開させない。値を文字列として
+# 組み立てず --arg / -F で渡すことで、名前に $(...) や ' が混ざっても注入にならない。
+# shellcheck disable=SC2016
+set -uo pipefail
+
+# 自動レビューを行う bot のログイン名。環境変数で差し替えられないようにする。
+# 差し替えられると、自分のアカウントでレビューを 1 つ出すだけで
+# 「現 head はレビュー済み」を捏造でき、レビュー要件が無意味になる。
+readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
+
+# 1 つの PR に対して許すレビューの回数。
+# 上限に達したら、未解決が残っていても追加のレビューは要求しない。
+# その場合は打ち切り基準 (AGENTS.md) に従って判断するか、人へエスカレーションする。
+readonly MAX_ROUNDS="${LOOP_MAX_REVIEW_ROUNDS:-2}"
+
+# PR を開くと自動で 1 度レビューが入る。それが届く前に要求を投げると、
+# 同じ内容を二重にレビューさせることになる。開いた直後は黙って待つ。
+readonly INITIAL_GRACE_MIN="${LOOP_INITIAL_REVIEW_GRACE_MIN:-10}"
+
+usage() {
+  echo "使い方: bin/loop-review-budget <PR番号>" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+# 数字だけを受け付ける。PR 番号以外が渡る経路を作らない。
+[[ $1 =~ ^[0-9]+$ ]] || usage
+readonly PR="$1"
+
+if ! [[ $MAX_ROUNDS =~ ^[0-9]+$ ]] || ((MAX_ROUNDS < 1)); then
+  echo "[FAIL] 設定: LOOP_MAX_REVIEW_ROUNDS は 1 以上の整数で指定してください" >&2
+  exit 2
+fi
+
+# --- PR の head SHA -----------------------------------------------------------
+if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
+  || [[ -z $head_sha ]]; then
+  echo "[FAIL] PR #$PR の head SHA を取得できません" >&2
+  exit 2
+fi
+
+# --- Codex がレビュー済みの commit ---------------------------------------------
+# 指摘ありは review オブジェクト、指摘なしは会話コメントで返る。両方を数える。
+if ! reviewed="$("$(dirname "$0")/loop-review-commits" "$PR")"; then
+  echo "[FAIL] PR #$PR のレビュー済み commit を取得できません" >&2
+  exit 2
+fi
+rounds=0
+reviewed_head="no"
+last_at=""
+# ヘルパーは <時刻><TAB><SHA> を時刻順で返す。最終行の時刻が最後の応答時刻で、
+# これを落とすと「応答済みの古い要求」まで未応答として数えてしまい、
+# 2 周目へ永久に進めなくなる。
+while IFS=$'\t' read -r ts sha src; do
+  [[ -n $sha ]] || continue
+  ((rounds++))
+  last_at="$ts"
+  # 👍 リアクション由来の SHA は時刻からの推定でしかない。gate 側は信用せず
+  # 「現 head は未レビュー」と判定するので、ここで信用すると
+  # 「gate はマージ不可、budget は要求不可」で 両側から塞がれて詰む。
+  # 判定は gate に合わせる。
+  [[ $src == "reaction" ]] && continue
+  [[ $head_sha == "$sha"* ]] && reviewed_head="yes"
+done <<<"$reviewed"
+
+# --- 会話コメント -------------------------------------------------------------
+# 「受け取ったレビュー」だけを数えると、レビューが返ってこない場合に上限へ到達せず、
+# 要求だけを毎周投げ続ける。実際にレビュー機能が使えない状態を踏んだ。
+# 投げた要求と、bot からの応答不能通知も数える。
+if ! comments_json="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
+  | jq -rs --arg bot "$REVIEW_BOT" --arg since "$last_at" \
+    'add
+     | {requests: (map(select(.user.login != $bot
+                              and (.body | test("@codex\\s+review"; "i"))
+                              and ($since == "" or .created_at > $since))
+                       | .created_at)),
+        pending: (map(select(.user.login != $bot
+                             and (.body | test("@codex\\s+review"; "i"))
+                             and ($since == "" or .created_at > $since))) | length),
+        notice: (map(select(.user.login == $bot
+                            and (.body | test("create an environment"; "i")))) | length),
+        notice_at: (map(select(.user.login == $bot
+                               and (.body | test("create an environment"; "i")))
+                        | .created_at) | max)}')"; then
+  echo "[FAIL] PR #$PR のコメントを取得できません" >&2
+  exit 2
+fi
+pending="$(jq -r '.pending' <<<"$comments_json")"
+notice="$(jq -r '.notice' <<<"$comments_json")"
+notice_at="$(jq -r '.notice_at' <<<"$comments_json")"
+
+# 「環境が無い」通知は SHA を持たないのでレビュー扱いにはできないが、
+# 要求に対する応答ではある。これを消化しないと、元の要求が永久に未応答として
+# 残り、原因を直しても再要求できなくなる。通知より前の要求は応答済みとみなす。
+if [[ -n $notice_at && $notice_at != "null" ]] && [[ -z $last_at || $notice_at > $last_at ]]; then
+  pending="$(jq -rn --argjson c "$comments_json" --arg at "$notice_at" \
+    '$c.requests | map(select(. > $at)) | length' 2>/dev/null || echo "$pending")"
+fi
+
+echo "pr=$PR head=${head_sha:0:8} rounds=$rounds max=$MAX_ROUNDS reviewed_head=$reviewed_head pending=$pending"
+
+# --- 判定 ---------------------------------------------------------------------
+# 現 head が既にレビュー済みなら、再要求は純粋な浪費でしかない。
+# 何も変わっていないものを二度レビューさせない。これが浪費を止める本丸。
+if [[ $reviewed_head == "yes" ]]; then
+  echo "[NO] 現 head は既にレビュー済み。push してからでないと要求しない"
+  exit 1
+fi
+
+# 直近のレビュー以降に投げた要求が未応答なら、重ねて投げない。
+# レビューが遅いのか、そもそも応答できない状態なのかは区別できないが、
+# どちらでも「待つ」が正しい。3 周止まれば空転として検出される。
+if ((pending > 0)); then
+  echo "[NO] 要求済みで未応答 ($pending 件)。返るまで待つ。重ねて要求しない"
+  # 応答不能の通知が来ているなら、待っても返らない。原因を添える。
+  # ただし通知の有無だけで塞がない。環境を直しても古いコメントは PR に残るため、
+  # それを判定に使うと復旧後も永久に要求できなくなる。
+  if ((notice > 0)); then
+    echo "     直近に「環境が無い」旨の通知が出ている。投稿本文に codex への"
+    echo "     メンションを literal で含めていないか確認する (AGENTS.md 参照)"
+  fi
+  exit 1
+fi
+
+# 初回の自動レビューを待つ。猶予を過ぎても来ないなら、こちらから要求してよい。
+if ((rounds == 0)); then
+  if ! created_at="$(gh pr view "$PR" --json createdAt --jq '.createdAt' 2>/dev/null)" \
+    || [[ -z $created_at ]]; then
+    echo "[FAIL] PR #$PR の作成時刻を取得できません" >&2
+    exit 2
+  fi
+  created_epoch="$(date -d "$created_at" +%s 2>/dev/null || echo "")"
+  now_epoch="$(date +%s)"
+  if [[ -n $created_epoch ]] && ((now_epoch - created_epoch < INITIAL_GRACE_MIN * 60)); then
+    echo "[NO] PR を開いた直後。自動で入る初回レビューを待つ (${INITIAL_GRACE_MIN} 分)"
+    exit 1
+  fi
+fi
+
+if ((rounds >= MAX_ROUNDS)); then
+  echo "[NO] レビュー回数が上限 ($MAX_ROUNDS) に達している。これ以上は要求しない"
+  echo "     未解決が残る場合は打ち切り基準で判断するか、人へエスカレーションする"
+  exit 1
+fi
+
+echo "[OK] レビューを要求してよい (${rounds}/${MAX_ROUNDS} 回目)"
+exit 0
