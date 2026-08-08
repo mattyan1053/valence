@@ -146,6 +146,42 @@ describe("bin/loop-review-head", () => {
     expect(rows).toEqual([`2099-01-01T00:00:00Z\t${"5".repeat(40)}`]);
   });
 
+  it("--unknown は「SHA の分からないレビュー実行」を指定時刻で記録する", () => {
+    expect(run(["--unknown", "30", "2026-08-08T12:00:00Z"]).status).toBe(0);
+
+    expect(listed("30")).toEqual([["2026-08-08T12:00:00Z", "-"]]);
+  });
+
+  it("--unknown の時刻が ISO8601(UTC) でなければ記録しない", () => {
+    expect(run(["--unknown", "31", "2026-08-08 12:00:00"]).status).toBe(2);
+    expect(run(["--unknown", "31", "yesterday"]).status).toBe(2);
+    expect(listed("31")).toEqual([]);
+  });
+
+  it("SHA の分からない実行に応答が対応したら、結び付けずに消費する", () => {
+    // PR 作成時の自動レビューは master の要求ではないので SHA の記録が無い。
+    // その 👍 を「未消費の最も古い記録」へ寄せると、**見てもいない新しい head が
+    // レビュー済みになる**。記録を 1 件消費させて、結び付けはしない
+    const b = "b".repeat(40);
+    run(["--unknown", "32", "2026-08-08T12:00:00Z"]);
+    run(["32", b]);
+
+    const rows = pair("32", ["2099-01-01T00:00:00Z\t"]);
+
+    expect(rows).toEqual([]);
+  });
+
+  it("SHA の分からない実行のあとの応答は、次の記録に結び付く", () => {
+    // 消費しすぎて、正常な 👍 まで数えなくなっていないこと
+    const c = "c".repeat(40);
+    run(["--unknown", "33", "2026-08-08T12:00:00Z"]);
+    run(["33", c]);
+
+    const rows = pair("33", ["2099-01-01T00:00:00Z\t", "2099-01-01T00:00:01Z\t"]);
+
+    expect(rows).toEqual([`2099-01-01T00:00:01Z\t${c}`]);
+  });
+
   it("記録より多い応答が来ても、余った応答は結び付けない", () => {
     run(["24", "4".repeat(40)]);
 
