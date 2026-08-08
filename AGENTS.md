@@ -7,11 +7,12 @@
 
 ## 0. 応答言語
 
-**すべての応答・PR レビューコメント・コミットメッセージ本文・Issue コメントは日本語で書くこと。**
+**応答・PR レビューコメント・PR 本文・Issue コメントは日本語で書くこと。**
 
+- 英語で書かれた指示を受け取った場合でも、出力は日本語に揃える。
 - コード中の識別子・型名・API 名は英語。
 - コードコメントは日本語で構わない（「なぜ」を書く。「何を」はコードに語らせる）。
-- 英語で書かれた指示を受け取った場合でも、出力は日本語に揃える。
+- **例外: コミットメッセージの件名だけは英語**（§8 参照。本文は日本語）。
 
 ---
 
@@ -62,15 +63,19 @@ Valence は GitHub を**置き換えず拡張する** GitHub App として、レ
 
 **ホスト環境には何もインストールしない。すべてコンテナ内で実行する。**
 
+タスクランナーは `./task`（素の bash スクリプト）。`make` すらホストに要求しないため、
+ホストに必要なのは **bash / docker / git だけ**。
+
 ```bash
-make up          # 開発コンテナを起動
-make dev         # Next.js 開発サーバー (http://localhost:3000)
-make sh          # 開発コンテナのシェルに入る
-make check       # lint + typecheck + depcruise + test を一括実行（コミット前に必ず）
-make down        # 停止
+./task help      # コマンド一覧
+./task up        # 開発コンテナを起動
+./task dev       # Next.js 開発サーバー (http://localhost:3000)
+./task sh        # 開発コンテナのシェルに入る
+./task check     # lint + typecheck + depcruise + test を一括実行（コミット前に必ず）
+./task down      # 停止
 ```
 
-`make` を経由せず直接叩く場合も、必ずコンテナ内で実行する:
+`./task` を経由せず直接叩く場合も、必ずコンテナ内で実行する:
 
 ```bash
 docker compose exec app pnpm <script>
@@ -92,8 +97,8 @@ DDD / クリーンアーキテクチャの**依存関係逆転**の考え方を�
 形式主義には陥らず、「ビジネスルールがフレームワークに依存しない」ことだけを厳守する。
 
 ```
-app/                    Next.js App Router。ルーティングと配線のみ。ロジックを書かない
 src/
+  app/                  Next.js App Router。ルーティングと配線のみ。ロジックを書かない
   domain/               ビジネスルール。外部依存ゼロ（import できるのは Node 標準と自分自身だけ）
   application/          ユースケース。ports/ に interface を定義し、実装は知らない
   infrastructure/       ports の実装（GitHub GraphQL アダプタ、Supabase リポジトリ等）
@@ -101,19 +106,28 @@ src/
   composition/          合成ルート。ports に adapter を束ねて注入する唯一の場所
 ```
 
+内側（`domain`）ほど安定し、外側（`app`）ほど変わりやすい。依存の矢印は常に内向き。
+
 ### 依存方向（dependency-cruiser で機械的に強制）
 
-| レイヤ | import してよい先 |
-| --- | --- |
-| `domain` | **なし**（Node 標準ライブラリのみ） |
-| `application` | `domain` |
-| `infrastructure` | `application`, `domain` |
-| `ui` | `domain`（型のみ）, 他の `ui` |
-| `composition` | すべて |
-| `app` | `composition`, `ui`, `application`（型のみ） |
+| レイヤ | import してよい先 | 禁止 |
+| --- | --- | --- |
+| `domain` | Node 標準ライブラリと `domain` 自身**のみ** | npm パッケージを含むすべて |
+| `application` | `domain` と Node 標準ライブラリ**のみ** | 他レイヤすべて、および npm パッケージ全般 |
+| `infrastructure` | `application`, `domain`, npm | `ui` `app` `composition` |
+| `ui` | `domain`, 他の `ui`, React | `application` `infrastructure` `composition` |
+| `composition` | すべて | — |
+| `app` | `composition`, `ui`, `application`, `domain` | `infrastructure`（直接 import） |
 
-違反は `make check` で落ちる。**ルールを緩めて通すのではなく、設計を直すこと。**
-どうしても例外が必要なら、`.dependency-cruiser.jsonc` に理由をコメントで書いてから追加する。
+差し替えたい実装を握るのは `composition` だけ。`app` や `ui` が `infrastructure` を直接掴むと、
+テストで差し替えられなくなる。
+
+`application` で Octokit や Supabase SDK を import したくなったら、それは port の設計漏れ。
+SDK を隠す interface を `application/ports/` に切り、実装を `infrastructure` に置くこと。
+
+違反は `./task check`（`.dependency-cruiser.mjs`）で落ちる。テストファイル（`*.test.ts`）は対象外。
+**ルールを緩めて通すのではなく、設計を直すこと。**
+どうしても例外が必要なら、なぜ必要かを `.dependency-cruiser.mjs` にコメントで書いてから追加する。
 
 ### 具体的な指針
 
@@ -169,10 +183,40 @@ src/
 ## 8. Git / PR
 
 - ブランチは `main` から切る。命名は `feat/...` `fix/...` `chore/...` `refactor/...`。
-- コミットメッセージは [Conventional Commits](https://www.conventionalcommits.org/)。件名は 72 文字以内、本文は日本語。
 - **`main` へ直接 push しない。** 必ず PR 経由。
 - PR は 1 つの関心事にひとつ。レビューしやすい大きさに割る（このプロダクト自体がそういう思想のツールである）。
-- PR 本文には「何を変えたか」ではなく「**なぜ**変えたか」と「どう検証したか」を書く。
+- PR タイトル・本文は日本語。本文には「何を変えたか」ではなく「**なぜ**変えたか」と「どう検証したか」を書く。
+
+### コミットメッセージ
+
+**件名は gitmoji + Conventional Commits の英語形式、本文は日本語。**
+件名は `git log --oneline` や GitHub の一覧に並ぶので英語で揃え、詳細は読み手（＝日本語話者）に合わせる。
+
+```
+<gitmoji> <type>: <subject>
+
+<本文（日本語）: なぜこの変更が必要だったか。何をしたかは diff が語る>
+```
+
+- 件名は英語・命令形・小文字始まり・72 文字以内・末尾にピリオドを打たない。
+- 絵文字は Unicode 文字そのものを使う（`:sparkles:` ではなく `✨`）。
+- 本文は日本語。書くことがなければ省略してよい（件名だけのコミットは許容）。
+
+| gitmoji | type | 用途 |
+| --- | --- | --- |
+| 🎉 | `init` | リポジトリの最初のコミット |
+| ✨ | `feat` | 新機能 |
+| 🐛 | `fix` | バグ修正 |
+| ♻️ | `refactor` | 振る舞いを変えないリファクタ |
+| ✅ | `test` | テストの追加・修正 |
+| 📝 | `docs` | ドキュメント |
+| 🔧 | `chore` | 設定ファイル |
+| 👷 | `ci` | CI |
+| ⬆️ | `deps` | 依存の更新 |
+| 🔥 | `remove` | コード・ファイルの削除 |
+| 🔒️ | `security` | セキュリティ修正 |
+| ⚡️ | `perf` | パフォーマンス改善 |
+| 💄 | `ui` | 見た目のみの変更 |
 
 ### Codex によるレビュー
 
@@ -181,11 +225,19 @@ src/
 Codex へ: **レビューコメントは日本語で書くこと。** 指摘は以下の優先順で:
 
 1. 正しさのバグ（境界条件、エラーハンドリング漏れ、競合状態）
-2. セキュリティ（後述のチェックリスト）
+2. セキュリティ（§9 のチェックリスト）
 3. アーキテクチャ境界の違反、テストの欠如
 4. 可読性・命名
 
 スタイルの好みは Biome が見ているので指摘しなくてよい。
+
+**レビューの打ち切り基準。** 再レビューは回すたびに新しい指摘が出て終わらなくなる。以下を満たしたらマージしてよい:
+
+- 優先度 1（正しさ）と 2（セキュリティ）の指摘が残っていない
+- 3（境界違反・テスト欠如）に対応済み、または「対応しない理由」を PR にコメント済み
+- 再レビューは原則 **2 周まで**。3 周目に出てきた新規の nit は Issue に落とすかそのまま見送る
+
+「指摘がゼロになるまで」を目標にしない。マージを止めてよいのは正しさとセキュリティだけ。
 
 ---
 
@@ -208,11 +260,11 @@ Codex へ: **レビューコメントは日本語で書くこと。** 指摘は�
 作業を終える前に必ず:
 
 ```bash
-make check
+./task check
 ```
 
 - [ ] テストを先に書いたか（新規の振る舞いの場合）
-- [ ] `make check` が通るか（lint / typecheck / 依存方向 / テスト）
+- [ ] `./task check` が通るか（lint / typecheck / 依存方向 / テスト）
 - [ ] シークレット・絶対パス・個人情報をコミットに含めていないか
 - [ ] 不要になったコード・ドキュメントを消したか
 - [ ] 実装に合わせて `AGENTS.md` / `.env.example` を更新したか
