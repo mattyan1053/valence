@@ -1,0 +1,51 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+
+# production
+build/
+dist/
+
+# testing
+coverage/
+*.lcov
+
+# environment — 実際の値は絶対にコミットしない (public repo)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# supabase (ローカルスタックの生成物)
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
+# tooling caches
+.turbo/
+*.tsbuildinfo
+.vitest/
+playwright-report/
+test-results/
+
+# editor / os
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ai agent scratch (ローカル作業用、共有しない)
+.claude/settings.local.json
+.codex/
