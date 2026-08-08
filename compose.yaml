@@ -1,0 +1,57 @@
+name: valence
+
+services:
+  # 開発用コンテナ。常駐させておき、pnpm 系のコマンドは exec で流し込む。
+  # Supabase のローカルスタックは supabase CLI が別途コンテナ群を立てるので、
+  # ここには DB を定義しない (`make db-up` を参照)。
+  app:
+    build:
+      context: .
+      target: dev
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+        DOCKER_GID: ${DOCKER_GID:-999}
+    init: true
+    # ホストと同一パスにマウントする。Supabase CLI はコンテナ内から
+    # ホストの Docker daemon を操作するため、パスが一致していないと
+    # マイグレーションや seed の bind mount が解決できなくなる。
+    working_dir: ${PWD}
+    volumes:
+      - ${PWD}:${PWD}
+      # pnpm のグローバルストア。再ビルドのたびに再ダウンロードしないため
+      - pnpm-store:/home/node/.local/share/pnpm/store
+      # Supabase CLI からホストの Docker daemon を操作する (Docker-out-of-Docker)。
+      # コンテナにホスト root 相当の権限を与えることになるので、開発用途に限る
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NEXT_TELEMETRY_DISABLED: "1"
+    # 公開インターフェースには晒さない。手元 PC からは SSH ポートフォワードで繋ぐ
+    ports:
+      - "127.0.0.1:3000:3000"
+    extra_hosts:
+      # Supabase ローカルスタックはホスト側のポートに出るため、そこ経由で参照する
+      - "host.docker.internal:host-gateway"
+    command: sleep infinity
+
+  # GitHub Webhook をローカルの Next.js へ転送する。
+  # SMEE_URL を .env に設定したうえで `make smee` で起動する。
+  smee:
+    image: node:22-bookworm-slim
+    init: true
+    profiles: ["webhook"]
+    env_file:
+      - path: .env
+        required: false
+    command: >
+      npx --yes smee-client
+      --url ${SMEE_URL:-}
+      --target http://app:3000/api/github/webhook
+    depends_on:
+      - app
+
+volumes:
+  pnpm-store:

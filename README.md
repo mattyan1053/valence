@@ -26,9 +26,9 @@ Next.js (App Router) / React / TypeScript / Tailwind CSS / React Flow / Supabase
 
 ```bash
 cp .env.example .env    # 値を埋める
-make up                 # 開発コンテナを起動
-make dev                # http://localhost:3000
-make check              # lint + typecheck + 依存方向検査 + テスト
+./task up                 # 開発コンテナを起動
+./task dev                # http://localhost:3000
+./task check              # lint + typecheck + 依存方向検査 + テスト
 ```
 
 詳細な開発ルール・アーキテクチャ方針は [AGENTS.md](./AGENTS.md) を参照。

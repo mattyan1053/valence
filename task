@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+#
+# 開発タスクランナー。
+#
+# ホストに何もインストールしない方針のため、make ではなく素の bash で書いてある
+# (bash / docker / git 以外はホストに要求しない)。
+# 実処理はすべて開発コンテナ内で走る。
+#
+#   ./task help
+#
+set -euo pipefail
+
+cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+
+# ホストの実値をビルド引数として渡す。これで環境固有の値を .env に書かずに済む。
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999)"
+export HOST_UID HOST_GID DOCKER_GID
+
+compose() { docker compose "$@"; }
+
+# 非対話用。CI や AI エージェントからは TTY がないため -T を付ける。
+exec_app() { compose exec -T app "$@"; }
+
+# 人間が対話的に使う用 (シェル、dev サーバー、watch など)。
+exec_app_it() {
+  local tty_flag=()
+  [[ -t 0 ]] || tty_flag=(-T)
+  compose exec "${tty_flag[@]}" app "$@"
+}
+
+ensure_up() {
+  if [[ -z "$(compose ps -q app 2>/dev/null)" ]] || \
+     [[ -z "$(docker ps -q --filter "id=$(compose ps -q app)" 2>/dev/null)" ]]; then
+    compose up -d app
+  fi
+}
+
+# 開発コンテナを起動する (冪等)
+cmd_up() { compose up -d app; }
+
+# 開発コンテナを停止する
+cmd_down() { compose down; }
+
+# 開発イメージを再ビルドする
+cmd_build() { compose build app; }
+
+# コンテナとボリュームを破棄する
+cmd_clean() { compose down --volumes --remove-orphans; }
+
+# 開発コンテナのシェルに入る
+cmd_sh() { ensure_up; exec_app_it bash; }
+
+# 依存をインストールする (lockfile 準拠)
+cmd_install() { ensure_up; exec_app pnpm install --frozen-lockfile; }
+
+# Next.js 開発サーバーを起動する (http://localhost:3000)
+cmd_dev() { ensure_up; exec_app_it pnpm dev; }
+
+# 任意の pnpm コマンドを流す 例: ./task pnpm add zod
+cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
+
+# lint + typecheck + 依存方向 + テスト をまとめて実行する
+cmd_check() { ensure_up; exec_app pnpm check; }
+
+# Biome で lint する
+cmd_lint() { ensure_up; exec_app pnpm lint; }
+
+# 自動修正できるものを直す (Biome)
+cmd_fix() { ensure_up; exec_app pnpm fix; }
+
+# 型検査する
+cmd_typecheck() { ensure_up; exec_app pnpm typecheck; }
+
+# レイヤ間の依存方向を検査する
+cmd_depcruise() { ensure_up; exec_app pnpm depcruise; }
+
+# テストを実行する
+cmd_test() { ensure_up; exec_app pnpm test "$@"; }
+
+# テストを watch モードで実行する
+cmd_test_watch() { ensure_up; exec_app_it pnpm test:watch; }
+
+# Supabase ローカルスタックを起動する
+cmd_db_up() { ensure_up; exec_app pnpm supabase start; }
+
+# Supabase ローカルスタックを停止する
+cmd_db_down() { ensure_up; exec_app pnpm supabase stop; }
+
+# ローカル DB をマイグレーションから作り直す
+cmd_db_reset() { ensure_up; exec_app pnpm supabase db reset; }
+
+# GitHub Webhook の転送を開始する (.env の SMEE_URL が必要)
+cmd_smee() {
+  ensure_up
+  compose --profile webhook up -d smee
+  compose logs -f smee
+}
+
+# 使えるコマンドの一覧を表示する
+cmd_help() {
+  echo "使い方: ./task <コマンド> [引数...]"
+  echo
+  # 各 cmd_* 定義の直前のコメント行を説明として拾う
+  awk '
+    /^# / { desc = substr($0, 3); next }
+    /^cmd_[a-z_]+\(\)/ {
+      name = $1
+      sub(/\(\)$/, "", name)
+      sub(/^cmd_/, "", name)
+      gsub(/_/, ":", name)
+      if (desc != "") printf "  \033[36m%-12s\033[0m %s\n", name, desc
+      desc = ""
+      next
+    }
+    { desc = "" }
+  ' "$0"
+}
+
+main() {
+  local raw="${1:-help}"
+  shift || true
+  # `db:up` のようなコロン区切りを関数名へ変換する
+  local fn="cmd_${raw//:/_}"
+  fn="${fn//-/_}"
+
+  if ! declare -F "$fn" >/dev/null; then
+    echo "不明なコマンド: ${raw}" >&2
+    echo >&2
+    cmd_help >&2
+    exit 1
+  fi
+
+  "$fn" "$@"
+}
+
+main "$@"
