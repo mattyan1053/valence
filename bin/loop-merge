@@ -50,6 +50,17 @@ readonly HEAD_SHA="$2"
   exit 2
 }
 
+# 削除の反映を待つ秒数。**使うのはマージの後だが、検証はマージの前に行う。**
+# マージは取り消せないので、あとで落ちると「成功したマージが失敗として記録される」。
+# 秒数は非負整数のみ。sleep は小数も受けるが、待つかどうかの判定を算術評価で行う都合上、
+# 0.5 のような値は構文エラーになり **sleep が呼ばれずに誤警告が戻る**。
+readonly BRANCH_CHECK_WAIT_SEC="${LOOP_BRANCH_CHECK_WAIT_SEC:-2}"
+readonly BRANCH_CHECK_ATTEMPTS=3
+if ! [[ $BRANCH_CHECK_WAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_BRANCH_CHECK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+
 # --match-head-commit を必ず付ける。判定後に push された commit を取り込まないため。
 merge_out="$(gh pr merge "$PR" --squash --delete-branch --match-head-commit "$HEAD_SHA" 2>&1)"
 merge_status=$?
@@ -108,9 +119,6 @@ fi
 # **削除の反映を待ってから確かめる。** マージ直後に読むと、削除が GitHub 側へ
 # 反映される前なので ref がまだ見える。実際に 2 回のマージで 2 回とも誤検知した。
 # **毎回出る警告は読まれなくなる**ので、本当に残ったときに気づけなくなる。
-readonly BRANCH_CHECK_WAIT_SEC="${LOOP_BRANCH_CHECK_WAIT_SEC:-2}"
-readonly BRANCH_CHECK_ATTEMPTS=3
-
 if [[ -n $head_ref ]]; then
   remains=0
   for ((attempt = 1; attempt <= BRANCH_CHECK_ATTEMPTS; attempt++)); do
@@ -120,7 +128,8 @@ if [[ -n $head_ref ]]; then
     fi
     remains=1
     # 待ち時間 0 なら sleep を呼ばない (外部コマンドに依存させない)
-    ((attempt < BRANCH_CHECK_ATTEMPTS && BRANCH_CHECK_WAIT_SEC > 0)) \
+    # 10# を付ける。08 のような値を 8 進として読むと算術エラーになる。
+    ((attempt < BRANCH_CHECK_ATTEMPTS && 10#$BRANCH_CHECK_WAIT_SEC > 0)) \
       && sleep "$BRANCH_CHECK_WAIT_SEC"
   done
   ((remains == 1)) && echo "[WARN] remote ブランチが残っています: $head_ref"

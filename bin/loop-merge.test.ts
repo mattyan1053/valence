@@ -48,6 +48,7 @@ function runWithFakeGh(
   mergeExit: number,
   /** remote ブランチの見え方。削除の反映には数秒かかることがある。 */
   branchRef: "gone" | "always-there" | "gone-after-retry" = "gone",
+  extraEnv: Record<string, string> = {},
 ): FakeRun {
   const dir = mkdtempSync(join(tmpdir(), "loop-merge-fake-"));
   symlinkSync("/usr/bin/bash", join(dir, "bash"));
@@ -91,7 +92,7 @@ function runWithFakeGh(
   const result = spawnSync(SCRIPT, ["12", GATED_SHA], {
     encoding: "utf8",
     // 反映待ちで実時間を使わない
-    env: { ...process.env, PATH: dir, LOOP_BRANCH_CHECK_WAIT_SEC: "0" },
+    env: { ...process.env, PATH: dir, LOOP_BRANCH_CHECK_WAIT_SEC: "0", ...extraEnv },
   });
   const calls = existsSync(callLog)
     ? readFileSync(callLog, "utf8")
@@ -177,6 +178,43 @@ describe("bin/loop-merge の成否判定", () => {
     const result = runWithFakeGh(["MERGED", "", "", "feat/x", GATED_SHA], 0);
 
     expect(result.status).toBe(1);
+  });
+});
+
+describe("bin/loop-merge の設定検査", () => {
+  /** 設定だけを見る（gh を呼ばせない）。 */
+  function runWithConfig(wait: string): Run {
+    const result = spawnSync(SCRIPT, ["12", GATED_SHA], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: binDir, LOOP_BRANCH_CHECK_WAIT_SEC: wait },
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it("待ち時間が非負整数でなければ落ちる", () => {
+    // 算術評価でエラーになる値。sleep が呼ばれず、誤警告が設定次第で戻る
+    expect(runWithConfig("0.5").status).toBe(2);
+    expect(runWithConfig("foo").status).toBe(2);
+    expect(runWithConfig("-1").status).toBe(2);
+    expect(runWithConfig("0.5").stderr).toContain("LOOP_BRANCH_CHECK_WAIT_SEC");
+  });
+
+  it("先頭に 0 が付いていても 10 進として受け付ける", () => {
+    // 08 を 8 進として読むと算術エラーになる
+    expect(runWithConfig("08").status).not.toBe(2);
+  });
+
+  it("設定が誤っていたら、マージを試みる前に落ちる", () => {
+    // マージは取り消せない。**その後で落ちると成功したマージが失敗として記録される**
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+      "gone",
+      { LOOP_BRANCH_CHECK_WAIT_SEC: "0.5" },
+    );
+
+    expect(result.status).toBe(2);
+    expect(result.calls).toEqual([]);
   });
 });
 
