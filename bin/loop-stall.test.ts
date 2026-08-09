@@ -253,6 +253,76 @@ describe("上限に達したときに止める対象", () => {
   });
 });
 
+describe("作業が尽きた周回の数え方", () => {
+  /**
+   * 本物の `task` を持つ使い捨てリポジトリに worktree を足し、上限まで走らせる。
+   * **`loop/STOP` が両方の worktree へ配られるところまで**を見る。偽の `task` だと
+   * 「呼ばれた」しか分からず、**配る側が壊れても気づけない**。
+   */
+  function runNoWorkToLimit(steps: string[]): { status: number; stops: boolean[] } {
+    const repo = mkdtempSync(join(tmpdir(), "loop-stall-nowork-"));
+    spawnSync("git", ["init", "--quiet", repo]);
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+    mkdirSync(join(repo, "bin"));
+    const script = join(repo, "bin", "loop-stall");
+    copyFileSync(SCRIPT, script);
+    chmodSync(script, 0o755);
+    spawnSync("git", ["-C", repo, "add", "-A"]);
+    spawnSync("git", [
+      "-C",
+      repo,
+      "-c",
+      "user.email=loop@example.invalid",
+      "-c",
+      "user.name=loop",
+      "commit",
+      "--quiet",
+      "-m",
+      "init",
+    ]);
+    const worktree = `${repo}-wt`;
+    spawnSync("git", ["-C", repo, "worktree", "add", "--detach", "--quiet", worktree]);
+
+    let result = spawnSync(script, [steps[0] ?? "no-work"], { cwd: repo, encoding: "utf8" });
+    for (const step of steps.slice(1)) {
+      result = spawnSync(script, [step], { cwd: repo, encoding: "utf8" });
+    }
+    const stops = [
+      existsSync(join(repo, "loop", "STOP")),
+      existsSync(join(worktree, "loop", "STOP")),
+    ];
+    spawnSync("git", ["-C", repo, "worktree", "remove", "--force", worktree]);
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+    return { status: result.status ?? -1, stops };
+  }
+
+  it("3 周続くと loop/STOP が両方の worktree へ配られる", () => {
+    // 作業が尽きた状態はループの中では解けない。**記録されないと永久に空回りする**
+    const result = runNoWorkToLimit(["no-work", "no-work", "no-work"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stops).toEqual([true, true]);
+  });
+
+  it("2 周では止まらない", () => {
+    // すぐ Issue を足すつもりで席を外しているだけなら、その間に止めない
+    const result = runNoWorkToLimit(["no-work", "no-work"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stops).toEqual([false, false]);
+  });
+
+  it("前へ進んだ周回を挟むと数え直す", () => {
+    // 起票や PR で状態が動いたら --reset が呼ばれる。**間隔を空けた 3 回で止めない**
+    const result = runNoWorkToLimit(["no-work", "no-work", "--reset", "no-work", "no-work"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stops).toEqual([false, false]);
+  });
+});
+
 describe("ドキュメントに書かれた停止識別子", () => {
   /**
    * 追跡下の Markdown から `bin/loop-stall <引数>` の呼び出しを拾う。
@@ -288,5 +358,16 @@ describe("ドキュメントに書かれた停止識別子", () => {
     const args = documentedArgs().map(({ arg }) => arg);
 
     expect(args.filter((arg) => !arg.startsWith("--")).length).toBeGreaterThan(0);
+  });
+
+  it("作業が尽きた周回を数えるのは master の手順だけ", () => {
+    // **両側で数えると 2 倍の速さで 3 周に達する。** worker は master が起票する前の
+    // 周回でも「ready なし」で終わるので、そこで数えると実際には 1.5 周ぶんで止まる
+    const users = documentedArgs()
+      .filter(({ arg }) => arg === "no-work")
+      .map(({ file }) => file);
+
+    expect(users).toContain(".claude/commands/loop-master.md");
+    expect(users).not.toContain(".claude/commands/loop-worker.md");
   });
 });
