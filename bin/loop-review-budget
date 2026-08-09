@@ -74,24 +74,38 @@ fi
 
 # --- Codex がレビュー済みの commit ---------------------------------------------
 # 指摘ありは review オブジェクト、指摘なしは会話コメントで返る。両方を数える。
+#
+# **2 つの軸を分けて取る。** rebase は「レビューが現 head を覆っているか」だけを
+# 無効にし、**過去の要求が応答された事実は消さない**。同じ列から両方を導くと、
+# 保留した PR を rebase した瞬間に応答済みの要求まで未応答へ戻り、
+# **再レビューを要求できないまま詰む**。
 if ! reviewed="$("$(dirname "$0")/loop-review-commits" "$PR")"; then
   echo "[FAIL] PR #$PR のレビュー済み commit を取得できません" >&2
   exit 2
 fi
+if ! answered="$("$(dirname "$0")/loop-review-commits" --all "$PR")"; then
+  echo "[FAIL] PR #$PR の応答履歴を取得できません" >&2
+  exit 2
+fi
+
+# 回数と head 一致は「有効なレビュー」から数える (rebase で消えたものは数えない)。
 rounds=0
 reviewed_head="no"
-last_at=""
-# ヘルパーは <時刻><TAB><SHA> を時刻順で返す。最終行の時刻が最後の応答時刻で、
-# これを落とすと「応答済みの古い要求」まで未応答として数えてしまい、
-# 2 周目へ永久に進めなくなる。
-while IFS=$'\t' read -r ts sha; do
+while IFS=$'\t' read -r _ts sha; do
   [[ -n $sha ]] || continue
   ((rounds++))
-  last_at="$ts"
   # 👍 だけの応答も bin/loop-review-head の記録で SHA が確定しているので、
   # gate と同じ基準で扱う。出どころによる場合分けは要らない。
   [[ $head_sha == "$sha"* ]] && reviewed_head="yes"
 done <<<"$reviewed"
+
+# 最後に応答があった時刻は **rebase で消えたものも含めて** 取る。
+# これを落とすと「応答済みの古い要求」まで未応答として数えてしまう。
+last_at=""
+while IFS=$'\t' read -r ts sha; do
+  [[ -n $sha ]] || continue
+  last_at="$ts"
+done <<<"$answered"
 
 # --- 会話コメント -------------------------------------------------------------
 # 「受け取ったレビュー」だけを数えると、レビューが返ってこない場合に上限へ到達せず、

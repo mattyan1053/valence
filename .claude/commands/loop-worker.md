@@ -127,7 +127,7 @@ gh issue list --label in-progress --limit 100 --json number,title
 ```bash
 git branch --format='%(refname:short)' | grep -v '^main$'
 git log --oneline main..<ブランチ>                          # コミットが載っているか
-gh pr list --state all --limit 200 --head <ブランチ> --json number,state
+gh pr list --state all --limit 200 --head <ブランチ> --json number,state,labels
 ```
 
 - **PR が既にある**（state を問わず）→ 公開は済んでいる。作り直さない。ただし
@@ -140,8 +140,11 @@ gh pr list --state all --limit 200 --head <ブランチ> --json number,state
   - **CLOSED**（マージされていない）→ なぜ閉じられたかは worker には判断できない。
     `in-progress` を外して `blocked` を付け、状況を Issue にコメントしたうえで
     `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
-  - **OPEN** → ステップ 2 の「自分の open PR」に出ていないのにここで見つかる状態
-    （他人が作った PR など）。推測で触らず、同じく
+  - **OPEN かつ `parked`** → master が保留にした PR である。**何もしないでステップ 4 へ進む。**
+    先行 Issue を実装させるための保留なので、ここで止まると **PR-B を作れず保留の意味が消える**。
+    label は `in-progress` のままでよい（再開するのは master の指示を受けてから）
+  - **OPEN**（`parked` でない）→ ステップ 2 の「自分の open PR」に出ていないのに
+    ここで見つかる状態（他人が作った PR など）。推測で触らず、
     `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
     （状態が変わらなければ同じ識別子が積み上がり、3 周で止まる）
 - **PR が無く、コミットが載ったブランチがある** → 公開に失敗した周回の続きである。
