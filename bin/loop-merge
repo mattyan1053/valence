@@ -119,19 +119,46 @@ fi
 # **削除の反映を待ってから確かめる。** マージ直後に読むと、削除が GitHub 側へ
 # 反映される前なので ref がまだ見える。実際に 2 回のマージで 2 回とも誤検知した。
 # **毎回出る警告は読まれなくなる**ので、本当に残ったときに気づけなくなる。
+# ref の有無を返す。**非ゼロを「消えた」と読まない。** gh は理由を問わず 1 を返すので、
+# 通信エラーや rate limit まで「消えた」に倒れ、**残っているのに警告が出なくなる**。
+# 見分けは標準エラーの「(HTTP 404)」で行う (gh は `gh: Not Found (HTTP 404)` を出す)。
+#
+#   0 = ある / 1 = 無い (404) / 2 = 判定できない
+branch_ref_state() {
+  local out status
+  out="$(gh api "repos/{owner}/{repo}/git/ref/heads/$1" 2>&1)"
+  status=$?
+  ((status == 0)) && return 0
+  [[ $out == *"HTTP 404"* ]] && return 1
+  printf '%s\n' "$out" >&2
+  return 2
+}
+
 if [[ -n $head_ref ]]; then
-  remains=0
+  # 最後に分かった状態で判断する。「分からない」を「大丈夫」に丸めない。
+  last_state=2
+  saw_branch=0
   for ((attempt = 1; attempt <= BRANCH_CHECK_ATTEMPTS; attempt++)); do
-    if ! gh api "repos/{owner}/{repo}/git/ref/heads/$head_ref" >/dev/null 2>&1; then
-      remains=0
-      break
-    fi
-    remains=1
+    branch_ref_state "$head_ref"
+    last_state=$?
+    ((last_state == 0)) && saw_branch=1
+    ((last_state == 1)) && break
     # 待ち時間 0 なら sleep を呼ばない (外部コマンドに依存させない)
     # 10# を付ける。08 のような値を 8 進として読むと算術エラーになる。
     ((attempt < BRANCH_CHECK_ATTEMPTS && 10#$BRANCH_CHECK_WAIT_SEC > 0)) \
       && sleep "$BRANCH_CHECK_WAIT_SEC"
   done
-  ((remains == 1)) && echo "[WARN] remote ブランチが残っています: $head_ref"
+
+  case $last_state in
+    0) echo "[WARN] remote ブランチが残っています: $head_ref" ;;
+    2)
+      # 一度でも「ある」と分かっていれば、残っている側に倒す。
+      if ((saw_branch == 1)); then
+        echo "[WARN] remote ブランチが残っています: $head_ref (削除を確認できませんでした)"
+      else
+        echo "[WARN] remote ブランチの削除を確認できませんでした: $head_ref"
+      fi
+      ;;
+  esac
 fi
 exit 0

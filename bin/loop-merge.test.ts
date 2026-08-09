@@ -47,7 +47,12 @@ function runWithFakeGh(
   prFields: string[],
   mergeExit: number,
   /** remote ブランチの見え方。削除の反映には数秒かかることがある。 */
-  branchRef: "gone" | "always-there" | "gone-after-retry" = "gone",
+  branchRef:
+    | "gone"
+    | "always-there"
+    | "gone-after-retry"
+    | "cannot-tell"
+    | "exists-then-cannot-tell" = "gone",
   extraEnv: Record<string, string> = {},
 ): FakeRun {
   const dir = mkdtempSync(join(tmpdir(), "loop-merge-fake-"));
@@ -71,11 +76,24 @@ function runWithFakeGh(
       `  [[ -f '${dir}/apicalls' ]] && read -r n < '${dir}/apicalls'`,
       "  n=$((n + 1))",
       `  echo "$n" > '${dir}/apicalls'`,
+      // gh は失敗の理由を問わず 1 を返す。404（消えた）とそれ以外を本文で分ける
       ...(branchRef === "always-there"
         ? ["  exit 0"]
         : branchRef === "gone-after-retry"
-          ? ["  if ((n == 1)); then exit 0; fi", "  exit 1"]
-          : ["  exit 1"]),
+          ? [
+              "  if ((n == 1)); then exit 0; fi",
+              '  echo "gh: Not Found (HTTP 404)" >&2',
+              "  exit 1",
+            ]
+          : branchRef === "cannot-tell"
+            ? ['  echo "error connecting to api.github.com" >&2', "  exit 1"]
+            : branchRef === "exists-then-cannot-tell"
+              ? [
+                  "  if ((n == 1)); then exit 0; fi",
+                  '  echo "error connecting to api.github.com" >&2',
+                  "  exit 1",
+                ]
+              : ['  echo "gh: Not Found (HTTP 404)" >&2', "  exit 1"]),
       "fi",
       'if [[ $1 == "pr" && $2 == "view" ]]; then',
       // --jq は gh 側で解決されるので、差し替えでは取り出し済みの値を 1 行 1 値で返す
@@ -158,6 +176,28 @@ describe("bin/loop-merge の成否判定", () => {
     );
 
     expect(result.status).toBe(0);
+    expect(result.stdout).toContain("remote ブランチが残っています: feat/x");
+  });
+
+  it("確認できなかっただけの失敗を、ブランチが消えたと扱わない", () => {
+    // gh は通信エラーや rate limit でも 1 を返す。**「分からない」を「大丈夫」に丸めない**
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+      "cannot-tell",
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("確認できませんでした");
+  });
+
+  it("存在を確認したあと判定できなくなったら、残っている側に倒す", () => {
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+      "exists-then-cannot-tell",
+    );
+
     expect(result.stdout).toContain("remote ブランチが残っています: feat/x");
   });
 
