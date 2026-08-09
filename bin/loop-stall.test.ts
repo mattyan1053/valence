@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -156,6 +157,38 @@ describe("上限に達したときに止める対象", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("止められません");
+  });
+
+  it("シンボリックリンク経由で cd しても同じリポジトリと判定する", () => {
+    // bash の cd / pwd は既定でリンクを保った論理パスを返す。到達経路が違うだけで
+    // 別リポジトリ扱いになると、**止まっていないのに exit 1（停止済み）を返す**
+    const scriptRepo = mkdtempSync(join(tmpdir(), "loop-stall-script-"));
+    spawnSync("git", ["init", "--quiet", scriptRepo]);
+    writeFileSync(join(scriptRepo, "task"), `#!/usr/bin/env bash\ntouch '${scriptRepo}/ran'\n`, {
+      mode: 0o755,
+    });
+    mkdirSync(join(scriptRepo, "bin"));
+    const script = join(scriptRepo, "bin", "loop-stall");
+    copyFileSync(SCRIPT, script);
+    chmodSync(script, 0o755);
+    const link = `${scriptRepo}-link`;
+    symlinkSync(scriptRepo, link);
+
+    // Node の cwd 指定では物理パスに解決されてしまうので、シェルの cd を通す
+    let result: ReturnType<typeof spawnSync>;
+    for (let i = 0; i < 3; i++) {
+      result = spawnSync("/usr/bin/bash", ["-c", `cd '${link}' && '${script}' dirty`], {
+        encoding: "utf8",
+      });
+    }
+    const ran = existsSync(join(scriptRepo, "ran"));
+    // biome-ignore lint/style/noNonNullAssertion: ループで必ず代入される
+    const stderr = result!.stderr as unknown as string;
+    rmSync(link, { force: true });
+    rmSync(scriptRepo, { recursive: true, force: true });
+
+    expect(stderr).not.toContain("止められません");
+    expect(ran).toBe(true);
   });
 
   it("cwd がスクリプトと同じリポジトリなら止める", () => {

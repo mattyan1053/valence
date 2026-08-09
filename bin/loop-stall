@@ -128,7 +128,9 @@ if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common
   exit 2
 fi
 # --git-common-dir は worktree からだと相対パスを返すことがある。
-common_dir="$(cd "$common_dir" 2>/dev/null && pwd)" || {
+# **物理パス (pwd -P) で解決する。** 既定の pwd はシンボリックリンクを保った論理パスを
+# 返すので、同じ .git でも到達経路が違うだけで文字列が一致しなくなる。
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
   exit 2
 }
@@ -150,13 +152,14 @@ readonly TASK="$toplevel/task"
 
 # スクリプトのあるリポジトリ。cwd 側と同一かを共通ディレクトリで突き合わせる
 # (worktree どうしでも共通ディレクトリは一致する)。
-script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || script_dir=""
+# 比較する両側とも物理パスに揃える。片方だけでは同じ問題が残る。
+script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
 script_common_dir=""
 if [[ -n $script_dir ]] && script_common_dir="$(
   git -C "$script_dir" rev-parse --git-common-dir 2>/dev/null
 )"; then
-  script_common_dir="$(cd "$script_dir/$script_common_dir" 2>/dev/null && pwd)" \
-    || script_common_dir="$(cd "$script_common_dir" 2>/dev/null && pwd)" \
+  script_common_dir="$(cd "$script_dir/$script_common_dir" 2>/dev/null && pwd -P)" \
+    || script_common_dir="$(cd "$script_common_dir" 2>/dev/null && pwd -P)" \
     || script_common_dir=""
 fi
 readonly script_common_dir
