@@ -162,10 +162,14 @@ gh issue edit <N> --remove-label in-progress     # label が無くても成功�
 ```
 
 続けて、取りこぼしをさらう。手で閉じたものや、前の周回で外し損ねたものが対象。
+**一覧して終わりにしない。出てきた番号から必ず外す。**
 
 ```bash
 # **--state closed を明示する。** 付けないと既定の open だけを見て必ず 0 件に見える
-gh issue list --state closed --label in-progress --limit 200 --json number --jq '.[].number'
+for n in $(gh issue list --state closed --label in-progress --limit 200 \
+  --json number --jq '.[].number'); do
+  gh issue edit "$n" --remove-label in-progress
+done
 ```
 
 **さらう側だけに頼らない。** 一覧の検索には反映の遅れがあり、**いま閉じたばかりの Issue は
@@ -173,8 +177,9 @@ gh issue list --state closed --label in-progress --limit 200 --json number --jq 
 1 手ずれた結果が返った）。マージ直後にこれだけを見ると、**残骸を作った当人が
 「0 件だから大丈夫」と読む**。番号で直接外すほうが本筋で、さらう側は保険である。
 
-遅れて出てきたぶんは次のマージで拾えるので、**セッションが落ちても最終的には収束する。**
-この周回はここで終わり。
+遅れて出てきたぶんは次のマージでさらって外すので、**セッションが落ちても最終的には
+収束する。** ただし**外すところまで回して初めて収束する**（一覧するだけだと、
+気づけるようになるだけで件数は減らない）。この周回はここで終わり。
 
 ### exit 1 — 何が足りないかで分ける
 
