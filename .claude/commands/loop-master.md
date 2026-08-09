@@ -317,7 +317,52 @@ gh issue edit <割り込みの N> --remove-label backlog --add-label ready
 ```
 
 worker が既に着手している（`in-progress`）ものは、label を戻しても止まらない。
-**手を止めさせたいときは PR / Issue にコメントで伝える。**
+**手を止めさせたいときは、次の「割り込みを伝える」に従う。**
+
+### 割り込みを伝える
+
+**着手順を変えた・PR を保留にした・人から依頼が入った・前提の誤りが見つかった。**
+どれも worker が次の周回で GitHub を読むまで届かず、その間は捨てることになる実装が進む。
+メッセージで知らせれば早く届く。
+
+**順番を守る。先に GitHub を更新し、そのうえでメッセージで知らせる。**
+
+```bash
+# まだ着手していない（ready）を後回しにする
+gh issue edit <N> --remove-label ready --add-label backlog
+
+# **着手済み（in-progress）を止める場合は blocked を付ける。**
+# gh issue edit は指定した label だけを足し引きするので in-progress も外す。
+# 外し忘れると、worker のステップ 2.2 が「公開に失敗した周回」として再開する
+gh issue edit <N> --remove-label in-progress --add-label blocked
+
+gh pr comment <PR番号> --body-file <file>    # 何を止めるか / なぜかを残す
+ListAgents                                   # 相手を探す
+```
+
+**「後回し」と「止めた」は別の状態である。**
+
+| 状況 | label | worker から見えるか |
+| --- | --- | --- |
+| まだ着手していないものを後回しにする | `ready` → `backlog` | 着手していないので影響なし |
+| **着手済みの作業を止める** | `in-progress` → `blocked` | **`blocked` を読んで手を止める** |
+
+`backlog` へ落とすと、worker が読む対象（`in-progress` / `blocked`）から消える。
+**PR がまだ無い段階では、`blocked` が唯一の手がかりになる。**
+`blocked` は `loop/README.md` で「判断が要る。ループは触らない」と定義済みで、
+停止を表す label として既にある。
+
+**メッセージは揮発する。** セッションが落ちれば消えるので、**メッセージだけで指示を
+完結させない**。worker が再起動しても、GitHub の状態だけで同じ結論に至れること。
+
+**名前だけでは弾かれることがある。** そのときは `ListAgents` の行末にある `[ref]` を
+付けて送り直す（同名の取り違えを防ぐための確認である）。**相手が一覧に居なければ
+GitHub に書いて終わりにする。** 到達を前提にしない。
+
+**自分が禁止されていることを worker に代行させない。** master はマージの実行者だが
+コードを書かないので、「この修正を入れておいて」と実装を丸投げしたり、逆に
+「マージしておいて」と worker へ頼んだりしない（worker はマージ禁止）。
+役割の分離は権限の話ではなく**判定の独立性**のためで、迂回すると設計が崩れる。
 
 ## 7. 空転を検出する
 
