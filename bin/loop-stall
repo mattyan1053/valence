@@ -45,6 +45,7 @@ readonly STOP_IDS=(
   "review-budget-unknown:<PR番号>|master: bin/loop-review-budget が exit 2"
   "merge-failed:<PR番号>@<SHA>|master: マージに失敗"
   "review-exhausted:<PR番号>@<SHA>|master: レビュー上限に達し、手直しも上限超え"
+  "review-unanswered:<PR番号>@<SHA>|master: レビューが返らず、マージも再要求もできない"
   "blocking-findings:<PR番号>@<SHA>|master: 優先度 1 / 2 の指摘が残っている"
 )
 

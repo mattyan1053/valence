@@ -5,8 +5,19 @@
 # 判定不能は「要求してはいけない」に倒す。浪費を防ぐ側が安全側だからである。
 #
 #   exit 0 = 要求してよい
-#   exit 1 = 要求してはいけない
+#   exit 1 = 要求してはいけない (**空転として数える対象**)
 #   exit 2 = 使い方の誤り / 判定不能
+#   exit 3 = まだ要求しない (**正常な待ち。空転として数えない**)
+#
+# 1 と 3 を分けるのは、呼び出し側が「待ち続けていること」を空転として記録するためである。
+# 猶予の内側は正常な状態で、これを数えると **健全な PR が周回の間隔しだいで
+# loop/STOP に到達する**。猶予は 2 つあり、どちらも時刻で測る (周回数で測らない)。
+#
+#   PR を開いた直後      … 自動で入る初回レビューを待つ (LOOP_INITIAL_REVIEW_GRACE_MIN)
+#   要求してから応答まで … 返るのを待つ (LOOP_PENDING_REVIEW_GRACE_MIN)
+#
+# 文言ではなく終了コードで区別できるようにしてある
+# (手順書は「終了コードで分岐する」と決めている)。
 #
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
 # -x も使わない。判定結果にトレースが混ざると読み取りを誤らせる。
@@ -29,6 +40,12 @@ readonly MAX_ROUNDS="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 # 同じ内容を二重にレビューさせることになる。開いた直後は黙って待つ。
 readonly INITIAL_GRACE_MIN="${LOOP_INITIAL_REVIEW_GRACE_MIN:-10}"
 
+# 要求してから応答が返るまでの猶予。**周回の速さから独立して判定するため**にある。
+# 「何周待ったか」で異常を決めると、閾値がレビューの遅さではなく master の
+# ポーリング間隔で決まり、`/loop 1m` で回すだけで健全な PR が止まる。
+# 要求コメントの時刻は GitHub 側にあるので、そこからの経過時間で測る。
+readonly PENDING_GRACE_MIN="${LOOP_PENDING_REVIEW_GRACE_MIN:-30}"
+
 usage() {
   echo "使い方: bin/loop-review-budget <PR番号>" >&2
   exit 2
@@ -41,6 +58,10 @@ readonly PR="$1"
 
 if ! [[ $MAX_ROUNDS =~ ^[0-9]+$ ]] || ((MAX_ROUNDS < 1)); then
   echo "[FAIL] 設定: LOOP_MAX_REVIEW_ROUNDS は 1 以上の整数で指定してください" >&2
+  exit 2
+fi
+if ! [[ $PENDING_GRACE_MIN =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_PENDING_REVIEW_GRACE_MIN は 0 以上の整数で指定してください" >&2
   exit 2
 fi
 
@@ -97,6 +118,8 @@ fi
 pending="$(jq -r '.pending' <<<"$comments_json")"
 notice="$(jq -r '.notice' <<<"$comments_json")"
 notice_at="$(jq -r '.notice_at' <<<"$comments_json")"
+# 未応答の要求のうち **最も新しいもの** の時刻。猶予の起点に使う。
+pending_at="$(jq -r '.requests | max // ""' <<<"$comments_json")"
 
 # 「環境が無い」通知は SHA を持たないのでレビュー扱いにはできないが、
 # 要求に対する応答ではある。これを消化しないと、元の要求が永久に未応答として
@@ -104,6 +127,8 @@ notice_at="$(jq -r '.notice_at' <<<"$comments_json")"
 if [[ -n $notice_at && $notice_at != "null" ]] && [[ -z $last_at || $notice_at > $last_at ]]; then
   pending="$(jq -rn --argjson c "$comments_json" --arg at "$notice_at" \
     '$c.requests | map(select(. > $at)) | length' 2>/dev/null || echo "$pending")"
+  pending_at="$(jq -rn --argjson c "$comments_json" --arg at "$notice_at" \
+    '$c.requests | map(select(. > $at)) | max // ""' 2>/dev/null || echo "$pending_at")"
 fi
 
 echo "pr=$PR head=${head_sha:0:8} rounds=$rounds max=$MAX_ROUNDS reviewed_head=$reviewed_head pending=$pending"
@@ -118,8 +143,22 @@ fi
 
 # 直近のレビュー以降に投げた要求が未応答なら、重ねて投げない。
 # レビューが遅いのか、そもそも応答できない状態なのかは区別できないが、
-# どちらでも「待つ」が正しい。3 周止まれば空転として検出される。
+# どちらでも「待つ」が正しい。
+#
+# **待ち続けていることの検出はここではしない。** 呼び出し側 (master の手順 3.2) が
+# 未解決スレッドの有無まで見て、`review-unanswered:<PR番号>@<SHA>` を記録する。
+# 識別子に head SHA が入るので、push で前へ進んだ周回は数え直される。
 if ((pending > 0)); then
+  # 猶予の内側は「正常な待ち」。空転として数えさせない (exit 3)。
+  # ここを周回数で数えると、閾値が master のポーリング間隔で決まってしまう。
+  if [[ -n $pending_at && $pending_at != "null" ]]; then
+    requested_epoch="$(date -d "$pending_at" +%s 2>/dev/null || echo "")"
+    if [[ -n $requested_epoch ]] \
+      && (($(date +%s) - requested_epoch < PENDING_GRACE_MIN * 60)); then
+      echo "[WAIT] 要求から ${PENDING_GRACE_MIN} 分の猶予内 ($pending_at)。返るのを待つ"
+      exit 3
+    fi
+  fi
   echo "[NO] 要求済みで未応答 ($pending 件)。返るまで待つ。重ねて要求しない"
   # 応答不能の通知が来ているなら、待っても返らない。原因を添える。
   # ただし通知の有無だけで塞がない。環境を直しても古いコメントは PR に残るため、
@@ -141,8 +180,9 @@ if ((rounds == 0)); then
   created_epoch="$(date -d "$created_at" +%s 2>/dev/null || echo "")"
   now_epoch="$(date +%s)"
   if [[ -n $created_epoch ]] && ((now_epoch - created_epoch < INITIAL_GRACE_MIN * 60)); then
-    echo "[NO] PR を開いた直後。自動で入る初回レビューを待つ (${INITIAL_GRACE_MIN} 分)"
-    exit 1
+    # まだ誰にも何も要求していない。空転ではないので 3 で返す。
+    echo "[WAIT] PR を開いた直後。自動で入る初回レビューを待つ (${INITIAL_GRACE_MIN} 分)"
+    exit 3
   fi
 fi
 
