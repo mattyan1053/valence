@@ -128,11 +128,41 @@ if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common
   exit 2
 fi
 # --git-common-dir は worktree からだと相対パスを返すことがある。
-common_dir="$(cd "$common_dir" 2>/dev/null && pwd)" || {
+# **物理パス (pwd -P) で解決する。** 既定の pwd はシンボリックリンクを保った論理パスを
+# 返すので、同じ .git でも到達経路が違うだけで文字列が一致しなくなる。
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
   exit 2
 }
 readonly STATE="$common_dir/valence-loop-stall"
+
+# 止める対象は **カウンタと同じリポジトリ**。スクリプトの位置から相対で `./task` を
+# 引くと、cwd のリポジトリで数えているのに別のリポジトリを止めることになる。
+# 実際に踏んだ: 使い捨てのリポジトリで数え方を確かめただけで、実リポジトリの
+# master と worker が両方停止した。**検証のたびに本番が止まる形にしない。**
+#
+# ただし cwd 側の `task` を実行可能だからといって実行してはいけない。`-x` は
+# 「Valence のタスクランナーである」ことを何も保証せず、**別のリポジトリが用意した
+# 任意のコードを動かす**ことになる。**同じリポジトリのときだけ実行する。**
+if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
+  echo "[FAIL] 作業ツリーの根を特定できません" >&2
+  exit 2
+fi
+readonly TASK="$toplevel/task"
+
+# スクリプトのあるリポジトリ。cwd 側と同一かを共通ディレクトリで突き合わせる
+# (worktree どうしでも共通ディレクトリは一致する)。
+# 比較する両側とも物理パスに揃える。片方だけでは同じ問題が残る。
+script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
+script_common_dir=""
+if [[ -n $script_dir ]] && script_common_dir="$(
+  git -C "$script_dir" rev-parse --git-common-dir 2>/dev/null
+)"; then
+  script_common_dir="$(cd "$script_dir/$script_common_dir" 2>/dev/null && pwd -P)" \
+    || script_common_dir="$(cd "$script_common_dir" 2>/dev/null && pwd -P)" \
+    || script_common_dir=""
+fi
+readonly script_common_dir
 
 # 進捗があった周回は数え直す。これが無いと、同じエラーが 2 回起きたあと何周
 # 正常に進んでも、後日の独立した 1 回を「3 周連続」と数えて全ループを止める。
@@ -165,7 +195,15 @@ echo "stall id=$ID count=$count max=$MAX_REPEATS"
 
 if ((count >= MAX_REPEATS)); then
   echo "[STOP] 同じ状態で $count 周続いた。全ループを止める"
-  "$(dirname "$0")/../task" loop:stop "$ID: 同じ状態で $count 周続いたため停止。人の判断が要る"
+  if [[ -n $script_common_dir && $script_common_dir == "$common_dir" && -x $TASK ]]; then
+    "$TASK" loop:stop "$ID: 同じ状態で $count 周続いたため停止。人の判断が要る"
+  else
+    # 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい。
+    echo "[FAIL] ループを止められません" >&2
+    echo "       カウンタ: $STATE" >&2
+    echo "       スクリプト: ${script_common_dir:-不明}" >&2
+    echo "       別のリポジトリで実行しているため、そちらの task は実行しません" >&2
+  fi
   exit 1
 fi
 exit 0

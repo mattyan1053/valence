@@ -1,5 +1,15 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,6 +94,114 @@ describe("bin/loop-stall の停止識別子", () => {
 
     expect(reset.status).toBe(0);
     expect(run(["wrong-branch:12"], sandbox).stdout).toContain("count=1");
+  });
+});
+
+describe("上限に達したときに止める対象", () => {
+  /**
+   * スクリプトのコピーと偽の `task` を使い、上限まで走らせる。
+   * **本物の bin/loop-stall をそのまま上限まで走らせない。** それをやると実際に
+   * 実リポジトリの両 worktree が停止する（この Issue の事故そのもの）。
+   *
+   * 偽の `task` は「呼ばれた印」を残すだけ。**呼ばれてはいけない側にも置く**ので、
+   * 実行されたかどうかがそのまま判定になる。
+   */
+  function runToLimit(options: { cwd: "same-repo" | "other-repo" }): {
+    status: number;
+    stderr: string;
+    ranScriptRepoTask: boolean;
+    ranCwdRepoTask: boolean;
+  } {
+    const scriptRepo = mkdtempSync(join(tmpdir(), "loop-stall-script-"));
+    const otherRepo = mkdtempSync(join(tmpdir(), "loop-stall-cwd-"));
+    for (const repo of [scriptRepo, otherRepo]) {
+      spawnSync("git", ["init", "--quiet", repo]);
+      // 呼ばれたことだけを残す task。本物のように loop/STOP は配らない
+      writeFileSync(join(repo, "task"), `#!/usr/bin/env bash\ntouch '${repo}/ran'\n`, {
+        mode: 0o755,
+      });
+    }
+    mkdirSync(join(scriptRepo, "bin"));
+    const script = join(scriptRepo, "bin", "loop-stall");
+    copyFileSync(SCRIPT, script);
+    chmodSync(script, 0o755);
+
+    const cwd = options.cwd === "same-repo" ? scriptRepo : otherRepo;
+    let result = spawnSync(script, ["dirty"], { cwd, encoding: "utf8" });
+    for (let i = 0; i < 2; i++) {
+      result = spawnSync(script, ["dirty"], { cwd, encoding: "utf8" });
+    }
+    const ran = {
+      status: result.status ?? -1,
+      stderr: result.stderr,
+      ranScriptRepoTask: existsSync(join(scriptRepo, "ran")),
+      ranCwdRepoTask: existsSync(join(otherRepo, "ran")),
+    };
+    rmSync(scriptRepo, { recursive: true, force: true });
+    rmSync(otherRepo, { recursive: true, force: true });
+    return ran;
+  }
+
+  it("cwd が別のリポジトリなら、どちらの task も実行しない", () => {
+    // -x は「Valence のタスクランナーである」ことを保証しない。実行してしまうと
+    // **そのリポジトリが用意した任意のコードが動く**
+    const result = runToLimit({ cwd: "other-repo" });
+
+    expect(result.ranCwdRepoTask).toBe(false);
+    expect(result.ranScriptRepoTask).toBe(false);
+  });
+
+  it("cwd が別のリポジトリなら、止めなかった理由を出す", () => {
+    // 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい
+    const result = runToLimit({ cwd: "other-repo" });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("止められません");
+  });
+
+  it("シンボリックリンク経由で cd しても同じリポジトリと判定する", () => {
+    // bash の cd / pwd は既定でリンクを保った論理パスを返す。到達経路が違うだけで
+    // 別リポジトリ扱いになると、**止まっていないのに exit 1（停止済み）を返す**
+    const scriptRepo = mkdtempSync(join(tmpdir(), "loop-stall-script-"));
+    spawnSync("git", ["init", "--quiet", scriptRepo]);
+    writeFileSync(join(scriptRepo, "task"), `#!/usr/bin/env bash\ntouch '${scriptRepo}/ran'\n`, {
+      mode: 0o755,
+    });
+    mkdirSync(join(scriptRepo, "bin"));
+    const script = join(scriptRepo, "bin", "loop-stall");
+    copyFileSync(SCRIPT, script);
+    chmodSync(script, 0o755);
+    const link = `${scriptRepo}-link`;
+    symlinkSync(scriptRepo, link);
+
+    // Node の cwd 指定では物理パスに解決されてしまうので、シェルの cd を通す
+    let result: ReturnType<typeof spawnSync>;
+    for (let i = 0; i < 3; i++) {
+      result = spawnSync("/usr/bin/bash", ["-c", `cd '${link}' && '${script}' dirty`], {
+        encoding: "utf8",
+      });
+    }
+    const ran = existsSync(join(scriptRepo, "ran"));
+    // biome-ignore lint/style/noNonNullAssertion: ループで必ず代入される
+    const stderr = result!.stderr as unknown as string;
+    rmSync(link, { force: true });
+    rmSync(scriptRepo, { recursive: true, force: true });
+
+    expect(stderr).not.toContain("止められません");
+    expect(ran).toBe(true);
+  });
+
+  it("cwd がスクリプトと同じリポジトリなら止める", () => {
+    const result = runToLimit({ cwd: "same-repo" });
+
+    expect(result.status).toBe(1);
+    expect(result.ranScriptRepoTask).toBe(true);
+  });
+
+  it("実リポジトリの loop/STOP は作られない", () => {
+    runToLimit({ cwd: "other-repo" });
+
+    expect(existsSync(join(REPO_ROOT, "loop", "STOP"))).toBe(false);
   });
 });
 
