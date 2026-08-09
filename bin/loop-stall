@@ -153,14 +153,25 @@ readonly TASK="$toplevel/task"
 # スクリプトのあるリポジトリ。cwd 側と同一かを共通ディレクトリで突き合わせる
 # (worktree どうしでも共通ディレクトリは一致する)。
 # 比較する両側とも物理パスに揃える。片方だけでは同じ問題が残る。
+#
+# **rev-parse --git-common-dir の返り方は場所で変わる。** 通常のリポジトリでは
+# 相対パス (.git / ../.git)、**リンクされた worktree では絶対パス**を返す。
+# 両方を通さないと、master (worktree で動く) だけ判定が壊れる。
+#
+# 失敗した代入で変数を壊さない。`var="$(cmd)"` は cmd が失敗しても空を代入するので、
+# それをフォールバックの入力に使うと `cd ""` になる。**これは成功して cwd を返す**ため、
+# 「同じリポジトリの worktree」が「別のリポジトリ」に化ける。実際に踏んだ。
 script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
 script_common_dir=""
-if [[ -n $script_dir ]] && script_common_dir="$(
-  git -C "$script_dir" rev-parse --git-common-dir 2>/dev/null
-)"; then
-  script_common_dir="$(cd "$script_dir/$script_common_dir" 2>/dev/null && pwd -P)" \
-    || script_common_dir="$(cd "$script_common_dir" 2>/dev/null && pwd -P)" \
-    || script_common_dir=""
+if [[ -n $script_dir ]]; then
+  if raw_common_dir="$(git -C "$script_dir" rev-parse --git-common-dir 2>/dev/null)" \
+    && [[ -n $raw_common_dir ]]; then
+    # 相対パスならスクリプトの位置から解決する。絶対パスはそのまま使う。
+    [[ $raw_common_dir == /* ]] || raw_common_dir="$script_dir/$raw_common_dir"
+    if resolved="$(cd "$raw_common_dir" 2>/dev/null && pwd -P)" && [[ -n $resolved ]]; then
+      script_common_dir="$resolved"
+    fi
+  fi
 fi
 readonly script_common_dir
 
