@@ -17,6 +17,11 @@ const SCRIPT = fileURLToPath(new URL("./loop-gate", import.meta.url));
 
 const HEAD = "a".repeat(40);
 
+/** gh の `--jq` の `@base64` と同じ符号化。 */
+function b64(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64");
+}
+
 type Run = { status: number; stdout: string; stderr: string };
 
 /**
@@ -39,6 +44,9 @@ function runGate(env: Record<string, string> = {}): Run {
   symlinkSync("/usr/bin/bash", join(path, "bash"));
   // ゲートが隣の補助スクリプトを引くのに使う。gh はここに置かない（差し替えを通す）
   symlinkSync("/usr/bin/dirname", join(path, "dirname"));
+  // 必須チェック名を @base64 と同じ形に揃えるのに使う
+  symlinkSync("/usr/bin/base64", join(path, "base64"));
+  symlinkSync("/usr/bin/tr", join(path, "tr"));
 
   const gate = join(bin, "loop-gate");
   copyFileSync(SCRIPT, gate);
@@ -78,9 +86,9 @@ case "$args" in
     printf '%s\\n' "\${FAKE_SIZE_FILES:-5}" "\${FAKE_SIZE_LINES:-100}"
     ;;
   "pr checks"*)
-    require "--jq" "(type)" ".name" ".bucket"
+    require "--jq" "(type)" ".name" "@base64" ".bucket"
     [[ -n \${FAKE_CHECKS_FAIL:-} ]] && exit 1
-    printf '%s' "\${FAKE_CHECKS-T$'\\t'array$'\\n'C$'\\t'alpha$'\\t'pass}"
+    printf '%s' "\${FAKE_CHECKS-T$'\\t'array$'\\n'C$'\\t'YWxwaGE=$'\\t'pass}"
     printf '\\n'
     ;;
   "api graphql"*)
@@ -156,12 +164,12 @@ describe("bin/loop-gate は 1 条件でも欠ければ止める", () => {
     { name: "規模上限: 行数", env: { FAKE_SIZE_LINES: "99999" }, marker: "規模上限" },
     {
       name: "GHA CI: 必須チェックが pass でない",
-      env: { FAKE_CHECKS: "T\tarray\nC\talpha\tfail" },
+      env: { FAKE_CHECKS: `T\tarray\nC\t${b64("alpha")}\tfail` },
       marker: "GHA CI",
     },
     {
       name: "GHA CI: 必須チェックが無い",
-      env: { FAKE_CHECKS: "T\tarray\nC\tbeta\tpass" },
+      env: { FAKE_CHECKS: `T\tarray\nC\t${b64("beta")}\tpass` },
       marker: "GHA CI",
     },
     // **文面まで見る。** 「0 件」を消しても必須チェック不足で落ちるので、
@@ -176,6 +184,15 @@ describe("bin/loop-gate は 1 条件でも欠ければ止める", () => {
       name: "レビュー: 現 head が未レビューで上限未満",
       env: { FAKE_REVIEWED: `2026-01-01T00:00:00Z\t${"b".repeat(40)}` },
       marker: "レビュー",
+    },
+    {
+      // **チェック名は PR 側で決められる**（pull_request で走る job 名）。
+      // 名前 "dummy\nC\talpha" を持つ成功ジョブが 1 つあると、生のまま並べる実装では
+      // 2 行目が `C<TAB>alpha<TAB>pass` になり、**実在しない必須チェックが pass に見える**
+      // （修正前の実装に食わせて GATE PASS が出ることを確認済み）
+      name: "GHA CI: 区切りを含むチェック名で必須チェックを偽装できない",
+      env: { FAKE_CHECKS: `T\tarray\nC\t${b64("dummy\nC\talpha")}\tpass` },
+      marker: "GHA CI",
     },
     { name: "未解決スレッドがある", env: { FAKE_THREADS: "2" }, marker: "未解決スレッド" },
     {

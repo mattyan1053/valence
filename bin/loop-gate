@@ -123,11 +123,18 @@ fi
 # gh pr checks は「取得の失敗」でも「チェックが pending / fail」でも非ゼロで終わる
 # (pending は exit 8)。終了コードだけで弾くと、CI が落ちている PR を「取得できません」
 # として片付けてしまい、worker へ修正を返す経路が死ぬ。出力の有無で切り分ける。
-# 1 行目に結果の型、2 行目以降に "C<TAB>名前<TAB>bucket" を出させる。
+# 1 行目に結果の型、2 行目以降に "C<TAB>符号化した名前<TAB>bucket" を出させる。
 # **型を出力に含める**のは、取得の失敗と「チェック 0 件」を見分けるため
 # (どちらも本文が空になる)。bin/loop-fixup-lines と同じ形。
+#
+# **チェック名は @base64 で符号化して受け取る。** 名前は pull_request で走る job 名から
+# 来るので **PR 側で決められる**。区切り (タブ・改行) を含む名前をそのまま並べると、
+# `dummy\nC\talpha\tpass` のような名前 1 つで**行を増やし、実在しない必須チェックを
+# pass に見せられる**。符号化後は [A-Za-z0-9+/=] だけなので区切りを跨げない。
+# **復号はしない。** 突き合わせはこちらが持つ必須チェック名を符号化して行い、
+# 表示にも自分の名前しか使わない (外部由来の文字列を出力へ戻さない)。
 checks_out="$(gh pr checks "$PR" --json name,bucket \
-  --jq '"T\t\(type)", (.[]? | "C\t\(.name)\t\(.bucket)")' 2>/dev/null)"
+  --jq '"T\t\(type)", (.[]? | "C\t\(.name | @base64)\t\(.bucket)")' 2>/dev/null)"
 checks_type=""
 check_lines=()
 while IFS= read -r line; do
@@ -145,9 +152,15 @@ else
   missing=()
   bad=()
   for name in "${required[@]}"; do
+    # 比較する側も同じ符号化に揃える。base64 は 76 桁で折り返す実装があるので改行を落とす
+    # (-w0 は GNU 限定なので使わない)。jq の @base64 は折り返さない。
+    if ! want="$(printf '%s' "$name" | base64 | tr -d '\n')" || [[ -z $want ]]; then
+      fail "GHA CI: 必須チェック名を符号化できません: $name"
+      break
+    fi
     bucket=""
     for line in "${check_lines[@]}"; do
-      if [[ ${line%%$'\t'*} == "$name" ]]; then
+      if [[ ${line%%$'\t'*} == "$want" ]]; then
         bucket="${line#*$'\t'}"
         break
       fi
