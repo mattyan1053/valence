@@ -134,6 +134,16 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd)" || {
 }
 readonly STATE="$common_dir/valence-loop-stall"
 
+# 止める対象は **カウンタと同じリポジトリ**。スクリプトの位置から相対で `./task` を
+# 引くと、cwd のリポジトリで数えているのに別のリポジトリを止めることになる。
+# 実際に踏んだ: 使い捨てのリポジトリで数え方を確かめただけで、実リポジトリの
+# master と worker が両方停止した。**検証のたびに本番が止まる形にしない。**
+if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
+  echo "[FAIL] 作業ツリーの根を特定できません" >&2
+  exit 2
+fi
+readonly TASK="$toplevel/task"
+
 # 進捗があった周回は数え直す。これが無いと、同じエラーが 2 回起きたあと何周
 # 正常に進んでも、後日の独立した 1 回を「3 周連続」と数えて全ループを止める。
 if [[ $ID == "--reset" ]]; then
@@ -165,7 +175,14 @@ echo "stall id=$ID count=$count max=$MAX_REPEATS"
 
 if ((count >= MAX_REPEATS)); then
   echo "[STOP] 同じ状態で $count 周続いた。全ループを止める"
-  "$(dirname "$0")/../task" loop:stop "$ID: 同じ状態で $count 周続いたため停止。人の判断が要る"
+  if [[ -x $TASK ]]; then
+    "$TASK" loop:stop "$ID: 同じ状態で $count 周続いたため停止。人の判断が要る"
+  else
+    # 黙って止めないのは、黙って止めるのと同じくらい分かりにくい。
+    echo "[FAIL] ループを止められません: $TASK が実行できません" >&2
+    echo "       カウンタは $STATE に書きました" >&2
+    echo "       ここは valence の作業ツリーではありません (別のリポジトリで実行している)" >&2
+  fi
   exit 1
 fi
 exit 0
