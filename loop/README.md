@@ -95,6 +95,9 @@ worktree は作った時点の commit に貼り付き、**マージした改善�
 | `in-progress` | worker が着手中 | worker |
 | `blocked` | 判断が要る。ループは触らない | どちらでも |
 
+**Issue テンプレートからの起票も `backlog` に入る**（`.github/ISSUE_TEMPLATE/`）。
+ここが抜けると、人が立てた Issue が master のどの一覧にも現れない。
+
 **着手順は master が決める。** worker は `ready` の 1 件を取るだけで、順序を判断しない。
 `gh issue list` は新しい順に返すため、worker に選ばせると実質 LIFO になり、
 古い Issue が後回しになるうえ、割り込みを伝える手段も無くなる。

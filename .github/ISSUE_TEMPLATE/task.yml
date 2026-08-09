@@ -1,6 +1,8 @@
 name: 作業・改善
 description: 実装したいこと、直したい設計、気になっている点をまとめる
-labels: ["task"]
+# backlog に入れる。master は backlog / ready / in-progress しか見ないので、
+# ここが抜けると起票が候補から漏れる（存在しない label は GitHub が黙って落とす）。
+labels: ["backlog"]
 body:
   - type: markdown
     attributes:

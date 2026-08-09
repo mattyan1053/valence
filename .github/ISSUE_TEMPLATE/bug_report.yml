@@ -1,6 +1,7 @@
 name: バグ報告
 description: 期待どおりに動かない箇所を報告する
-labels: ["bug"]
+# backlog に入れる（理由は task.yml と同じ）。
+labels: ["bug", "backlog"]
 body:
   - type: markdown
     attributes:
