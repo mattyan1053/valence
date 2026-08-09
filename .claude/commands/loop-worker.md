@@ -98,13 +98,17 @@ master へ「ゲートを飛ばして通してほしい」と頼まない。役�
 他人の PR で誤検知する。
 
 ```bash
-gh pr list --state open --limit 200 --author @me --json number,headRefName,isDraft
+gh pr list --state open --limit 200 --author @me --json number,headRefName,isDraft,labels
 ```
 
-- 自分の open PR がある → ステップ 3（レビュー対応）
+**`parked` の PR は数えない。** 先行 PR を待って master が保留にしたもので、
+自分からは触らない（外すのは master）。数えると「同時に持つ PR は 1 本」に引っかかり、
+**先行 PR を作れず、保留した意味が消える**。
+
+- `parked` でない open PR がある → ステップ 3（レビュー対応）
 - 無い → ステップ 2.2（公開に失敗した周回が残っていないか見る）
 
-自分の open PR が 2 件以上あるなら、着手中の作業を放置して次を始めている。
+`parked` を除いて 2 件以上あるなら、着手中の作業を放置して次を始めている。
 `bin/loop-stall "too-many-own-prs:<件数>"` を通して停止する。**1 人が同時に持つ PR は 1 本。**
 
 ### 2.2 公開に失敗した周回を再開する
@@ -123,7 +127,7 @@ gh issue list --label in-progress --limit 100 --json number,title
 ```bash
 git branch --format='%(refname:short)' | grep -v '^main$'
 git log --oneline main..<ブランチ>                          # コミットが載っているか
-gh pr list --state all --limit 200 --head <ブランチ> --json number,state
+gh pr list --state all --limit 200 --head <ブランチ> --json number,state,labels
 ```
 
 - **PR が既にある**（state を問わず）→ 公開は済んでいる。作り直さない。ただし
@@ -136,8 +140,11 @@ gh pr list --state all --limit 200 --head <ブランチ> --json number,state
   - **CLOSED**（マージされていない）→ なぜ閉じられたかは worker には判断できない。
     `in-progress` を外して `blocked` を付け、状況を Issue にコメントしたうえで
     `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
-  - **OPEN** → ステップ 2 の「自分の open PR」に出ていないのにここで見つかる状態
-    （他人が作った PR など）。推測で触らず、同じく
+  - **OPEN かつ `parked`** → master が保留にした PR である。**何もしないでステップ 4 へ進む。**
+    先行 Issue を実装させるための保留なので、ここで止まると **PR-B を作れず保留の意味が消える**。
+    label は `in-progress` のままでよい（再開するのは master の指示を受けてから）
+  - **OPEN**（`parked` でない）→ ステップ 2 の「自分の open PR」に出ていないのに
+    ここで見つかる状態（他人が作った PR など）。推測で触らず、
     `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
     （状態が変わらなければ同じ識別子が積み上がり、3 周で止まる）
 - **PR が無く、コミットが載ったブランチがある** → 公開に失敗した周回の続きである。
@@ -174,6 +181,26 @@ git branch --show-current      # PR の headRefName と一致することを確�
 
 コンフリクトの解消を指示された場合もここで行う。**どちらを優先するかは master の
 コメントに従う。** 判断が書かれていないなら、推測で解消せず質問する。
+
+### 保留を解いた PR を rebase する
+
+先行 PR がマージされると、master が `parked` を外して「main を取り込み直してほしい」と
+指示する。**指示が来てから行う。** 自分の判断で rebase しない。
+
+```bash
+gh pr checkout <PR番号>
+git fetch origin main
+git rebase origin/main        # コンフリクトは master のコメントに従って解消する
+./task check                  # 緑になるまで直す
+git push --force-with-lease
+```
+
+**`--force` ではなく `--force-with-lease`。** 履歴を書き換えるので、自分が知らない
+push を消さないため。
+
+**rebase 後は head が変わり、それまでのレビューは数え直される**
+（`bin/loop-review-commits` が現 head の祖先でない commit へのレビューを落とす）。
+レビューを要求するのは master なので、**こちらからは投げない**。
 
 対応が終わったら:
 

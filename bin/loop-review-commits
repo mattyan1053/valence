@@ -19,6 +19,13 @@
 # **「レビューした」の判定は commit_id の有無ではなく、本文にレビュー内容があるか**で行う。
 # review オブジェクトである・commit_id を持つ、は応答の器の話でしかない。
 #
+# **rebase で消えた commit のレビューは数えない。** 保留した PR を再開するときは
+# main を取り込み直すので head が変わり、それまでのレビューは **現 head の祖先ではない
+# commit** を見たことになる。数えたままにすると、レビュー上限に達している PR が
+# 「上限到達＋手直しが上限超え」で人の判断待ちになり、**保留した PR が二度と
+# マージできない**。祖先かどうかは compare の status で機械的に分かる
+# (ahead / identical = 祖先、behind / diverged = そうでない)。
+#
 # review だけを数えると、指摘ゼロの PR が「未レビュー」と判定され、
 # **きれいな PR ほどマージできない**という逆転が起きる。実際に踏んだ。
 #
@@ -42,20 +49,44 @@
 #
 # 出力される SHA は短縮形が混ざる。呼び出し側は前方一致で突き合わせること。
 #
+# **「レビューが有効か」と「応答があったか」は別の軸である。** rebase は前者だけを
+# 無効にし、**過去の要求が応答された事実は消さない**。既定では有効なものだけを返し、
+# `--all` を付けると祖先でない commit へのレビューも落とさずに、第 3 列へ live / stale を
+# 添えて返す。
+#
+#   <ISO8601 の時刻><TAB><commit SHA>                  (既定)
+#   <ISO8601 の時刻><TAB><commit SHA><TAB>live|stale   (--all)
+#
+# **両方の軸を 1 回の取得から導けるようにするため**である。呼び出し側が既定と `--all` を
+# 2 回叩くと、その間に届いた応答で **片方だけ新しい食い違った組み合わせ**になり、
+# レビュー上限を 1 回超えられてしまう。
+#
 #   exit 0 = 取得できた (0 件のこともある)
 #   exit 2 = 使い方の誤り / 取得不能
 #
-# jq の変数はシェルに展開させない。値を文字列として組み立てず --arg で渡すことで、
-# 名前に $(...) や ' が混ざっても注入にならない。
+# 抽出は **gh の --jq** で行い、外部の jq に依存しない。依存が少ないほど、gh を
+# 差し替えて判定だけをテストできる (bin/loop-merge と同じ理由)。
+# フィルタへ値を文字列で埋め込まない。env 経由で渡すことで、名前に $(...) や ' が
+# 混ざっても注入にならない。
 # shellcheck disable=SC2016
 set -uo pipefail
 
-readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
+REVIEW_BOT="chatgpt-codex-connector[bot]"
+export REVIEW_BOT
+readonly REVIEW_BOT
 
 usage() {
-  echo "使い方: bin/loop-review-commits <PR番号>" >&2
+  echo "使い方: bin/loop-review-commits [--all] <PR番号>" >&2
+  echo "  --all  落とさずに出し、第 3 列へ live / stale を添える" >&2
   exit 2
 }
+
+include_stale=0
+if [[ ${1-} == "--all" ]]; then
+  include_stale=1
+  shift
+fi
+readonly include_stale
 
 [[ $# -eq 1 ]] || usage
 [[ $1 =~ ^[0-9]+$ ]] || usage
@@ -71,12 +102,11 @@ readonly PR="$1"
 # 本物のレビューには必ず「Reviewed commit: `<SHA>`」の印がある (実データで確認)。
 # 印が無いものは **要求への応答ではあるがレビューではない** ので、SHA を持たない
 # 応答として印 - で返す。数から落とすと記録が消費されず行き止まりを作る。
-if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
-  | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot and (.commit_id // "") != ""))
-     | map("\(.submitted_at)\t" +
-           (if ((.body // "") | test("Reviewed commit:"; "i")) then .commit_id else "-" end))
-     | .[]')"; then
+if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" \
+  --jq 'map(select(.user.login == env.REVIEW_BOT and (.commit_id // "") != ""))
+        | map("\(.submitted_at)\t" +
+              (if ((.body // "") | test("Reviewed commit:"; "i")) then .commit_id else "-" end))
+        | .[]' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のレビューを取得できません" >&2
   exit 2
 fi
@@ -89,22 +119,22 @@ fi
 # 後者を落とすと、その応答が記録を消費しないまま残り、あとから来た 👍 が
 # そこへ吸われて **現 head が永久にレビュー済みにならない**。
 # bin/loop-review-budget は前から通知を応答として扱っており、定義を揃える。
-if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
-  | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot))
-     | map(. as $c
-           | (($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha?)
-              // (if ($c.body | test("create an environment"; "i")) then "-" else empty end))
-           | "\($c.created_at)\t\(.)")
-     | .[]')"; then
+if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" \
+  --jq 'map(select(.user.login == env.REVIEW_BOT))
+        | map(. as $c
+              | (($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha?)
+                 // (if ($c.body | test("create an environment"; "i")) then "-" else empty end))
+              | "\($c.created_at)\t\(.)")
+        | .[]' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
   exit 2
 fi
 
 # 👍 リアクション。SHA を持たないので、時刻だけを取って空の SHA 欄で流す。
-if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" 2>/dev/null \
-  | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot and .content == "+1") | "\(.created_at)\t") | .[]')"; then
+if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" \
+  --jq 'map(select(.user.login == env.REVIEW_BOT and .content == "+1")
+             | "\(.created_at)\t")
+        | .[]' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のリアクションを取得できません" >&2
   exit 2
 fi
@@ -124,5 +154,34 @@ if ! paired="$(printf '%s' "$responses" | "$(dirname "$0")/loop-review-head" --p
   exit 2
 fi
 
-printf '%s' "$paired" | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}$'
+rows="$(printf '%s' "$paired" \
+  | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}$' || (( $? == 1 )))"
+
+# 現 head の祖先でない commit へのレビューを落とす。head を取れないときは
+# 判定できないので失敗に倒す (数え落として「未レビュー」に見えるほうが安全)。
+if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
+  || [[ -z $head_sha ]]; then
+  echo "[FAIL] PR #$PR の head SHA を取得できません" >&2
+  exit 2
+fi
+
+while IFS=$'\t' read -r ts sha; do
+  [[ -n $sha ]] || continue
+  if ! status="$(gh api "repos/{owner}/{repo}/compare/${sha}...${head_sha}" \
+    --jq '.status' 2>/dev/null)" || [[ -z $status ]]; then
+    echo "[FAIL] PR #$PR: $sha が現 head の祖先か判定できません" >&2
+    exit 2
+  fi
+  # ahead = head が先に進んでいる (sha は祖先) / identical = 同じ commit
+  if [[ $status == "ahead" || $status == "identical" ]]; then
+    live="live"
+  else
+    live="stale"
+  fi
+  if ((include_stale == 1)); then
+    printf '%s\t%s\t%s\n' "$ts" "$sha" "$live"
+  elif [[ $live == "live" ]]; then
+    printf '%s\t%s\n' "$ts" "$sha"
+  fi
+done <<<"$rows"
 exit 0

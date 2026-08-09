@@ -119,6 +119,7 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 | `ready` | **次にやる 1 件。同時に 1 件だけ** | master |
 | `in-progress` | worker が着手中 | worker |
 | `blocked` | 判断が要る。ループは触らない | どちらでも |
+| `parked` | **PR に付ける。** 先行 PR を待って保留中 | master |
 
 **Issue テンプレートからの起票も `backlog` に入る**（`.github/ISSUE_TEMPLATE/`）。
 ここが抜けると、人が立てた Issue が master のどの一覧にも現れない。
@@ -129,6 +130,29 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 
 `ready` が 2 件以上あると着手順が一意に決まらない。どちらのループも
 `bin/loop-stall "too-many-ready:<件数>"` を通して止める。
+
+## PR の保留（先行 PR を割り込ませる）
+
+レビュー中に「先に直すべきもの」が見つかったとき、**その PR を保留にして先行 PR を
+先に通す**。人間のレビューでは日常的に起きる流れで、これが表現できないとループが止まる。
+
+```
+PR-A をレビュー中に先行対応が要ると分かる
+  → PR-A に parked を付ける（master）。理由と待っている番号をコメントに残す
+  → 先行の Issue を起票 → PR-B を作ってマージ
+  → PR-A の parked を外し、worker に rebase を指示する
+  → PR-A を rebase して再開、マージ
+```
+
+- **`parked` の PR にはゲートを回さない。** master の選定対象から外す
+- **worker は `parked` を「持っている PR」に数えない。** 数えると
+  「同時に持つ PR は 1 本」に引っかかり、先行 PR を作れない
+- **worker は `parked` の PR を自分から触らない。** 外すのは master
+
+**rebase すると head が変わる。** それまでのレビューは現 head の祖先でない commit を
+見たことになるので、**数え直す**（`bin/loop-review-commits` が祖先でない commit への
+レビューを落とす）。こうしないと、上限に達した PR が「上限到達＋手直しが上限超え」で
+人の判断待ちになり、**保留した PR が二度とマージできない**。
 
 ## セットアップ
 
