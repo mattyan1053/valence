@@ -57,12 +57,16 @@
 #   exit 0 = 取得できた (0 件のこともある)
 #   exit 2 = 使い方の誤り / 取得不能
 #
-# jq の変数はシェルに展開させない。値を文字列として組み立てず --arg で渡すことで、
-# 名前に $(...) や ' が混ざっても注入にならない。
+# 抽出は **gh の --jq** で行い、外部の jq に依存しない。依存が少ないほど、gh を
+# 差し替えて判定だけをテストできる (bin/loop-merge と同じ理由)。
+# フィルタへ値を文字列で埋め込まない。env 経由で渡すことで、名前に $(...) や ' が
+# 混ざっても注入にならない。
 # shellcheck disable=SC2016
 set -uo pipefail
 
-readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
+REVIEW_BOT="chatgpt-codex-connector[bot]"
+export REVIEW_BOT
+readonly REVIEW_BOT
 
 usage() {
   echo "使い方: bin/loop-review-commits [--all] <PR番号>" >&2
@@ -91,12 +95,11 @@ readonly PR="$1"
 # 本物のレビューには必ず「Reviewed commit: `<SHA>`」の印がある (実データで確認)。
 # 印が無いものは **要求への応答ではあるがレビューではない** ので、SHA を持たない
 # 応答として印 - で返す。数から落とすと記録が消費されず行き止まりを作る。
-if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/dev/null \
-  | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot and (.commit_id // "") != ""))
-     | map("\(.submitted_at)\t" +
-           (if ((.body // "") | test("Reviewed commit:"; "i")) then .commit_id else "-" end))
-     | .[]')"; then
+if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" \
+  --jq 'map(select(.user.login == env.REVIEW_BOT and (.commit_id // "") != ""))
+        | map("\(.submitted_at)\t" +
+              (if ((.body // "") | test("Reviewed commit:"; "i")) then .commit_id else "-" end))
+        | .[]' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のレビューを取得できません" >&2
   exit 2
 fi
@@ -109,22 +112,22 @@ fi
 # 後者を落とすと、その応答が記録を消費しないまま残り、あとから来た 👍 が
 # そこへ吸われて **現 head が永久にレビュー済みにならない**。
 # bin/loop-review-budget は前から通知を応答として扱っており、定義を揃える。
-if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
-  | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot))
-     | map(. as $c
-           | (($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha?)
-              // (if ($c.body | test("create an environment"; "i")) then "-" else empty end))
-           | "\($c.created_at)\t\(.)")
-     | .[]')"; then
+if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" \
+  --jq 'map(select(.user.login == env.REVIEW_BOT))
+        | map(. as $c
+              | (($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha?)
+                 // (if ($c.body | test("create an environment"; "i")) then "-" else empty end))
+              | "\($c.created_at)\t\(.)")
+        | .[]' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
   exit 2
 fi
 
 # 👍 リアクション。SHA を持たないので、時刻だけを取って空の SHA 欄で流す。
-if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" 2>/dev/null \
-  | jq -rs --arg bot "$REVIEW_BOT" \
-    'add | map(select(.user.login == $bot and .content == "+1") | "\(.created_at)\t") | .[]')"; then
+if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" \
+  --jq 'map(select(.user.login == env.REVIEW_BOT and .content == "+1")
+             | "\(.created_at)\t")
+        | .[]' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のリアクションを取得できません" >&2
   exit 2
 fi
