@@ -146,7 +146,35 @@ gh は非ゼロを返す**。終了コードだけを見ると、成功したマ
 - exit 2 → 引数の誤り。同じく `bin/loop-stall "merge-failed:<PR番号>@<SHA>"` で停止する
 
 マージできたら、対応する Issue が閉じたかを確認する（PR 本文に `Closes #N` があれば自動）。
-閉じていなければ閉じる。この周回はここで終わり。
+閉じていなければ閉じる。
+
+**続けて、閉じた Issue から `in-progress` を外す。** 外すのは着手した worker ではなく
+**閉じた側**である。worker がマージを知るのは次の周回で、そのときには
+`gh issue list --label in-progress` に**閉じた Issue が出てこない**（既定は open のみ）ため、
+外す機会が二度と来ない。**マージのたびに 1 件ずつ増え、誰も件数を知らないまま溜まる**
+（実際に 12 件溜まっていた）。
+
+まず、この PR が閉じた Issue から外す。**番号で直接指定する。**
+
+```bash
+gh pr view <PR番号> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
+gh issue edit <N> --remove-label in-progress     # label が無くても成功する（冪等）
+```
+
+続けて、取りこぼしをさらう。手で閉じたものや、前の周回で外し損ねたものが対象。
+
+```bash
+# **--state closed を明示する。** 付けないと既定の open だけを見て必ず 0 件に見える
+gh issue list --state closed --label in-progress --limit 200 --json number --jq '.[].number'
+```
+
+**さらう側だけに頼らない。** 一覧の検索には反映の遅れがあり、**いま閉じたばかりの Issue は
+数十秒ほど出てこない**（実際に、label を付けた直後は 0 件、外した直後は 1 件と、
+1 手ずれた結果が返った）。マージ直後にこれだけを見ると、**残骸を作った当人が
+「0 件だから大丈夫」と読む**。番号で直接外すほうが本筋で、さらう側は保険である。
+
+遅れて出てきたぶんは次のマージで拾えるので、**セッションが落ちても最終的には収束する。**
+この周回はここで終わり。
 
 ### exit 1 — 何が足りないかで分ける
 
