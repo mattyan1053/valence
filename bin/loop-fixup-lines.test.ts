@@ -18,6 +18,8 @@ let binDir: string;
 beforeAll(() => {
   binDir = mkdtempSync(join(tmpdir(), "loop-fixup-bin-"));
   symlinkSync("/usr/bin/bash", join(binDir, "bash"));
+  // 符号化したファイル名を戻すのに使う。gh はここに置かない（差し替えを通す）
+  symlinkSync("/usr/bin/base64", join(binDir, "base64"));
 });
 
 afterAll(() => {
@@ -46,10 +48,19 @@ function run(args: string[]): Run {
 function runWithLines(lines: string[], ghExit = 0): Run {
   const dir = mkdtempSync(join(tmpdir(), "loop-fixup-fake-"));
   symlinkSync("/usr/bin/bash", join(dir, "bash"));
+  symlinkSync("/usr/bin/base64", join(dir, "base64"));
   writeFileSync(
     join(dir, "gh"),
     [
       "#!/usr/bin/env bash",
+      // **--jq の式まで見る。** ファイル名を符号化しているのは gh 側の --jq なので、
+      // ここを見ないと **@base64 を外しても緑のまま**になる
+      'for frag in "--jq" ".filename" "@base64" ".additions" ".deletions"; do',
+      '  if [[ "$*" != *"$frag"* ]]; then',
+      '    echo "スタブ: 想定外の gh 呼び出し ($frag が無い)" >&2',
+      "    exit 1",
+      "  fi",
+      "done",
       // %b で渡す。%s だと JSON.stringify が付けた \t が **タブに戻らず**、
       // 列の分かれていない行を渡してしまう
       ...lines.map((line) => `printf '%b\\n' ${JSON.stringify(line)}`),
@@ -67,9 +78,13 @@ function runWithLines(lines: string[], ghExit = 0): Run {
   return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
-/** `F\t<ファイル名>\t<追加>\t<削除>` の 1 行を作る。 */
+/**
+ * `F\t<符号化したファイル名>\t<追加>\t<削除>` の 1 行を作る。
+ * **名前は gh の `@base64` と同じ符号化で載る。** 生のまま載せると、区切りを含む
+ * ファイル名でレコードを増やせてしまう（それを防ぐのがこの符号化）。
+ */
 function file(name: string, additions: number, deletions: number): string {
-  return `F\t${name}\t${additions}\t${deletions}`;
+  return `F\t${Buffer.from(name, "utf8").toString("base64")}\t${additions}\t${deletions}`;
 }
 
 /** files が配列だったとき（正常）の出力を作る。 */
@@ -120,6 +135,17 @@ describe("bin/loop-fixup-lines の数え方", () => {
     ]);
 
     expect(result.stdout.trim()).toBe("15\t7");
+  });
+
+  it("区切りを含むファイル名でも 1 ファイルとして数える", () => {
+    // **ファイル名は PR 側で決められる**（git のパスにはタブも改行も入る）。
+    // 生のまま並べる実装では、この 1 件が 3 行に割れて `a` が本体 3 行として数えられた
+    // （実測: 修正前は `3\t500`）。符号化後は 1 行のままで、
+    // 名前は `.test.ts` で終わるのでテスト追加として除外される
+    const result = runWithFiles([file("a\t1\t2\nF\tb.test.ts", 500, 0)]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("0\t500");
   });
 
   it("変更ファイルが 0 件なら 0 を返す", () => {
