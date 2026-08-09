@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 同じ停止識別子が続いた回数を数え、上限に達したら全ループを止める。
+# 停止識別子ごとに記録された回数を数え、上限に達したら全ループを止める。
 #
 #   bin/loop-stall <停止識別子>
 #
@@ -47,6 +47,10 @@ readonly STOP_IDS=(
   "review-exhausted:<PR番号>@<SHA>|master: レビュー上限に達し、手直しも上限超え"
   "review-unanswered:<PR番号>@<SHA>|master: レビューが返らず、マージも再要求もできない"
   "blocking-findings:<PR番号>@<SHA>|master: 優先度 1 / 2 の指摘が残っている"
+  # 件数を付けない。着手できる状態が 1 つでもあればこの識別子を使わないので、
+  # 付けられる数はどれも 0 で、**状態が同じなのに毎回変わる値**にしかならない。
+  # blocked だけがある状態もここに含める (人の判断待ちで、ループの中では解けない)。
+  "no-work|master: 着手できる作業が無い (open PR も backlog / ready / in-progress も 0 件)"
 )
 
 usage() {
@@ -136,6 +140,25 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
 }
 readonly STATE="$common_dir/valence-loop-stall"
 
+# **master と worker は同じカウンタを、同じ周期で書きうる。** 読んでから書くまでを
+# 排他しないと、後から書いた側が相手の増分を消す (lost update)。記録が増えないまま
+# 周回だけ進むので、**どちらの識別子も上限に届かず第 4 層が効かなくなる**。
+# 排他しないほうへ倒れると気づけないので、**取れないときは数えずに失敗する**。
+readonly LOCK_WAIT_SEC="${LOOP_STALL_LOCK_WAIT_SEC:-10}"
+if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_STALL_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+exec 9>"$STATE.lock" || {
+  echo "[FAIL] 停止カウンタのロックを作成できません: $STATE.lock" >&2
+  exit 2
+}
+if ! flock -w "$LOCK_WAIT_SEC" 9; then
+  echo "[FAIL] 停止カウンタのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+  echo "       数えずに終わります。記録が飛ぶより止まらないほうが分かりにくいためです" >&2
+  exit 2
+fi
+
 # 止める対象は **カウンタと同じリポジトリ**。スクリプトの位置から相対で `./task` を
 # 引くと、cwd のリポジトリで数えているのに別のリポジトリを止めることになる。
 # 実際に踏んだ: 使い捨てのリポジトリで数え方を確かめただけで、実リポジトリの
@@ -183,21 +206,32 @@ if [[ $ID == "--reset" ]]; then
   exit 0
 fi
 
-prev_id=""
-prev_count=0
+# **識別子ごとに数える。** 1 つだけ持って「直前と違えば 1 に戻す」形にすると、
+# **カウンタを共有している master と worker が互いの記録を消し合う**。
+# 「master は no-work、worker は dirty」で交互に書かれると、どちらも 3 に届かず
+# **2 つ動いているというだけで第 4 層が無効になる**。
+#
+# 前へ進んだ合図は --reset であって、識別子が変わったことではない。
+# --reset が来るまでは、どの識別子の記録も消さない。
+#
+#   <回数><TAB><識別子>  を 1 行ずつ
+#
+# 書式に合わない行は捨てる (壊れた記録・古い書式で数えない)。
+count=0
+others=()
 if [[ -f $STATE ]]; then
-  # 1 行目が識別子、2 行目が回数。壊れていたら 0 から数え直す。
-  { read -r prev_id; read -r prev_count; } < "$STATE" 2>/dev/null || true
-  [[ $prev_count =~ ^[0-9]+$ ]] || prev_count=0
+  while IFS=$'\t' read -r prev_count prev_id; do
+    [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
+    if [[ $prev_id == "$ID" ]]; then
+      count="$prev_count"
+    else
+      others+=("$prev_count"$'\t'"$prev_id")
+    fi
+  done < "$STATE"
 fi
+count=$((count + 1))
 
-if [[ $ID == "$prev_id" ]]; then
-  count=$((prev_count + 1))
-else
-  count=1
-fi
-
-printf '%s\n%s\n' "$ID" "$count" > "$STATE" || {
+printf '%s\n' "${others[@]}" "$count"$'\t'"$ID" > "$STATE" || {
   echo "[FAIL] 停止カウンタを書き込めません: $STATE" >&2
   exit 2
 }
@@ -205,9 +239,9 @@ printf '%s\n%s\n' "$ID" "$count" > "$STATE" || {
 echo "stall id=$ID count=$count max=$MAX_REPEATS"
 
 if ((count >= MAX_REPEATS)); then
-  echo "[STOP] 同じ状態で $count 周続いた。全ループを止める"
+  echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める"
   if [[ -n $script_common_dir && $script_common_dir == "$common_dir" && -x $TASK ]]; then
-    "$TASK" loop:stop "$ID: 同じ状態で $count 周続いたため停止。人の判断が要る"
+    "$TASK" loop:stop "$ID: 同じ状態が $count 回記録されたため停止。人の判断が要る"
   else
     # 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい。
     echo "[FAIL] ループを止められません" >&2
