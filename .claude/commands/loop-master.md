@@ -166,11 +166,35 @@ gh issue edit <N> --remove-label in-progress     # label が無くても成功�
 
 ```bash
 # **--state closed を明示する。** 付けないと既定の open だけを見て必ず 0 件に見える
-for n in $(gh issue list --state closed --label in-progress --limit 200 \
-  --json number --jq '.[].number'); do
-  gh issue edit "$n" --remove-label in-progress
-done
+# 一覧は先に変数へ受ける。$(...) の中の失敗は for に伝わらず、**取得できなかった周回が
+# 「0 件だった」と見分けが付かなくなる**
+if ! stale="$(gh issue list --state closed --label in-progress --limit 200 \
+  --json number --jq '.[].number')"; then
+  echo "[FAIL] 閉じた Issue の一覧を取得できません。残骸の有無は不明です" >&2
+else
+  removed=0
+  failed=0
+  for n in $stale; do
+    if gh issue edit "$n" --remove-label in-progress >/dev/null; then
+      removed=$((removed + 1))
+    else
+      failed=$((failed + 1))
+      echo "[FAIL] #$n の in-progress を外せません" >&2
+    fi
+  done
+  echo "掃除: 外した ${removed} 件 / 失敗 ${failed} 件"
+fi
 ```
+
+**失敗を黙って成功にしない。** 1 件も外せなかったのか、そもそも 0 件だったのかは
+別の状態で、後者だけが「残骸なし」である。`gh` の失敗は編集ごとに数え、
+**外した件数と失敗した件数の両方を出す**。
+
+**ここでは `bin/loop-stall` を通さない。** マージは既に済んでおり、掃除の失敗は
+その事実を変えない。しかも**この掃除は毎回のマージで走り、冪等**なので、
+落ちたぶんは次のマージで拾える。**成功したマージのあとで止めると、前へ進んでいるのに
+3 周で全ループが止まる**（同じ理由で 1.1 は HEAD が動いたときカウンタを消している）。
+失敗が続くなら件数が減らないまま出力に残り続けるので、**気づけないまま消えることはない**。
 
 **さらう側だけに頼らない。** 一覧の検索には反映の遅れがあり、**いま閉じたばかりの Issue は
 数十秒ほど出てこない**（実際に、label を付けた直後は 0 件、外した直後は 1 件と、
