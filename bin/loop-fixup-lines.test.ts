@@ -18,8 +18,6 @@ let binDir: string;
 beforeAll(() => {
   binDir = mkdtempSync(join(tmpdir(), "loop-fixup-bin-"));
   symlinkSync("/usr/bin/bash", join(binDir, "bash"));
-  // 符号化したファイル名を戻すのに使う。gh はここに置かない（差し替えを通す）
-  symlinkSync("/usr/bin/base64", join(binDir, "base64"));
 });
 
 afterAll(() => {
@@ -48,14 +46,15 @@ function run(args: string[]): Run {
 function runWithLines(lines: string[], ghExit = 0): Run {
   const dir = mkdtempSync(join(tmpdir(), "loop-fixup-fake-"));
   symlinkSync("/usr/bin/bash", join(dir, "bash"));
-  symlinkSync("/usr/bin/base64", join(dir, "base64"));
   writeFileSync(
     join(dir, "gh"),
     [
       "#!/usr/bin/env bash",
       // **--jq の式まで見る。** ファイル名を符号化しているのは gh 側の --jq なので、
       // ここを見ないと **@base64 を外しても緑のまま**になる
-      'for frag in "--jq" ".filename" "@base64" ".additions" ".deletions"; do',
+      // **判定の式まで見る。** テストかどうかを決めているのは gh 側の --jq なので、
+      // ここを見ないと **判定を外しても緑のまま**になる
+      `for frag in "--jq" ".filename" 'endswith(".test.ts")' ".additions" ".deletions"; do`,
       '  if [[ "$*" != *"$frag"* ]]; then',
       '    echo "スタブ: 想定外の gh 呼び出し ($frag が無い)" >&2',
       "    exit 1",
@@ -79,12 +78,14 @@ function runWithLines(lines: string[], ghExit = 0): Run {
 }
 
 /**
- * `F\t<符号化したファイル名>\t<追加>\t<削除>` の 1 行を作る。
- * **名前は gh の `@base64` と同じ符号化で載る。** 生のまま載せると、区切りを含む
- * ファイル名でレコードを増やせてしまう（それを防ぐのがこの符号化）。
+ * `F\t<テストか>\t<追加>\t<削除>` の 1 行を作る。
+ *
+ * **ファイル名は載らない。** テストかどうかの判定は gh の `--jq` で終わっていて、
+ * 外へ出るのは `true` / `false` と数値だけである（名前を出すと、区切りや末尾の
+ * 空白で数を狂わせられる。実際に両方踏んだ）。**その判定式はスタブが検査している。**
  */
-function file(name: string, additions: number, deletions: number): string {
-  return `F\t${Buffer.from(name, "utf8").toString("base64")}\t${additions}\t${deletions}`;
+function row(isTest: boolean, additions: number, deletions: number): string {
+  return `F\t${isTest}\t${additions}\t${deletions}`;
 }
 
 /** files が配列だったとき（正常）の出力を作る。 */
@@ -94,7 +95,7 @@ function runWithFiles(rows: string[], ghExit = 0): Run {
 
 describe("bin/loop-fixup-lines の数え方", () => {
   it("本体の変更は追加も削除も数える", () => {
-    const result = runWithFiles([file("bin/loop-merge", 34, 7)]);
+    const result = runWithFiles([row(false, 34, 7)]);
 
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe("41\t0");
@@ -102,10 +103,7 @@ describe("bin/loop-fixup-lines の数え方", () => {
 
   it("テストの追加行は数えない", () => {
     // 危険なのは「レビューを受けていない本体の変更」であって、守りが増えることではない
-    const result = runWithFiles([
-      file("bin/loop-merge", 34, 7),
-      file("bin/loop-merge.test.ts", 43, 0),
-    ]);
+    const result = runWithFiles([row(false, 34, 7), row(true, 43, 0)]);
 
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe("41\t43");
@@ -114,38 +112,34 @@ describe("bin/loop-fixup-lines の数え方", () => {
   it("テストの削除行は数える", () => {
     // 「テストファイルだから安全」ではない。**守りを減らす変更は本体と同じ**に扱う。
     // ここを追加と一緒に除外すると、レビュー後に検証を消しても素通りする
-    const result = runWithFiles([file("bin/loop-merge.test.ts", 0, 30)]);
+    const result = runWithFiles([row(true, 0, 30)]);
 
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe("30\t0");
   });
 
   it("同じファイルで追加と削除が混ざっていても、削除だけを数える", () => {
-    const result = runWithFiles([file("src/domain/pr.test.ts", 12, 5)]);
+    const result = runWithFiles([row(true, 12, 5)]);
 
     expect(result.stdout.trim()).toBe("5\t12");
   });
 
-  it("末尾が .test.ts のものだけをテストとして扱う", () => {
-    // 名前に test を含むだけの本体ファイルを除外すると、**本体の変更が数から消える**
-    const result = runWithFiles([
-      file("src/domain/test.ts", 10, 0),
-      file("src/test-utils.ts", 5, 0),
-      file("bin/loop-stall.test.ts", 7, 0),
-    ]);
+  it("本体とテストが混ざっていても、それぞれの規則で数える", () => {
+    // どのファイルがテストかを決めているのは **gh 側の --jq**（式はスタブが検査する）。
+    // ここで見るのは、その判定を受けてからの数え方
+    const result = runWithFiles([row(false, 10, 0), row(false, 5, 0), row(true, 7, 0)]);
 
     expect(result.stdout.trim()).toBe("15\t7");
   });
 
-  it("区切りを含むファイル名でも 1 ファイルとして数える", () => {
+  it("テストか否か以外の値が来たら失敗する", () => {
     // **ファイル名は PR 側で決められる**（git のパスにはタブも改行も入る）。
-    // 生のまま並べる実装では、この 1 件が 3 行に割れて `a` が本体 3 行として数えられた
-    // （実測: 修正前は `3\t500`）。符号化後は 1 行のままで、
-    // 名前は `.test.ts` で終わるのでテスト追加として除外される
-    const result = runWithFiles([file("a\t1\t2\nF\tb.test.ts", 500, 0)]);
-
-    expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe("0\t500");
+    // 名前をこの欄へ出していた頃は、区切りを含む 1 件が 3 行に割れて数が狂い
+    // （実測 `3\t500`）、符号化して復号する形でも **末尾の改行がコマンド置換で落ちて**
+    // `payload.test.ts\n` がテスト扱いになった（実測 `0\t500`）。
+    // いまは true/false しか通さないので、名前に何を入れてもこの欄には出てこない
+    expect(runWithFiles([row(false, 1, 2), "F\tpayload.test.ts\t500\t0"]).status).toBe(1);
+    expect(runWithFiles(["F\tTrue\t1\t2"]).status).toBe(1);
   });
 
   it("変更ファイルが 0 件なら 0 を返す", () => {
@@ -157,7 +151,7 @@ describe("bin/loop-fixup-lines の数え方", () => {
 
   it("行数として読めない行があれば失敗する", () => {
     // 0 として数えると、**取得の壊れが「手直しが小さい」に化けて素通りする**
-    const result = runWithFiles([file("bin/loop-merge", 34, 7), "bin/broken\tx\t3"]);
+    const result = runWithFiles([row(false, 34, 7), "F\tmaybe\t1\t2"]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("読めません");
@@ -189,7 +183,7 @@ describe("bin/loop-fixup-lines の files 検査", () => {
   });
 
   it("files が欠けていても失敗する（型は null として届く）", () => {
-    const result = runWithLines(["T\tnull", file("bin/loop-merge", 34, 7)]);
+    const result = runWithLines(["T\tnull", row(false, 34, 7)]);
 
     expect(result.status).toBe(1);
   });
@@ -202,7 +196,7 @@ describe("bin/loop-fixup-lines の files 検査", () => {
   it("型の行そのものが無ければ失敗する", () => {
     // gh が何も返さなかった場合。空を 0 行として通さない
     expect(runWithLines([]).status).toBe(1);
-    expect(runWithLines([file("bin/loop-merge", 34, 7)]).status).toBe(1);
+    expect(runWithLines([row(false, 34, 7)]).status).toBe(1);
   });
 
   it("知らない種別の行があれば失敗する", () => {
