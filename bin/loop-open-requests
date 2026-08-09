@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# master が PR へ出した「直してほしいこと」が残っているかを見る。
+#
+#   bin/loop-open-requests <PR番号>
+#
+# **master の要求は通常の PR コメントで渡す** (手順書のステップ 4)。ところが
+# ゲートが見る「未解決」は**レビュースレッドだけ**なので、コメントで出した要求は
+# ゲートから見えない。実際に PR #48 で「これが済んだらマージする」と書いた直後に
+# GATE PASS が出た。**止めていたのは master の記憶だけ**で、セッションが落ちれば消える。
+#
+# 「回数を自分で覚えない」(bin/loop-stall) と同じ理由で、これも状態にする。
+# 置き場所は **PR の label**。master が付け、master が外す。
+#
+#   要求を出す   … gh pr edit <PR> --add-label changes-requested
+#   要求を下ろす … gh pr edit <PR> --remove-label changes-requested
+#
+# **worker は外さない。** 外せるのが worker になると「直したと自己申告すれば通る」に
+# なり、判定の独立性が消える (master が実装しないのと同じ理由)。
+#
+# レビュースレッドとして投稿する案は採らなかった。スレッドはファイルと行に紐づくので、
+# **CI の失敗や規模超過のように行を指せない要求が表せない**。
+# 「最後の master コメント以降に push があるか」で見る案も採らなかった。
+# push は要求が満たされた証拠ではないし、master のコメントには判定の報告も混ざる。
+#
+#   exit 0 = 未処理の要求は無い
+#   exit 1 = master が要求を出している (マージしてはいけない)
+#   exit 2 = 判定できない / 使い方の誤り
+#
+# **判定不能を 0 に倒さない。** そこを緩めると、API 障害の周回だけ要求が消える。
+set -uo pipefail
+
+# 要求が残っていることを表す label。ここが正で、手順書はこの名前を引く。
+readonly REQUEST_LABEL="changes-requested"
+
+usage() {
+  echo "使い方: bin/loop-open-requests <PR番号>" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+[[ $1 =~ ^[0-9]+$ ]] || usage
+readonly PR="$1"
+
+if ! labels="$(gh pr view "$PR" --json labels --jq '.labels[].name' 2>/dev/null)"; then
+  echo "[FAIL] PR #$PR の label を取得できません" >&2
+  exit 2
+fi
+
+# **完全一致で見る。** 前方一致にすると changes-requested-later のような名前でも
+# 止まってしまい、要求が無いのにマージできない PR を作れる。
+while IFS= read -r label; do
+  if [[ $label == "$REQUEST_LABEL" ]]; then
+    echo "master の要求あり: $REQUEST_LABEL"
+    exit 1
+  fi
+done <<<"$labels"
+
+echo "master の要求なし"
+exit 0
