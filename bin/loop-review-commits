@@ -19,6 +19,13 @@
 # **「レビューした」の判定は commit_id の有無ではなく、本文にレビュー内容があるか**で行う。
 # review オブジェクトである・commit_id を持つ、は応答の器の話でしかない。
 #
+# **rebase で消えた commit のレビューは数えない。** 保留した PR を再開するときは
+# main を取り込み直すので head が変わり、それまでのレビューは **現 head の祖先ではない
+# commit** を見たことになる。数えたままにすると、レビュー上限に達している PR が
+# 「上限到達＋手直しが上限超え」で人の判断待ちになり、**保留した PR が二度と
+# マージできない**。祖先かどうかは compare の status で機械的に分かる
+# (ahead / identical = 祖先、behind / diverged = そうでない)。
+#
 # review だけを数えると、指摘ゼロの PR が「未レビュー」と判定され、
 # **きれいな PR ほどマージできない**という逆転が起きる。実際に踏んだ。
 #
@@ -124,5 +131,24 @@ if ! paired="$(printf '%s' "$responses" | "$(dirname "$0")/loop-review-head" --p
   exit 2
 fi
 
-printf '%s' "$paired" | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}$'
+# 現 head の祖先でない commit へのレビューを落とす。head を取れないときは
+# 判定できないので失敗に倒す (数え落として「未レビュー」に見えるほうが安全)。
+if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
+  || [[ -z $head_sha ]]; then
+  echo "[FAIL] PR #$PR の head SHA を取得できません" >&2
+  exit 2
+fi
+
+while IFS=$'\t' read -r ts sha; do
+  [[ -n $sha ]] || continue
+  if ! status="$(gh api "repos/{owner}/{repo}/compare/${sha}...${head_sha}" \
+    --jq '.status' 2>/dev/null)" || [[ -z $status ]]; then
+    echo "[FAIL] PR #$PR: $sha が現 head の祖先か判定できません" >&2
+    exit 2
+  fi
+  # ahead = head が先に進んでいる (sha は祖先) / identical = 同じ commit
+  [[ $status == "ahead" || $status == "identical" ]] || continue
+  printf '%s\t%s\n' "$ts" "$sha"
+done <<<"$(printf '%s' "$paired" \
+  | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}$' || (( $? == 1 )))"
 exit 0

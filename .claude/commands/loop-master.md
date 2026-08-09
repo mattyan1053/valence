@@ -63,13 +63,15 @@ HEAD が動いたことは前へ進んだ証拠なので、ここで数え直す
 ## 2. open PR を見て、見る順番を決める
 
 ```bash
-gh pr list --state open --limit 200 --json number,headRefOid,title,isDraft,baseRefName,mergeable
+gh pr list --state open --limit 200 \
+  --json number,headRefOid,title,isDraft,baseRefName,mergeable,labels
 ```
 
 `--limit` を明示する。既定 30 件では、それを超えたときに古い PR を取りこぼす。
 取得に失敗したら `bin/loop-stall pr-lookup-failed` を通して停止する。
 
 0 件ならステップ 5（起票）へ。draft は worker が作業中なので触らない。
+**`parked` の PR も選ばない**（先行 PR を待って保留中。ゲートを回しても意味が無い）。
 
 **複数あるときは順番が結果を変える。** 何も考えずに番号順で見ると、後続が依存する
 PR を後回しにして、無駄なコンフリクト解消を worker にさせることになる。次の順で選ぶ。
@@ -318,6 +320,32 @@ gh issue edit <割り込みの N> --remove-label backlog --add-label ready
 
 worker が既に着手している（`in-progress`）ものは、label を戻しても止まらない。
 **手を止めさせたいときは、次の「割り込みを伝える」に従う。**
+
+### PR を保留にする / 再開する
+
+レビュー中に「先に直すべきもの」が見つかったら、**その PR を保留にして先行 PR を先に通す**。
+保留にせず抱えたままだと、worker は「同時に持つ PR は 1 本」に引っかかって先行 PR を作れない。
+
+```bash
+gh pr edit <PR番号> --add-label parked         # 保留にする
+gh pr comment <PR番号> --body-file <file>      # 理由と、待っている Issue / PR の番号
+gh issue create --label backlog --title "<先行対応>" --body-file <file>
+```
+
+**待っている番号を必ず双方へ書く。** 保留した PR には「#N を待っている」、
+先行の Issue には「#PR を保留中」と書く。どちらか一方だと、片側からたどれない。
+
+先行 PR がマージされたら、**`parked` を外して worker に rebase を指示する**。
+
+```bash
+gh pr edit <PR番号> --remove-label parked
+gh pr comment <PR番号> --body-file <file>      # 「main を取り込み直して push してほしい」
+```
+
+**rebase すると head が変わり、それまでのレビューは数え直される**
+（`bin/loop-review-commits` が現 head の祖先でない commit へのレビューを落とす）。
+つまり**再開後は改めてレビューを要求できる**。これが無いと、上限に達している PR は
+「上限到達＋手直しが上限超え」で人の判断待ちになり、**保留した PR が二度とマージできない**。
 
 ### 割り込みを伝える
 
