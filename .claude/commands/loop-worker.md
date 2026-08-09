@@ -47,14 +47,23 @@ git switch main && git fetch origin main && git merge --ff-only origin/main
 - **裏付けが見つからないなら推測で動かない。** 送り主へ確認するか、GitHub の状態に従う
 
 **メッセージは届かないことがある**（セッションが落ちた、相手が一覧に居なかった）。
-そのため **毎周回、自分の open PR と `in-progress` の Issue の通常コメントを読む。**
+そのため **毎周回、自分の open PR と `in-progress` / `blocked` の Issue の通常コメントを読む。**
 
 ```bash
 gh pr list --state open --limit 200 --author @me --json number --jq '.[].number'
-gh issue list --label in-progress --limit 100 --json number --jq '.[].number'
-gh api repos/{owner}/{repo}/issues/<番号>/comments \
+gh issue list --label in-progress --limit 200 --json number --jq '.[].number'
+gh issue list --label blocked --limit 200 --json number --jq '.[].number'
+gh api --paginate repos/{owner}/{repo}/issues/<番号>/comments \
   --jq '.[] | "\(.created_at) \(.user.login): \(.body)"'
 ```
+
+**`--paginate` と `--limit` を省かない。** 既定では先頭ページ（コメントは 30 件）しか
+返らず、**後から投稿された指示ほど読み落とす**。
+
+**`blocked` が付いていたら手を止める。** master が着手済みの作業を止めるときは
+`in-progress` を外して `blocked` を付ける（「後回し」の `backlog` とは別の状態）。
+**PR がまだ無い段階で割り込まれた場合、`blocked` が唯一の手がかりになる。**
+自分が進めていた作業がそこにあるなら、続けずに理由のコメントを読む。
 
 **未解決のレビュースレッドだけを見ていると、通常コメントの指示を取りこぼす。**
 保留・優先順の変更・前提の誤りは、レビュースレッドではなく通常コメントで届く。

@@ -331,14 +331,26 @@ worker が既に着手している（`in-progress`）ものは、label を戻し
 # まだ着手していない（ready）を後回しにする
 gh issue edit <N> --remove-label ready --add-label backlog
 
-# **着手済み（in-progress）を止める場合は in-progress も外す。**
-# gh issue edit は指定した label だけを足し引きするので、外し忘れると
-# worker のステップ 2.2 が「公開に失敗した周回」としてその Issue を再開する
-gh issue edit <N> --remove-label in-progress --add-label backlog
+# **着手済み（in-progress）を止める場合は blocked を付ける。**
+# gh issue edit は指定した label だけを足し引きするので in-progress も外す。
+# 外し忘れると、worker のステップ 2.2 が「公開に失敗した周回」として再開する
+gh issue edit <N> --remove-label in-progress --add-label blocked
 
 gh pr comment <PR番号> --body-file <file>    # 何を止めるか / なぜかを残す
 ListAgents                                   # 相手を探す
 ```
+
+**「後回し」と「止めた」は別の状態である。**
+
+| 状況 | label | worker から見えるか |
+| --- | --- | --- |
+| まだ着手していないものを後回しにする | `ready` → `backlog` | 着手していないので影響なし |
+| **着手済みの作業を止める** | `in-progress` → `blocked` | **`blocked` を読んで手を止める** |
+
+`backlog` へ落とすと、worker が読む対象（`in-progress` / `blocked`）から消える。
+**PR がまだ無い段階では、`blocked` が唯一の手がかりになる。**
+`blocked` は `loop/README.md` で「判断が要る。ループは触らない」と定義済みで、
+停止を表す label として既にある。
 
 **メッセージは揮発する。** セッションが落ちれば消えるので、**メッセージだけで指示を
 完結させない**。worker が再起動しても、GitHub の状態だけで同じ結論に至れること。
