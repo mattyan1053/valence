@@ -11,6 +11,10 @@
 #   指摘なし → 会話コメント。本文に「Reviewed commit: `<短縮SHA>`」を含む
 #   指摘なし → PR 本体への 👍 リアクションだけ。**SHA を持たない**
 #
+# これに加えて、**レビューできなかったときの通知** (「環境が無い」旨の会話コメント) も
+# 要求への応答である。レビューはしていないので SHA を持たないが、数から落とすと
+# 記録が消費されずに残り、あとから来た 👍 がそこへ吸われる。
+#
 # review だけを数えると、指摘ゼロの PR が「未レビュー」と判定され、
 # **きれいな PR ほどマージできない**という逆転が起きる。実際に踏んだ。
 #
@@ -62,12 +66,20 @@ if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" 2>/de
   exit 2
 fi
 
-# 「Reviewed commit: `<sha>`」からバッククォートに挟まれた 16 進を抜く。
+# 会話コメントは 2 種類ある。どちらも **要求に対する応答** なので数に入れる。
+#
+#   「Reviewed commit: `<sha>`」… 指摘なしのレビュー。SHA を持つ
+#   「環境が無い」旨の通知    … レビューできなかった。SHA を持たない (印 - で返す)
+#
+# 後者を落とすと、その応答が記録を消費しないまま残り、あとから来た 👍 が
+# そこへ吸われて **現 head が永久にレビュー済みにならない**。
+# bin/loop-review-budget は前から通知を応答として扱っており、定義を揃える。
 if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
   | jq -rs --arg bot "$REVIEW_BOT" \
     'add | map(select(.user.login == $bot))
      | map(. as $c
-           | ($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha? // empty)
+           | (($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha?)
+              // (if ($c.body | test("create an environment"; "i")) then "-" else empty end))
            | "\($c.created_at)\t\(.)")
      | .[]')"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
@@ -89,7 +101,7 @@ fi
 # pipefail がそれをパイプライン全体の失敗にするので、**1 だけ**を通す。
 # `|| true` にすると grep 自体のエラー (2 以上) まで飲み込んでしまう。
 responses="$(printf '%s\n%s\n%s' "$reviews" "$comments" "$reactions" \
-  | { grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t([0-9a-f]{7,40})?$' || (( $? == 1 )); } \
+  | { grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t([0-9a-f]{7,40}|-)?$' || (( $? == 1 )); } \
   | sort -s -k1,1)"
 
 if ! paired="$(printf '%s' "$responses" | "$(dirname "$0")/loop-review-head" --pair "$PR")"; then
