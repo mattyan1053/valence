@@ -62,8 +62,16 @@ done
 # 型を出力の一部にしてあるのは、**判定をこのスクリプト側に置いてテストするため**でもある。
 # --jq の中で弾くと、差し替えた gh が --jq を実行しない (コンテナに jq が無い) 以上、
 # 「配列でなければ落ちる」ことを 1 つも確かめられない。
+# **ファイル名を外へ出さない。** git のパスにはタブも改行も入り、**名前は PR 側で
+# 決められる**。生のまま並べると 1 件が複数行に割れて数が狂うし (実測: 区切りを含む
+# 名前 1 件が 3 行に割れた)、符号化して復号する形も **末尾の改行がコマンド置換で
+# 落ちて `payload.test.ts\n` がテスト扱いになった** (実測: 本体 500 行が 0 行に化けた)。
+#
+# **テストかどうかの判定を --jq の中で終わらせ、外へは true/false と数値だけ出す。**
+# 名前がどの層にも出てこないので、区切りも末尾の空白も問題にならない。
+# `.test.ts` はこの判定の定数なので、式へ literal で書ける (外部の値を差し込まない)。
 if ! out="$(gh api "repos/{owner}/{repo}/compare/${REVIEWED}...${HEAD_SHA}" \
-  --jq '"T\t\(.files | type)", (.files[]? | "F\t\(.filename)\t\(.additions)\t\(.deletions)")' \
+  --jq '"T\t\(.files | type)", (.files[]? | "F\t\(.filename | endswith(".test.ts"))\t\(.additions)\t\(.deletions)")' \
   2>/dev/null)"; then
   echo "[FAIL] レビュー済み commit から head までの差分を取得できません" >&2
   exit 1
@@ -88,14 +96,15 @@ while IFS= read -r row; do
   # 行ごと正規表現で受ける。IFS=タブ の read はタブが IFS の空白文字なので
   # **連続が 1 区切りに畳まれ、列が足りない行を正常な行として読む**。
   # 読めない行を 0 として数えると、**取得の壊れが「手直しが小さい」に化けて素通りする**。
-  [[ $row =~ ^F$'\t'(.+)$'\t'([0-9]+)$'\t'([0-9]+)$ ]] || {
+  # テストかどうかは true/false のどちらかしか来ない。形も確かめる。
+  [[ $row =~ ^F$'\t'(true|false)$'\t'([0-9]+)$'\t'([0-9]+)$ ]] || {
     echo "[FAIL] 差分の行数を数値として読めません: $row" >&2
     exit 1
   }
-  name="${BASH_REMATCH[1]}"
+  is_test="${BASH_REMATCH[1]}"
   additions="${BASH_REMATCH[2]}"
   deletions="${BASH_REMATCH[3]}"
-  if [[ $name == *.test.ts ]]; then
+  if [[ $is_test == "true" ]]; then
     ((counted += 10#$deletions, excluded += 10#$additions))
   else
     ((counted += 10#$additions + 10#$deletions))
