@@ -120,11 +120,15 @@ describe("上限に達したときに止める対象", () => {
 
     // 呼ばれたことだけを残す task。本物のように loop/STOP は配らない
     const fakeTask = (repo: string) => {
-      writeFileSync(join(repo, "task"), `#!/usr/bin/env bash
+      writeFileSync(
+        join(repo, "task"),
+        `#!/usr/bin/env bash
 touch '${repo}/stopped'
-`, {
-        mode: 0o755,
-      });
+`,
+        {
+          mode: 0o755,
+        },
+      );
     };
     fakeTask(options.taskIn === "script" ? scriptRepo : cwdRepo);
 
