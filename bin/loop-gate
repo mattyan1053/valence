@@ -72,13 +72,20 @@ pass() { results+=("[ OK ] $1"); }
 # open / draft でない / base が main であることを確認する。
 # base を見ないと、別ブランチ宛ての PR を main 相当として扱ってしまう。
 head_sha=""
-if ! pr_json="$(gh pr view "$PR" --json state,isDraft,baseRefName,headRefOid 2>/dev/null)"; then
+# 取り出しは gh の --jq だけで行い、**外部の jq に依存しない**。
+# 依存すると jq の無い環境 (開発コンテナ) でゲートを動かせず、
+# **合否を決めるこのスクリプトだけテストが書けない** ことになる。
+# 1 行 1 値で受ける。TSV を IFS=タブ で割ると連続タブが畳まれ、空の値で列がずれる。
+if ! pr_fields="$(gh pr view "$PR" --json state,isDraft,baseRefName,headRefOid \
+  --jq '[.state, (.isDraft | tostring), (.baseRefName // ""), (.headRefOid // "")] | .[]' \
+  2>/dev/null)"; then
   fail "判定対象: PR #$PR の情報を取得できません"
 else
-  state="$(jq -r '.state' <<<"$pr_json")"
-  draft="$(jq -r '.isDraft' <<<"$pr_json")"
-  base="$(jq -r '.baseRefName' <<<"$pr_json")"
-  head_sha="$(jq -r '.headRefOid' <<<"$pr_json")"
+  mapfile -t pr_values <<<"$pr_fields"
+  state="${pr_values[0]-}"
+  draft="${pr_values[1]-}"
+  base="${pr_values[2]-}"
+  head_sha="${pr_values[3]-}"
   if [[ $state != "OPEN" ]]; then
     fail "判定対象: PR #$PR は open ではありません ($state)"
   elif [[ $draft == "true" ]]; then
@@ -93,11 +100,13 @@ else
 fi
 
 # --- 2. 規模上限 --------------------------------------------------------------
-if ! size_json="$(gh pr view "$PR" --json changedFiles,additions,deletions 2>/dev/null)"; then
+if ! size_fields="$(gh pr view "$PR" --json changedFiles,additions,deletions \
+  --jq '[.changedFiles, (.additions + .deletions)] | .[]' 2>/dev/null)"; then
   fail "規模上限: 差分の規模を取得できません"
 else
-  files="$(jq -r '.changedFiles' <<<"$size_json")"
-  lines="$(jq -r '.additions + .deletions' <<<"$size_json")"
+  mapfile -t size_values <<<"$size_fields"
+  files="${size_values[0]-}"
+  lines="${size_values[1]-}"
   if ! [[ $files =~ ^[0-9]+$ && $lines =~ ^[0-9]+$ ]]; then
     fail "規模上限: 差分の規模を数値として読めません"
   elif ((files > MAX_FILES)); then
@@ -114,16 +123,35 @@ fi
 # gh pr checks は「取得の失敗」でも「チェックが pending / fail」でも非ゼロで終わる
 # (pending は exit 8)。終了コードだけで弾くと、CI が落ちている PR を「取得できません」
 # として片付けてしまい、worker へ修正を返す経路が死ぬ。出力の有無で切り分ける。
-checks_json="$(gh pr checks "$PR" --json name,bucket 2>/dev/null)"
-if [[ -z ${checks_json//[[:space:]]/} ]] || ! jq -e 'type == "array"' <<<"$checks_json" >/dev/null 2>&1; then
+# 1 行目に結果の型、2 行目以降に "C<TAB>名前<TAB>bucket" を出させる。
+# **型を出力に含める**のは、取得の失敗と「チェック 0 件」を見分けるため
+# (どちらも本文が空になる)。bin/loop-fixup-lines と同じ形。
+checks_out="$(gh pr checks "$PR" --json name,bucket \
+  --jq '"T\t\(type)", (.[]? | "C\t\(.name)\t\(.bucket)")' 2>/dev/null)"
+checks_type=""
+check_lines=()
+while IFS= read -r line; do
+  case "$line" in
+    T$'\t'*) checks_type="${line#T$'\t'}" ;;
+    C$'\t'*) check_lines+=("${line#C$'\t'}") ;;
+  esac
+done <<<"$checks_out"
+
+if [[ $checks_type != "array" ]]; then
   fail "GHA CI: gh pr checks で結果を取得できません"
-elif [[ "$(jq -r 'length' <<<"$checks_json")" == "0" ]]; then
+elif ((${#check_lines[@]} == 0)); then
   fail "GHA CI: チェックが 1 件も登録されていません"
 else
   missing=()
   bad=()
   for name in "${required[@]}"; do
-    bucket="$(jq -r --arg n "$name" '.[] | select(.name == $n) | .bucket' <<<"$checks_json" | head -1)"
+    bucket=""
+    for line in "${check_lines[@]}"; do
+      if [[ ${line%%$'\t'*} == "$name" ]]; then
+        bucket="${line#*$'\t'}"
+        break
+      fi
+    done
     if [[ -z $bucket ]]; then
       missing+=("$name")
     elif [[ $bucket != "pass" ]]; then
