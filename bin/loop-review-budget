@@ -79,33 +79,29 @@ fi
 # 無効にし、**過去の要求が応答された事実は消さない**。同じ列から両方を導くと、
 # 保留した PR を rebase した瞬間に応答済みの要求まで未応答へ戻り、
 # **再レビューを要求できないまま詰む**。
-if ! reviewed="$("$(dirname "$0")/loop-review-commits" "$PR")"; then
+# **取得は 1 回だけ。** 2 回叩くと、その間に応答が届いたときに「回数は古く、
+# 最後の応答時刻は新しい」という食い違った組み合わせで判定してしまい、
+# **レビュー上限を 1 回超えられる**。同じスナップショットから両方を導く。
+if ! responses="$("$(dirname "$0")/loop-review-commits" --all "$PR")"; then
   echo "[FAIL] PR #$PR のレビュー済み commit を取得できません" >&2
   exit 2
 fi
-if ! answered="$("$(dirname "$0")/loop-review-commits" --all "$PR")"; then
-  echo "[FAIL] PR #$PR の応答履歴を取得できません" >&2
-  exit 2
-fi
 
-# 回数と head 一致は「有効なレビュー」から数える (rebase で消えたものは数えない)。
 rounds=0
 reviewed_head="no"
-while IFS=$'\t' read -r _ts sha; do
+last_at=""
+while IFS=$'\t' read -r ts sha live; do
   [[ -n $sha ]] || continue
+  # 最後に応答があった時刻は **rebase で消えたものも含めて** 取る。
+  # これを落とすと「応答済みの古い要求」まで未応答として数えてしまう。
+  last_at="$ts"
+  # 回数と head 一致は「有効なレビュー」だけを見る (rebase で消えたものは数えない)。
+  [[ $live == "live" ]] || continue
   ((rounds++))
   # 👍 だけの応答も bin/loop-review-head の記録で SHA が確定しているので、
   # gate と同じ基準で扱う。出どころによる場合分けは要らない。
   [[ $head_sha == "$sha"* ]] && reviewed_head="yes"
-done <<<"$reviewed"
-
-# 最後に応答があった時刻は **rebase で消えたものも含めて** 取る。
-# これを落とすと「応答済みの古い要求」まで未応答として数えてしまう。
-last_at=""
-while IFS=$'\t' read -r ts sha; do
-  [[ -n $sha ]] || continue
-  last_at="$ts"
-done <<<"$answered"
+done <<<"$responses"
 
 # --- 会話コメント -------------------------------------------------------------
 # 「受け取ったレビュー」だけを数えると、レビューが返ってこない場合に上限へ到達せず、

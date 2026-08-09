@@ -291,9 +291,22 @@ gh issue list --label backlog --limit 200 --search "sort:created-asc" --json num
 「永久に後回し」を master 側で作り直す**ことになる。`--search "sort:created-asc"` で
 古い順へ倒し、`--limit` も明示する（ステップ 2 の PR 取得と同じ理由）。
 
+**`parked` な PR に紐づく Issue は「着手中」に数えない。** 保留した PR の Issue は
+`in-progress` のまま残るので、数えると **先行 Issue を `ready` へ昇格させられず、
+worker は PR-B を作れない**（worker 側で 2.2 を抜けても、`ready` が無ければ止まる）。
+**両側で外して初めて経路が通る。**
+
+```bash
+# parked な PR が閉じる予定の Issue（PR 本文の Closes #N）
+gh pr list --state open --limit 200 --json number,labels,body \
+  --jq '.[] | select([.labels[].name] | index("parked")) | .body' \
+  | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+'
+```
+
 - **`ready` が 2 件以上** → 運用が壊れている。どれを次にするか決まらないので、
   `bin/loop-stall "too-many-ready:<件数>"` を通して停止する
-- **`in-progress` がある** → worker が動いている。何もしない。この周回は終わり
+- **`in-progress` がある**（上で除いた残りが 1 件でもある）→ worker が動いている。
+  何もしない。この周回は終わり
 - **`ready` が 1 件** → worker の番。何もしない。この周回は終わり
 - **`ready` も `in-progress` も 0 件** → `backlog` から次の 1 件を選んで昇格させる
 

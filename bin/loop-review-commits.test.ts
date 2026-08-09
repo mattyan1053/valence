@@ -105,6 +105,19 @@ describe("bin/loop-review-commits", () => {
     expect(result.stdout).toContain(LIVE);
   });
 
+  it("--all は 1 回の取得で両方の軸を返す（live / stale を添える）", () => {
+    // 呼び出し側が既定と --all を 2 回叩くと、その間に届いた応答で片方だけ新しい
+    // 食い違った組み合わせになり、**レビュー上限を 1 回超えられる**
+    const rows = run(["--all", "12"])
+      .stdout.split("\n")
+      .filter((line) => line !== "");
+
+    expect(rows).toEqual([
+      `2026-08-09T00:00:00Z\t${LIVE}\tlive`,
+      `2026-08-09T01:00:00Z\t${STALE}\tstale`,
+    ]);
+  });
+
   it("祖先か判定できないときは失敗にする", () => {
     // 数え落として「未レビュー」に見えるほうが安全
     const result = run(["12"], { compareFails: true });
