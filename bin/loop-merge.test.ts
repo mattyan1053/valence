@@ -43,7 +43,18 @@ function run(args: string[]): Run {
  * gh を差し替えて判定だけを動かす。**この判定こそが本題**で、
  * 実際にマージしてしまうため本物の gh では試せない。
  */
-function runWithFakeGh(prFields: string[], mergeExit: number): FakeRun {
+function runWithFakeGh(
+  prFields: string[],
+  mergeExit: number,
+  /** remote ブランチの見え方。削除の反映には数秒かかることがある。 */
+  branchRef:
+    | "gone"
+    | "always-there"
+    | "gone-after-retry"
+    | "cannot-tell"
+    | "exists-then-cannot-tell" = "gone",
+  extraEnv: Record<string, string> = {},
+): FakeRun {
   const dir = mkdtempSync(join(tmpdir(), "loop-merge-fake-"));
   symlinkSync("/usr/bin/bash", join(dir, "bash"));
   const callLog = join(dir, "calls");
@@ -57,6 +68,32 @@ function runWithFakeGh(prFields: string[], mergeExit: number): FakeRun {
       'if [[ $1 == "pr" && $2 == "merge" ]]; then',
       '  echo "could not determine current branch: not on any branch" >&2',
       `  exit ${mergeExit}`,
+      "fi",
+      // remote ブランチの存在確認。何度目の問い合わせかで応答を変える
+      'if [[ $1 == "api" ]]; then',
+      // cat は組み込みではないので使わない（PATH に置いていない）
+      "  n=0",
+      `  [[ -f '${dir}/apicalls' ]] && read -r n < '${dir}/apicalls'`,
+      "  n=$((n + 1))",
+      `  echo "$n" > '${dir}/apicalls'`,
+      // gh は失敗の理由を問わず 1 を返す。404（消えた）とそれ以外を本文で分ける
+      ...(branchRef === "always-there"
+        ? ["  exit 0"]
+        : branchRef === "gone-after-retry"
+          ? [
+              "  if ((n == 1)); then exit 0; fi",
+              '  echo "gh: Not Found (HTTP 404)" >&2',
+              "  exit 1",
+            ]
+          : branchRef === "cannot-tell"
+            ? ['  echo "error connecting to api.github.com" >&2', "  exit 1"]
+            : branchRef === "exists-then-cannot-tell"
+              ? [
+                  "  if ((n == 1)); then exit 0; fi",
+                  '  echo "error connecting to api.github.com" >&2',
+                  "  exit 1",
+                ]
+              : ['  echo "gh: Not Found (HTTP 404)" >&2', "  exit 1"]),
       "fi",
       'if [[ $1 == "pr" && $2 == "view" ]]; then',
       // --jq は gh 側で解決されるので、差し替えでは取り出し済みの値を 1 行 1 値で返す
@@ -72,7 +109,8 @@ function runWithFakeGh(prFields: string[], mergeExit: number): FakeRun {
 
   const result = spawnSync(SCRIPT, ["12", GATED_SHA], {
     encoding: "utf8",
-    env: { ...process.env, PATH: dir },
+    // 反映待ちで実時間を使わない
+    env: { ...process.env, PATH: dir, LOOP_BRANCH_CHECK_WAIT_SEC: "0", ...extraEnv },
   });
   const calls = existsSync(callLog)
     ? readFileSync(callLog, "utf8")
@@ -117,6 +155,52 @@ describe("bin/loop-merge の成否判定", () => {
     expect(mergeCall).toBe(`pr merge 12 --squash --delete-branch --match-head-commit ${GATED_SHA}`);
   });
 
+  it("削除の反映が遅れているだけなら、ブランチ残りの警告を出さない", () => {
+    // --delete-branch の削除が GitHub 側へ反映される前に読むと、まだ ref が見える。
+    // **毎回出る警告は読まれなくなる**ので、本当に残ったときに気づけなくなる
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+      "gone-after-retry",
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("remote ブランチが残っています");
+  });
+
+  it("待っても残っているブランチは警告する", () => {
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+      "always-there",
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("remote ブランチが残っています: feat/x");
+  });
+
+  it("確認できなかっただけの失敗を、ブランチが消えたと扱わない", () => {
+    // gh は通信エラーや rate limit でも 1 を返す。**「分からない」を「大丈夫」に丸めない**
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+      "cannot-tell",
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("確認できませんでした");
+  });
+
+  it("存在を確認したあと判定できなくなったら、残っている側に倒す", () => {
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+      "exists-then-cannot-tell",
+    );
+
+    expect(result.stdout).toContain("remote ブランチが残っています: feat/x");
+  });
+
   it("ゲートした SHA と違う head がマージされていたら成功にしない", () => {
     // ゲート後に別の commit が push され、人が UI から手でマージした場合。
     // --match-head-commit はこちらのマージ要求にしか効かないので、state だけ見ると
@@ -134,6 +218,43 @@ describe("bin/loop-merge の成否判定", () => {
     const result = runWithFakeGh(["MERGED", "", "", "feat/x", GATED_SHA], 0);
 
     expect(result.status).toBe(1);
+  });
+});
+
+describe("bin/loop-merge の設定検査", () => {
+  /** 設定だけを見る（gh を呼ばせない）。 */
+  function runWithConfig(wait: string): Run {
+    const result = spawnSync(SCRIPT, ["12", GATED_SHA], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: binDir, LOOP_BRANCH_CHECK_WAIT_SEC: wait },
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it("待ち時間が非負整数でなければ落ちる", () => {
+    // 算術評価でエラーになる値。sleep が呼ばれず、誤警告が設定次第で戻る
+    expect(runWithConfig("0.5").status).toBe(2);
+    expect(runWithConfig("foo").status).toBe(2);
+    expect(runWithConfig("-1").status).toBe(2);
+    expect(runWithConfig("0.5").stderr).toContain("LOOP_BRANCH_CHECK_WAIT_SEC");
+  });
+
+  it("先頭に 0 が付いていても 10 進として受け付ける", () => {
+    // 08 を 8 進として読むと算術エラーになる
+    expect(runWithConfig("08").status).not.toBe(2);
+  });
+
+  it("設定が誤っていたら、マージを試みる前に落ちる", () => {
+    // マージは取り消せない。**その後で落ちると成功したマージが失敗として記録される**
+    const result = runWithFakeGh(
+      ["MERGED", "2026-08-08T22:21:40Z", "6e8a472", "feat/x", GATED_SHA],
+      0,
+      "gone",
+      { LOOP_BRANCH_CHECK_WAIT_SEC: "0.5" },
+    );
+
+    expect(result.status).toBe(2);
+    expect(result.calls).toEqual([]);
   });
 });
 
