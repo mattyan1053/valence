@@ -105,6 +105,18 @@ describe("ループが使う label", () => {
     expect(missing).toEqual([]);
   });
 
+  it("changes-requested を外すのは master の手順だけ", () => {
+    // **worker が外せると「直したと自己申告すれば通る」になり、判定の独立性が消える。**
+    // ゲートはこの label だけを見るので、外す側が増えた時点で歯止めが無くなる
+    const removers = labelsUsedInDocs()
+      .filter(({ label }) => label === "changes-requested")
+      .filter(({ file }) => /--remove-label changes-requested/.test(read(file)))
+      .map(({ file }) => file);
+
+    expect(removers).toContain(".claude/commands/loop-master.md");
+    expect(removers).not.toContain(".claude/commands/loop-worker.md");
+  });
+
   it("手順書が渡す label はすべて用意されている", () => {
     const known = new Set(labelsCreatedBySetup());
 

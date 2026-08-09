@@ -314,6 +314,27 @@ describe("作業が尽きた周回の数え方", () => {
     expect(result.stops).toEqual([false, false]);
   });
 
+  it("master の要求が外れないまま 3 周続くと loop/STOP が配られる", () => {
+    // **label は master しか外せない。** 外し忘れると、その PR は永久にマージされず
+    // 3 周続いても人を呼べない（#47 で塞いだ形が別の場所に開く）
+    const sha = "a".repeat(40);
+    const id = `changes-requested:50@${sha}`;
+    const result = runNoWorkToLimit([id, id, id]);
+
+    expect(result.status).toBe(1);
+    expect(result.stops).toEqual([true, true]);
+  });
+
+  it("worker が push した周回は数え直す（SHA が変わる）", () => {
+    // 対応が進んでいるあいだに止めない
+    const a = `changes-requested:50@${"a".repeat(40)}`;
+    const b = `changes-requested:50@${"b".repeat(40)}`;
+    const result = runNoWorkToLimit([a, a, b]);
+
+    expect(result.status).toBe(0);
+    expect(result.stops).toEqual([false, false]);
+  });
+
   it("もう一方のループの停止が挟まっても数え直さない", () => {
     // **カウンタは master と worker で共有している。** 別の識別子で数え直す作りだと、
     // 「master は no-work、worker は dirty」で交互に書き合って **どちらも 3 に届かない**。

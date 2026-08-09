@@ -130,6 +130,14 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 | `in-progress` | worker が着手中 | worker |
 | `blocked` | 判断が要る。ループは触らない | どちらでも |
 | `parked` | **PR に付ける。** 先行 PR を待って保留中 | master |
+| `changes-requested` | **PR に付ける。** master が出した要求が未処理 | master |
+
+**master が PR コメントで出した要求は `changes-requested` で表す。** ゲートが見る
+「未解決」はレビュースレッドだけなので、コメントだけでは**ゲートから見えない**
+（実際に「これが済んだらマージする」と書いた直後に GATE PASS が出た）。
+付けるのも外すのも master。**worker は外さない**（外せると自己申告で通ってしまう）。
+**label を先に付け、成功を確認してからコメントを投稿する**（逆だと、間で落ちたときに
+要求だけが残って label が付かない）。外れないまま 3 周続いたら第 4 層が人を呼ぶ。
 
 **Issue テンプレートからの起票も `backlog` に入る**（`.github/ISSUE_TEMPLATE/`）。
 ここが抜けると、人が立てた Issue が master のどの一覧にも現れない。
