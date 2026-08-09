@@ -28,6 +28,25 @@ function labelsDocumentedInReadme(): string[] {
   return [...table.matchAll(/^\|\s*`([^`]+)`\s*\|/gm)].map((row) => row[1] ?? "");
 }
 
+/** Issue テンプレートが起票時に付ける label。 */
+function labelsUsedInTemplates(): { file: string; label: string }[] {
+  const dir = "github/ISSUE_TEMPLATE".replace("github", ".github");
+  return execFileSync("git", ["ls-files", `${dir}/*.yml`], { cwd: REPO_ROOT, encoding: "utf8" })
+    .split("\n")
+    .filter((path) => path !== "")
+    .flatMap((file) => {
+      const match = read(file).match(/^labels:\s*\[([^\]]*)\]/m);
+      if (match?.[1] === undefined) {
+        return [];
+      }
+      return match[1]
+        .split(",")
+        .map((label) => label.trim().replace(/^["']|["']$/g, ""))
+        .filter((label) => label !== "")
+        .map((label) => ({ file, label }));
+    });
+}
+
 /** 追跡下の Markdown が `gh issue` に渡している label。 */
 function labelsUsedInDocs(): { file: string; label: string }[] {
   const files = execFileSync("git", ["ls-files", "*.md"], { cwd: REPO_ROOT, encoding: "utf8" })
@@ -41,8 +60,43 @@ function labelsUsedInDocs(): { file: string; label: string }[] {
 }
 
 describe("ループが使う label", () => {
-  it("`./task loop:setup` が作る label と loop/README.md の表が一致する", () => {
-    expect([...labelsCreatedBySetup()].sort()).toEqual([...labelsDocumentedInReadme()].sort());
+  it("loop/README.md の表の label は `./task loop:setup` が用意する", () => {
+    const prepared = new Set(labelsCreatedBySetup());
+
+    expect(labelsDocumentedInReadme().filter((label) => !prepared.has(label))).toEqual([]);
+  });
+
+  it("表に無い label を用意するのは、テンプレートが使うものだけ", () => {
+    // 用意する label が増えっぱなしにならないよう、余分は使い道で説明できることを要求する
+    const documented = new Set(labelsDocumentedInReadme());
+    const usedByTemplates = new Set(labelsUsedInTemplates().map(({ label }) => label));
+
+    const extra = labelsCreatedBySetup().filter(
+      (label) => !documented.has(label) && !usedByTemplates.has(label),
+    );
+
+    expect(extra).toEqual([]);
+  });
+
+  it("Issue テンプレートが付ける label はすべて用意されている", () => {
+    // 存在しない label を書いても GitHub はエラーにせず**黙って落とす**。
+    // 起票した人は登録したつもりのまま、どの一覧にも現れない
+    const prepared = new Set(labelsCreatedBySetup());
+
+    expect(labelsUsedInTemplates().filter(({ label }) => !prepared.has(label))).toEqual([]);
+  });
+
+  it("Issue テンプレートは起票を backlog に入れる", () => {
+    // master は backlog / ready / in-progress しか見ない。ここが抜けると
+    // 人の起票が候補から漏れ、master は「作業が無い」と判断して別の作業を起票する
+    const files = new Set(labelsUsedInTemplates().map(({ file }) => file));
+    const withBacklog = new Set(
+      labelsUsedInTemplates()
+        .filter(({ label }) => label === "backlog")
+        .map(({ file }) => file),
+    );
+
+    expect([...files].filter((file) => !withBacklog.has(file))).toEqual([]);
   });
 
   it("手順書が渡す label はすべて用意されている", () => {
