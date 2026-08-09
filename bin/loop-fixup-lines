@@ -52,8 +52,19 @@ for sha in "$REVIEWED" "$HEAD_SHA"; do
   }
 done
 
-if ! rows="$(gh api "repos/{owner}/{repo}/compare/${REVIEWED}...${HEAD_SHA}" \
-  --jq '.files[]? | "\(.filename)\t\(.additions)\t\(.deletions)"' 2>/dev/null)"; then
+# 1 行目に files の型、2 行目以降にファイルごとの行数を出させる。
+#
+# **2xx でも files が配列とは限らない** (フィールドの欠落・null・形式不正)。
+# `.files[]?` だけだとどれもエラーにならず出力が空になり、**数えられなかったことが
+# 「変更 0 行」として返る**。ゲートはそれを「手直しの範囲」と読んでマージへ進むので、
+# **差分を判定できていないのに自動マージが通る**。「分からない」を「大丈夫」に丸めない。
+#
+# 型を出力の一部にしてあるのは、**判定をこのスクリプト側に置いてテストするため**でもある。
+# --jq の中で弾くと、差し替えた gh が --jq を実行しない (コンテナに jq が無い) 以上、
+# 「配列でなければ落ちる」ことを 1 つも確かめられない。
+if ! out="$(gh api "repos/{owner}/{repo}/compare/${REVIEWED}...${HEAD_SHA}" \
+  --jq '"T\t\(.files | type)", (.files[]? | "F\t\(.filename)\t\(.additions)\t\(.deletions)")' \
+  2>/dev/null)"; then
   echo "[FAIL] レビュー済み commit から head までの差分を取得できません" >&2
   exit 1
 fi
@@ -62,12 +73,22 @@ fi
 # 「gh を呼ぶ前に落ちること」のような確認が書けなくなる。
 counted=0
 excluded=0
+seen_type=0
 while IFS= read -r row; do
   [[ -n $row ]] || continue
+  if [[ $row == T$'\t'* ]]; then
+    # 空の配列は正常 (同一 commit の compare は実際に files: [] を返す)。
+    [[ $row == $'T\tarray' ]] || {
+      echo "[FAIL] 差分のファイル一覧を配列として読めません: ${row#T$'\t'}" >&2
+      exit 1
+    }
+    seen_type=1
+    continue
+  fi
   # 行ごと正規表現で受ける。IFS=タブ の read はタブが IFS の空白文字なので
   # **連続が 1 区切りに畳まれ、列が足りない行を正常な行として読む**。
   # 読めない行を 0 として数えると、**取得の壊れが「手直しが小さい」に化けて素通りする**。
-  [[ $row =~ ^(.+)$'\t'([0-9]+)$'\t'([0-9]+)$ ]] || {
+  [[ $row =~ ^F$'\t'(.+)$'\t'([0-9]+)$'\t'([0-9]+)$ ]] || {
     echo "[FAIL] 差分の行数を数値として読めません: $row" >&2
     exit 1
   }
@@ -79,7 +100,14 @@ while IFS= read -r row; do
   else
     ((counted += 10#$additions + 10#$deletions))
   fi
-done <<<"$rows"
+done <<<"$out"
+
+# 型の行が来ていないなら、gh が何も返していないか出力の形が変わっている。
+# **「ファイルが 1 件も無かった」と区別がつかないので、0 行として返さない。**
+if ((seen_type == 0)); then
+  echo "[FAIL] 差分のファイル一覧を取得できません (files の型が返っていません)" >&2
+  exit 1
+fi
 
 printf '%s\t%s\n' "$counted" "$excluded"
 exit 0

@@ -34,12 +34,16 @@ function run(args: string[]): Run {
 }
 
 /**
- * gh を差し替えて数え方だけを動かす。
+ * gh を差し替えて、スクリプトが受け取る行をそのまま渡す。
  * 差し替えが返すのは **ファイルごとの生の行数** で、分類も合計もスクリプト側で行う。
  * ここを gh の --jq に寄せると、テストは「あらかじめ数えた答え」を渡すだけになり、
  * **数え方そのものを 1 つも検証できない**。
+ *
+ * `files` が配列かどうかも `T\t<型>` の 1 行として受け取る。コンテナに jq が無く、
+ * 差し替えた gh は `--jq` を実行できないので、**生の JSON を渡すテストは書けない**。
+ * 型を出力の一部にしてあるので、**判定そのものはここで検証できる**。
  */
-function runWithFiles(rows: string[], ghExit = 0): Run {
+function runWithLines(lines: string[], ghExit = 0): Run {
   const dir = mkdtempSync(join(tmpdir(), "loop-fixup-fake-"));
   symlinkSync("/usr/bin/bash", join(dir, "bash"));
   writeFileSync(
@@ -48,7 +52,7 @@ function runWithFiles(rows: string[], ghExit = 0): Run {
       "#!/usr/bin/env bash",
       // %b で渡す。%s だと JSON.stringify が付けた \t が **タブに戻らず**、
       // 列の分かれていない行を渡してしまう
-      ...rows.map((row) => `printf '%b\\n' ${JSON.stringify(row)}`),
+      ...lines.map((line) => `printf '%b\\n' ${JSON.stringify(line)}`),
       `exit ${ghExit}`,
       "",
     ].join("\n"),
@@ -63,9 +67,14 @@ function runWithFiles(rows: string[], ghExit = 0): Run {
   return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
-/** `<ファイル名>\t<追加>\t<削除>` の 1 行を作る。 */
+/** `F\t<ファイル名>\t<追加>\t<削除>` の 1 行を作る。 */
 function file(name: string, additions: number, deletions: number): string {
-  return `${name}\t${additions}\t${deletions}`;
+  return `F\t${name}\t${additions}\t${deletions}`;
+}
+
+/** files が配列だったとき（正常）の出力を作る。 */
+function runWithFiles(rows: string[], ghExit = 0): Run {
+  return runWithLines(["T\tarray", ...rows], ghExit);
 }
 
 describe("bin/loop-fixup-lines の数え方", () => {
@@ -139,6 +148,49 @@ describe("bin/loop-fixup-lines の数え方", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("取得できません");
+  });
+});
+
+describe("bin/loop-fixup-lines の files 検査", () => {
+  // 2xx で返ってきても files が配列とは限らない（欠落・null・形式不正）。
+  // **数えられなかったことを 0 行として返すと、ゲートが「手直し 0 行」と読んで
+  // 自動マージへ進む。** 判定不能は必ず失敗側へ倒す。
+  it("files が null なら失敗する", () => {
+    const result = runWithLines(["T\tnull"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("配列");
+  });
+
+  it("files が欠けていても失敗する（型は null として届く）", () => {
+    const result = runWithLines(["T\tnull", file("bin/loop-merge", 34, 7)]);
+
+    expect(result.status).toBe(1);
+  });
+
+  it("files が配列でない型なら失敗する", () => {
+    expect(runWithLines(["T\tobject"]).status).toBe(1);
+    expect(runWithLines(["T\tstring"]).status).toBe(1);
+  });
+
+  it("型の行そのものが無ければ失敗する", () => {
+    // gh が何も返さなかった場合。空を 0 行として通さない
+    expect(runWithLines([]).status).toBe(1);
+    expect(runWithLines([file("bin/loop-merge", 34, 7)]).status).toBe(1);
+  });
+
+  it("知らない種別の行があれば失敗する", () => {
+    const result = runWithLines(["T\tarray", "X\tsomething"]);
+
+    expect(result.status).toBe(1);
+  });
+
+  it("空の配列は 0 行として受け入れる（差分が無いのは正常）", () => {
+    // 同一 commit の compare は実際に {"files": []} を返す
+    const result = runWithLines(["T\tarray"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("0\t0");
   });
 });
 
