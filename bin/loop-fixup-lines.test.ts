@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -168,6 +168,32 @@ describe("bin/loop-fixup-lines の数え方", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("取得できません");
+  });
+});
+
+describe("bin/loop-fixup-lines が gh に渡す判定式", () => {
+  /**
+   * **式そのものを固定する。** テストかどうかを決めているのは gh 側の `--jq` で、
+   * 断片の有無だけを見ていると `endswith(".test.ts") | not` のような**反転**を
+   * 通してしまう（本番では通常の `.ts` がテスト扱いになり、本体行数から消える）。
+   *
+   * **意味は検証していない。** 判定を本物の jq へ通すには jq が要るが、
+   * **開発コンテナに jq は入っていない**（`Dockerfile` が入れるのは ca-certificates /
+   * curl / git / openssh-client / procps だけ）。`gh --jq` にしてあるのは
+   * **`bin/loop-*` がホストでも動く必要がある**ためで（master はコンテナを使わない）、
+   * テストのために jq を足すと**スクリプトが jq を呼ぶ道が開き、その前提が壊れる**。
+   *
+   * 代わりに、**式を書き換えたら必ずこのテストの更新が要る**形にしてある。
+   * 「気づかないうちに反転していた」は起きない。
+   */
+  const EXPECTED_JQ = `"T\\t\\(.files | type)", (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.additions)\\t\\(.deletions)")`;
+
+  it("判定式が想定どおりであること", () => {
+    const script = readFileSync(SCRIPT, "utf8");
+
+    const match = /--jq '([^']*)'/.exec(script);
+
+    expect(match?.[1]).toBe(EXPECTED_JQ);
   });
 });
 
