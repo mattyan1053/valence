@@ -140,6 +140,25 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
 }
 readonly STATE="$common_dir/valence-loop-stall"
 
+# **master と worker は同じカウンタを、同じ周期で書きうる。** 読んでから書くまでを
+# 排他しないと、後から書いた側が相手の増分を消す (lost update)。記録が増えないまま
+# 周回だけ進むので、**どちらの識別子も上限に届かず第 4 層が効かなくなる**。
+# 排他しないほうへ倒れると気づけないので、**取れないときは数えずに失敗する**。
+readonly LOCK_WAIT_SEC="${LOOP_STALL_LOCK_WAIT_SEC:-10}"
+if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_STALL_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+exec 9>"$STATE.lock" || {
+  echo "[FAIL] 停止カウンタのロックを作成できません: $STATE.lock" >&2
+  exit 2
+}
+if ! flock -w "$LOCK_WAIT_SEC" 9; then
+  echo "[FAIL] 停止カウンタのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+  echo "       数えずに終わります。記録が飛ぶより止まらないほうが分かりにくいためです" >&2
+  exit 2
+fi
+
 # 止める対象は **カウンタと同じリポジトリ**。スクリプトの位置から相対で `./task` を
 # 引くと、cwd のリポジトリで数えているのに別のリポジトリを止めることになる。
 # 実際に踏んだ: 使い捨てのリポジトリで数え方を確かめただけで、実リポジトリの

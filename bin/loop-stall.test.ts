@@ -342,6 +342,83 @@ describe("作業が尽きた周回の数え方", () => {
   });
 });
 
+describe("共有カウンタの排他", () => {
+  /** スクリプトのコピーだけを置いた使い捨てリポジトリ。 */
+  function makeRepo(): { repo: string; script: string; state: string } {
+    const repo = mkdtempSync(join(tmpdir(), "loop-stall-lock-"));
+    spawnSync("git", ["init", "--quiet", repo]);
+    writeFileSync(join(repo, "task"), "#!/usr/bin/env bash\ntrue\n", { mode: 0o755 });
+    mkdirSync(join(repo, "bin"));
+    const script = join(repo, "bin", "loop-stall");
+    copyFileSync(SCRIPT, script);
+    chmodSync(script, 0o755);
+    return { repo, script, state: join(repo, ".git", "valence-loop-stall") };
+  }
+
+  it("ロックが取られている間は待ち、解放されてから数える", () => {
+    // **カウンタは master と worker が同じ周期で書きうる。** 読んでから書くまでを
+    // 排他しないと、後から書いた側が相手の増分を消す（記録が増えないまま周回が進み、
+    // **どちらの識別子も上限に届かない**）。
+    const { repo, script, state } = makeRepo();
+    // 先に 1 回書いて、ロック対象のファイルを作っておく
+    spawnSync(script, ["no-work"], { cwd: repo, encoding: "utf8" });
+    // 外から 1 秒ロックを保持し、**待たされた時間**を見る。
+    // 「結果が正しい」だけでは、ロックを取らない実装でも通ってしまう
+    const holder = spawnSync(
+      "/usr/bin/bash",
+      [
+        "-c",
+        `flock '${state}.lock' -c 'sleep 1' &
+         sleep 0.2
+         start=$(date +%s%N)
+         '${script}' no-work
+         end=$(date +%s%N)
+         echo "elapsed_ms=$(( (end - start) / 1000000 ))"
+         wait`,
+      ],
+      { cwd: repo, encoding: "utf8", env: { ...process.env, LOOP_MAX_STALL_REPEATS: "99" } },
+    );
+    const elapsed = Number(/elapsed_ms=(\d+)/.exec(holder.stdout)?.[1] ?? "0");
+    const counted = readFileSync(state, "utf8");
+    rmSync(repo, { recursive: true, force: true });
+
+    expect(holder.stdout).toContain("count=2");
+    // ロックを取らない実装なら数十 ms で終わる
+    expect(elapsed).toBeGreaterThan(500);
+    expect(counted).toContain("2\tno-work");
+  });
+
+  it("待っても取れなければ、数えずに失敗する", () => {
+    // **取れないまま数えると、記録が飛んだことに誰も気づけない。**
+    const { repo, script, state } = makeRepo();
+    spawnSync(script, ["no-work"], { cwd: repo, encoding: "utf8" });
+    const result = spawnSync(
+      "/usr/bin/bash",
+      [
+        "-c",
+        `flock '${state}.lock' -c 'sleep 2' &
+         sleep 0.2
+         '${script}' no-work
+         echo "stall_exit=$?"
+         wait`,
+      ],
+      {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
+      },
+    );
+    const counted = readFileSync(state, "utf8");
+    rmSync(repo, { recursive: true, force: true });
+
+    // ラッパーではなく **loop-stall 自身の終了コード**を見る
+    expect(result.stdout).toContain("stall_exit=2");
+    expect(result.stderr).toContain("ロック");
+    // 数えていないこと（1 のまま）
+    expect(counted).toContain("1\tno-work");
+  });
+});
+
 describe("ドキュメントに書かれた停止識別子", () => {
   /**
    * 追跡下の Markdown から `bin/loop-stall <引数>` の呼び出しを拾う。
