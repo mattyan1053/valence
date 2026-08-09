@@ -151,7 +151,23 @@ fi
 # そこで上限到達後は、レビュー済み commit から head までの差分が手直しの範囲に
 # 収まっていれば通す。どちらの経路も必ず終わる。
 readonly MAX_ROUNDS_GATE="${LOOP_MAX_REVIEW_ROUNDS:-2}"
-readonly MAX_FIXUP_LINES="${LOOP_MAX_FIXUP_LINES:-80}"
+
+# 手直し量は **全変更行ではなく、bin/loop-fixup-lines が数えた本体の行数**で測る
+# (テストの追加行だけを除き、テストの削除行は本体と同じに数える。理由はそちらのコメント)。
+#
+# 既定値の根拠。**通すべき実例と止めるべき実例の間に置いている。**
+#
+#   PR #36 … 本体 44 行 / 1 ファイル (テスト追加 43 行を除いた値)。**通す側**。
+#            中身は gh の非ゼロ終了を「ブランチが消えた」と読まない修正で、
+#            増えた 43 行は上限到達後に master 自身が要求したテストだった
+#   PR #41 … 本体 74 行 / 3 ファイル (テスト追加 13 行を除いた値)。**止める側**。
+#            レビュー後に loop-review-budget / loop-review-commits / master 手順書を
+#            書き直しており、これは「手直し」ではなく人が見るべき変更である
+#
+# 以前の 80 行は全変更行に対する値で、**上の 2 件をどちらも止めていた** (どちらも 87 行)。
+# 数える範囲を狭めたまま 80 を据え置くと**緩めただけ**になるので、実例の間 (44 と 74 の
+# ちょうど中間) まで締め直した。**「たまたま超えなかった値」を閾値にしない。**
+readonly MAX_FIXUP_LINES="${LOOP_MAX_FIXUP_LINES:-60}"
 
 if [[ -z $head_sha || $head_sha == "null" ]]; then
   fail "レビュー: head SHA が不明なため判定できません"
@@ -179,17 +195,19 @@ else
     pass "レビュー: 現 head に対するレビューあり (${rounds} 回)"
   elif ((rounds < MAX_ROUNDS_GATE)); then
     fail "レビュー: 現 head (${head_sha:0:8}) は未レビュー。レビューを要求してください (${rounds}/${MAX_ROUNDS_GATE})"
-  elif ! cmp_json="$(gh api "repos/{owner}/{repo}/compare/${last_reviewed}...${head_sha}" \
-    --jq '{lines: ([.files[]? | .changes] | add // 0)}' 2>/dev/null)"; then
+  elif ! fixup="$("$(dirname "$0")/loop-fixup-lines" "$last_reviewed" "$head_sha")"; then
     fail "レビュー: レビュー済み commit から head までの差分を取得できません"
   else
-    fixup_lines="$(jq -r '.lines' <<<"$cmp_json")"
-    if ! [[ $fixup_lines =~ ^[0-9]+$ ]]; then
+    # <数える行><TAB><除外したテスト追加行>。IFS=タブ の read で割らない。
+    # タブは IFS の空白文字なので連続が畳まれ、片方が空のときに列がずれる。
+    fixup_lines="${fixup%%$'\t'*}"
+    excluded_lines="${fixup#*$'\t'}"
+    if ! [[ $fixup_lines =~ ^[0-9]+$ && $excluded_lines =~ ^[0-9]+$ ]]; then
       fail "レビュー: 手直し量を数値として読めません"
     elif ((fixup_lines > MAX_FIXUP_LINES)); then
-      fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したうえ、レビュー後の変更が ${fixup_lines} 行 > ${MAX_FIXUP_LINES} 行。人の判断が要ります"
+      fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したうえ、レビュー後の本体変更が ${fixup_lines} 行 > ${MAX_FIXUP_LINES} 行 (テスト追加 ${excluded_lines} 行は除外)。人の判断が要ります"
     else
-      pass "レビュー: 上限到達。レビュー後の変更は ${fixup_lines} 行で手直しの範囲"
+      pass "レビュー: 上限到達。レビュー後の本体変更は ${fixup_lines} 行で手直しの範囲 (テスト追加 ${excluded_lines} 行は除外)"
     fi
   fi
 fi
