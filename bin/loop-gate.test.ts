@@ -44,27 +44,47 @@ function runGate(env: Record<string, string> = {}): Run {
   copyFileSync(SCRIPT, gate);
   chmodSync(gate, 0o755);
 
-  // gh の差し替え。**引数の中身で分岐する**ので、呼ぶ場所が変わればここも合わなくなる
+  // gh の差し替え。**引数の中身で分岐する**ので、呼ぶ場所が変わればここも合わなくなる。
+  //
+  // **--jq の式まで見る。** 値を取り出しているのは gh 側の --jq で、スタブが
+  // 「取り出し済みの値」を返すだけだと、**--jq を消しても壊しても緑のまま**になる。
+  // 本番では生の JSON が mapfile へ流れ込み、ゲートは常に落ちる。
   writeFileSync(
     join(path, "gh"),
     `#!/usr/bin/env bash
 args="$*"
+
+# 期待する断片が無ければ「想定外の呼び出し」として失敗させる
+require() {
+  local frag
+  for frag in "$@"; do
+    if [[ $args != *"$frag"* ]]; then
+      echo "スタブ: 想定外の gh 呼び出し (\$frag が無い): $args" >&2
+      exit 1
+    fi
+  done
+}
+
 case "$args" in
   *"--json state,isDraft,baseRefName,headRefOid"*)
+    require "--jq" ".state" ".isDraft" ".baseRefName" ".headRefOid"
     [[ -n \${FAKE_PR_VIEW_FAIL:-} ]] && exit 1
     printf '%s\\n' "\${FAKE_PR_STATE:-OPEN}" "\${FAKE_PR_DRAFT:-false}" \\
       "\${FAKE_PR_BASE:-main}" "\${FAKE_PR_HEAD:-${HEAD}}"
     ;;
   *"--json changedFiles,additions,deletions"*)
+    require "--jq" ".changedFiles" ".additions" ".deletions"
     [[ -n \${FAKE_SIZE_FAIL:-} ]] && exit 1
     printf '%s\\n' "\${FAKE_SIZE_FILES:-5}" "\${FAKE_SIZE_LINES:-100}"
     ;;
   "pr checks"*)
+    require "--jq" "(type)" ".name" ".bucket"
     [[ -n \${FAKE_CHECKS_FAIL:-} ]] && exit 1
     printf '%s' "\${FAKE_CHECKS-T$'\\t'array$'\\n'C$'\\t'alpha$'\\t'pass}"
     printf '\\n'
     ;;
   "api graphql"*)
+    require "--jq" "isResolved"
     [[ -n \${FAKE_THREADS_FAIL:-} ]] && exit 1
     printf '%s\\n' "\${FAKE_THREADS:-0}"
     ;;
