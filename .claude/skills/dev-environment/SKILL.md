@@ -44,6 +44,34 @@ docker compose exec -T app pgrep -a node    # コンテナ内に next がいる�
 | 止めたままにする | `docker compose stop app` |
 | 環境ごと落とす | `./task down` |
 
+### コンテナ内で環境変数が空（`.env` には値があるのに）
+
+**`env_file` はコンテナの作成時にしか読まれない。** `.env` を書き換えても、
+既に動いているコンテナには反映されない。**再起動でも読み直さない。**
+
+症状が「環境変数が空」なので、**読み方のバグと見分けがつかない**。`process.env` の綴りや
+`.env` の書式を疑う前に、まず**コンテナの作成時刻と `.env` の更新時刻**を比べる。
+
+```bash
+docker inspect valence-app-1 --format '{{.Created}}'   # コンテナが作られた時刻
+stat -c '%y' .env                                      # これより古ければ読まれていない
+```
+
+反映させるコマンドは `./task up`。**`./task restart` では直らない。**
+
+| やること | 反映 | 中身 |
+| --- | --- | --- |
+| `./task restart` | **されない** | `docker compose restart app`（作り直さない） |
+| `docker compose stop` → `start` | **されない** | 同上 |
+| `./task up` | される | `docker compose up -d app`。compose が設定の変化を見てコンテナを作り直す |
+| `docker compose up -d --force-recreate app` | される | 変化を検出しない compose でも確実に作り直す |
+
+`./task up` は変化が無ければ作り直さない（冪等）。作り直すと **dev サーバーは再起動する**
+ので、`./task dev` でログを追っていたら追い直すこと。
+
+**`./task check` などの他のコマンドでは反映されない。** それらが内部で呼ぶのは
+「動いていなければ起動する」処理で、**動いているコンテナには何もしない**。
+
 ### Supabase に繋がらない
 
 **接続先が 2 通りあり、取り違えると原因が分かりにくい。**
