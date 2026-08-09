@@ -98,73 +98,75 @@ describe("bin/loop-stall の停止識別子", () => {
 
 describe("上限に達したときに止める対象", () => {
   /**
-   * スクリプトのコピーと偽の `task` を別々のリポジトリに置いて上限まで走らせる。
+   * スクリプトのコピーと偽の `task` を使い、上限まで走らせる。
    * **本物の bin/loop-stall をそのまま上限まで走らせない。** それをやると実際に
    * 実リポジトリの両 worktree が停止する（この Issue の事故そのもの）。
+   *
+   * 偽の `task` は「呼ばれた印」を残すだけ。**呼ばれてはいけない側にも置く**ので、
+   * 実行されたかどうかがそのまま判定になる。
    */
-  function runToLimit(options: { taskIn: "script" | "cwd" }): {
+  function runToLimit(options: { cwd: "same-repo" | "other-repo" }): {
     status: number;
     stderr: string;
-    stoppedScriptRepo: boolean;
-    stoppedCwdRepo: boolean;
+    ranScriptRepoTask: boolean;
+    ranCwdRepoTask: boolean;
   } {
     const scriptRepo = mkdtempSync(join(tmpdir(), "loop-stall-script-"));
-    const cwdRepo = mkdtempSync(join(tmpdir(), "loop-stall-cwd-"));
-    for (const repo of [scriptRepo, cwdRepo]) {
+    const otherRepo = mkdtempSync(join(tmpdir(), "loop-stall-cwd-"));
+    for (const repo of [scriptRepo, otherRepo]) {
       spawnSync("git", ["init", "--quiet", repo]);
+      // 呼ばれたことだけを残す task。本物のように loop/STOP は配らない
+      writeFileSync(join(repo, "task"), `#!/usr/bin/env bash\ntouch '${repo}/ran'\n`, {
+        mode: 0o755,
+      });
     }
     mkdirSync(join(scriptRepo, "bin"));
     const script = join(scriptRepo, "bin", "loop-stall");
     copyFileSync(SCRIPT, script);
     chmodSync(script, 0o755);
 
-    // 呼ばれたことだけを残す task。本物のように loop/STOP は配らない
-    const fakeTask = (repo: string) => {
-      writeFileSync(
-        join(repo, "task"),
-        `#!/usr/bin/env bash
-touch '${repo}/stopped'
-`,
-        {
-          mode: 0o755,
-        },
-      );
-    };
-    fakeTask(options.taskIn === "script" ? scriptRepo : cwdRepo);
-
-    let result = spawnSync(script, ["dirty"], { cwd: cwdRepo, encoding: "utf8" });
+    const cwd = options.cwd === "same-repo" ? scriptRepo : otherRepo;
+    let result = spawnSync(script, ["dirty"], { cwd, encoding: "utf8" });
     for (let i = 0; i < 2; i++) {
-      result = spawnSync(script, ["dirty"], { cwd: cwdRepo, encoding: "utf8" });
+      result = spawnSync(script, ["dirty"], { cwd, encoding: "utf8" });
     }
-    const stopped = {
+    const ran = {
       status: result.status ?? -1,
       stderr: result.stderr,
-      stoppedScriptRepo: existsSync(join(scriptRepo, "stopped")),
-      stoppedCwdRepo: existsSync(join(cwdRepo, "stopped")),
+      ranScriptRepoTask: existsSync(join(scriptRepo, "ran")),
+      ranCwdRepoTask: existsSync(join(otherRepo, "ran")),
     };
     rmSync(scriptRepo, { recursive: true, force: true });
-    rmSync(cwdRepo, { recursive: true, force: true });
-    return stopped;
+    rmSync(otherRepo, { recursive: true, force: true });
+    return ran;
   }
 
-  it("cwd と別のリポジトリにあるスクリプト自身のループは止めない", () => {
-    const result = runToLimit({ taskIn: "script" });
+  it("cwd が別のリポジトリなら、どちらの task も実行しない", () => {
+    // -x は「Valence のタスクランナーである」ことを保証しない。実行してしまうと
+    // **そのリポジトリが用意した任意のコードが動く**
+    const result = runToLimit({ cwd: "other-repo" });
+
+    expect(result.ranCwdRepoTask).toBe(false);
+    expect(result.ranScriptRepoTask).toBe(false);
+  });
+
+  it("cwd が別のリポジトリなら、止めなかった理由を出す", () => {
+    // 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい
+    const result = runToLimit({ cwd: "other-repo" });
 
     expect(result.status).toBe(1);
-    expect(result.stoppedScriptRepo).toBe(false);
-    // 黙って止めないのは、黙って止めるのと同じくらい分かりにくい
     expect(result.stderr).toContain("止められません");
   });
 
-  it("カウンタと同じリポジトリのループを止める", () => {
-    const result = runToLimit({ taskIn: "cwd" });
+  it("cwd がスクリプトと同じリポジトリなら止める", () => {
+    const result = runToLimit({ cwd: "same-repo" });
 
     expect(result.status).toBe(1);
-    expect(result.stoppedCwdRepo).toBe(true);
+    expect(result.ranScriptRepoTask).toBe(true);
   });
 
   it("実リポジトリの loop/STOP は作られない", () => {
-    runToLimit({ taskIn: "script" });
+    runToLimit({ cwd: "other-repo" });
 
     expect(existsSync(join(REPO_ROOT, "loop", "STOP"))).toBe(false);
   });

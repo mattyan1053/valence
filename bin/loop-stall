@@ -138,11 +138,28 @@ readonly STATE="$common_dir/valence-loop-stall"
 # 引くと、cwd のリポジトリで数えているのに別のリポジトリを止めることになる。
 # 実際に踏んだ: 使い捨てのリポジトリで数え方を確かめただけで、実リポジトリの
 # master と worker が両方停止した。**検証のたびに本番が止まる形にしない。**
+#
+# ただし cwd 側の `task` を実行可能だからといって実行してはいけない。`-x` は
+# 「Valence のタスクランナーである」ことを何も保証せず、**別のリポジトリが用意した
+# 任意のコードを動かす**ことになる。**同じリポジトリのときだけ実行する。**
 if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
   echo "[FAIL] 作業ツリーの根を特定できません" >&2
   exit 2
 fi
 readonly TASK="$toplevel/task"
+
+# スクリプトのあるリポジトリ。cwd 側と同一かを共通ディレクトリで突き合わせる
+# (worktree どうしでも共通ディレクトリは一致する)。
+script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || script_dir=""
+script_common_dir=""
+if [[ -n $script_dir ]] && script_common_dir="$(
+  git -C "$script_dir" rev-parse --git-common-dir 2>/dev/null
+)"; then
+  script_common_dir="$(cd "$script_dir/$script_common_dir" 2>/dev/null && pwd)" \
+    || script_common_dir="$(cd "$script_common_dir" 2>/dev/null && pwd)" \
+    || script_common_dir=""
+fi
+readonly script_common_dir
 
 # 進捗があった周回は数え直す。これが無いと、同じエラーが 2 回起きたあと何周
 # 正常に進んでも、後日の独立した 1 回を「3 周連続」と数えて全ループを止める。
@@ -175,13 +192,14 @@ echo "stall id=$ID count=$count max=$MAX_REPEATS"
 
 if ((count >= MAX_REPEATS)); then
   echo "[STOP] 同じ状態で $count 周続いた。全ループを止める"
-  if [[ -x $TASK ]]; then
+  if [[ -n $script_common_dir && $script_common_dir == "$common_dir" && -x $TASK ]]; then
     "$TASK" loop:stop "$ID: 同じ状態で $count 周続いたため停止。人の判断が要る"
   else
-    # 黙って止めないのは、黙って止めるのと同じくらい分かりにくい。
-    echo "[FAIL] ループを止められません: $TASK が実行できません" >&2
-    echo "       カウンタは $STATE に書きました" >&2
-    echo "       ここは valence の作業ツリーではありません (別のリポジトリで実行している)" >&2
+    # 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい。
+    echo "[FAIL] ループを止められません" >&2
+    echo "       カウンタ: $STATE" >&2
+    echo "       スクリプト: ${script_common_dir:-不明}" >&2
+    echo "       別のリポジトリで実行しているため、そちらの task は実行しません" >&2
   fi
   exit 1
 fi
