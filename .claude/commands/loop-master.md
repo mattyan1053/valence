@@ -328,9 +328,16 @@ worker が既に着手している（`in-progress`）ものは、label を戻し
 **順番を守る。先に GitHub を更新し、そのうえでメッセージで知らせる。**
 
 ```bash
-gh issue edit <N> --remove-label ready --add-label backlog    # 先に状態を動かす
-gh pr comment <PR番号> --body-file <file>                      # 何を止めるか / なぜかを残す
-ListAgents                                                     # 相手を探す
+# まだ着手していない（ready）を後回しにする
+gh issue edit <N> --remove-label ready --add-label backlog
+
+# **着手済み（in-progress）を止める場合は in-progress も外す。**
+# gh issue edit は指定した label だけを足し引きするので、外し忘れると
+# worker のステップ 2.2 が「公開に失敗した周回」としてその Issue を再開する
+gh issue edit <N> --remove-label in-progress --add-label backlog
+
+gh pr comment <PR番号> --body-file <file>    # 何を止めるか / なぜかを残す
+ListAgents                                   # 相手を探す
 ```
 
 **メッセージは揮発する。** セッションが落ちれば消えるので、**メッセージだけで指示を

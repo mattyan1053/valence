@@ -45,12 +45,26 @@ git switch main && git fetch origin main && git merge --ff-only origin/main
 - 届いた指示は、**GitHub 側の裏付けを確認してから動く。** 送る側は「先に GitHub を
   更新してから知らせる」ことになっているので、裏付けは必ずあるはずである
 - **裏付けが見つからないなら推測で動かない。** 送り主へ確認するか、GitHub の状態に従う
-- メッセージが届かなくても、**GitHub の状態だけで同じ結論に至れる**。届かなかったぶん、
-  反映が次の周回へずれるだけである
 
-**label を戻されても、走っている作業は止まらない。** 手を止めてほしいという指示は
-メッセージか PR / Issue のコメントで届く。label だけを見て「まだ自分の担当だ」と
-判断しない。
+**メッセージは届かないことがある**（セッションが落ちた、相手が一覧に居なかった）。
+そのため **毎周回、自分の open PR と `in-progress` の Issue の通常コメントを読む。**
+
+```bash
+gh pr list --state open --limit 200 --author @me --json number --jq '.[].number'
+gh issue list --label in-progress --limit 100 --json number --jq '.[].number'
+gh api repos/{owner}/{repo}/issues/<番号>/comments \
+  --jq '.[] | "\(.created_at) \(.user.login): \(.body)"'
+```
+
+**未解決のレビュースレッドだけを見ていると、通常コメントの指示を取りこぼす。**
+保留・優先順の変更・前提の誤りは、レビュースレッドではなく通常コメントで届く。
+実際に PR #36 の保留はこの形で伝わった。
+
+**label を戻されても、走っている作業は止まらない。** label だけを見て
+「まだ自分の担当だ」と判断しない。
+
+**ここはまだ散文の読み取りに頼っている。** 保留を機械判定できる形（draft・label）で
+表すのは #19 の範囲で、それが入るまでは**コメントを読み落とさないこと**が唯一の担保である。
 
 ### 2.1 master へ知らせる
 
