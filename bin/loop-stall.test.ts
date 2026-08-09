@@ -314,6 +314,25 @@ describe("作業が尽きた周回の数え方", () => {
     expect(result.stops).toEqual([false, false]);
   });
 
+  it("もう一方のループの停止が挟まっても数え直さない", () => {
+    // **カウンタは master と worker で共有している。** 別の識別子で数え直す作りだと、
+    // 「master は no-work、worker は dirty」で交互に書き合って **どちらも 3 に届かない**。
+    // 止めるための仕組みが、2 つ動いているというだけで無効になる
+    const result = runNoWorkToLimit(["no-work", "dirty", "no-work", "dirty", "no-work"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stops).toEqual([true, true]);
+  });
+
+  it("前へ進んだ周回を挟むと、他の識別子の記録も消える", () => {
+    // --reset は「前へ進んだ」の合図。**識別子ごとに残すと、進んだ後の 1 回で
+    // 昔の記録が上限に達する**
+    const result = runNoWorkToLimit(["no-work", "dirty", "--reset", "no-work", "dirty"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stops).toEqual([false, false]);
+  });
+
   it("前へ進んだ周回を挟むと数え直す", () => {
     // 起票や PR で状態が動いたら --reset が呼ばれる。**間隔を空けた 3 回で止めない**
     const result = runNoWorkToLimit(["no-work", "no-work", "--reset", "no-work", "no-work"]);

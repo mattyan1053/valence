@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 同じ停止識別子が続いた回数を数え、上限に達したら全ループを止める。
+# 停止識別子ごとに記録された回数を数え、上限に達したら全ループを止める。
 #
 #   bin/loop-stall <停止識別子>
 #
@@ -187,21 +187,32 @@ if [[ $ID == "--reset" ]]; then
   exit 0
 fi
 
-prev_id=""
-prev_count=0
+# **識別子ごとに数える。** 1 つだけ持って「直前と違えば 1 に戻す」形にすると、
+# **カウンタを共有している master と worker が互いの記録を消し合う**。
+# 「master は no-work、worker は dirty」で交互に書かれると、どちらも 3 に届かず
+# **2 つ動いているというだけで第 4 層が無効になる**。
+#
+# 前へ進んだ合図は --reset であって、識別子が変わったことではない。
+# --reset が来るまでは、どの識別子の記録も消さない。
+#
+#   <回数><TAB><識別子>  を 1 行ずつ
+#
+# 書式に合わない行は捨てる (壊れた記録・古い書式で数えない)。
+count=0
+others=()
 if [[ -f $STATE ]]; then
-  # 1 行目が識別子、2 行目が回数。壊れていたら 0 から数え直す。
-  { read -r prev_id; read -r prev_count; } < "$STATE" 2>/dev/null || true
-  [[ $prev_count =~ ^[0-9]+$ ]] || prev_count=0
+  while IFS=$'\t' read -r prev_count prev_id; do
+    [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
+    if [[ $prev_id == "$ID" ]]; then
+      count="$prev_count"
+    else
+      others+=("$prev_count"$'\t'"$prev_id")
+    fi
+  done < "$STATE"
 fi
+count=$((count + 1))
 
-if [[ $ID == "$prev_id" ]]; then
-  count=$((prev_count + 1))
-else
-  count=1
-fi
-
-printf '%s\n%s\n' "$ID" "$count" > "$STATE" || {
+printf '%s\n' "${others[@]}" "$count"$'\t'"$ID" > "$STATE" || {
   echo "[FAIL] 停止カウンタを書き込めません: $STATE" >&2
   exit 2
 }
@@ -209,9 +220,9 @@ printf '%s\n%s\n' "$ID" "$count" > "$STATE" || {
 echo "stall id=$ID count=$count max=$MAX_REPEATS"
 
 if ((count >= MAX_REPEATS)); then
-  echo "[STOP] 同じ状態で $count 周続いた。全ループを止める"
+  echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める"
   if [[ -n $script_common_dir && $script_common_dir == "$common_dir" && -x $TASK ]]; then
-    "$TASK" loop:stop "$ID: 同じ状態で $count 周続いたため停止。人の判断が要る"
+    "$TASK" loop:stop "$ID: 同じ状態が $count 回記録されたため停止。人の判断が要る"
   else
     # 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい。
     echo "[FAIL] ループを止められません" >&2
