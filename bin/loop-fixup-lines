@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# レビュー済み commit から head までの「手直し量」を数える。
+#
+#   bin/loop-fixup-lines <レビュー済み SHA> <head SHA>
+#   → <数える行>\t<除外したテスト追加行>
+#
+# ゲートはレビュー上限に達したあと、この値で「手直しの範囲か / 人の判断が要るか」を分ける。
+#
+# **全変更行で測ると、レビュー指摘への正しい対応を罰する。** 実際に PR #36 と #41 が
+# 2 件続けて 87 行で人へ渡されたが、どちらも上限到達後に **master 自身がテストの追加を
+# 要求した**結果として増えていた (#36 は 87 行中 43 行がテストの追加)。
+# 危険なのは「レビューを受けていない**本体の**変更」であって、テストが増えることではない。
+#
+# そこで数えるのは次のとおり。
+#
+#   本体ファイル      … 追加も削除も数える
+#   テストファイル    … **削除だけ**数える (追加は数えない)
+#
+# **「テストファイルだから安全」とは扱わない。** 名前は中身を保証しないし、
+# レビュー後に検証を消す変更は「守りを減らす」ので本体と同じ危険度がある。
+# 数えないのは「守りを増やす側」だけである。テストの追加が壊れていれば CI が落ちる。
+#
+# テストの判定は **パスの末尾が .test.ts** かどうかだけで行う (vitest の include と同じ形)。
+# 名前に test を含むだけの本体ファイル (src/test-utils.ts など) を除外すると、
+# **本体の変更が数から消える**。
+#
+# 数え方はここ (awk) で行い、gh の --jq には **ファイルごとの生の行数**しか出させない。
+# 集計を gh 側に寄せると、テストは差し替えた gh が返す「あらかじめ数えた答え」を
+# 受け取るだけになり、**数え方そのものを 1 つも検証できなくなる**。
+#
+#   exit 0 = 数えた
+#   exit 1 = 取得できない / 読めない (呼び出し側は判定不能として扱う)
+#   exit 2 = 使い方の誤り
+#
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-fixup-lines <レビュー済み SHA> <head SHA>" >&2
+  exit 2
+}
+
+[[ $# -eq 2 ]] || usage
+readonly REVIEWED="$1"
+readonly HEAD_SHA="$2"
+
+# compare の URL に入る。パスやブランチ名を通すと、別の場所を比較しうる。
+# 会話コメント由来の SHA は短縮形なので、7 桁から受ける。
+for sha in "$REVIEWED" "$HEAD_SHA"; do
+  [[ $sha =~ ^[0-9a-f]{7,40}$ ]] || {
+    echo "[FAIL] SHA として読めません: $sha" >&2
+    exit 2
+  }
+done
+
+if ! rows="$(gh api "repos/{owner}/{repo}/compare/${REVIEWED}...${HEAD_SHA}" \
+  --jq '.files[]? | "\(.filename)\t\(.additions)\t\(.deletions)"' 2>/dev/null)"; then
+  echo "[FAIL] レビュー済み commit から head までの差分を取得できません" >&2
+  exit 1
+fi
+
+# 集計は bash だけで行う。外部コマンドを足すと、テストが PATH を絞れなくなり
+# 「gh を呼ぶ前に落ちること」のような確認が書けなくなる。
+counted=0
+excluded=0
+while IFS= read -r row; do
+  [[ -n $row ]] || continue
+  # 行ごと正規表現で受ける。IFS=タブ の read はタブが IFS の空白文字なので
+  # **連続が 1 区切りに畳まれ、列が足りない行を正常な行として読む**。
+  # 読めない行を 0 として数えると、**取得の壊れが「手直しが小さい」に化けて素通りする**。
+  [[ $row =~ ^(.+)$'\t'([0-9]+)$'\t'([0-9]+)$ ]] || {
+    echo "[FAIL] 差分の行数を数値として読めません: $row" >&2
+    exit 1
+  }
+  name="${BASH_REMATCH[1]}"
+  additions="${BASH_REMATCH[2]}"
+  deletions="${BASH_REMATCH[3]}"
+  if [[ $name == *.test.ts ]]; then
+    ((counted += 10#$deletions, excluded += 10#$additions))
+  else
+    ((counted += 10#$additions + 10#$deletions))
+  fi
+done <<<"$rows"
+
+printf '%s\t%s\n' "$counted" "$excluded"
+exit 0
