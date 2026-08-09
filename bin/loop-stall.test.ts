@@ -191,6 +191,54 @@ describe("上限に達したときに止める対象", () => {
     expect(ran).toBe(true);
   });
 
+  it("リンクされた worktree から実行しても同じリポジトリと判定する", () => {
+    // rev-parse --git-common-dir は **リンクされた worktree では絶対パス**、
+    // 通常のリポジトリでは相対パス（../.git）を返す。両方を通さないと、
+    // master 側（worktree）だけ第 4 層が効かなくなる
+    const repo = mkdtempSync(join(tmpdir(), "loop-stall-repo-"));
+    spawnSync("git", ["init", "--quiet", repo]);
+    writeFileSync(join(repo, "task"), '#!/usr/bin/env bash\ntouch "$(pwd)/ran"\n', {
+      mode: 0o755,
+    });
+    mkdirSync(join(repo, "bin"));
+    const script = join(repo, "bin", "loop-stall");
+    copyFileSync(SCRIPT, script);
+    chmodSync(script, 0o755);
+    // worktree を足すには commit が要る
+    spawnSync("git", ["-C", repo, "add", "-A"]);
+    spawnSync("git", [
+      "-C",
+      repo,
+      "-c",
+      "user.email=loop@example.invalid",
+      "-c",
+      "user.name=loop",
+      "commit",
+      "--quiet",
+      "-m",
+      "init",
+    ]);
+    const worktree = `${repo}-wt`;
+    spawnSync("git", ["-C", repo, "worktree", "add", "--detach", "--quiet", worktree]);
+
+    // **worktree 側のスクリプトを、その worktree から呼ぶ。** master はこの形で走る。
+    // リンクされた worktree 内では rev-parse が絶対パスを返すので、
+    // script_dir との連結が失敗する経路に入る
+    const scriptInWorktree = join(worktree, "bin", "loop-stall");
+    let result = spawnSync(scriptInWorktree, ["dirty"], { cwd: worktree, encoding: "utf8" });
+    for (let i = 0; i < 2; i++) {
+      result = spawnSync(scriptInWorktree, ["dirty"], { cwd: worktree, encoding: "utf8" });
+    }
+    const ran = existsSync(join(worktree, "ran"));
+    const stderr = result.stderr;
+    spawnSync("git", ["-C", repo, "worktree", "remove", "--force", worktree]);
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+
+    expect(stderr).not.toContain("止められません");
+    expect(ran).toBe(true);
+  });
+
   it("cwd がスクリプトと同じリポジトリなら止める", () => {
     const result = runToLimit({ cwd: "same-repo" });
 
