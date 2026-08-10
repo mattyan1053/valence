@@ -149,4 +149,15 @@ describe("周回を捨てるかの判定", () => {
     // 繰り返す形にすると、壊れたときに止まらなくなる
     expect(sectionOf(heading)).toMatch(/1 回だけ/);
   });
+
+  it.each(DISCARD_POINTS)("$name は、読み直されることを保証しない", ({ heading }) => {
+    // **呼び直しても、同じセッションで既に読み込まれていると古い版のまま走る**
+    // （実測で 2 回中 1 回。「instructions unchanged」と返る）。
+    // **保証できないことを手順書に書かない**——このリポジトリが繰り返し塞いできた
+    // 「意図と実装の食い違い」が、手順書そのものに入る
+    const section = sectionOf(heading);
+
+    expect(section).not.toMatch(/ディスクから\s*\n?読み直される/);
+    expect(section).toMatch(/保証(は)?(無|な)い/);
+  });
 });
