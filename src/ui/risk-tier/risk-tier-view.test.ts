@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { ChangeSummary, CiStatus, RiskTier } from "../../domain/triage/risk-tier";
+import { classifyRiskTier } from "../../domain/triage/risk-tier";
 import type { RiskTierViewProps } from "./risk-tier-view";
 import { RiskTierView } from "./risk-tier-view";
 
@@ -20,20 +21,42 @@ function change(overrides: Partial<ChangeSummary> = {}): ChangeSummary {
 }
 
 /**
- * **表示側で並べる。** 判定は `classifyRiskTier` が持っているので、
- * ここでは「どの Tier が来ても、それと分かる表示が出るか」だけを見る。
+ * **判定を通して描く。** `tier` と `change` を別々に渡せると、
+ * **実際には起こりえない組み合わせでも緑**になり、
+ * 説明と判定がずれても気づけない（#110 のレビュー指摘）。
  */
+function viewFor(change: ChangeSummary): string {
+  return render({ tier: classifyRiskTier(change), change });
+}
+
 const TIERS: readonly RiskTier[] = ["fast-track", "needs-review", "high-risk"];
+
+/** それぞれの Tier が**実際に成立する**入力。 */
+const REAL_CASES: Record<RiskTier, ChangeSummary> = {
+  "fast-track": change({ changedFileCount: 1, changedLineCount: 5 }),
+  "needs-review": change({ changedFileCount: 9, changedLineCount: 300 }),
+  "high-risk": change({ touchesSensitivePath: true }),
+};
 
 describe("RiskTierView", () => {
   it("どの Tier でも、それと分かる表示が出る", () => {
     // **表示の追加を忘れたら落ちる。** 型の側でも `Record<RiskTier, …>` が
     // 網羅を要求するので、Tier を足すと `pnpm typecheck` が落ちる
+    // **判断材料を揃えて比べる。** 入力ごと変えると、
+    // **Tier の文言が同じでも変更規模の行が違うので別物に見える**（実際にそうなった）
     const labels = TIERS.map((tier) => render({ tier, change: change() }));
 
     expect(new Set(labels).size).toBe(TIERS.length);
     for (const markup of labels) {
       expect(markup).not.toBe("");
+    }
+  });
+
+  it("表示に使う入力が、実際にその Tier になる", () => {
+    // **試験データが判定からずれないようにする。** ずれると、
+    // 「起こりえない組み合わせ」を確かめているのに気づけない
+    for (const tier of TIERS) {
+      expect(classifyRiskTier(REAL_CASES[tier]), `${tier} が成立する入力になっていない`).toBe(tier);
     }
   });
 
@@ -61,6 +84,18 @@ describe("RiskTierView", () => {
     expect(touching).toMatch(/パスに触れ/);
     expect(touching).not.toBe(notTouching);
     expect(notTouching).not.toMatch(/パスに触れ/);
+  });
+
+  it("CI だけが落ちている小さな変更に、影響が大きいとは書かない", () => {
+    // **`high-risk` は 2 通りの理由で成立する**（CI が落ちている / 機密パスに触れている）。
+    // 成立していないほうを名指しすると、**画面の中で理由が食い違う**。
+    // Tier の説明は「何をすべきか」にとどめ、「なぜか」は判断材料の行に任せる
+    const markup = viewFor(
+      change({ changedFileCount: 3, changedLineCount: 10, ciStatus: "failing" }),
+    );
+
+    expect(markup).toMatch(/落ちています/);
+    expect(markup).not.toMatch(/影響が大きい/);
   });
 
   describe("CI の状態", () => {
