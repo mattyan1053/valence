@@ -112,19 +112,61 @@ function firstPage(repository: GitHubRepository): string {
  *
  * **`api.github.com` 以外は辿らない。** この要求には token が載っているので、
  * 応答に書かれた URL をそのまま辿ると、**別のホストへ資格情報を送りうる**。
+ *
+ * **「次が無い」と「読めなかった」を分ける。** 読めないものを「次が無い」に丸めると、
+ * **1 ページだけを全件のつもりで返す**。消えた PR を base にしている PR は辺を失い、
+ * **エラーも警告も出ないまま独立した PR として描かれる**。
  */
 function nextPage(link: string | null): string | undefined {
   if (link === null) {
     return undefined;
   }
-  const next = /<([^>]+)>\s*;\s*rel="next"/.exec(link)?.[1];
-  if (next === undefined) {
+
+  let unreadable = false;
+  for (const entry of link.split(",")) {
+    if (entry.trim() === "") {
+      continue;
+    }
+    const parsed = parseLinkEntry(entry);
+    if (parsed === undefined) {
+      unreadable = true;
+      continue;
+    }
+    if (parsed.rel.includes("next")) {
+      return sameOrigin(parsed.url);
+    }
+  }
+
+  if (unreadable) {
+    throw new Error("PR 一覧の Link ヘッダを読み取れません");
+  }
+  return undefined;
+}
+
+/**
+ * `Link` の 1 要素を読む。
+ *
+ * **パラメータの順序にも引用形式にも依存しない。** `Link` はどちらも保証せず、
+ * `<...>; type="x"; rel="next"` も `<...>; rel=next` も有効である。
+ * `rel` は空白区切りで複数の関係を持ちうるので、語として照合する。
+ */
+function parseLinkEntry(entry: string): { url: string; rel: string[] } | undefined {
+  const [, url, rest] = /^\s*<([^>]*)>(.*)$/s.exec(entry) ?? [];
+  if (url === undefined || url === "") {
     return undefined;
   }
-  if (!next.startsWith(`${API_ORIGIN}/`)) {
+  const rel = (rest ?? "")
+    .split(";")
+    .map((parameter) => /^\s*rel\s*=\s*"?([^"]*)"?\s*$/.exec(parameter)?.[1])
+    .find((value) => value !== undefined);
+  return { url, rel: (rel ?? "").trim().split(/\s+/) };
+}
+
+function sameOrigin(url: string): string {
+  if (!url.startsWith(`${API_ORIGIN}/`)) {
     throw new Error("PR 一覧の続きが GitHub API 以外を指しています");
   }
-  return next;
+  return url;
 }
 
 /**

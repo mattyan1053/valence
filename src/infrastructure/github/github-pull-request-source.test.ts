@@ -371,4 +371,62 @@ describe("GitHub から PR 一覧を取ってくる", () => {
       }).listPullRequests(),
     ).rejects.toThrow();
   });
+
+  describe("Link ヘッダの読み取り", () => {
+    /** 2 ページ目を `link` の書き方だけ変えて辿らせる。 */
+    function withLink(link: string) {
+      return fakeGitHub({
+        [INSTALLATION_URL]: INSTALLATION,
+        [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+        [PULLS_URL]: { body: JSON.stringify([pull(8, "main", "feat/a")]), link },
+        [SECOND_PAGE_URL]: { body: JSON.stringify([pull(9, "feat/a", "feat/b")]) },
+      });
+    }
+
+    function listWith(link: string) {
+      return createGitHubPullRequestSource({
+        credentials,
+        repository,
+        fetchImpl: withLink(link).fetchImpl,
+        now: clockFrom("2026-08-10T00:00:00Z"),
+      }).listPullRequests();
+    }
+
+    it.each([
+      { form: "rel が最初で引用符あり", link: `<${SECOND_PAGE_URL}>; rel="next"` },
+      { form: "rel が後ろ", link: `<${SECOND_PAGE_URL}>; type="application/json"; rel="next"` },
+      { form: "引用符なし", link: `<${SECOND_PAGE_URL}>; rel=next` },
+      {
+        form: "他の関係と並ぶ",
+        link: `<${PULLS_URL}>; rel="prev", <${SECOND_PAGE_URL}>; rel="next"`,
+      },
+    ])("$form でも続きを辿る", async ({ link }) => {
+      // **`Link` はパラメータの順序も引用形式も保証しない。** 読み落とすと
+      // 1 ページで打ち切り、**エラーも警告も出ないまま PR が消える**
+      const listing = await listWith(link);
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8, 9]);
+    });
+
+    it("next が無ければ、そこで終わる", async () => {
+      // 「次が無い」は正常。**「読めなかった」と混ぜない**
+      const listing = await listWith(`<${PULLS_URL}>; rel="last"`);
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8]);
+    });
+
+    it("next を含むだけの関係は辿らない", async () => {
+      // **`rel` は空白区切りの語である。** 部分一致で拾うと、
+      // `rel="nextpage"` のような別の関係を続きだと思って辿る
+      const listing = await listWith(`<${SECOND_PAGE_URL}>; rel="nextpage"`);
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8]);
+    });
+
+    it("読めない Link は投げる", async () => {
+      // **「読めなかった」を「次が無い」に丸めない。** 丸めると、
+      // 全件のつもりで 1 ページだけ返す
+      await expect(listWith("next page over there")).rejects.toThrow();
+    });
+  });
 });
