@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# `ready` の Issue を **1 つの周回だけが取る**ようにする。
+#
+#   exit 0 = 取れた (この周回が実装してよい)
+#   exit 1 = 取れなかった (別の周回が取った / 取っている最中) → **次の Issue へ進む**
+#   exit 2 = 判定できない / 使い方の誤り
+#
+# **label を付け替えるだけでは足りない。** 読んでから書くまでに間があるので、
+# **両方が「空いている」と読んでから、両方が書ける**。症状は「同じ Issue の PR が 2 本」で、
+# **どちらも正しく見える**ので、後から見ても取り合いだと分からない。
+#
+# **assignee では区別できない。** 周回はどれも同じ GitHub アカウントで動くので、
+# 「誰が取ったか」を GitHub 側の値で表せない。**取り合いを解けるのは手元だけ**である。
+#
+# **読み・書き・確認をまとめて 1 つにする。** 直列化するのは*この一瞬*だけで、
+# 周回そのものは並列に走る (#81 で lease を作業場ごとにしたのはそのためである)。
+#
+# **譲る側の決め方: 先にロックを取れた側が取り、後から入った側が譲る。**
+# ロックは必ずどちらか一方が取るので、**両方が譲って誰も進まない**ことは起きない。
+# 譲った側は**待たない**。次の Issue へ進み、無ければその周回を終える (#74 と同じ判断)。
+#
+# **守れるのは、同じクローンを共有する周回まで。** 別のクローン・別のマシンで動く周回は
+# 対象外である (`bin/loop-lease` と `bin/loop-stall` も同じ前提に立っている)。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# ロックを待つ時間。**ここで行うのは GitHub との数往復だけ**なので短くてよい。
+readonly LOCK_WAIT_SEC="${LOOP_CLAIM_LOCK_WAIT_SEC:-10}"
+
+usage() {
+  echo "使い方: bin/loop-claim <Issue番号>" >&2
+  echo "        ready の Issue を 1 つの周回だけが取れるようにする" >&2
+  echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+readonly ISSUE="$1"
+[[ $ISSUE =~ ^[0-9]+$ ]] || usage
+
+if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_CLAIM_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+
+# **git の共通ディレクトリに置く。** 作業場ごとに置くと、作業場が分かれた時点で
+# 取り合いを検出できない——**それがこの Issue の前提**である (`bin/loop-lease` と同じ形)。
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+
+labels_of() {
+  gh issue view "$ISSUE" --json labels --jq '.labels[].name'
+}
+
+has_label() {
+  local wanted="$1" line
+  while IFS= read -r line; do
+    [[ $line == "$wanted" ]] && return 0
+  done <<<"$2"
+  return 1
+}
+
+exec 9>"$common_dir/valence-loop-claim.lock" || {
+  echo "[FAIL] 取り合いのロックを作成できません" >&2
+  exit 2
+}
+# **待てなかったら譲る。** いま誰かが取っている最中なので、
+# 「取れなかった」と同じ扱いにするのが安全側である（判定不能に倒すと、
+# **取り合いのたびに周回が止まる**）。flock はプロセスが死ねば外れるので、居座らない。
+if ! flock -w "$LOCK_WAIT_SEC" 9; then
+  echo "[INFO] #$ISSUE: 別の周回が取っている最中です（${LOCK_WAIT_SEC} 秒待機）。譲ります" >&2
+  exit 1
+fi
+
+# ここから先はロックの中。**読み・書き・確認がひとつながりになる。**
+if ! before="$(labels_of)"; then
+  echo "[FAIL] #$ISSUE の label を読めません" >&2
+  exit 2
+fi
+if ! has_label "ready" "$before"; then
+  echo "[INFO] #$ISSUE は ready ではありません。別の周回が取ったとみなして譲ります" >&2
+  exit 1
+fi
+
+if ! gh issue edit "$ISSUE" --remove-label ready --add-label in-progress >/dev/null; then
+  echo "[FAIL] #$ISSUE の label を付け替えられません" >&2
+  exit 2
+fi
+
+# **書いたら読み直して確かめる。** 付け替えが通らなくても `gh` は成功を返しうる。
+# 確かめずに進むと、**label は ready のまま実装が始まり**、次の周回が同じものを取る。
+if ! after="$(labels_of)"; then
+  echo "[FAIL] #$ISSUE の label を読み直せません" >&2
+  exit 2
+fi
+if has_label "ready" "$after" || ! has_label "in-progress" "$after"; then
+  echo "[FAIL] #$ISSUE の label が変わっていません（取れたとみなしません）" >&2
+  exit 2
+fi
