@@ -28,12 +28,15 @@ import { resolveRepositoryInstallation } from "./repository-installation";
 const API_ORIGIN = "https://api.github.com";
 
 /**
- * 変更ファイルを読むページ数の上限（1 ページ 100 件）。
+ * 1 つの一覧で読むページ数の上限（1 ページ 100 件）。
  *
  * **根拠は「これを超える PR は、そもそも人が読む大きさではない」**でしかない。
  * 正確な値ではないので、**超えたことが分かる形**にしてある（材料にせず理由を残す）。
+ *
+ * **どの一覧にも同じ上限を当てる。** ファイルだけを手当てして CI の結果を 1 ページで
+ * 済ませていたため、**「30 件しか見ていないのに passing」**になっていた（#117 のレビュー）。
  */
-const MAX_FILE_PAGES = 3;
+const MAX_PAGES = 3;
 
 export type GitHubChangeSummarySourceOptions = {
   readonly credentials: AppCredentials;
@@ -79,24 +82,43 @@ export function createGitHubChangeSummarySource({
     return { body: await response.json(), link: response.headers.get("link") };
   }
 
-  async function readFiles(
-    number: number,
+  /**
+   * ページを繋いで読む。**続きが無ければそこで終わり**で、
+   * **上限に当たったときだけ「見切れた」**になる。
+   */
+  async function readPages(
+    path: string,
+    pick: (body: unknown) => unknown[] | undefined,
     header: string,
-  ): Promise<{ files: unknown[]; truncated: boolean }> {
-    const files: unknown[] = [];
-    for (let page = 1; page <= MAX_FILE_PAGES; page++) {
-      const url = `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/pulls/${number}/files?per_page=100&page=${page}`;
+  ): Promise<{ items: unknown[]; truncated: boolean }> {
+    const items: unknown[] = [];
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const url = `${API_ORIGIN}/repos/${repository.owner}/${repository.name}${path}?per_page=100&page=${page}`;
       const result = (await readJson(url, header)) as { body: unknown; link: string | null };
-      if (!Array.isArray(result.body)) {
-        throw new Error("変更ファイルの一覧を読めませんでした");
+      const chunk = pick(result.body);
+      if (chunk === undefined) {
+        throw new Error("一覧を読めませんでした");
       }
-      files.push(...result.body);
-      // **続きが無ければそこで終わり。** 上限に当たったときだけ「見切れた」になる
+      items.push(...chunk);
       if (result.link === null || !result.link.includes('rel="next"')) {
-        return { files, truncated: false };
+        return { items, truncated: false };
       }
     }
-    return { files, truncated: true };
+    return { items, truncated: true };
+  }
+
+  /** **見切れたら材料にしない。** 「見ていない」を「通っている」と読まないため。 */
+  async function readAll(
+    path: string,
+    pick: (body: unknown) => unknown[] | undefined,
+    header: string,
+    what: string,
+  ): Promise<unknown[]> {
+    const { items, truncated } = await readPages(path, pick, header);
+    if (truncated) {
+      throw new Error(`${what}が多すぎて最後まで見切れませんでした`);
+    }
+    return items;
   }
 
   async function summaryOf(number: number, header: string): Promise<ChangeSummary> {
@@ -106,16 +128,35 @@ export function createGitHubChangeSummarySource({
     if (typeof head !== "string" || head === "") {
       throw new Error("PR の head を読めませんでした");
     }
-    const { files, truncated } = await readFiles(number, header);
-    const checks = (await readJson(`${base}/commits/${head}/check-runs`, header)) as {
-      body: unknown;
-    };
+    const files = await readPages(
+      `/pulls/${number}/files`,
+      (body) => (Array.isArray(body) ? body : undefined),
+      header,
+    );
+    // **CI の結果も最後まで読む。** ファイルだけ手当てして片方を 1 ページで済ませると、
+    // **見ていない run が「通っている」に化ける**。
+    // **Checks API と Commit Status の両方を見る**——**道具立てを前提にしない**
+    // （`AGENTS.md` §1）。Commit Status だけを登録する CI があり、
+    // 片方しか見ないと、そのリポジトリでは全 PR が永久に `pending` になる。
+    const checkRuns = await readAll(
+      `/commits/${head}/check-runs`,
+      (body) => (body as { check_runs?: unknown })?.check_runs as unknown[] | undefined,
+      header,
+      "CI の結果",
+    );
+    const statuses = await readAll(
+      `/commits/${head}/status`,
+      (body) => (body as { statuses?: unknown })?.statuses as unknown[] | undefined,
+      header,
+      "CI の状態",
+    );
 
     const result = toChangeSummary({
       detail: detail.body,
-      files,
-      filesTruncated: truncated,
-      checks: checks.body,
+      files: files.items,
+      filesTruncated: files.truncated,
+      checks: { check_runs: checkRuns },
+      statuses: { statuses },
     });
     if (!result.ok) {
       throw new Error(result.reason);

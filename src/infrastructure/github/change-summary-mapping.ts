@@ -26,6 +26,13 @@ export type ChangeSummaryInput = {
   readonly filesTruncated: boolean;
   /** `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` */
   readonly checks: unknown;
+  /**
+   * `GET /repos/{owner}/{repo}/commits/{sha}/status`（Commit Status）
+   *
+   * **道具立てを前提にしない**（`AGENTS.md` §1）。Checks API を使わず
+   * **Commit Status だけを登録する CI がある**ので、両方見て初めてどちらでも動く。
+   */
+  readonly statuses: unknown;
 };
 
 const detailSchema = z.object({
@@ -49,8 +56,22 @@ const checksSchema = z.object({
   ),
 });
 
-/** 落ちたと見なす結末。**「成功以外はすべて」にしない**（skipped まで落ちたことになる）。 */
-const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required"]);
+const statusesSchema = z.object({
+  statuses: z.array(z.object({ state: z.string() })),
+});
+
+/**
+ * **通ったと見なす結末を挙げる。** 落ちたほうを挙げると、**知らない値が `passing` になる**。
+ *
+ * `conclusion` は GitHub が増やす値で、**増えたことを知る手立てがこちらに無い**
+ * （`stale` を落としていて、実際に取りこぼした）。#114 で決めた
+ * 「**列挙は必ず古くなり、古くなった先は取りこぼし側**」がここにも当てはまるので、
+ * **古くなったときに安全な側へ落ちる向き**にしてある。
+ */
+const PASSING_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
+
+/** Commit Status 側で「通った」と見なす値。**同じ理由で通ったほうを挙げる。** */
+const PASSING_STATES = new Set(["success"]);
 
 /**
  * **3 つを潰さない。** `pending` は待てば済み、`failing` は直さないと進まない——
@@ -58,11 +79,22 @@ const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action
  *
  * **1 件も無いものを `passing` にしない。** CI が動いていない PR が素通りする。
  */
-function toCiStatus(runs: readonly { status: string; conclusion: string | null }[]): CiStatus {
-  if (runs.some((run) => run.conclusion !== null && FAILED_CONCLUSIONS.has(run.conclusion))) {
+function toCiStatus(
+  runs: readonly { status: string; conclusion: string | null }[],
+  states: readonly { state: string }[],
+): CiStatus {
+  const failed =
+    runs.some(
+      (run) => run.status === "completed" && !PASSING_CONCLUSIONS.has(run.conclusion ?? ""),
+    ) || states.some((status) => status.state === "failure" || status.state === "error");
+  if (failed) {
     return "failing";
   }
-  if (runs.length === 0 || runs.some((run) => run.status !== "completed")) {
+  // **信号が 1 つも無いものを `passing` にしない。** CI が動いていない PR が素通りする
+  const running =
+    runs.some((run) => run.status !== "completed") ||
+    states.some((status) => !PASSING_STATES.has(status.state));
+  if ((runs.length === 0 && states.length === 0) || running) {
     return "pending";
   }
   return "passing";
@@ -80,6 +112,10 @@ export function toChangeSummary(input: ChangeSummaryInput): ChangeSummaryResult 
   const checks = checksSchema.safeParse(input.checks);
   if (!checks.success) {
     return { ok: false, reason: `CI の状態を読めません: ${z.prettifyError(checks.error)}` };
+  }
+  const statuses = statusesSchema.safeParse(input.statuses);
+  if (!statuses.success) {
+    return { ok: false, reason: `CI の状態を読めません: ${z.prettifyError(statuses.error)}` };
   }
 
   const touches = touchesSensitivePath(files.data.map((file) => file.filename));
@@ -100,7 +136,7 @@ export function toChangeSummary(input: ChangeSummaryInput): ChangeSummaryResult 
       // **追加と削除を足す。** 片方だけだと、消しただけの大きな変更が小さく見える
       changedLineCount: detail.data.additions + detail.data.deletions,
       touchesSensitivePath: touches,
-      ciStatus: toCiStatus(checks.data.check_runs),
+      ciStatus: toCiStatus(checks.data.check_runs, statuses.data.statuses),
     },
   };
 }

@@ -55,7 +55,11 @@ const OK_ROUTES: Routes = {
   "/commits/s1/check-runs": {
     body: { check_runs: [{ status: "completed", conclusion: "success" }] },
   },
+  // **Commit Status しか登録しない CI がある。** 両方見て初めてどちらでも動く
+  "/commits/s1/status": { body: { state: "success", statuses: [] } },
 };
+
+const NEXT_PAGE = '<https://api.github.com/x?page=99>; rel="next"';
 
 describe("createGitHubChangeSummarySource", () => {
   it("実データの形から材料を組み立てる", async () => {
@@ -112,6 +116,42 @@ describe("createGitHubChangeSummarySource", () => {
 
     expect(listing.summaries.has(1)).toBe(false);
     expect(listing.unavailable[0]?.reason).toMatch(/見切れ|多すぎ/);
+  });
+
+  it("check run が見切れたら材料にしない", async () => {
+    // **ファイル側と同じ向きに倒す。** 「30 件しか見ていないのに passing」は、
+    // **「見ていない」を「通っている」と読む**形である
+    const listing = await source({
+      ...OK_ROUTES,
+      "/commits/s1/check-runs": {
+        body: { check_runs: [{ status: "completed", conclusion: "success" }] },
+        link: NEXT_PAGE,
+      },
+    }).listChangeSummaries([1]);
+
+    expect(listing.summaries.has(1)).toBe(false);
+    expect(listing.unavailable[0]?.reason).toMatch(/見切れ|多すぎ/);
+  });
+
+  it("Commit Status が見切れたら材料にしない", async () => {
+    const listing = await source({
+      ...OK_ROUTES,
+      "/commits/s1/status": { body: { state: "success", statuses: [] }, link: NEXT_PAGE },
+    }).listChangeSummaries([1]);
+
+    expect(listing.summaries.has(1)).toBe(false);
+  });
+
+  it("Commit Status を取りに行く", async () => {
+    // **Checks API だけを見ると、Commit Status しか使わないリポジトリで
+    // すべての PR が永久に pending になる**（安全だが役に立たない）
+    const listing = await source({
+      ...OK_ROUTES,
+      "/commits/s1/check-runs": { body: { check_runs: [] } },
+      "/commits/s1/status": { body: { state: "success", statuses: [{ state: "success" }] } },
+    }).listChangeSummaries([1]);
+
+    expect(listing.summaries.get(1)?.ciStatus).toBe("passing");
   });
 
   it("番号を渡さなければ何も取りに行かない", async () => {
