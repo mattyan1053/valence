@@ -92,6 +92,19 @@ describe("周回を捨てるかの判定", () => {
     { name: "マージの段", heading: "### exit 0 — マージする" },
   ] as const;
 
+  /** 呼び直しの手前で何をするかが書かれた bash ブロック。 */
+  function codeBlockWithRerun(section: string): string {
+    const block = section
+      .split("```bash")
+      .slice(1)
+      .map((chunk) => chunk.split("```")[0] ?? "")
+      .find((chunk) => chunk.includes("/loop-master"));
+    if (block === undefined) {
+      throw new Error("呼び直しの手順が bash ブロックに書かれていません");
+    }
+    return block;
+  }
+
   function sectionOf(heading: string): string {
     const section = read(".claude/commands/loop-master.md").split(heading)[1];
     if (section === undefined) {
@@ -106,8 +119,20 @@ describe("周回を捨てるかの判定", () => {
     const section = sectionOf(heading);
 
     expect(section).toContain("/loop-master");
+
+    // **順序は「呼び直す手前で何をするか」で見る。** 散文の言及を拾うと、
+    // **本文で名前に触れただけで順序が満たされたことになる**（実際にそうなった）
+    const block = codeBlockWithRerun(section);
+
     // **カウンタを消してから呼び直す。** 順序を変えない
-    expect(section.indexOf("bin/loop-stall --reset")).toBeLessThan(section.indexOf("/loop-master"));
+    expect(block.indexOf("bin/loop-stall --reset")).toBeGreaterThanOrEqual(0);
+    expect(block.indexOf("bin/loop-stall --reset")).toBeLessThan(block.indexOf("/loop-master"));
+    // **lease も返してから呼び直す。** 握ったまま呼び直すと、呼び直された周回が
+    // **1.0 で自分自身に阻まれて何もせず終わる**（結局、次の cron まで動かない）
+    expect(block.indexOf("bin/loop-lease release master")).toBeGreaterThanOrEqual(0);
+    expect(block.indexOf("bin/loop-lease release master")).toBeLessThan(
+      block.indexOf("/loop-master"),
+    );
   });
 
   it.each(DISCARD_POINTS)("$name の呼び直しは 1 回だけと書いてある", ({ heading }) => {
