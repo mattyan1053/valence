@@ -16,6 +16,8 @@ type State = {
   ready?: number;
   inProgress?: number;
   backlog?: number;
+  /** `parked` な PR が閉じる予定の Issue 番号（PR 本文の `Closes #N`）。 */
+  parkedCloses?: number[];
   /** `gh` が失敗する（判定不能）。 */
   fails?: boolean;
   /** その取得だけが失敗する。**最初の 1 つだけを試すと、後ろの取得を試せない。** */
@@ -47,6 +49,12 @@ describe("bin/loop-handoff", () => {
               "  exit 1",
               "fi",
             ]),
+        // **`parked` の問い合わせも `pr list` を含む。** 先に見ないと取り違える
+        'if [[ $* == *"parked"* ]]; then',
+        `  printf '%b' ${JSON.stringify((state.parkedCloses ?? []).map((n) => `Closes #${n}`).join("\n"))}`,
+        `  [[ -n ${JSON.stringify((state.parkedCloses ?? []).join(","))} ]] && echo`,
+        "  exit 0",
+        "fi",
         'if [[ $* == *"pr list"* ]]; then',
         // **`%b` で出す。** `%s` だと `\t` がリテラルのまま出て、列が壊れる
         // （`bin/loop-await-review` のテストで 1 度踏んだ）
@@ -82,7 +90,20 @@ describe("bin/loop-handoff", () => {
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     path = join(repo, "path");
     mkdirSync(path, { recursive: true });
-    for (const command of ["bash", "git", "flock", "cat", "mkdir", "rm", "printf", "date"]) {
+    for (const command of [
+      "bash",
+      "git",
+      "flock",
+      "cat",
+      "mkdir",
+      "rm",
+      "printf",
+      "date",
+      // parked な PR の Issue を数えるのに使う
+      "grep",
+      "sort",
+      "wc",
+    ]) {
       const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
       if (found !== "") {
         symlinkSync(found, join(path, command));
@@ -194,6 +215,20 @@ describe("bin/loop-handoff", () => {
     expect(run().status).toBe(2);
   });
 
+  it("途中で自己宛てになっても、戻ったらまた送る", () => {
+    // **記録の更新が自己宛ての分岐より後だと、B で更新されずに A の記録が残る。**
+    // どの分岐を通っても更新済みになっていること
+    withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
+    expect(run("master").status).toBe(0);
+
+    withState({ prs: [{ number: 12 }] }); // → master。**master から見ると自己宛て**
+    expect(run("master").status).toBe(1);
+
+    withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker（再発）
+
+    expect(run("master").status).toBe(0);
+  });
+
   it("行き先が入れ替わって戻ったら、また送る", () => {
     // **記録を受け手のぶんしか更新しないと、A→B→A の 3 通目が出ない**
     // （worker の記録が A のままなので「送信済み」と読む）。
@@ -207,5 +242,26 @@ describe("bin/loop-handoff", () => {
     withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker（戻る）
 
     expect(run("master").status).toBe(0);
+  });
+
+  it("parked の PR に紐づく Issue は着手中に数えない", () => {
+    // **保留は「先行 PR を先に通す」ための正常な流れ**である。生の `in-progress` を
+    // 見ると「渡すものが無い」と答えてしまい、**#92 がいちばん埋めたかった沈黙**になる
+    // （master のステップ 6 も同じ理由で除いている）
+    withState({
+      prs: [{ number: 12, labels: ["parked"] }],
+      parkedCloses: [7],
+      ready: 1,
+      inProgress: 1,
+    });
+
+    expect(run("master").stdout).toMatch(/^worker\t/);
+  });
+
+  it("parked でない着手中があれば渡さない", () => {
+    // worker が動いている。**起こす必要は無い**
+    withState({ ready: 1, inProgress: 1 });
+
+    expect(run("master").status).toBe(1);
   });
 });

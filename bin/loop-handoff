@@ -63,7 +63,48 @@ done
 
 # 判断に使う状態。**指紋もここから作る**（別の値から作ると、判断が変わっていないのに
 # 指紋だけ変わって 2 通目が飛ぶ）。
+# **`parked` な PR に紐づく Issue は「着手中」に数えない**（master のステップ 6 と同じ理由）。
+# 保留した PR の Issue は `in-progress` のまま残るので、数えると
+# **保留中はいつも「渡すものが無い」**になり、**保留がいちばん埋めたかった沈黙を作る**。
+parked_issues="$(gh pr list --state open --limit 200 --json number,labels,body \
+  --jq '.[] | select([.labels[].name] | index("parked")) | .body' |
+  grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+' | sort -u | wc -l)" || parked_issues=0
+[[ $parked_issues =~ ^[0-9]+$ ]] || parked_issues=0
+((in_progress -= parked_issues))
+((in_progress < 0)) && in_progress=0
+
 readonly STATE="prs=${prs}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
+
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+
+# **状態を求めたら、いちばん最初にすべての役の記録を更新する。分岐はそのあと。**
+# 分岐ごとに更新すると、**通らなかった分岐の記録が古いまま残り**、
+# 行き先が戻ったときに「送信済み」と誤読する。**分岐が増えても同じ穴が開かない形にする。**
+exec 9>"$common_dir/valence-loop-handoff.lock" || {
+  echo "[FAIL] 送信記録のロックを作成できません" >&2
+  exit 2
+}
+if ! flock -w "${LOOP_HANDOFF_LOCK_WAIT_SEC:-10}" 9; then
+  echo "[FAIL] 送信記録のロックを取得できません" >&2
+  exit 2
+fi
+
+declare -A previous=()
+for role in "${ROLES[@]}"; do
+  record="$common_dir/valence-loop-handoff-$role"
+  previous[$role]="$(cat "$record" 2>/dev/null || true)"
+  printf '%s' "$STATE" >"$record" || {
+    echo "[FAIL] 送信記録を書き込めません: $record" >&2
+    exit 2
+  }
+done
 
 changes_requested=""
 gateable=""
@@ -98,44 +139,7 @@ fi
 # （自己通知で新しい手順書に載れる保証も無い）。
 [[ $to == "$ROLE" ]] && exit 1
 
-if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
-  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
-  exit 2
-fi
-common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
-  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
-  exit 2
-}
-readonly SENT="$common_dir/valence-loop-handoff-$to"
-
-# 読んでから書くまでを守る。**両方の周回が「まだ送っていない」と読むと 2 通飛ぶ。**
-exec 9>"$SENT.lock" || {
-  echo "[FAIL] 送信記録のロックを作成できません: $SENT.lock" >&2
-  exit 2
-}
-if ! flock -w "${LOOP_HANDOFF_LOCK_WAIT_SEC:-10}" 9; then
-  echo "[FAIL] 送信記録のロックを取得できません" >&2
-  exit 2
-fi
-
-already_sent=0
-if [[ -f $SENT ]] && [[ "$(cat "$SENT")" == "$STATE" ]]; then
-  # **同じ状態で 2 通目を送らない。** 相手はもう知っている。
-  already_sent=1
-fi
-
-# **評価するたびに、すべての役の記録を更新する。** 受け手のぶんだけ書くと、
-# **行き先が入れ替わって戻ったとき（A→B→A）に 3 通目が出ない**
-# （A の記録が古い状態のまま残り、「送信済み」と読む）。
-# **新しい値（連番・時刻）は足さない。** 判断が変わっていないのに指紋だけ変わると、
-# 2 通目が飛ぶ。
-for role in "${ROLES[@]}"; do
-  printf '%s' "$STATE" >"$common_dir/valence-loop-handoff-$role" || {
-    echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$role" >&2
-    exit 2
-  }
-done
-
-((already_sent == 1)) && exit 1
+# **同じ状態で 2 通目を送らない。** 相手はもう知っている。
+[[ "${previous[$to]}" == "$STATE" ]] && exit 1
 
 printf '%s\t%s\n' "$to" "$reason"
