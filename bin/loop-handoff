@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# 周回の出口で、**次に動けるのは誰か**を決める。
+#
+#   exit 0 = 渡す相手がいる。`<役>\t<理由>` を stdout に出す
+#   exit 1 = 渡さない (相手に持ち物が無い / 動けるのは自分 / 同じ状態で送信済み)
+#   exit 2 = 状態を読めない / 使い方の誤り
+#
+# **通知は「〜した」ときにだけ送られていた。** 周回を終える経路は 9 つ以上あり、
+# **何もせずに終わる経路には 1 つも通知が無い**ので、そこを通ると
+# **次の cron まで誰も動かない**。列挙を足しても、経路が増えればまた漏れる
+# (`bin/loop-procedure-changed` の「1 以外はすべて」と同じ理由)。
+# **出口を 1 本にして、そこで必ず持ち手を決める。**
+#
+# **ping-pong を作らない。** 「暇そうだから起こす」を許すと
+# 「やることなし → 起こす → やることなし → 起こす」で焼き切れる。
+#
+#   1. **相手に具体的な持ち物があるときだけ送る**
+#   2. **同じ状態で 2 通目を送らない** (判断に使った状態そのものを覚えておく)
+#   3. **自分自身へは送らない** (自分が動けるなら次の周回でやればよい)
+#
+# 覚えておく場所は `bin/loop-stall` と同じ **git の共通ディレクトリ**。
+# 新しい保存先を増やすと、掃除する場所が増える。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+# shellcheck disable=SC2016
+set -uo pipefail
+
+readonly ROLES=(master worker)
+
+usage() {
+  echo "使い方: bin/loop-handoff <役>   役: ${ROLES[*]}" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+readonly ROLE="$1"
+role_is_known=1
+for known in "${ROLES[@]}"; do
+  [[ $known == "$ROLE" ]] && role_is_known=0
+done
+((role_is_known == 0)) || {
+  echo "[FAIL] 未知の役: $ROLE（使えるのは ${ROLES[*]}）" >&2
+  exit 2
+}
+
+# **読めなかったら「送らない」に倒さない。** 倒すと、止まっていることに気づけない。
+fail_unknown() {
+  echo "[FAIL] GitHub の状態を読み取れません: $1" >&2
+  exit 2
+}
+
+prs="$(gh pr list --state open --limit 200 --json number,labels \
+  --jq '.[] | "\(.number)\t\(.labels | map(.name) | join(","))"')" || fail_unknown "open PR"
+ready="$(gh issue list --label ready --limit 200 --json number --jq 'length')" || fail_unknown "ready"
+in_progress="$(gh issue list --label in-progress --limit 200 --json number --jq 'length')" ||
+  fail_unknown "in-progress"
+backlog="$(gh issue list --label backlog --limit 200 --json number --jq 'length')" ||
+  fail_unknown "backlog"
+
+for count in "$ready" "$in_progress" "$backlog"; do
+  [[ $count =~ ^[0-9]+$ ]] || fail_unknown "件数が数値ではありません: $count"
+done
+
+# 判断に使う状態。**指紋もここから作る**（別の値から作ると、判断が変わっていないのに
+# 指紋だけ変わって 2 通目が飛ぶ）。
+readonly STATE="prs=${prs}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
+
+changes_requested=""
+gateable=""
+while IFS=$'\t' read -r number labels; do
+  [[ -n $number ]] || continue
+  if [[ ",$labels," == *",changes-requested,"* ]]; then
+    changes_requested="$number"
+  elif [[ ",$labels," != *",parked,"* ]]; then
+    gateable="$number"
+  fi
+done <<<"$prs"
+
+# 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
+if [[ -n $changes_requested ]]; then
+  to="worker"
+  reason="PR #${changes_requested} に master の要求が残っている"
+elif [[ -n $gateable ]]; then
+  to="master"
+  reason="PR #${gateable} のゲートを回せる"
+elif ((ready == 1 && in_progress == 0)); then
+  to="worker"
+  reason="ready の Issue が 1 件ある"
+elif ((backlog > 0 && ready == 0)); then
+  to="master"
+  reason="backlog はあるが ready が 0 件（昇格の番）"
+else
+  # ここは `bin/loop-stall` が `no-work` として数える領域である。
+  exit 1
+fi
+
+# **自分自身へは送らない。** 自分が動けるなら次の周回でやればよい
+# （自己通知で新しい手順書に載れる保証も無い）。
+[[ $to == "$ROLE" ]] && exit 1
+
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+readonly SENT="$common_dir/valence-loop-handoff-$to"
+
+# 読んでから書くまでを守る。**両方の周回が「まだ送っていない」と読むと 2 通飛ぶ。**
+exec 9>"$SENT.lock" || {
+  echo "[FAIL] 送信記録のロックを作成できません: $SENT.lock" >&2
+  exit 2
+}
+if ! flock -w "${LOOP_HANDOFF_LOCK_WAIT_SEC:-10}" 9; then
+  echo "[FAIL] 送信記録のロックを取得できません" >&2
+  exit 2
+fi
+
+if [[ -f $SENT ]] && [[ "$(cat "$SENT")" == "$STATE" ]]; then
+  # **同じ状態で 2 通目を送らない。** 相手はもう知っている。
+  exit 1
+fi
+printf '%s' "$STATE" >"$SENT" || {
+  echo "[FAIL] 送信記録を書き込めません: $SENT" >&2
+  exit 2
+}
+
+printf '%s\t%s\n' "$to" "$reason"
