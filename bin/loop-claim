@@ -163,16 +163,36 @@ if [[ $ACTION == "audit" ]]; then
 
   # **古い記録は、その場で解放する。** 「誰も作業していないのに持ち主が居る」記録は、
   # 作業場が増えた瞬間に**再開を止める**（#82 の前に消しておきたい）。
+  #
+  # **確認と削除は `take` / `resume` と同じロックの中で行う。**
+  # ロックの外で読んだ値を中で使うと、**読んでから消すまでの窓**が開き、
+  # **`take` が書いたばかりの記録を消す**——**塞ぎたいものと同じ形を、塞ぐ側が作る**。
+  exec 9>"$common_dir/valence-loop-claim.lock" || {
+    echo "[FAIL] 取り合いのロックを作成できません" >&2
+    exit 2
+  }
+  if ! flock -w "$LOCK_WAIT_SEC" 9; then
+    # **取れないうちは記録に触らない。** 走っている周回が書いている最中である
+    echo "[FAIL] 取り合いのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+    exit 2
+  fi
+
   for record in "$common_dir"/valence-loop-claim-[0-9]*; do
     [[ -f $record ]] || continue
     number="${record##*valence-loop-claim-}"
     [[ $number =~ ^[0-9]+$ ]] || continue
+    # **ロックの中で読み直す。** 外で読んだ値は、もう古いかもしれない
     if ! labels="$(gh issue view "$number" --json labels --jq '.labels[].name')"; then
       echo "[FAIL] #$number の label を読めません" >&2
       exit 2
     fi
     if ! has_label "in-progress" "$labels"; then
-      rm -f "$record"
+      # **失敗を黙って成功にしない。** 消えていない記録は残り続け、
+      # **別の作業場の再開を妨げる**（手順書 3.1 の掃除と同じ扱い）
+      if ! rm -f "$record"; then
+        echo "[FAIL] 古い記録を消せません: $record" >&2
+        exit 2
+      fi
       echo "[INFO] #${number} は着手中ではないので、古い記録を解放しました"
     fi
   done

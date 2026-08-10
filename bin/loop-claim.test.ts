@@ -408,6 +408,54 @@ describe("bin/loop-claim", () => {
 
       expect(run(["audit"]).status).toBe(2);
     });
+
+    it("消せなかったら、消したことにしない", () => {
+      // **失敗を黙って成功にしない。** 消えていない記録は残り続け、
+      // **別の作業場の再開を妨げ続ける**（手順書 3.1 の掃除と同じ扱い）
+      withAudit({ labelsOf: { 82: ["backlog"] } });
+      writeRecord(82);
+      // **ロックのファイルは先に作っておく。** 作れないところで止まると、
+      // **消せなかった場合まで辿れない**（緑になっても理由が違う）
+      writeFileSync(join(repo, ".git", "valence-loop-claim.lock"), "");
+      const holder = join(repo, ".git");
+      chmodSync(holder, 0o555);
+
+      try {
+        const audited = run(["audit"]);
+
+        expect(audited.status).toBe(2);
+        expect(audited.stdout).not.toContain("解放しました");
+      } finally {
+        chmodSync(holder, 0o755);
+      }
+    });
+
+    it("記録の確認と削除は、take と同じロックの中で行う", () => {
+      // **ロックの外で読んだ値を中で使わない。** 読んでから消すまでに `take` が
+      // 入ると、**いま書かれた記録を消す**——`take` が塞いだのと同じ形が、
+      // **塞ぐ側に開く**（#124 のレビュー指摘）
+      withAudit({ labelsOf: { 82: ["backlog"] } });
+      writeRecord(82);
+      const lock = join(repo, ".git", "valence-loop-claim.lock");
+      const held = spawnSync(
+        "bash",
+        [
+          "-c",
+          `setsid flock -x ${JSON.stringify(lock)} -c "sleep 5" </dev/null >/dev/null 2>&1 & echo $!`,
+        ],
+        { encoding: "utf8" },
+      ).stdout.trim();
+
+      try {
+        // **ロックを取れないうちは、記録に触らない。**
+        const audited = run(["audit"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } });
+
+        expect(audited.status).toBe(2);
+        expect(existsSync(join(repo, ".git", "valence-loop-claim-82"))).toBe(true);
+      } finally {
+        spawnSync("kill", [held]);
+      }
+    });
   });
 
   it("使い方の誤りは 2 で落ちる", () => {
