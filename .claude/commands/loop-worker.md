@@ -333,6 +333,16 @@ bin/loop-claim take <N>
 Biome の複雑度（#117）を 2 度見落とし、**どちらも CI まで気づかなかった**。
 **テストが緑であることと、`./task check` が通ることは別である。**
 
+**絞るなら、先に走らせて終了コードを控える。**
+
+```bash
+./task check >check.log 2>&1; status=$?   # 合否はこの $status で決める
+grep -aE "error|×" check.log              # 絞るのはそのあと
+```
+
+**パイプで繋ぐと、`$?` は絞り込み側のものになり `./task check` の合否が消える**
+（`./task check | grep …` の `$?` は `grep` の値）。繋ぐなら `${PIPESTATUS[0]}` を見る。
+
 完了条件を満たせない、または Issue の記述だけでは判断できない場合は、
 `blocked` label を付けて理由をコメントし、`bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する。
 **推測で埋めない。**
