@@ -1,5 +1,43 @@
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { touchesSensitivePath } from "./sensitive-path";
+
+/**
+ * **このリポジトリに実在するパス**で確かめる回帰試験。
+ *
+ * `src/infrastructure/github/app-jwt.ts` を取りこぼしていた（#114 のレビュー）。
+ * **自分自身のリポジトリで踏む形**だったので、**実物のパスで固定する**。
+ * ファイルが消えたり名前が変わったりしたら、この試験は**存在しない**ほうで落ちる
+ * （当たらなくなったことに気づかず緑のまま、を避ける）。
+ */
+const REAL_SENSITIVE_PATHS: readonly string[] = [
+  "src/infrastructure/github/app-jwt.ts",
+  "src/infrastructure/github/app-credentials.ts",
+  "src/infrastructure/github/installation-token.ts",
+  ".github/workflows/ci.yml",
+  "pnpm-lock.yaml",
+  "compose.yaml",
+];
+
+describe("このリポジトリ自身のパス", () => {
+  const tracked = new Set(
+    execFileSync("git", ["ls-files"], {
+      cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+      encoding: "utf8",
+    })
+      .split("\n")
+      .filter((path) => path !== ""),
+  );
+
+  it.each(REAL_SENSITIVE_PATHS)("%s は実在する", (path) => {
+    expect(tracked.has(path), `${path} が見つからない（名前が変わった？）`).toBe(true);
+  });
+
+  it.each(REAL_SENSITIVE_PATHS)("%s は影響が大きいと判定される", (path) => {
+    expect(touchesSensitivePath([path])).toBe(true);
+  });
+});
 
 describe("touchesSensitivePath", () => {
   it("何も変更していなければ false", () => {

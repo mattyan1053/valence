@@ -122,6 +122,24 @@ const SENSITIVE_WORDS: readonly string[] = [
   "acl",
   "rbac",
   "iam",
+  // **略語も落とさない。** `auth` があって `jwt` が無い、という取りこぼし方をしていた
+  // （このリポジトリの `src/infrastructure/github/app-jwt.ts` で実際に踏んだ）。
+  // **同じ語彙の中で、綴りの短いほうだけが抜ける**のがこの穴の形である。
+  "jwt",
+  "jwk",
+  "jwks",
+  "jose",
+  "sso",
+  "mfa",
+  "otp",
+  "totp",
+  "csrf",
+  "xsrf",
+  "hmac",
+  "pkce",
+  "tls",
+  "ssl",
+  "cors",
   // 壊れると復元しにくいもの
   "crypto",
   "encryption",
