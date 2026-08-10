@@ -155,11 +155,23 @@ done
 # 保留した PR の Issue は `in-progress` のまま残るので、数えると
 # **保留中はいつも「渡すものが無い」**になり、**保留がいちばん埋めたかった沈黙を作る**。
 # **同じ一覧から数える。** 別の口で取り直すと、そこだけ古い値になりうる。
-parked_issues="$(while IFS=$'\t' read -r _number labels _head body; do
+# **「一致なし」を失敗として扱わない。** `grep` の exit 1 は**「無かった」**であって
+# 「読めなかった」ではない。パイプの終了コードで全体を捨てると、
+# **最後の `parked` PR に `Closes` が無いだけで、数えたぶんまで 0 になる**——
+# そのとき `parked` の Issue が引かれず、**保留がいちばん埋めたかった沈黙**が戻る。
+#
+# **読めなかったときの受け皿は上にある**（`$prs` の取得が失敗すれば `fail_unknown`）。
+# ここは**取れている本文から数えるだけ**なので、失敗しうる操作を挟まない。
+declare -A parked_seen=()
+while IFS=$'\t' read -r _number labels _head body; do
   [[ ",$labels," == *",parked,"* ]] || continue
-  grep -oE 'Closes #[0-9]+' <<<"$body" | grep -oE '[0-9]+'
-done <<<"$prs" | sort -u | wc -l)" || parked_issues=0
-[[ $parked_issues =~ ^[0-9]+$ ]] || parked_issues=0
+  rest="$body"
+  while [[ $rest =~ Closes[[:space:]]+#([0-9]+) ]]; do
+    parked_seen[${BASH_REMATCH[1]}]=1
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  done
+done <<<"$prs"
+parked_issues=${#parked_seen[@]}
 ((in_progress -= parked_issues))
 ((in_progress < 0)) && in_progress=0
 

@@ -463,6 +463,23 @@ describe("bin/loop-handoff", () => {
     });
   });
 
+  it("最後の parked PR に Closes が無くても、数えたぶんは残る", () => {
+    // **`grep` の exit 1 は「無かった」であって「読めなかった」ではない。**
+    // 最後の反復の終了コードで全体を捨てると、**取れていたぶんまで 0 になる**——
+    // そのとき `parked` の Issue が引かれず、**保留がいちばん埋めたかった沈黙**が戻る。
+    // **一致しないほうを最後に置く**（順番が効く）
+    withState({
+      prs: [
+        { number: 12, labels: ["parked"], body: "Closes #7" },
+        { number: 13, labels: ["parked"], body: "本文だけで Closes が無い" },
+      ],
+      ready: 1,
+      inProgress: 1,
+    });
+
+    expect(run("master").stdout).toMatch(/^worker\t/);
+  });
+
   it("parked でない着手中があれば渡さない", () => {
     // worker が動いている。**起こす必要は無い**
     withState({ ready: 1, inProgress: 1 });
