@@ -12,11 +12,26 @@ import { createAppJwt } from "./app-jwt";
 
 const API_ORIGIN = "https://api.github.com";
 
-/** どのリポジトリを見るか。**中身は境界の外から来る**ので、そのまま URL へ入れる。 */
+/** どのリポジトリを見るか。 */
 export type GitHubRepository = {
   readonly owner: string;
   readonly name: string;
 };
+
+/**
+ * **URL へ入れる前に検証する**（`AGENTS.md` §6）。
+ *
+ * この要求には **App の JWT が載る**ので、`..%2F..%2Fapp` のような値をそのまま
+ * 入れると、**App の資格で別の endpoint を叩く**ことになる。いまの呼び出し側は
+ * テストだけだが、**UI からリポジトリを選ばせた瞬間に外部入力になる**。
+ *
+ * **落ちたら投げる。直して続行しない。** `..` を除去して進むと、
+ * **別のリポジトリを黙って見に行く**ほうの事故になる。
+ */
+const nameSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]+$/)
+  .refine((value) => !value.includes(".."));
 
 export type ResolveInstallationOptions = {
   readonly credentials: AppCredentials;
@@ -26,8 +41,13 @@ export type ResolveInstallationOptions = {
   readonly fetchImpl?: typeof fetch;
 };
 
-/** 使う項目だけを検証する。`id` は GitHub が振る数値。 */
-const responseSchema = z.object({ id: z.number().int() });
+/**
+ * 使う項目だけを検証する。
+ *
+ * **`id` は正の整数**である。`0` や負数を通すと `/app/installations/0/access_tokens`
+ * へ進み、**原因の分からない失敗**になる（下の「見つからなければ投げる」が守れない）。
+ */
+const responseSchema = z.object({ id: z.number().int().positive() });
 
 /**
  * そのリポジトリに入っている installation の ID を返す。
@@ -41,6 +61,9 @@ export async function resolveRepositoryInstallation({
   now,
   fetchImpl = fetch,
 }: ResolveInstallationOptions): Promise<string> {
+  requireName(repository.owner, "owner");
+  requireName(repository.name, "name");
+
   const response = await fetchImpl(
     `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/installation`,
     {
@@ -62,6 +85,13 @@ export async function resolveRepositoryInstallation({
     throw installationResponseError(response.status);
   }
   return String(parsed.data.id);
+}
+
+/** **値は載せない。** 外から来た文字列をそのままログへ流さない。 */
+function requireName(value: string, field: "owner" | "name"): void {
+  if (!nameSchema.safeParse(value).success) {
+    throw new Error(`リポジトリの指定が不正です: ${field}`);
+  }
 }
 
 /** **応答の中身を載せない**（§6「出力に何が含まれうるかで判断する」）。 */

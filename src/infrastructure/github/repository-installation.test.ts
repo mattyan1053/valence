@@ -27,7 +27,8 @@ function respondingWith(routes: Record<string, { body: string; status?: number }
 }
 
 const VALENCE = "https://api.github.com/repos/mattyan1053/valence/installation";
-const OTHER = "https://api.github.com/repos/mattyan1053/other/installation";
+const SAME_OWNER = "https://api.github.com/repos/mattyan1053/other/installation";
+const OTHER_ACCOUNT = "https://api.github.com/repos/another-org/valence/installation";
 
 describe("リポジトリの installation を実行時に解決する", () => {
   it("応答から installation の ID を取り出す", async () => {
@@ -43,12 +44,30 @@ describe("リポジトリの installation を実行時に解決する", () => {
     expect(installation).toBe("5678");
   });
 
-  it("リポジトリが違えば installation も違う", async () => {
-    // **App ごとに 1 つではない。** インストール先ごとに増えるので、
-    // 1 つ固定の前提がコードに残っていると、2 つ目のリポジトリで嘘の ID を使う
+  it("アカウントが違えば installation も違う", async () => {
+    // **installation はアカウント（org / ユーザー）単位である。** App ごとに 1 つでは
+    // ないので、1 つ固定の前提がコードに残っていると、2 つ目のアカウントで嘘の ID を使う
     const { fetchImpl } = respondingWith({
       [VALENCE]: { body: '{"id":5678}' },
-      [OTHER]: { body: '{"id":9012}' },
+      [OTHER_ACCOUNT]: { body: '{"id":9012}' },
+    });
+    const resolve = (owner: string) =>
+      resolveRepositoryInstallation({
+        credentials,
+        repository: { owner, name: "valence" },
+        now,
+        fetchImpl,
+      });
+
+    expect([await resolve("mattyan1053"), await resolve("another-org")]).toEqual(["5678", "9012"]);
+  });
+
+  it("同じアカウントの 2 つのリポジトリは同じ installation になる", async () => {
+    // **リポジトリ単位ではない。** ここを取り違えると、installation を
+    // リポジトリごとに持ち回る設計へ倒れる
+    const { fetchImpl } = respondingWith({
+      [VALENCE]: { body: '{"id":5678}' },
+      [SAME_OWNER]: { body: '{"id":5678}' },
     });
     const resolve = (name: string) =>
       resolveRepositoryInstallation({
@@ -58,7 +77,7 @@ describe("リポジトリの installation を実行時に解決する", () => {
         fetchImpl,
       });
 
-    expect([await resolve("valence"), await resolve("other")]).toEqual(["5678", "9012"]);
+    expect([await resolve("valence"), await resolve("other")]).toEqual(["5678", "5678"]);
   });
 
   it("App の JWT を Bearer で載せる", async () => {
@@ -117,5 +136,37 @@ describe("リポジトリの installation を実行時に解決する", () => {
     }).catch((error: unknown) => String(error));
 
     expect(message).not.toContain("leaked");
+  });
+
+  it("id が 0 や負数なら投げる", async () => {
+    // **`z.number().int()` は 0 も負数も通す。** 通すと
+    // `/app/installations/0/access_tokens` へ進み、原因の分からない失敗になる
+    const zero = respondingWith({ [VALENCE]: { body: '{"id":0}' } });
+    const negative = respondingWith({ [VALENCE]: { body: '{"id":-1}' } });
+    const resolve = (fetchImpl: typeof fetch) =>
+      resolveRepositoryInstallation({
+        credentials,
+        repository: { owner: "mattyan1053", name: "valence" },
+        now,
+        fetchImpl,
+      });
+
+    await expect(resolve(zero.fetchImpl)).rejects.toThrow(/読め/);
+    await expect(resolve(negative.fetchImpl)).rejects.toThrow(/読め/);
+  });
+
+  it("リポジトリの指定が不正なら、要求を送る前に投げる", async () => {
+    // **この要求には App の JWT が載る。** 検証せずに URL へ入れると、
+    // **App の資格で別の endpoint を叩く**ことになる
+    const { calls, fetchImpl } = respondingWith({ [VALENCE]: { body: '{"id":5678}' } });
+    const resolve = (owner: string, name: string) =>
+      resolveRepositoryInstallation({ credentials, repository: { owner, name }, now, fetchImpl });
+
+    await expect(resolve("..%2F..%2Fapp", "valence")).rejects.toThrow(/owner/);
+    await expect(resolve("mattyan1053/other", "valence")).rejects.toThrow(/owner/);
+    await expect(resolve("mattyan1053", "..")).rejects.toThrow(/name/);
+    await expect(resolve("", "valence")).rejects.toThrow(/owner/);
+    // **直して続行しない。** 別のリポジトリを黙って見に行くほうが悪い
+    expect(calls).toEqual([]);
   });
 });
