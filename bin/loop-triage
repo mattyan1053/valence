@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# レビュー上限に達した PR を、**どこへ渡すか**決める。
+#
+#   bin/loop-triage --findings <件数> --rework-lines <見込み行数> \
+#                   --security <yes|no> --worse <yes|no> --reachable <yes|no>
+#
+#   → `<行き先>\t<理由>` を stdout に出す
+#     rework = worker へ差し戻す / human = 人を呼ぶ / defer = Issue へ外出ししてマージ
+#
+#   exit 0 = 決まった
+#   exit 2 = 判定できない / 使い方の誤り
+#
+# **既定はマージで、人を呼ぶのは例外である**（利用者の判断）。
+# それまでの基準は **直近 4 件すべてで人の結論と食い違っていた**（#64 / #67 / #96 / #100）。
+# 3 時間で 2 回、人を呼んで止まっている。**校正されていない物差しだった。**
+#
+# **上から順に当て、最初に当たったところで決める。** 散文で「小さいから」と書ける形に
+# すると、**都度判断が戻ってくる**。だから入力は**数と yes/no だけ**にしてある。
+#
+#   0. 手直しの範囲に収まる見込み        → 差し戻す
+#   1. セキュリティ (AGENTS.md §6)       → 人を呼ぶ
+#   2. 入れる前より悪くなる              → 人を呼ぶ
+#   3. いまの構成で到達可能              → 人を呼ぶ (ここまで来た時点で手直しの範囲は超えている)
+#   4. どれでもない                      → Issue へ外出ししてマージ
+#
+# **0 がいちばん先に来る理由。** 2 行で直るものを Issue にすると、誰かが後で読んで
+# **PR を立て直して、またレビューを通す**ことになり、差し戻しより高くつく。
+# **外出しは「その場で直せないもの」のためにある。**
+#
+# **0 は見込みで判定する。** 見込みは外れる (#96 で実際に外れた)。外れても
+# **第 3 層が次の周回で実測して止める**ので、**外れたときの損は 1 周**である。
+# 迷ったら差し戻す側へ倒してよい。
+#
+# **2 は優先度ではなく差し引きで見る。** #100 は「黙って重複が生まれる」を塞いで
+# 「exit 128 で騒がしく落ちる」を残した交換で、**塞いだ穴のほうが大きい**。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **手直しの上限はゲートと同じ値を使う。** 2 箇所に閾値を持つと、片方だけ直して
+# 食い違い、**見込みで通したものを実測が止める**（またはその逆）ことになる。
+readonly MAX_FIXUP_LINES="${LOOP_MAX_FIXUP_LINES:-60}"
+
+usage() {
+  echo "使い方: bin/loop-triage --findings <件数> --rework-lines <見込み行数> \\" >&2
+  echo "                        --security <yes|no> --worse <yes|no> --reachable <yes|no>" >&2
+  echo "        → rework（差し戻す）/ human（人を呼ぶ）/ defer（外出ししてマージ）" >&2
+  exit 2
+}
+
+findings=""
+rework_lines=""
+security=""
+worse=""
+reachable=""
+
+while (($# > 0)); do
+  case "$1" in
+  --findings) findings="${2-}" ;;
+  --rework-lines) rework_lines="${2-}" ;;
+  --security) security="${2-}" ;;
+  --worse) worse="${2-}" ;;
+  --reachable) reachable="${2-}" ;;
+  *) usage ;;
+  esac
+  shift 2 || usage
+done
+
+for number in "$findings" "$rework_lines"; do
+  [[ $number =~ ^[0-9]+$ ]] || usage
+done
+# **yes / no 以外を通さない。** 空や `maybe` を「no」と読むと、
+# **答えられない状況ほど通ってしまう**。
+for answer in "$security" "$worse" "$reachable"; do
+  [[ $answer == "yes" || $answer == "no" ]] || usage
+done
+[[ $MAX_FIXUP_LINES =~ ^[0-9]+$ ]] || {
+  echo "[FAIL] 設定: LOOP_MAX_FIXUP_LINES は 0 以上の整数で指定してください" >&2
+  exit 2
+}
+
+decide() {
+  printf '%s\t%s\n' "$1" "$2"
+  exit 0
+}
+
+# 0. **その場で直せるなら差し戻す。** 指摘が残っていないなら差し戻す相手がいない。
+if ((findings > 0 && rework_lines <= MAX_FIXUP_LINES)); then
+  decide rework "手直しの範囲に収まる見込み（${rework_lines} 行 <= ${MAX_FIXUP_LINES} 行）"
+fi
+# 1. セキュリティ。
+[[ $security == "yes" ]] && decide human "AGENTS.md §6（セキュリティ）に当たる"
+# 2. 差し引きで悪くなる。
+[[ $worse == "yes" ]] && decide human "この PR を入れると、入れる前より悪くなる"
+# 3. いまの構成で踏める。
+[[ $reachable == "yes" ]] && decide human "いまの構成で到達可能で、手直しの範囲を超える"
+# 4. それ以外。
+decide defer "上のどれにも当たらない（外出しして記録に残す）"
