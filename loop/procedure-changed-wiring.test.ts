@@ -56,4 +56,29 @@ describe("周回を捨てるかの判定", () => {
 
     expect(uncovered).toEqual([]);
   });
+
+  it("判定の分岐は「1 以外はすべて捨てる」になっている", () => {
+    // **`exit 2` だけを並べると、並べ忘れた値が抜ける。** 判定器が消えた・
+    // 実行できない（126 / 127）ときはどの分岐にも入らず、
+    // **「判定不能なら捨てる」が成立しない**（実際に踏んだ）。
+    //
+    // **節を切って見る。** 文書全体を見ると、別の節の同じ言い回しが拾われて
+    // **分岐を書き換えても通る**（実際に 0 件だった）
+    const section = read(".claude/commands/loop-master.md")
+      .split("### 1.1 手順とスクリプトを最新にする")[1]
+      ?.split("\n## ")[0];
+
+    expect(section).toMatch(/1 以外/);
+    expect(section).toMatch(/126 \/ 127/);
+  });
+
+  it("マージした周回も、変わっていなければ続ける", () => {
+    // **ここで終えると、次の周回まで誰も動かない。** マージでは通知を送らないので、
+    // worker は自分の cron が来るまで何も知らない
+    const doc = read(".claude/commands/loop-master.md");
+    const afterMerge = doc.split("### exit 0 — マージする")[1]?.split("\n### ")[0] ?? "";
+
+    expect(afterMerge).toContain("bin/loop-procedure-changed");
+    expect(afterMerge).toMatch(/ステップ 6/);
+  });
 });
