@@ -19,7 +19,7 @@ import type {
 } from "../../application/ports/change-summary-source";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { AppCredentials } from "./app-credentials";
-import { toChangeSummary } from "./change-summary-mapping";
+import { toChangeSummary, toHeadSha } from "./change-summary-mapping";
 import type { InstallationToken } from "./installation-token";
 import { needsRefresh, requestInstallationToken } from "./installation-token";
 import type { GitHubRepository } from "./repository-installation";
@@ -124,8 +124,10 @@ export function createGitHubChangeSummarySource({
   async function summaryOf(number: number, header: string): Promise<ChangeSummary> {
     const base = `${API_ORIGIN}/repos/${repository.owner}/${repository.name}`;
     const detail = (await readJson(`${base}/pulls/${number}`, header)) as { body: unknown };
-    const head = (detail.body as { head?: { sha?: unknown } } | null)?.head?.sha;
-    if (typeof head !== "string" || head === "") {
+    // **検証してから URL へ入れる**（`AGENTS.md` §6）。素通しにすると、
+    // **installation トークンを付けたまま別の endpoint を叩ける**。
+    const head = toHeadSha(detail.body);
+    if (head === undefined) {
       throw new Error("PR の head を読めませんでした");
     }
     const files = await readPages(
@@ -150,6 +152,16 @@ export function createGitHubChangeSummarySource({
       header,
       "CI の状態",
     );
+
+    // **3 回の取得は別々の瞬間を見ている。** 間に push が入ると、
+    // **古い版の件数と CI に、新しい版のパス**が混ざり、
+    // **未検証の新しい版に「読まずにマージしてよい」と出る**。
+    // **取り直さない**——また間に push が入りうるので終わらない。材料にしなければ、
+    // 行は残ったまま次の周回で埋まる（#112）。
+    const again = (await readJson(`${base}/pulls/${number}`, header)) as { body: unknown };
+    if (toHeadSha(again.body) !== head) {
+      throw new Error("取得の途中で PR が更新されました（別々の版が混ざるため材料にしません）");
+    }
 
     const result = toChangeSummary({
       detail: detail.body,

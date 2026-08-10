@@ -35,11 +35,32 @@ export type ChangeSummaryInput = {
   readonly statuses: unknown;
 };
 
+/**
+ * **head の SHA も検証する。** これは URL のパスへ入る値なので、
+ * 空でないだけでは足りない——`/` やドットセグメントが入れば、
+ * **installation トークンを付けたまま別の endpoint を叩ける**（`AGENTS.md` §6）。
+ * **40 桁の 16 進**に絞る。
+ */
+const headShaSchema = z.string().regex(/^[0-9a-f]{40}$/);
+
+const headSchema = z.object({ head: z.object({ sha: headShaSchema }) });
+
 const detailSchema = z.object({
   changed_files: z.number().int().nonnegative(),
   additions: z.number().int().nonnegative(),
   deletions: z.number().int().nonnegative(),
 });
+
+/**
+ * 検証済みの head を取り出す。**読めなければ材料にしない**（推測で埋めない）。
+ *
+ * **材料の組み立てとは別にしてある。** head が要るのは**要求を組み立てる側**だけで、
+ * `ChangeSummary` には入らない。
+ */
+export function toHeadSha(detail: unknown): string | undefined {
+  const parsed = headSchema.safeParse(detail);
+  return parsed.success ? parsed.data.head.sha : undefined;
+}
 
 const filesSchema = z.array(z.object({ filename: z.string().min(1) }));
 

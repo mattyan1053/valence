@@ -12,9 +12,11 @@ const { privateKey } = generateKeyPairSync("rsa", {
 });
 const CREDENTIALS: AppCredentials = { appId: "1234", privateKey };
 const REPOSITORY = { owner: "o", name: "r" };
+/** **40 桁の 16 進**。SHA の形をしていないものは URL に入れない（§6） */
+const HEAD = "a".repeat(40);
 
 /** どの URL に何を返すか。**本物の GitHub を呼ばない。** */
-type Routes = Record<string, { status?: number; body: unknown; link?: string }>;
+type Routes = Record<string, { status?: number; body: unknown | (() => unknown); link?: string }>;
 
 function fakeFetch(routes: Routes): typeof fetch {
   return (async (input: string | URL | Request) => {
@@ -33,7 +35,8 @@ function fakeFetch(routes: Routes): typeof fetch {
     if (route === undefined) {
       return new Response("not stubbed", { status: 404 });
     }
-    return new Response(JSON.stringify(route.body), {
+    const body = typeof route.body === "function" ? route.body() : route.body;
+    return new Response(JSON.stringify(body), {
       status: route.status ?? 200,
       headers: route.link === undefined ? {} : { link: route.link },
     });
@@ -51,12 +54,12 @@ function source(routes: Routes) {
 
 const OK_ROUTES: Routes = {
   "/pulls/1/files": { body: [{ filename: "src/ui/button.tsx" }] },
-  "/pulls/1": { body: { changed_files: 1, additions: 2, deletions: 0, head: { sha: "s1" } } },
-  "/commits/s1/check-runs": {
+  "/pulls/1": { body: { changed_files: 1, additions: 2, deletions: 0, head: { sha: HEAD } } },
+  [`/commits/${HEAD}/check-runs`]: {
     body: { check_runs: [{ status: "completed", conclusion: "success" }] },
   },
   // **Commit Status しか登録しない CI がある。** 両方見て初めてどちらでも動く
-  "/commits/s1/status": { body: { state: "success", statuses: [] } },
+  [`/commits/${HEAD}/status`]: { body: { state: "success", statuses: [] } },
 };
 
 const NEXT_PAGE = '<https://api.github.com/x?page=99>; rel="next"';
@@ -123,7 +126,7 @@ describe("createGitHubChangeSummarySource", () => {
     // **「見ていない」を「通っている」と読む**形である
     const listing = await source({
       ...OK_ROUTES,
-      "/commits/s1/check-runs": {
+      [`/commits/${HEAD}/check-runs`]: {
         body: { check_runs: [{ status: "completed", conclusion: "success" }] },
         link: NEXT_PAGE,
       },
@@ -136,7 +139,7 @@ describe("createGitHubChangeSummarySource", () => {
   it("Commit Status が見切れたら材料にしない", async () => {
     const listing = await source({
       ...OK_ROUTES,
-      "/commits/s1/status": { body: { state: "success", statuses: [] }, link: NEXT_PAGE },
+      [`/commits/${HEAD}/status`]: { body: { state: "success", statuses: [] }, link: NEXT_PAGE },
     }).listChangeSummaries([1]);
 
     expect(listing.summaries.has(1)).toBe(false);
@@ -147,11 +150,74 @@ describe("createGitHubChangeSummarySource", () => {
     // すべての PR が永久に pending になる**（安全だが役に立たない）
     const listing = await source({
       ...OK_ROUTES,
-      "/commits/s1/check-runs": { body: { check_runs: [] } },
-      "/commits/s1/status": { body: { state: "success", statuses: [{ state: "success" }] } },
+      [`/commits/${HEAD}/check-runs`]: { body: { check_runs: [] } },
+      [`/commits/${HEAD}/status`]: { body: { state: "success", statuses: [{ state: "success" }] } },
     }).listChangeSummaries([1]);
 
     expect(listing.summaries.get(1)?.ciStatus).toBe("passing");
+  });
+
+  it("取得の途中で head が変われば材料にしない", async () => {
+    // **3 回の取得が別々の瞬間を見ている。** 間に push が入ると、
+    // **古い版の件数と CI に、新しい版のパス**が混ざる。
+    // 古い版が小さくて CI 済みなら、**未検証の新しい版に「読まずにマージしてよい」と出る**。
+    // **取り直さない**——また間に push が入りうるので終わらない
+    let call = 0;
+    const listing = await source({
+      ...OK_ROUTES,
+      "/pulls/1": {
+        body: () => {
+          call++;
+          return {
+            changed_files: 1,
+            additions: 2,
+            deletions: 0,
+            head: { sha: call === 1 ? HEAD : "b".repeat(40) },
+          };
+        },
+      },
+    }).listChangeSummaries([1]);
+
+    expect(listing.summaries.has(1)).toBe(false);
+    expect(listing.unavailable[0]?.reason).toMatch(/更新|変わ/);
+  });
+
+  it("head が SHA の形でなければ、その値で要求しない", async () => {
+    // **未検証の値を URL のパスへ入れない**（`AGENTS.md` §6）。
+    // **installation トークンが付いている**ので、別の endpoint を叩けてしまう
+    const asked: string[] = [];
+    const listing = await createGitHubChangeSummarySource({
+      credentials: CREDENTIALS,
+      repository: REPOSITORY,
+      now: () => new Date("2026-01-01T00:00:00Z"),
+      fetchImpl: (async (input: string | URL | Request) => {
+        const url = String(input);
+        asked.push(url);
+        if (url.includes("/installation") || url.includes("/access_tokens")) {
+          return new Response(
+            JSON.stringify({ id: 1, token: "t", expires_at: "2999-01-01T00:00:00Z" }),
+            { status: url.includes("/access_tokens") ? 201 : 200 },
+          );
+        }
+        // **ファイルの一覧は読める形で返す。** ここで落とすと、
+        // **CI を取りに行く前に終わってしまい、URL を組み立てる箇所を通らない**
+        if (url.includes("/files")) {
+          return new Response("[]", { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            head: { sha: "../../../orgs/other/secrets" },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    }).listChangeSummaries([1]);
+
+    expect(listing.summaries.has(1)).toBe(false);
+    expect(asked.some((url) => url.includes("orgs/other/secrets"))).toBe(false);
   });
 
   it("番号を渡さなければ何も取りに行かない", async () => {
