@@ -43,6 +43,9 @@ describe("bin/loop-await-review", () => {
       cwd: sandbox,
       encoding: "utf8",
       env: {
+        // **`process.env` を土台にする。** 一から組むと `ProcessEnv` の必須項目
+        // （`NODE_ENV`）が欠けて型検査が落ちる。**PATH は後から上書きするので絞れている**
+        ...process.env,
         PATH: join(sandbox, "path"),
         LOOP_AWAIT_REVIEW_MAX_SEC: "2",
         LOOP_AWAIT_REVIEW_INTERVAL_SEC: "1",
