@@ -31,6 +31,10 @@ export type DependencyOrder = {
  * UI も揺れる。番号順のような別の基準を持ち込まないのは、**呼び出し側が決めた
  * 並び**（GitHub の一覧順など）と競合するからで、`buildDependencyEdges` が
  * 入力の順で辺を返すのと同じ考え方である。
+ *
+ * そのために**深さごとの塊で出す**（`drainReady`）。走査の途中で依存を外すと、
+ * **同じ走査の中で解放された深いものが、まだ見ていない浅いものより先に出る**。
+ * 依存は守られるので、**静かに並びだけがずれる**。
  */
 export function orderByDependency(
   pullRequests: readonly PullRequestRef[],
@@ -73,30 +77,48 @@ function registerDependencies(
  * 依存が解けたものを、出せるものが無くなるまで取り出す。
  *
  * 取り出した PR は `blockedBy` から消える（**残ったものが並べられなかった PR**）。
- * 毎回 `pullRequests` の順に見るので、同じ深さのものは入力の順に並ぶ。
+ *
+ * **その時点で出せるものを入力の順にまとめて取り、一群を出してから依存を外す。**
+ * 外しながら取り出すと、同じ回で解放された深いものが、まだ見ていない浅いものより
+ * 先に出てしまう。**深さごとの塊で出すことで「同じ深さは入力の順」が実装の
+ * 性質として出る。**
  */
 function drainReady(
   blockedBy: Map<number, Set<number>>,
   pullRequests: readonly PullRequestRef[],
 ): number[] {
   const ordered: number[] = [];
-  let progressed = true;
-  while (progressed) {
-    progressed = false;
-    for (const pullRequest of pullRequests) {
-      const dependencies = blockedBy.get(pullRequest.number);
-      if (dependencies === undefined || dependencies.size > 0) {
-        continue;
-      }
-      blockedBy.delete(pullRequest.number);
-      ordered.push(pullRequest.number);
-      for (const rest of blockedBy.values()) {
-        rest.delete(pullRequest.number);
-      }
-      progressed = true;
-    }
+  for (
+    let ready = collectReady(blockedBy, pullRequests);
+    ready.length > 0;
+    ready = collectReady(blockedBy, pullRequests)
+  ) {
+    ordered.push(...ready);
+    release(blockedBy, ready);
   }
   return ordered;
+}
+
+/** いま依存が残っていない PR を、入力の順に集める。 */
+function collectReady(
+  blockedBy: ReadonlyMap<number, ReadonlySet<number>>,
+  pullRequests: readonly PullRequestRef[],
+): number[] {
+  return pullRequests
+    .map((pullRequest) => pullRequest.number)
+    .filter((number) => blockedBy.get(number)?.size === 0);
+}
+
+/** 出した一群を、残りの依存先から取り除く。 */
+function release(blockedBy: Map<number, Set<number>>, released: readonly number[]): void {
+  for (const number of released) {
+    blockedBy.delete(number);
+  }
+  for (const rest of blockedBy.values()) {
+    for (const number of released) {
+      rest.delete(number);
+    }
+  }
 }
 
 /**

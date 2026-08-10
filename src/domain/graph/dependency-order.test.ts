@@ -72,6 +72,21 @@ describe("依存の順序", () => {
     expect(orderByDependency([pr(1), pr(2), pr(3)], edges).ordered).toEqual([1, 2, 3]);
   });
 
+  it("鎖が 2 本あっても、同じ深さは入力の順に並ぶ", () => {
+    // **根が 1 つだと、この食い違いを通してしまう。** 走査の途中で依存を外すと、
+    // **同じ走査の中で解放された深いもの**（#4）が、まだ見ていない浅いもの（#1）
+    // より先に出る。依存は守られているので、静かにずれる
+    const result = orderByDependency(
+      [pr(2), pr(3), pr(4), pr(1)],
+      [
+        { dependent: 2, dependsOn: 1 },
+        { dependent: 4, dependsOn: 3 },
+      ],
+    );
+
+    expect(result.ordered).toEqual([3, 1, 2, 4]);
+  });
+
   it("循環に含まれる PR は順序に混ざらず、別に返る", () => {
     // **循環を「無い」に丸めない。** 混ぜると、依存を無視した順序が正しい顔で出る
     const result = orderByDependency(
