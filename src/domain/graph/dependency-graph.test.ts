@@ -90,6 +90,15 @@ describe("PR の依存グラフ", () => {
     expect(buildDependencyEdges([])).toEqual([]);
   });
 
+  it("番号が重複した入力は落とす", () => {
+    // **番号が一意なのは「1 つのリポジトリの PR 一覧」だからである。**
+    // 重複しているなら前提が破られている。通すと、自己辺の判定が別の PR を
+    // 巻き込み、**静かに間違った辺が出る**
+    expect(() =>
+      buildDependencyEdges([pr(1, "main", "feat/a"), pr(1, "feat/a", "feat/b")]),
+    ).toThrow(/#1/);
+  });
+
   it("入力の順序で辺を返す（同じ入力なら同じ出力）", () => {
     // 描画も順序判定もこの並びを前提にできるよう、決定論的にする
     const input = [pr(3, "feat/b", "feat/c"), pr(1, "main", "feat/a"), pr(2, "feat/a", "feat/b")];

@@ -22,7 +22,14 @@ export type BranchRef = {
   readonly branch: string;
 };
 
-/** 依存を決めるのに要る、PR の最小限の情報。 */
+/**
+ * 依存を決めるのに要る、PR の最小限の情報。
+ *
+ * **入力は 1 つのリポジトリの PR 一覧であり、`number` はその中で一意である。**
+ * 参照だけがリポジトリを持ち、番号が持たないのは非対称に見えるが、**fork が
+ * 持ち込むのは head の参照だけ**だからである。fork からの PR も upstream の一覧に
+ * upstream の番号で並ぶ。複数リポジトリの一覧を混ぜて渡す使い方は想定していない。
+ */
 export type PullRequestRef = {
   readonly number: number;
   /** マージ先。 */
@@ -53,6 +60,7 @@ export type DependencyEdge = {
 export function buildDependencyEdges(
   pullRequests: readonly PullRequestRef[],
 ): readonly DependencyEdge[] {
+  assertUniqueNumbers(pullRequests);
   const byHead = indexByHead(pullRequests);
 
   const edges: DependencyEdge[] = [];
@@ -69,6 +77,23 @@ export function buildDependencyEdges(
     edges.push({ dependent: pullRequest.number, dependsOn });
   }
   return edges;
+}
+
+/**
+ * 番号が一意という前提を確かめる。
+ *
+ * **head の重複とは別の話である。** head の重複は閉じた PR を含めれば起こりうるので
+ * 辺を作らずに進むが、**番号の重複は入力が前提を満たしていない証拠**なので落とす。
+ * 通すと、自己辺の判定が同じ番号の別の PR を巻き込み、**静かに間違った辺が出る**。
+ */
+function assertUniqueNumbers(pullRequests: readonly PullRequestRef[]): void {
+  const seen = new Set<number>();
+  for (const pullRequest of pullRequests) {
+    if (seen.has(pullRequest.number)) {
+      throw new Error(`PR 番号が重複しています: #${pullRequest.number}`);
+    }
+    seen.add(pullRequest.number);
+  }
 }
 
 /**
