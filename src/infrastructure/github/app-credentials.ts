@@ -5,6 +5,8 @@
  * **値はログにも例外にも出さない。** 秘密鍵がここを通る。
  */
 
+import { z } from "zod";
+
 /** App として署名し、installation として振る舞うために要るもの。 */
 export type AppCredentials = {
   readonly appId: string;
@@ -28,19 +30,37 @@ export function readAppCredentials(
   env: Readonly<Record<string, string | undefined>>,
 ): AppCredentials {
   return {
-    appId: required(env, APP_ID),
-    installationId: required(env, INSTALLATION_ID),
-    privateKey: toPem(required(env, PRIVATE_KEY)),
+    appId: required(env, APP_ID, idSchema),
+    installationId: required(env, INSTALLATION_ID, idSchema),
+    privateKey: toPem(required(env, PRIVATE_KEY, secretSchema)),
   };
 }
 
+/**
+ * **ID は GitHub が振る数値である。** 空白だけの値や名前らしき文字列を通すと、
+ * `iss` や URL に載ってから 401 / 404 になり、**設定ミスだと分からなくなる**。
+ * 前後の空白は `.env` を手で編集すると混ざるので落とす。
+ */
+const idSchema = z.string().trim().regex(/^\d+$/);
+
+/**
+ * **秘密鍵は空かどうかだけを見る。** PEM の形まで検証しても、署名が通るかは
+ * 通してみないと分からない。二重に持つ意味がない。
+ */
+const secretSchema = z.string().refine((value) => value.trim() !== "");
+
 /** **名前だけを載せる。** 値を載せると、秘密鍵がそのままログへ流れる。 */
-function required(env: Readonly<Record<string, string | undefined>>, name: string): string {
-  const value = env[name];
-  if (value === undefined || value === "") {
-    throw new Error(`環境変数が設定されていません: ${name}`);
+function required(
+  env: Readonly<Record<string, string | undefined>>,
+  name: string,
+  schema: z.ZodType<string, unknown>,
+): string {
+  const parsed = schema.safeParse(env[name]);
+  if (!parsed.success) {
+    // **Zod のエラーを持ち上げない。** 検証結果には値が入りうる
+    throw new Error(`環境変数が設定されていないか、形式が違います: ${name}`);
   }
-  return value;
+  return parsed.data;
 }
 
 /**

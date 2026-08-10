@@ -40,6 +40,40 @@ describe("GitHub App の資格情報を読む", () => {
     );
   });
 
+  it("空白だけの値は未設定と同じに扱う", () => {
+    // **`!== ""` では通ってしまう。** 通すと `iss` や URL に空白が載り、
+    // 症状が 401 / 404 になって**設定ミスだと分からなくなる**
+    expect(() => readAppCredentials({ ...env, GITHUB_APP_ID: " " })).toThrow(/GITHUB_APP_ID/);
+    expect(() => readAppCredentials({ ...env, GITHUB_APP_INSTALLATION_ID: "  " })).toThrow(
+      /GITHUB_APP_INSTALLATION_ID/,
+    );
+    expect(() => readAppCredentials({ ...env, GITHUB_APP_PRIVATE_KEY: " \n " })).toThrow(
+      /GITHUB_APP_PRIVATE_KEY/,
+    );
+  });
+
+  it("ID が数字でなければ落とす", () => {
+    // App ID も installation ID も **GitHub が振る数値**である。
+    // URL に載ってから 404 で気づくのでは、設定ミスだと分からない
+    expect(() => readAppCredentials({ ...env, GITHUB_APP_ID: "my-app" })).toThrow(/GITHUB_APP_ID/);
+    expect(() => readAppCredentials({ ...env, GITHUB_APP_INSTALLATION_ID: "56 78" })).toThrow(
+      /GITHUB_APP_INSTALLATION_ID/,
+    );
+  });
+
+  it("ID の前後の空白は落として使う", () => {
+    // `.env` を手で編集すると混ざる。**中身が数字なら設定ミスではない**
+    expect(readAppCredentials({ ...env, GITHUB_APP_ID: " 1234 " }).appId).toBe("1234");
+  });
+
+  it("秘密鍵の中身までは見ない", () => {
+    // **PEM の形を検証しない。** 署名が通るかは通してみるのが確実で、
+    // ここで形を見に行っても二重に持つだけになる
+    expect(() =>
+      readAppCredentials({ ...env, GITHUB_APP_PRIVATE_KEY: "これは鍵ではない" }),
+    ).not.toThrow();
+  });
+
   it("投げるときに値を載せない", () => {
     // **名前は出してよいが、値は出さない。** 秘密鍵が入っている変数もここを通る
     const secret = "-----BEGIN PRIVATE KEY-----leaked-----END PRIVATE KEY-----";
