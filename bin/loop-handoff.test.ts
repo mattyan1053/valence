@@ -12,7 +12,15 @@ type Run = { status: number; stdout: string; stderr: string };
 /** GitHub の状態。**偽の `gh` はこれを返すだけ**にして、判断だけを試す。 */
 type State = {
   /** open PR。`labels` は付いている label 名。 */
-  prs?: { number: number; labels?: string[]; unresolved?: number; head?: string }[];
+  prs?: {
+    number: number;
+    labels?: string[];
+    /** 未解決スレッドの最後の発言。**件数だけでは持ち手が決まらない。** */
+    unresolvedBy?: ("bot" | "us")[];
+    /** 最後の発言の ID。**返信だけでも動く値**である。 */
+    lastComment?: number;
+    head?: string;
+  }[];
   ready?: number;
   inProgress?: number;
   backlog?: number;
@@ -62,11 +70,17 @@ describe("bin/loop-handoff", () => {
 
   function withState(state: State): void {
     const prs = (state.prs ?? [])
-      .map((pr) => `${pr.number}\t${(pr.labels ?? []).join(",")}`)
+      .map((pr) => `${pr.number}\t${(pr.labels ?? []).join(",")}\t${pr.head ?? "a".repeat(40)}`)
       .join("\n");
-    // **ゲートと同じものを見る。** 未解決スレッドと head SHA は GraphQL からしか取れない
-    const details = (state.prs ?? [])
-      .map((pr) => `${pr.number}\t${pr.head ?? "a".repeat(40)}\t${pr.unresolved ?? 0}`)
+    // **ゲートと同じものを見る。** 未解決スレッドは GraphQL からしか取れない。
+    // 1 行 1 スレッドで、**最後の発言の ID と書いた人**を返す
+    const threads = (state.prs ?? [])
+      .flatMap((pr) =>
+        (pr.unresolvedBy ?? []).map(
+          (who, index) =>
+            `${pr.lastComment ?? 100 + index}\t${who === "bot" ? "chatgpt-codex-connector" : "mattyan1053"}`,
+        ),
+      )
       .join("\n");
     const parked = (state.parkedCloses ?? []).map((n) => `Closes #${n}`).join("\n");
 
@@ -76,7 +90,15 @@ describe("bin/loop-handoff", () => {
         "#!/usr/bin/env bash",
         ...failureLines(state),
         ...answerLines("repo view", "owner\nrepo"),
-        ...answerLines("api graphql", details),
+        // **ゲートと同じ読み方をしているか。** スレッド自体をページングしていないと、
+        // 101 件目以降にだけ未解決が残る PR を 0 件と数える
+        'if [[ $* == *"api graphql"* ]]; then',
+        '  if [[ $* != *"pageInfo"* || $* != *"after: $endCursor"* ]]; then',
+        '    echo "スタブ: reviewThreads をページングしていない" >&2',
+        "    exit 1",
+        "  fi",
+        "fi",
+        ...answerLines("api graphql", threads),
         // **`parked` の問い合わせも `pr list` を含む。** 先に見ないと取り違える
         ...answerLines("parked", parked),
         ...answerLines("pr list", prs),
@@ -281,7 +303,7 @@ describe("bin/loop-handoff", () => {
       // **ゲートは未解決スレッドを見て落とすのに、handoff は label だけを見ていた。**
       // label が 0 件だと「master がゲートを回せる」と読み、**自分宛なので黙る**
       // （#103 と #107 で実際に起きた。手順書どおりに進んでも label は付かない）
-      withState({ prs: [{ number: 12, unresolved: 1 }] });
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
       const handoff = run("master");
 
@@ -289,7 +311,7 @@ describe("bin/loop-handoff", () => {
     });
 
     it("未解決が無ければ、これまでどおり master がゲートを回す", () => {
-      withState({ prs: [{ number: 12, unresolved: 0 }] });
+      withState({ prs: [{ number: 12, unresolvedBy: [] }] });
 
       expect(run("worker").stdout).toMatch(/^master\t/);
     });
@@ -297,13 +319,13 @@ describe("bin/loop-handoff", () => {
     it("label と実態が食い違っていたら、別の終了コードで知らせる", () => {
       // **「送るものが無い」と「状態が矛盾している」を混ぜない**（#105）。
       // 未解決があるのに `changes-requested` が無いのは、運用が壊れている
-      withState({ prs: [{ number: 12, unresolved: 1 }] });
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
       expect(run("master").status).toBe(3);
     });
 
     it("label が付いていれば矛盾ではない", () => {
-      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolved: 1 }] });
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
 
       expect(run("master").status).toBe(0);
     });
@@ -312,6 +334,49 @@ describe("bin/loop-handoff", () => {
       withState({ prs: [{ number: 12 }], failsOn: "api graphql" });
 
       expect(run("master").status).toBe(2);
+    });
+  });
+
+  describe("レビュー対応の復路", () => {
+    it("worker が返信し終えた周回は master へ渡す", () => {
+      // **resolve できるのは master だけ**なので、直して返信し終えても未解決は残る。
+      // ここで宛先を worker にすると**自分宛て → exit 1 → 沈黙**で、
+      // **この PR が塞ごうとした穴を復路に作る**（#115 のレビュー指摘）
+      withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
+
+      expect(run("worker").stdout).toMatch(/^master\t/);
+    });
+
+    it("master が返した周回は worker へ渡す", () => {
+      // **件数は同じで、変わるのは「最後に誰が書いたか」**である
+      withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
+
+      expect(run("master").stdout).toMatch(/^worker\t/);
+    });
+
+    it("誰も答えていない指摘は worker の持ち物", () => {
+      // レビューの bot が最後なら、**まだ誰も答えていない**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+
+      expect(run("master").stdout).toMatch(/^worker\t/);
+      expect(run("worker").status).toBe(1);
+    });
+
+    it("返信だけでも、また送る", () => {
+      // **コードを変えずに理由だけ返信できる**（手順書 238 行目）。
+      // head も件数も label も動かないので、**指紋が最後の発言を持っていないと黙る**
+      // label は付いている状態から始める（付いていない件は別の試験で見る）
+      const requested = ["changes-requested"];
+      withState({
+        prs: [{ number: 12, labels: requested, unresolvedBy: ["bot"], lastComment: 100 }],
+      });
+      expect(run("master").status).toBe(0);
+
+      withState({
+        prs: [{ number: 12, labels: requested, unresolvedBy: ["us"], lastComment: 200 }],
+      });
+
+      expect(run("worker").status).toBe(0);
     });
   });
 
@@ -337,10 +402,12 @@ describe("bin/loop-handoff", () => {
 
     it("未解決スレッドが増えれば、また送る", () => {
       // **push が無くても master が指摘を返せば状態は動く。** SHA だけでは足りない
-      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolved: 1 }] });
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
       expect(run("master").status).toBe(0);
 
-      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolved: 2 }] });
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot", "bot"] }],
+      });
 
       expect(run("master").status).toBe(0);
     });

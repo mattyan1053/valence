@@ -35,6 +35,9 @@ set -uo pipefail
 
 readonly ROLES=(master worker)
 
+# 自動レビューの bot。**この人が最後なら、まだ誰も答えていない。**
+readonly REVIEW_BOT="chatgpt-codex-connector"
+
 usage() {
   echo "使い方: bin/loop-handoff <役>   役: ${ROLES[*]}" >&2
   exit 2
@@ -57,24 +60,63 @@ fail_unknown() {
   exit 2
 }
 
-prs="$(gh pr list --state open --limit 200 --json number,labels \
-  --jq '.[] | "\(.number)\t\(.labels | map(.name) | join(","))"')" || fail_unknown "open PR"
+prs="$(gh pr list --state open --limit 200 --json number,labels,headRefOid \
+  --jq '.[] | "\(.number)\t\(.labels | map(.name) | join(","))\t\(.headRefOid)"')" || fail_unknown "open PR"
 
-# **未解決スレッドと head SHA を取る。** `gh pr list --json` は未解決スレッドを返さない
-# ので GraphQL で取る。owner / repo は `{owner}` の置換が効かない（置換されるのは
-# `gh api` のエンドポイントだけ）ので、先に引く。
+# **未解決スレッドを、ゲートと同じ読み方で取る。**
+#
+# `gh pr list --json` は未解決スレッドを返さないので GraphQL で取る。
+# owner / repo は `{owner}` の置換が効かない（置換されるのは `gh api` の
+# エンドポイントだけ）ので、先に引く。
+#
+# **スレッド自体をページングする。** 内側の接続に `pageInfo` と `after` が無いと
+# `--paginate` は外側しか進めず、**101 件目以降にだけ未解決が残る PR を 0 件と数える**。
+# `bin/loop-gate` も同じ形でページングしている——**同じものを、同じ読み方で見る**のが
+# この仕組みの主題で、読み方が違えば同じ食い違いが戻る。
+#
+# **組み立てはゲートと 2 箇所に分かれている。** ゲートは 1 本の PR について合否を出し、
+# ここは open な PR すべてについて持ち手を決めるので、必要な形が違う。
+# **片方だけ直すと食い違う**ので、どちらかを触るときはもう一方も見ること。
 repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || fail_unknown "リポジトリ"
 mapfile -t repo_parts <<<"$repo_ref"
-details="$(gh api graphql --paginate \
-  -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
-  -f query='query($owner:String!,$repo:String!,$endCursor:String){
-    repository(owner:$owner,name:$repo){
-      pullRequests(states:OPEN,first:50,after:$endCursor){
-        pageInfo{hasNextPage endCursor}
-        nodes{number headRefOid reviewThreads(first:100){nodes{isResolved}}}}}}' \
-  --jq '.data.repository.pullRequests.nodes[]
-    | "\(.number)\t\(.headRefOid)\t\([.reviewThreads.nodes[] | select(.isResolved == false)] | length)"')" ||
-  fail_unknown "未解決スレッド"
+
+# 未解決スレッドの「最後の発言」を PR 番号で引けるようにする。
+declare -A unresolved_of=()
+declare -A last_comment_of=()
+declare -A last_author_of=()
+while IFS=$'\t' read -r number _labels _head; do
+  [[ -n $number ]] || continue
+  threads="$(gh api graphql --paginate \
+    -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" -F number="$number" \
+    -f query='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){
+      repository(owner:$owner,name:$repo){
+        pullRequest(number:$number){
+          reviewThreads(first: 100, after: $endCursor){
+            pageInfo{hasNextPage endCursor}
+            nodes{isResolved comments(last:1){nodes{databaseId author{login}}}}}}}}' \
+    --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)
+      | .comments.nodes[0] | "\(.databaseId)\t\(.author.login)"')" ||
+    fail_unknown "未解決スレッド (#$number)"
+  count=0
+  while IFS=$'\t' read -r comment_id author; do
+    [[ -n $comment_id ]] || continue
+    ((count++))
+    # **いちばん新しい発言を持つ。** ID は増える一方なので、大きいほうが新しい
+    if [[ -z ${last_comment_of[$number]-} || $comment_id -gt ${last_comment_of[$number]} ]]; then
+      last_comment_of[$number]="$comment_id"
+      last_author_of[$number]="$author"
+    fi
+  done <<<"$threads"
+  unresolved_of[$number]="$count"
+done <<<"$prs"
+
+# **最後の発言も指紋に入れる。** コードを変えずに理由だけ返信すると、head も件数も
+# label も動かない。**「状態が動いたのに指紋が持っていない」**が、入口を変えて戻る。
+# ID は**新しい発言があったときだけ変わる**ので、時刻のように毎回変わる値ではない。
+details=""
+for number in "${!unresolved_of[@]}"; do
+  details+="${number}:${unresolved_of[$number]}:${last_comment_of[$number]-} "
+done
 ready="$(gh issue list --label ready --limit 200 --json number --jq 'length')" || fail_unknown "ready"
 in_progress="$(gh issue list --label in-progress --limit 200 --json number --jq 'length')" ||
   fail_unknown "in-progress"
@@ -135,37 +177,46 @@ for role in "${ROLES[@]}"; do
   }
 done
 
-# 未解決スレッド数を PR 番号で引けるようにする。
-declare -A unresolved_of=()
-while IFS=$'\t' read -r number _head unresolved; do
-  [[ -n $number ]] || continue
-  unresolved_of[$number]="$unresolved"
-done <<<"$details"
-
 changes_requested=""
 gateable=""
 # **label と実態の食い違い。** 未解決が残っているのに `changes-requested` が無い状態で、
 # 運用が壊れている（付け忘れではなく、**付ける段が無い経路がある**）。
 mismatched=""
-while IFS=$'\t' read -r number labels; do
+# **答えを待っている側**の PR（未解決があり、最後に書いたのが自分たちの役）。
+answered=""
+while IFS=$'\t' read -r number labels _head; do
   [[ -n $number ]] || continue
   unresolved="${unresolved_of[$number]-0}"
   [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
-  if [[ ",$labels," == *",changes-requested,"* ]]; then
-    changes_requested="$number"
-  elif [[ ",$labels," == *",parked,"* ]]; then
+  if [[ ",$labels," == *",parked,"* ]]; then
     :
+  elif ((unresolved > 0)) && [[ ${last_author_of[$number]-} != "$REVIEW_BOT"* ]]; then
+    # **件数だけでは持ち手が決まらない。** 同じ「未解決 1 件」に
+    # 「指摘が返ってきた直後」と「直して返信し終えた直後」が混ざっている。
+    # **役は同じアカウントで動く**ので、GitHub 側の名前では見分けられない——
+    # **呼んだ側は、その周回で書き終えている**ので、渡す先は相手役である。
+    answered="$number"
   elif ((unresolved > 0)); then
-    # **ゲートが落とす PR は master の持ち物ではない。** 直すのは worker である
+    # まだ誰も答えていない指摘。直すのは worker である
     changes_requested="$number"
-    mismatched="$number"
+    [[ ",$labels," == *",changes-requested,"* ]] || mismatched="$number"
+  elif [[ ",$labels," == *",changes-requested,"* ]]; then
+    changes_requested="$number"
   else
     gateable="$number"
   fi
 done <<<"$prs"
 
 # 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
-if [[ -n $changes_requested ]]; then
+if [[ -n $answered ]]; then
+  # 相手役へ渡す。**自分は今の周回で書き終えている**
+  to="worker"
+  reason="PR #${answered} に未解決の指摘がある"
+  if [[ $ROLE == "worker" ]]; then
+    to="master"
+    reason="PR #${answered} の対応が返っている（確認して resolve できる）"
+  fi
+elif [[ -n $changes_requested ]]; then
   to="worker"
   reason="PR #${changes_requested} に master の要求が残っている"
 elif [[ -n $gateable ]]; then
