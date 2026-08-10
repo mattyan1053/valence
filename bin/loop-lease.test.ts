@@ -147,4 +147,74 @@ describe("bin/loop-lease", () => {
 
     expect(acquired).toHaveLength(1);
   });
+
+  describe("worker はセッションごとに取る", () => {
+    /** 同じリポジトリの worktree を足す。**共通ディレクトリを共有する**ので、鍵も共有される。 */
+    function addWorktree(name: string): string {
+      const dir = join(sandbox, name);
+      expect(
+        spawnSync("git", ["-C", sandbox, "worktree", "add", "--detach", dir], { encoding: "utf8" })
+          .status,
+        "worktree を作れない",
+      ).toBe(0);
+      return dir;
+    }
+
+    beforeEach(() => {
+      // worktree を足すには commit が 1 つ要る
+      spawnSync("git", ["-C", sandbox, "commit", "--allow-empty", "-m", "init"], {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@e",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@e",
+        },
+      });
+    });
+
+    function acquireIn(dir: string): Run {
+      const result = spawnSync(SCRIPT, ["acquire", "worker"], { cwd: dir, encoding: "utf8" });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
+
+    it("別の作業場からなら、何人でも同時に取れる", () => {
+      // **人数を前提にしない。** 「2 人目」を特別扱いすると 3 人目で作り直しになる
+      const dirs = [sandbox, addWorktree("second"), addWorktree("third"), addWorktree("fourth")];
+
+      expect(dirs.map((dir) => acquireIn(dir).status)).toEqual([0, 0, 0, 0]);
+    });
+
+    it("同じ作業場では 2 つ取れない", () => {
+      // **同じ作業場なら直列でなければならない**（checkout と commit が並行する）。
+      // 識別子を作業場から作るので、**衝突＝同じ木＝直列**になる
+      expect(acquireIn(sandbox).status).toBe(0);
+
+      expect(acquireIn(sandbox).status).toBe(1);
+    });
+
+    it("master は作業場が違っても 2 つ取れない", () => {
+      // **master は役のまま 1 人。** 判定が並列になるとゲートの意味が薄れる
+      const second = addWorktree("second");
+
+      expect(
+        spawnSync(SCRIPT, ["acquire", "master"], { cwd: sandbox, encoding: "utf8" }).status,
+      ).toBe(0);
+      expect(
+        spawnSync(SCRIPT, ["acquire", "master"], { cwd: second, encoding: "utf8" }).status,
+      ).toBe(1);
+    });
+
+    it("取った作業場からは返せる", () => {
+      const token = acquireIn(sandbox).stdout.trim();
+
+      const released = spawnSync(SCRIPT, ["release", "worker", token], {
+        cwd: sandbox,
+        encoding: "utf8",
+      });
+
+      expect(released.status).toBe(0);
+      expect(acquireIn(sandbox).status).toBe(0);
+    });
+  });
 });
