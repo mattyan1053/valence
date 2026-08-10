@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# 同じ役の周回を直列化する。
+# 重ねてはいけない周回を直列化する。
+#
+# **単位は役によって違う。** master は役ごとに 1 つ、worker は作業場ごとに 1 つ。
+# 理由は下の `lease_scope` を組み立てるところに書いてある。
 #
 # 通知で始めた周回と cron の周回が重なると、**同じ作業ツリーで checkout・commit・push が
 # 並行する**。実際に一度起きている (#68: ブランチを切った直後に main へ戻され、
@@ -17,9 +20,8 @@
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
 set -uo pipefail
 
-# 直列化する単位。**役ごとに 1 つ。** master と worker は別の作業ツリーで動くので
-# 互いを待たせない。語彙を固定するのは、綴り違いで別の lease を取ると
-# **直列化しているつもりで 2 つ走る**ためである。
+# 語彙を固定する。綴り違いで別の lease を取ると、
+# **直列化しているつもりで 2 つ走る**。master と worker は互いを待たせない。
 readonly ROLES=(master worker)
 
 # 抱えたままの lease を引き継ぐまでの時間。**周回が落ちても、その役のループが
@@ -33,6 +35,8 @@ usage() {
   echo "使い方: bin/loop-lease acquire <役>" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
   echo "        役: ${ROLES[*]}" >&2
+  echo "        master は役ごとに 1 つ（判定を並列にしない）" >&2
+  echo "        worker は作業場ごとに 1 つ（作業場が増えたぶん並列になる）" >&2
   exit 2
 }
 
@@ -74,7 +78,41 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
   exit 2
 }
-readonly STATE="$common_dir/valence-loop-lease-$ROLE"
+# **worker はセッションごとに鍵を取る。master は役のまま 1 人。**
+#
+# worker を役で取ると **2 人目が何もせず終わる**（#74 の直列化が、そのまま並列の
+# 妨げになる）。master を並列にしないのは、**判定が並列になるとゲートの意味が薄れる**
+# ためである。
+#
+# **識別子は作業場（worktree の根）から作る。**
+#
+#   - **毎回変わる値にしない。** 落ちた周回の lease が永遠に残る
+#   - **人が付ける名前にしない。** 付け忘れ・付け間違いが「直列化しているつもりで
+#     2 つ走る」に化ける
+#   - **衝突したら直列になる。** 同じ作業場を共有する 2 つのセッションは、
+#     checkout と commit が並行するので**直列でなければならない**。
+#     つまり**衝突が正しい答えになる**（人数は前提にしていない。作業場が増えれば
+#     そのぶん並列になる）
+lease_scope="$ROLE"
+SCOPE_LABEL="$ROLE"
+if [[ $ROLE == "worker" ]]; then
+  if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
+    echo "[FAIL] 作業場の根を特定できません" >&2
+    exit 2
+  fi
+  toplevel="$(cd "$toplevel" 2>/dev/null && pwd -P)" || {
+    echo "[FAIL] 作業場の根へ移動できません" >&2
+    exit 2
+  }
+  # ファイル名にできる形へ畳む。**元のパスが読めるままにする**（どのセッションが
+  # 握っているのかを、記録を見るだけで分かるようにする）。
+  lease_scope="worker${toplevel//\//_}"
+  # **どの単位で弾かれたのかを、出力だけで分かるようにする。** 「worker の周回が
+  # 走っています」だと、別の作業場の worker まで止まっているように読める
+  SCOPE_LABEL="この作業場（$toplevel）の worker"
+fi
+readonly lease_scope SCOPE_LABEL
+readonly STATE="$common_dir/valence-loop-lease-$lease_scope"
 
 # 判定と書き込みの間に割り込まれると、**両方の周回が「空いている」と読む**。
 # ここを守らないと、直列化そのものが成立しない。
@@ -100,7 +138,7 @@ if [[ -f $STATE ]]; then
   fi
   if ((now - held_since >= TTL_SEC)); then
     # **黙って上書きしない。** 期限切れの引き継ぎは、落ちた周回の跡である。
-    echo "[WARN] $ROLE の lease が期限切れでした（$((now - held_since)) 秒前に取得）。引き継ぎます" >&2
+    echo "[WARN] $SCOPE_LABEL の lease が期限切れでした（$((now - held_since)) 秒前に取得）。引き継ぎます" >&2
     held_token=""
   fi
 fi
@@ -109,7 +147,7 @@ case "$ACTION" in
 acquire)
   [[ $# -eq 2 ]] || usage
   if [[ -n $held_token ]]; then
-    echo "[FAIL] $ROLE の周回が走っています（$((now - held_since)) 秒前に開始）。この周回は何もしません" >&2
+    echo "[FAIL] $SCOPE_LABEL の周回が走っています（$((now - held_since)) 秒前に開始）。この周回は何もしません" >&2
     echo "       待たずに終わるのは、走っている側が同じ状態を読むためです。" >&2
     echo "       読み終えた後だった場合は 1 拍落ちますが、次の周回（保険）が拾います" >&2
     exit 1
@@ -128,13 +166,13 @@ acquire)
 release)
   [[ $# -eq 3 ]] || usage
   if [[ -z $held_token ]]; then
-    echo "[FAIL] $ROLE の lease は誰も持っていません" >&2
+    echo "[FAIL] $SCOPE_LABEL の lease は誰も持っていません" >&2
     exit 1
   fi
   # **他人の lease を返させない。** 引き継がれた後に返すと、走っている周回の
   # 直列化が崩れる（自分は終わったつもりで、相手はまだ走っている）。
   if [[ $held_token != "$3" ]]; then
-    echo "[FAIL] $ROLE の lease は別の周回が持っています" >&2
+    echo "[FAIL] $SCOPE_LABEL の lease は別の周回が持っています" >&2
     exit 1
   fi
   rm -f "$STATE" || {
