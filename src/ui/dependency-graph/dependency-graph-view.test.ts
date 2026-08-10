@@ -91,6 +91,23 @@ describe("DependencyGraphView", () => {
       expect(markup).toMatch(/並べられ|循環/);
     });
 
+    it("循環そのものだと言い切らない", () => {
+      // **`cyclic` には循環に含まれない PR も入る**（その先に積まれたもの）。
+      // 「循環している」と言い切ると、**半分について事実と違う**
+      const markup = render(props({ order: { ordered: [], cyclic: [1, 2] } }));
+
+      expect(markup).toMatch(/その先に積まれ/);
+    });
+
+    it("直すべき PR が分かる書き方にする", () => {
+      // **その先に積まれた PR の base を付け替えても直らない。**
+      // 「どれかの base を」と書くと、**言われたとおりにして無関係な PR を触る**
+      const markup = render(props({ order: { ordered: [], cyclic: [1, 2] } }));
+
+      expect(markup).toMatch(/循環している PR の base/);
+      expect(markup).not.toMatch(/どれかの base/);
+    });
+
     it("循環が無いときは、その断りを出さない", () => {
       expect(render(props())).not.toMatch(/並べられ|循環/);
     });
