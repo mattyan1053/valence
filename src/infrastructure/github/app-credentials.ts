@@ -7,17 +7,20 @@
 
 import { z } from "zod";
 
-/** App として署名し、installation として振る舞うために要るもの。 */
+/**
+ * App として署名するために要るもの。
+ *
+ * **installation は含めない。** installation は設定ではなく**実行時の状態**で、
+ * App を新しいリポジトリへ入れるたびに増える（`resolveRepositoryInstallation`）。
+ */
 export type AppCredentials = {
   readonly appId: string;
-  readonly installationId: string;
   /** PEM。**中身を扱うのは署名のときだけで、どこにも出さない。** */
   readonly privateKey: string;
 };
 
 /** 読む環境変数の名前。`.env.example` と揃える。 */
 const APP_ID = "GITHUB_APP_ID";
-const INSTALLATION_ID = "GITHUB_APP_INSTALLATION_ID";
 const PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY";
 
 /**
@@ -31,14 +34,13 @@ export function readAppCredentials(
 ): AppCredentials {
   return {
     appId: required(env, APP_ID, idSchema),
-    installationId: required(env, INSTALLATION_ID, idSchema),
     privateKey: toPem(required(env, PRIVATE_KEY, secretSchema)),
   };
 }
 
 /**
- * **ID は GitHub が振る数値である。** 空白だけの値や名前らしき文字列を通すと、
- * `iss` や URL に載ってから 401 / 404 になり、**設定ミスだと分からなくなる**。
+ * **App ID は GitHub が振る数値である。** 空白だけの値や名前らしき文字列を通すと、
+ * `iss` に載ってから 401 になり、**設定ミスだと分からなくなる**。
  * 前後の空白は `.env` を手で編集すると混ざるので落とす。
  */
 const idSchema = z.string().trim().regex(/^\d+$/);

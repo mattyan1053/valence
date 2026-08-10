@@ -70,6 +70,11 @@ const responseSchema = z.object({
  */
 export async function requestInstallationToken(
   credentials: AppCredentials,
+  /**
+   * どの installation の token か。**跨いで使い回せない**ので、呼ぶ側が
+   * `resolveRepositoryInstallation` などで解決してから渡す。
+   */
+  installationId: string,
   now: Date,
   /**
    * **差し替えるための引数であって、抽象ではない。** interface も HTTP クライアントの層も
@@ -79,7 +84,7 @@ export async function requestInstallationToken(
   fetchImpl: typeof fetch = fetch,
 ): Promise<InstallationToken> {
   const response = await fetchImpl(
-    `https://api.github.com/app/installations/${credentials.installationId}/access_tokens`,
+    `https://api.github.com/app/installations/${installationId}/access_tokens`,
     {
       method: "POST",
       headers: {
