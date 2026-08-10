@@ -19,12 +19,18 @@ describe("bin/loop-await-review", () => {
    * **コピーの隣に偽物を置く**と、そちらが動く。
    */
   function withReviews(...responses: string[]): void {
+    withSlowReviews(0, ...responses);
+  }
+
+  /** 1 回の呼び出しに `delaySec` 秒かかる偽物。**実時間で切れるか**を試すために使う。 */
+  function withSlowReviews(delaySec: number, ...responses: string[]): void {
     copyFileSync(SCRIPT, join(sandbox, "loop-await-review"));
     chmodSync(join(sandbox, "loop-await-review"), 0o755);
 
     // 呼ばれるたびに次の応答へ進む。**「待っていたら出た」を作るため**である。
     const script = [
       "#!/usr/bin/env bash",
+      delaySec > 0 ? `sleep ${delaySec}` : ":",
       `count_file="${join(sandbox, "count")}"`,
       'count="$(cat "$count_file" 2>/dev/null || echo 0)"',
       'echo $((count + 1)) > "$count_file"',
@@ -152,5 +158,36 @@ describe("bin/loop-await-review", () => {
 
     expect(run(["74", ""], { LOOP_AWAIT_REVIEW_MAX_SEC: "しばらく" }).status).toBe(2);
     expect(run(["74", ""], { LOOP_AWAIT_REVIEW_INTERVAL_SEC: "0" }).status).toBe(2);
+  });
+
+  it("実時間で締め切る", () => {
+    // **`sleep` の秒数だけ数えると、API が遅いときに上限を守れない。**
+    // 「ツール呼び出しの制限より短く」という目的が果たせなくなる
+    withSlowReviews(2, "");
+
+    const started = Date.now();
+    const timedOut = run(["74", "2026-08-10T07:00:00Z"], {
+      LOOP_AWAIT_REVIEW_MAX_SEC: "2",
+      LOOP_AWAIT_REVIEW_INTERVAL_SEC: "1",
+    });
+
+    expect(timedOut.status).toBe(1);
+    // 確認 1 回（2 秒）で締切に届く。`sleep` の秒数だけ数える形に戻すと、
+    // 確認の時間が入らないぶん **3 回確認して 8 秒** かかる
+    expect(Date.now() - started).toBeLessThan(5000);
+  }, 15000);
+
+  it("上限が間隔より短ければ、残りだけ待つ", () => {
+    // **超過して待たない。** 待ってから諦めると、上限の意味が無くなる
+    withReviews("");
+
+    const started = Date.now();
+    const timedOut = run(["74", "2026-08-10T07:00:00Z"], {
+      LOOP_AWAIT_REVIEW_MAX_SEC: "1",
+      LOOP_AWAIT_REVIEW_INTERVAL_SEC: "9",
+    });
+
+    expect(timedOut.status).toBe(1);
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 });

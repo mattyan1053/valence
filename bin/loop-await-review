@@ -57,7 +57,11 @@ latest_review_at() {
   printf '%s' "$reviewed" | tail -n 1 | cut -f1
 }
 
-waited=0
+# **締切は開始時に 1 回決める。** `sleep` の秒数だけを足すと、**毎回の確認 (GitHub API)
+# にかかった時間が入らない**。API が遅いと「上限は守っているのに実時間はいくらでも伸びる」
+# ことになり、**ツール呼び出しの制限より短く**という目的が果たせない。
+readonly DEADLINE=$(($(date +%s) + MAX_SEC))
+
 while :; do
   if ! latest="$(latest_review_at)"; then
     echo "[FAIL] PR #$PR のレビューを読み取れません" >&2
@@ -68,9 +72,10 @@ while :; do
   if [[ -n $latest && $latest > $SINCE ]]; then
     exit 0
   fi
-  ((waited + INTERVAL_SEC > MAX_SEC)) && break
-  sleep "$INTERVAL_SEC"
-  waited=$((waited + INTERVAL_SEC))
+  remaining=$((DEADLINE - $(date +%s)))
+  ((remaining <= 0)) && break
+  # **残りが間隔より短ければ、残りだけ待つ。** 超過して待つと上限の意味が無くなる。
+  ((remaining < INTERVAL_SEC)) && sleep "$remaining" || sleep "$INTERVAL_SEC"
 done
 
 echo "[WARN] PR #$PR のレビューは ${MAX_SEC} 秒では返りませんでした" >&2

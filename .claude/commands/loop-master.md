@@ -276,8 +276,19 @@ bin/loop-review-budget <PR番号>
 
 ```bash
 # 基準時刻は **要求を投げる前**に取る。後から取ると、投げた直後に返った分を
-# 「元からあった」と読んでしまい、上限まで待ってから諦めることになる
-since="$(bin/loop-review-commits <PR番号> | tail -n 1 | cut -f1)"
+# 「元からあった」と読んでしまい、上限まで待ってから諦めることになる。
+#
+# **一覧は先に変数へ受ける。** パイプに繋ぐと終了コードは `cut` のものになり、
+# **取得できなかった周回が「レビューが 1 件も無い」と見分けが付かなくなる**
+# （掃除の段と同じ理由）。空の基準で待つと、過去のレビューが「新しい」と読まれて
+# 即座に戻り、**待つのをやめたうえに次の周回で未応答として数えられる**。
+if ! reviewed="$(bin/loop-review-commits <PR番号>)"; then
+  # **要求を投げずに終える。** 判定不能なまま投げると、投げてから困る形になる。
+  # 識別子は 3.2 の他の判定不能と同じものを使う（**勝手に作らない**）
+  bin/loop-stall "review-budget-unknown:<PR番号>"
+  exit
+fi
+since="$(printf '%s' "$reviewed" | tail -n 1 | cut -f1)"
 
 bin/loop-review-head <PR番号> "$(gh pr view <PR番号> --json headRefOid --jq '.headRefOid')"
 gh pr comment <PR番号> --body "@codex review"
