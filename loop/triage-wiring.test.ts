@@ -81,9 +81,16 @@ describe("上限に達したあとの行き先", () => {
     expect(failTable).toContain("deferred-overflow");
   });
 
-  it("外出しの節は、歯止めを自前で持たない", () => {
-    // **2 箇所に持つと、片方だけ直して食い違う**（判定が 2 通りになる）
-    expect(bashBlocks(triageSection())).not.toContain("bin/loop-deferred-budget");
+  it("外出しは、作る前に空き枠を見る", () => {
+    // **作ってから数えると、label 検索の索引が遅れて自分の 1 件が見えない**
+    // （この環境で実測済み。#101）。ゲートの検査は他の経路のために残す——
+    // **閾値はスクリプト 1 箇所のままで、呼ぶ場所が 2 つになるだけ**なので食い違わない
+    const block = bashBlocks(triageSection());
+
+    expect(block).toContain("bin/loop-deferred-budget --adding 1");
+    expect(block.indexOf("bin/loop-deferred-budget")).toBeLessThan(
+      block.indexOf("gh issue create"),
+    );
   });
 
   it("差し戻す側でも記録が残ると書いてある", () => {

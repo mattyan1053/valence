@@ -43,8 +43,11 @@ describe("bin/loop-deferred-budget", () => {
     );
   }
 
-  function run(env: Record<string, string> = {}): { status: number; stderr: string } {
-    const result = spawnSync(SCRIPT, [], {
+  function run(
+    env: Record<string, string> = {},
+    args: string[] = [],
+  ): { status: number; stderr: string } {
+    const result = spawnSync(SCRIPT, args, {
       cwd: dir,
       encoding: "utf8",
       env: { ...process.env, PATH: path, ...env },
@@ -101,6 +104,23 @@ describe("bin/loop-deferred-budget", () => {
     withOpenDeferred(201);
 
     expect(run({ LOOP_DEFERRED_MAX: "200" }).status).toBe(1);
+  });
+
+  it("これから作る 1 件を数に入れられる", () => {
+    // **作ってから数えると、索引の遅れで自分の 1 件が見えない**（この環境で実測済み。
+    // #101）。作る前に「増やしたらどうなるか」を判定すれば、遅れの影響を受けない
+    withOpenDeferred(5);
+
+    expect(run({}, ["--adding", "1"]).status).toBe(1);
+    expect(run({}, ["--adding", "0"]).status).toBe(0);
+  });
+
+  it("足す件数が数でなければ 2 で落ちる", () => {
+    withOpenDeferred(0);
+
+    expect(run({}, ["--adding", "いくつか"]).status).toBe(2);
+    expect(run({}, ["--adding"]).status).toBe(2);
+    expect(run({}, ["--nope", "1"]).status).toBe(2);
   });
 
   it("件数を読めなければ 2 で落ちる", () => {

@@ -24,10 +24,17 @@ if ! [[ $MAX =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-(($# == 0)) || {
-  echo "使い方: bin/loop-deferred-budget   （引数なし）" >&2
-  exit 2
-}
+# **これから作る分を数に入れられるようにする。** 作ってから数えると、
+# **label 検索の索引が数十秒遅れる**ので自分の 1 件が見えない（この環境で実測済み。#101）。
+# 作る前に「増やしたらどうなるか」を訊けば、遅れの影響を受けない。
+adding=0
+if (($# > 0)); then
+  [[ $# -eq 2 && $1 == "--adding" && $2 =~ ^[0-9]+$ ]] || {
+    echo "使い方: bin/loop-deferred-budget [--adding <これから作る件数>]" >&2
+    exit 2
+  }
+  adding="$2"
+fi
 
 # **上限より 1 件だけ多く取る。** `--limit` は「取ってくる件数の上限」なので、
 # そこで丸められると**上限ちょうどに見えて歯止めが効かない**。
@@ -38,8 +45,8 @@ if ! count="$(gh issue list --state open --label deferred-finding --limit "$((MA
   exit 2
 fi
 
-if ((count > MAX)); then
-  echo "[FAIL] 外出しした指摘が ${count} 件あります（上限 ${MAX} 件）。読み切ってから進めてください" >&2
+if ((count + adding > MAX)); then
+  echo "[FAIL] 外出しした指摘が $((count + adding)) 件になります（上限 ${MAX} 件）。読み切ってから進めてください" >&2
   echo "       一覧: gh issue list --state open --label deferred-finding" >&2
   exit 1
 fi
