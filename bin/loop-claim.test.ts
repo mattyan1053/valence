@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -307,6 +308,105 @@ describe("bin/loop-claim", () => {
 
       expect(overlapped()).toBe(true);
       expect(results.filter((result) => result.status === 0)).toHaveLength(1);
+    });
+  });
+
+  describe("audit — label と実態の食い違いを見つける", () => {
+    /** open PR の本文と、Issue ごとの label を返す偽の `gh`。 */
+    function withAudit(options: {
+      prs?: { number: number; body: string }[];
+      labelsOf?: Record<number, string[]>;
+    }): void {
+      const prs = (options.prs ?? []).map((pr) => `${pr.number}\t${pr.body}`).join("\n");
+      writeFileSync(
+        join(path, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          'if [[ $* == *"api graphql"* ]]; then',
+          `  printf '%b' ${JSON.stringify(prs)}`,
+          `  [[ -n ${JSON.stringify(prs)} ]] && echo`,
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"repo view"* ]]; then',
+          '  echo "owner"',
+          '  echo "repo"',
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"issue view"* ]]; then',
+          "  for word in $*; do",
+          "    case $word in",
+          ...Object.entries(options.labelsOf ?? {}).flatMap(([number, labels]) => [
+            `    ${number}) printf '%b' ${JSON.stringify(labels.join("\n"))}; echo; exit 0 ;;`,
+          ]),
+          "    esac",
+          "  done",
+          "  exit 0",
+          "fi",
+          'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+          "exit 2",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+    }
+
+    /** claim の記録を作る。**実在の古い記録は使わない**（次の操作で消える）。 */
+    function writeRecord(number: number, owner = repo): void {
+      writeFileSync(join(repo, ".git", `valence-loop-claim-${number}`), `${owner}\t1000\n`);
+    }
+
+    it("in-progress でない Issue を閉じる open PR を見つける", () => {
+      // **`ready` は「まだ誰も着手していない」を意味する。** そのまま PR があると、
+      // **2 人目が同じ Issue を取れる**（#84 / #100 が防ごうとした形そのもの）
+      withAudit({ prs: [{ number: 12, body: "Closes #73" }], labelsOf: { 73: ["ready"] } });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(1);
+      expect(audited.stdout).toContain("73");
+    });
+
+    it("in-progress なら食い違いではない", () => {
+      withAudit({
+        prs: [{ number: 12, body: "Closes #73" }],
+        labelsOf: { 73: ["in-progress"] },
+      });
+
+      expect(run(["audit"]).status).toBe(0);
+    });
+
+    it("着手中でない Issue の記録は、古いものとして解放する", () => {
+      // **記録が指す Issue が `in-progress` でないなら、その記録は古い**——
+      // **状態から機械的に分かる**ので、呼ぶ場所を散文で並べない（#92 と同じ理由）
+      withAudit({ labelsOf: { 82: ["backlog"] } });
+      writeRecord(82);
+
+      const audited = run(["audit"]);
+
+      expect(existsSync(join(repo, ".git", "valence-loop-claim-82"))).toBe(false);
+      expect(audited.stdout).toContain("82");
+    });
+
+    it("着手中の記録は残す", () => {
+      withAudit({ labelsOf: { 84: ["in-progress"] } });
+      writeRecord(84);
+
+      run(["audit"]);
+
+      expect(existsSync(join(repo, ".git", "valence-loop-claim-84"))).toBe(true);
+    });
+
+    it("古い記録があるだけでは止めない", () => {
+      // **自動で直せるものは直す。** 止めるのは人の判断が要るほうだけ
+      withAudit({ labelsOf: { 82: ["backlog"] } });
+      writeRecord(82);
+
+      expect(run(["audit"]).status).toBe(0);
+    });
+
+    it("読めなければ 2 で落ちる", () => {
+      writeFileSync(join(path, "gh"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+
+      expect(run(["audit"]).status).toBe(2);
     });
   });
 

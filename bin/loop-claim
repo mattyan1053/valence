@@ -49,15 +49,22 @@ readonly TTL_SEC="${LOOP_CLAIM_TTL_SEC:-1800}"
 usage() {
   echo "使い方: bin/loop-claim take <Issue番号>     ready の Issue を取る" >&2
   echo "        bin/loop-claim resume <Issue番号>   着手中の Issue を続けてよいか尋ねる" >&2
+  echo "        bin/loop-claim audit                label と実態の食い違いを見つける" >&2
   echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
   exit 2
 }
 
-[[ $# -eq 2 ]] || usage
-readonly ACTION="$1"
-readonly ISSUE="$2"
-[[ $ACTION == "take" || $ACTION == "resume" ]] || usage
-[[ $ISSUE =~ ^[0-9]+$ ]] || usage
+readonly ACTION="${1-}"
+if [[ $ACTION == "audit" ]]; then
+  [[ $# -eq 1 ]] || usage
+  ISSUE=""
+else
+  [[ $# -eq 2 ]] || usage
+  ISSUE="$2"
+  [[ $ACTION == "take" || $ACTION == "resume" ]] || usage
+  [[ $ISSUE =~ ^[0-9]+$ ]] || usage
+fi
+readonly ISSUE
 
 for setting in LOCK_WAIT_SEC TTL_SEC; do
   if ! [[ ${!setting} =~ ^[0-9]+$ ]]; then
@@ -106,6 +113,73 @@ write_record() {
     exit 2
   }
 }
+
+# --- audit ---------------------------------------------------------------------
+# **label と実態の食い違いを、状態から見つける。**
+#
+# **呼ぶ場所を散文で並べない。** `bin/loop-claim release` を足して「マージしたとき」
+# 「blocked へ落としたとき」…と列挙すると、**経路が増えたときに漏れる**
+# （#92 で「通知を送る場面」の列挙が漏れたのと同じ形）。
+# **どちらの食い違いも状態から機械的に決まる**ので、そちらを見る。
+#
+#   open PR が閉じる Issue が着手中でない … **人の判断が要る**（誰が持つべきか決められない）
+#   記録が指す Issue が着手中でない       … **古い記録**。自動で解放してよい
+if [[ $ACTION == "audit" ]]; then
+  # **一覧（検索）を通さない。** 付け替えた直後は古い値が返る（#101 で実測）。
+  repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || {
+    echo "[FAIL] リポジトリを特定できません" >&2
+    exit 2
+  }
+  mapfile -t repo_parts <<<"$repo_ref"
+  bodies="$(gh api graphql --paginate \
+    -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+    -f query='query($owner:String!,$repo:String!,$endCursor:String){
+      repository(owner:$owner,name:$repo){
+        pullRequests(states:OPEN,first:50,after:$endCursor){
+          pageInfo{hasNextPage endCursor}
+          nodes{number body}}}}' \
+    --jq '.data.repository.pullRequests.nodes[] | "\(.number)\t\((.body // "") | gsub("\\s+"; " "))"')" || {
+    echo "[FAIL] open PR を取得できません" >&2
+    exit 2
+  }
+
+  mismatched=0
+  while IFS=$'\t' read -r pr body; do
+    [[ -n $pr ]] || continue
+    rest="$body"
+    while [[ $rest =~ [Cc]loses[[:space:]]+#([0-9]+) ]]; do
+      closed="${BASH_REMATCH[1]}"
+      rest="${rest#*"${BASH_REMATCH[0]}"}"
+      if ! labels="$(gh issue view "$closed" --json labels --jq '.labels[].name')"; then
+        echo "[FAIL] #$closed の label を読めません" >&2
+        exit 2
+      fi
+      if ! has_label "in-progress" "$labels"; then
+        echo "[NG] PR #${pr} は #${closed} を閉じようとしていますが、着手中ではありません"
+        mismatched=1
+      fi
+    done
+  done <<<"$bodies"
+
+  # **古い記録は、その場で解放する。** 「誰も作業していないのに持ち主が居る」記録は、
+  # 作業場が増えた瞬間に**再開を止める**（#82 の前に消しておきたい）。
+  for record in "$common_dir"/valence-loop-claim-[0-9]*; do
+    [[ -f $record ]] || continue
+    number="${record##*valence-loop-claim-}"
+    [[ $number =~ ^[0-9]+$ ]] || continue
+    if ! labels="$(gh issue view "$number" --json labels --jq '.labels[].name')"; then
+      echo "[FAIL] #$number の label を読めません" >&2
+      exit 2
+    fi
+    if ! has_label "in-progress" "$labels"; then
+      rm -f "$record"
+      echo "[INFO] #${number} は着手中ではないので、古い記録を解放しました"
+    fi
+  done
+
+  ((mismatched == 0)) || exit 1
+  exit 0
+fi
 
 exec 9>"$common_dir/valence-loop-claim.lock" || {
   echo "[FAIL] 取り合いのロックを作成できません" >&2
