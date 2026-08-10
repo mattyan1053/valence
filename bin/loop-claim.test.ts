@@ -53,21 +53,31 @@ describe("bin/loop-claim", () => {
     );
   }
 
+  /** 同じリポジトリの作業場を足す。**共通ディレクトリは共有される**ので、記録も共有される。 */
+  function addWorkspace(name: string): string {
+    const dir = join(repo, name);
+    const result = spawnSync("git", ["-C", repo, "worktree", "add", "--detach", dir], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    return dir;
+  }
+
   /** **同時に**走らせる。`spawnSync` の繰り返しは直列で、同時性を試せない（#74 の前例）。 */
-  function raceFor(count: number, issue = "84"): Promise<Run[]> {
+  function race(jobs: { args: string[]; cwd?: string }[]): Promise<Run[]> {
     return Promise.all(
-      Array.from({ length: count }, () => {
+      jobs.map((job) => {
         return new Promise<Run>((resolve) => {
           const child = spawn(
             "bash",
             [
               "-c",
               `printf 'start %s\\n' "$(date +%s%N)" >>"$RACE_LOG"; ` +
-                `${JSON.stringify(SCRIPT)} ${issue}; code=$?; ` +
+                `${JSON.stringify(SCRIPT)} ${job.args.join(" ")}; code=$?; ` +
                 `printf 'end %s\\n' "$(date +%s%N)" >>"$RACE_LOG"; exit $code`,
             ],
             {
-              cwd: repo,
+              cwd: job.cwd ?? repo,
               env: { ...process.env, PATH: path, RACE_LOG: join(repo, "race.log") },
             },
           );
@@ -85,11 +95,28 @@ describe("bin/loop-claim", () => {
     );
   }
 
-  function run(...args: string[]): Run {
+  /** すべてのプロセスが走り出してから、最初の 1 つが終わったか。**直列なら成り立たない。** */
+  function overlapped(): boolean {
+    const marks = readFileSync(join(repo, "race.log"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => {
+        const [kind, at] = line.split(" ");
+        return { kind, at: BigInt(at ?? "0") };
+      });
+    const starts = marks.filter((mark) => mark.kind === "start").map((mark) => mark.at);
+    const ends = marks.filter((mark) => mark.kind === "end").map((mark) => mark.at);
+    if (starts.length === 0 || starts.length !== ends.length) {
+      return false;
+    }
+    return starts.reduce((a, b) => (a > b ? a : b)) < ends.reduce((a, b) => (a < b ? a : b));
+  }
+
+  function run(args: string[], options: { cwd?: string; env?: Record<string, string> } = {}): Run {
     const result = spawnSync(SCRIPT, args, {
-      cwd: repo,
+      cwd: options.cwd ?? repo,
       encoding: "utf8",
-      env: { ...process.env, PATH: path },
+      env: { ...process.env, PATH: path, ...options.env },
       timeout: 20_000,
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
@@ -104,6 +131,18 @@ describe("bin/loop-claim", () => {
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "loop-claim-"));
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    // 作業場を足すには commit が 1 つ要る
+    expect(
+      spawnSync("git", ["-C", repo, "commit", "--allow-empty", "--quiet", "-m", "init"], {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@e",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@e",
+        },
+      }).status,
+    ).toBe(0);
     path = join(repo, "path");
     mkdirSync(path, { recursive: true });
     state = join(repo, "labels");
@@ -132,95 +171,152 @@ describe("bin/loop-claim", () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  it("同時に取りに行っても、取れるのは 1 つだけ", async () => {
-    // **これが本題。** label を付けるだけだと、両方が「空いている」と読んでから両方が書ける
-    withGh({ labels: ["ready"] });
+  describe("take — ready の Issue を取る", () => {
+    it("同時に取りに行っても、取れるのは 1 つだけ", async () => {
+      // **これが本題。** label を付けるだけだと、両方が「空いている」と読んでから両方が書ける
+      withGh({ labels: ["ready"] });
 
-    const results = await raceFor(4);
+      const results = await race(Array.from({ length: 4 }, () => ({ args: ["take", "84"] })));
 
-    expect(results.filter((result) => result.status === 0)).toHaveLength(1);
-    expect(results.filter((result) => result.status === 1)).toHaveLength(3);
-    // **書き込みそのものも 1 回だけ。** exit だけ見ると、2 回書いてから譲っても通る
-    expect(editCount()).toBe(1);
-  });
-
-  it("試したときに、本当に重なっている", async () => {
-    // **同時性そのものが主題。** 直列に走らせていると、直列化を外す変異が赤くならない
-    // （#74 でそうなった）。**全員が走り出してから、最初の 1 つが終わる**ことを確かめる
-    withGh({ labels: ["ready"] });
-
-    await raceFor(4);
-
-    const marks = readFileSync(join(repo, "race.log"), "utf8")
-      .split("\n")
-      .filter((line) => line !== "")
-      .map((line) => {
-        const [kind, at] = line.split(" ");
-        return { kind, at: BigInt(at ?? "0") };
-      });
-    const starts = marks.filter((mark) => mark.kind === "start").map((mark) => mark.at);
-    const ends = marks.filter((mark) => mark.kind === "end").map((mark) => mark.at);
-
-    expect(starts).toHaveLength(4);
-    expect(ends).toHaveLength(4);
-    expect(starts.reduce((a, b) => (a > b ? a : b))).toBeLessThan(
-      ends.reduce((a, b) => (a < b ? a : b)),
-    );
-  });
-
-  it("取れなかった側は、待たされずに戻る", async () => {
-    // **待つと、そこが新しい詰まりどころになる**（#74 の lease と同じ判断）。
-    // 誰かが取っている最中でも、**待ち続けずに譲って次へ進む**
-    withGh({ labels: ["ready"] });
-    const holder = spawn("flock", [
-      "-x",
-      join(repo, ".git", "valence-loop-claim.lock"),
-      "sleep",
-      "20",
-    ]);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    const result = spawnSync(SCRIPT, ["84"], {
-      cwd: repo,
-      encoding: "utf8",
-      env: { ...process.env, PATH: path, LOOP_CLAIM_LOCK_WAIT_SEC: "1" },
-      timeout: 15_000,
+      expect(results.filter((result) => result.status === 0)).toHaveLength(1);
+      expect(results.filter((result) => result.status === 1)).toHaveLength(3);
+      // **書き込みそのものも 1 回だけ。** exit だけ見ると、2 回書いてから譲っても通る
+      expect(editCount()).toBe(1);
     });
-    holder.kill();
 
-    expect(result.status).toBe(1);
-    expect(editCount()).toBe(0);
+    it("試したときに、本当に重なっている", async () => {
+      // **同時性そのものが主題。** 直列に走らせていると、直列化を外す変異が赤くならない
+      // （#74 でそうなった）
+      withGh({ labels: ["ready"] });
+
+      await race(Array.from({ length: 4 }, () => ({ args: ["take", "84"] })));
+
+      expect(overlapped()).toBe(true);
+    });
+
+    it("取れなかった側は、待たされずに戻る", async () => {
+      // **待つと、そこが新しい詰まりどころになる**（#74 の lease と同じ判断）
+      withGh({ labels: ["ready"] });
+      const holder = spawn("flock", [
+        "-x",
+        join(repo, ".git", "valence-loop-claim.lock"),
+        "sleep",
+        "20",
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const result = run(["take", "84"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } });
+      holder.kill();
+
+      expect(result.status).toBe(1);
+      expect(editCount()).toBe(0);
+    });
+
+    it("書いたのに変わっていなければ、取れたことにしない", () => {
+      // **書き込んでから読み直して確かめる。** 書けたつもりで進むと、
+      // **label は ready のまま実装が始まり**、次の周回がもう一度同じものを取る
+      withGh({ labels: ["ready"], editIsNoop: true, viewDelay: "0" });
+
+      expect(run(["take", "84"]).status).toBe(2);
+    });
+
+    it("すでに ready が外れていれば取れない", () => {
+      withGh({ labels: ["in-progress"], viewDelay: "0" });
+
+      expect(run(["take", "84"]).status).toBe(1);
+    });
+
+    it("Issue を読めなければ 2 で落ちる", () => {
+      // **判定不能を「取れた」に倒さない。** 倒すと 2 人が同じものを実装する
+      writeFileSync(join(path, "gh"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+
+      expect(run(["take", "84"]).status).toBe(2);
+    });
   });
 
-  it("書いたのに変わっていなければ、取れたことにしない", () => {
-    // **書き込んでから読み直して確かめる。** 書けたつもりで進むと、
-    // **label は ready のまま実装が始まり**、次の周回がもう一度同じものを取る
-    withGh({ labels: ["ready"], editIsNoop: true, viewDelay: "0" });
+  describe("resume — in-progress の Issue を続けてよいか", () => {
+    it("別の作業場が取った Issue は再開しない", () => {
+      // **これが #100 のレビューで見つかった穴。** ステップ 2.2 は label しか見ておらず、
+      // **claim を通らずに実装へ入れた**。取った側がブランチを作る前の窓がそのまま重複になる
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      const other = addWorkspace("other");
+      expect(run(["take", "84"], { cwd: other }).status).toBe(0);
 
-    const result = run("84");
+      expect(run(["resume", "84"]).status).toBe(1);
+    });
 
-    expect(result.status).toBe(2);
-  });
+    it("自分が取った Issue は再開できる", () => {
+      // **中断した自分の作業は拾えなければならない。** 2.2 はそのための経路である
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      expect(run(["take", "84"]).status).toBe(0);
 
-  it("すでに ready が外れていれば取れない", () => {
-    // 先に取った側がいる。**読み直しはロックの中で行う**ので、ここで必ず気づく
-    withGh({ labels: ["in-progress"], viewDelay: "0" });
+      expect(run(["resume", "84"]).status).toBe(0);
+    });
 
-    expect(run("84").status).toBe(1);
-  });
+    it("持ち主の記録が無ければ拾える", () => {
+      // **落ちた周回が Issue を永久に抱え込まないこと。** 記録が無い＝生きている持ち主が
+      // 居ないので、2.2 の本来の役目（公開に失敗した周回を拾う）へ倒す
+      withGh({ labels: ["in-progress"], viewDelay: "0" });
 
-  it("Issue を読めなければ 2 で落ちる", () => {
-    // **判定不能を「取れた」に倒さない。** 倒すと 2 人が同じものを実装する
-    writeFileSync(join(path, "gh"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+      expect(run(["resume", "84"]).status).toBe(0);
+    });
 
-    expect(run("84").status).toBe(2);
+    it("期限を過ぎた記録は引き継げる", () => {
+      // **落ちた周回の跡である。** 黙って上書きせず、引き継いだことを標準エラーに残す
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      const other = addWorkspace("other");
+      expect(run(["take", "84"], { cwd: other }).status).toBe(0);
+
+      const resumed = run(["resume", "84"], { env: { LOOP_CLAIM_TTL_SEC: "0" } });
+
+      expect(resumed.status).toBe(0);
+      expect(resumed.stderr).toContain("WARN");
+    });
+
+    it("引き継いだら、持ち主は自分になる", () => {
+      // **引き継ぎっぱなしにしない。** 記録が前の持ち主のままだと、
+      // **次の周回でまた誰でも引き継げる**（排他が 1 回きりになる）
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      const other = addWorkspace("other");
+      expect(run(["take", "84"], { cwd: other }).status).toBe(0);
+      expect(run(["resume", "84"], { env: { LOOP_CLAIM_TTL_SEC: "0" } }).status).toBe(0);
+
+      expect(run(["resume", "84"], { cwd: other }).status).toBe(1);
+    });
+
+    it("in-progress でなければ再開しない", () => {
+      // 2.2 が見るのは着手中のものだけである。**ready を横から取らない**
+      withGh({ labels: ["ready"], viewDelay: "0" });
+
+      expect(run(["resume", "84"]).status).toBe(1);
+    });
+
+    it("取ろうとしている周回と、再開しようとしている周回が同時でも、進むのは 1 つだけ", async () => {
+      // **claim を通らない側が問題だった**ので、そこを競合させる。
+      // ロックのどちらが先でも成り立つ: resume が先なら label がまだ ready なので譲り、
+      // take が先なら記録の持ち主が違うので譲る
+      withGh({ labels: ["ready"] });
+      const other = addWorkspace("other");
+
+      const results = await race([
+        { args: ["take", "84"], cwd: other },
+        { args: ["resume", "84"] },
+        { args: ["resume", "84"] },
+        { args: ["resume", "84"] },
+      ]);
+
+      expect(overlapped()).toBe(true);
+      expect(results.filter((result) => result.status === 0)).toHaveLength(1);
+    });
   });
 
   it("使い方の誤りは 2 で落ちる", () => {
     withGh({ labels: ["ready"], viewDelay: "0" });
 
-    expect(run().status).toBe(2);
-    expect(run("84", "余計な引数").status).toBe(2);
-    expect(run("#84").status).toBe(2);
+    expect(run([]).status).toBe(2);
+    expect(run(["take"]).status).toBe(2);
+    expect(run(["take", "84", "余計な引数"]).status).toBe(2);
+    expect(run(["take", "#84"]).status).toBe(2);
+    expect(run(["grab", "84"]).status).toBe(2);
   });
 });

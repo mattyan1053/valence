@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# `ready` の Issue を **1 つの周回だけが取る**ようにする。
+# `ready` の Issue を **1 つの周回だけが取る**ようにし、**着手中のものを誰が持っているか**を
+# 記録する。
 #
-#   exit 0 = 取れた (この周回が実装してよい)
-#   exit 1 = 取れなかった (別の周回が取った / 取っている最中) → **次の Issue へ進む**
+#   bin/loop-claim take   <Issue番号>   ready の Issue を取る
+#   bin/loop-claim resume <Issue番号>   着手中の Issue を、自分が続けてよいか尋ねる
+#
+#   exit 0 = 取れた / 続けてよい
+#   exit 1 = 取れなかった / 別の作業場が持っている → **次の Issue へ進む。待たない**
 #   exit 2 = 判定できない / 使い方の誤り
 #
 # **label を付け替えるだけでは足りない。** 読んでから書くまでに間があるので、
 # **両方が「空いている」と読んでから、両方が書ける**。症状は「同じ Issue の PR が 2 本」で、
 # **どちらも正しく見える**ので、後から見ても取り合いだと分からない。
 #
+# **入口は 2 つある。** 手順書のステップ 4（`ready` を取る）だけでなく、
+# ステップ 2.2（着手中の Issue を再開する）からも実装へ入れる。
+# **2.2 は label しか見ていなかった**ので、`take` で取った直後——**ブランチができるまでの窓**——に
+# 別の作業場が 2.2 を通ると、そこから重複が入る。だから `resume` も同じ記録を見る。
+#
 # **assignee では区別できない。** 周回はどれも同じ GitHub アカウントで動くので、
 # 「誰が取ったか」を GitHub 側の値で表せない。**取り合いを解けるのは手元だけ**である。
-#
-# **読み・書き・確認をまとめて 1 つにする。** 直列化するのは*この一瞬*だけで、
-# 周回そのものは並列に走る (#81 で lease を作業場ごとにしたのはそのためである)。
+# 持ち主は `bin/loop-lease` と同じ**作業場（worktree の根）**で表す。語彙を増やさない。
 #
 # **譲る側の決め方: 先にロックを取れた側が取り、後から入った側が譲る。**
 # ロックは必ずどちらか一方が取るので、**両方が譲って誰も進まない**ことは起きない。
-# 譲った側は**待たない**。次の Issue へ進み、無ければその周回を終える (#74 と同じ判断)。
 #
 # **守れるのは、同じクローンを共有する周回まで。** 別のクローン・別のマシンで動く周回は
 # 対象外である (`bin/loop-lease` と `bin/loop-stall` も同じ前提に立っている)。
@@ -28,21 +34,37 @@ set -uo pipefail
 # ロックを待つ時間。**ここで行うのは GitHub との数往復だけ**なので短くてよい。
 readonly LOCK_WAIT_SEC="${LOOP_CLAIM_LOCK_WAIT_SEC:-10}"
 
+# 持ち主の記録を引き継ぐまでの時間。
+#
+# **記録が守るのは「取ってからブランチが見えるまで」の窓だけ**である。ブランチは
+# 作業場をまたいで共有されるので、**ブランチができた後は 2.2 が自分で判定できる**。
+# つまり期限は「その窓を覆えれば十分」で、長く持つ必要が無い。
+#
+# **短すぎると「2 つが同じものを実装する」を作り直し、長すぎると「落ちたら止まる」になる。**
+# ここは**拾えるほうへ倒す**——窓の中で落ちた周回は**何も作っていない**ので、
+# 引き継いでもやり直しになるだけで、失うものが無い。`bin/loop-lease` と同じ 30 分にして
+# あるのは、**1 周が長引くより十分に長い**という同じ理由による。
+readonly TTL_SEC="${LOOP_CLAIM_TTL_SEC:-1800}"
+
 usage() {
-  echo "使い方: bin/loop-claim <Issue番号>" >&2
-  echo "        ready の Issue を 1 つの周回だけが取れるようにする" >&2
+  echo "使い方: bin/loop-claim take <Issue番号>     ready の Issue を取る" >&2
+  echo "        bin/loop-claim resume <Issue番号>   着手中の Issue を続けてよいか尋ねる" >&2
   echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
   exit 2
 }
 
-[[ $# -eq 1 ]] || usage
-readonly ISSUE="$1"
+[[ $# -eq 2 ]] || usage
+readonly ACTION="$1"
+readonly ISSUE="$2"
+[[ $ACTION == "take" || $ACTION == "resume" ]] || usage
 [[ $ISSUE =~ ^[0-9]+$ ]] || usage
 
-if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
-  echo "[FAIL] 設定: LOOP_CLAIM_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
-  exit 2
-fi
+for setting in LOCK_WAIT_SEC TTL_SEC; do
+  if ! [[ ${!setting} =~ ^[0-9]+$ ]]; then
+    echo "[FAIL] 設定: LOOP_CLAIM_${setting%_SEC}_SEC は 0 以上の整数（秒）で指定してください" >&2
+    exit 2
+  fi
+done
 
 # **git の共通ディレクトリに置く。** 作業場ごとに置くと、作業場が分かれた時点で
 # 取り合いを検出できない——**それがこの Issue の前提**である (`bin/loop-lease` と同じ形)。
@@ -54,6 +76,16 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
   exit 2
 }
+if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
+  echo "[FAIL] 作業場の根を特定できません" >&2
+  exit 2
+fi
+toplevel="$(cd "$toplevel" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] 作業場の根へ移動できません" >&2
+  exit 2
+}
+readonly OWNER="$toplevel"
+readonly RECORD="$common_dir/valence-loop-claim-$ISSUE"
 
 labels_of() {
   gh issue view "$ISSUE" --json labels --jq '.labels[].name'
@@ -65,6 +97,14 @@ has_label() {
     [[ $line == "$wanted" ]] && return 0
   done <<<"$2"
   return 1
+}
+
+# **持ち主を書き残す。** 記録が無ければ、2.2 は「誰の作業か」を判定できない。
+write_record() {
+  printf '%s\t%s\n' "$OWNER" "$(date +%s)" >"$RECORD" || {
+    echo "[FAIL] #$ISSUE の持ち主を記録できません: $RECORD" >&2
+    exit 2
+  }
 }
 
 exec 9>"$common_dir/valence-loop-claim.lock" || {
@@ -80,27 +120,66 @@ if ! flock -w "$LOCK_WAIT_SEC" 9; then
 fi
 
 # ここから先はロックの中。**読み・書き・確認がひとつながりになる。**
-if ! before="$(labels_of)"; then
+if ! labels="$(labels_of)"; then
   echo "[FAIL] #$ISSUE の label を読めません" >&2
   exit 2
 fi
-if ! has_label "ready" "$before"; then
-  echo "[INFO] #$ISSUE は ready ではありません。別の周回が取ったとみなして譲ります" >&2
-  exit 1
-fi
 
-if ! gh issue edit "$ISSUE" --remove-label ready --add-label in-progress >/dev/null; then
-  echo "[FAIL] #$ISSUE の label を付け替えられません" >&2
-  exit 2
-fi
+case "$ACTION" in
+take)
+  if ! has_label "ready" "$labels"; then
+    echo "[INFO] #$ISSUE は ready ではありません。別の周回が取ったとみなして譲ります" >&2
+    exit 1
+  fi
 
-# **書いたら読み直して確かめる。** 付け替えが通らなくても `gh` は成功を返しうる。
-# 確かめずに進むと、**label は ready のまま実装が始まり**、次の周回が同じものを取る。
-if ! after="$(labels_of)"; then
-  echo "[FAIL] #$ISSUE の label を読み直せません" >&2
-  exit 2
-fi
-if has_label "ready" "$after" || ! has_label "in-progress" "$after"; then
-  echo "[FAIL] #$ISSUE の label が変わっていません（取れたとみなしません）" >&2
-  exit 2
-fi
+  if ! gh issue edit "$ISSUE" --remove-label ready --add-label in-progress >/dev/null; then
+    echo "[FAIL] #$ISSUE の label を付け替えられません" >&2
+    exit 2
+  fi
+
+  # **書いたら読み直して確かめる。** 付け替えが通らなくても `gh` は成功を返しうる。
+  # 確かめずに進むと、**label は ready のまま実装が始まり**、次の周回が同じものを取る。
+  if ! after="$(labels_of)"; then
+    echo "[FAIL] #$ISSUE の label を読み直せません" >&2
+    exit 2
+  fi
+  if has_label "ready" "$after" || ! has_label "in-progress" "$after"; then
+    echo "[FAIL] #$ISSUE の label が変わっていません（取れたとみなしません）" >&2
+    exit 2
+  fi
+
+  write_record
+  ;;
+resume)
+  # **着手中のものだけを見る。** `ready` を 2.2 から横取りしない（取るのは `take` である）。
+  if ! has_label "in-progress" "$labels"; then
+    echo "[INFO] #$ISSUE は着手中ではありません。2.2 の対象ではないので触りません" >&2
+    exit 1
+  fi
+
+  held_owner=""
+  held_since=""
+  if [[ -f $RECORD ]]; then
+    IFS=$'\t' read -r held_owner held_since <"$RECORD"
+    if ! [[ $held_since =~ ^[0-9]+$ ]]; then
+      echo "[FAIL] #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
+      exit 2
+    fi
+  fi
+
+  if [[ -n $held_owner && $held_owner != "$OWNER" ]]; then
+    now="$(date +%s)"
+    if ((now - held_since < TTL_SEC)); then
+      echo "[INFO] #$ISSUE は別の作業場が実装中です（$held_owner）。触りません" >&2
+      exit 1
+    fi
+    # **黙って奪わない。** 期限切れの引き継ぎは、落ちた周回の跡である。
+    echo "[WARN] #$ISSUE の持ち主（$held_owner）が $((now - held_since)) 秒前から動いていません。引き継ぎます" >&2
+  fi
+
+  # **引き継いだら持ち主を書き換える。** 前の持ち主のまま残すと、
+  # **次の周回でも誰でも引き継げる**ことになり、排他が 1 回きりになる。
+  # 自分の作業を続けるときも書き直す（動いていることの印である）。
+  write_record
+  ;;
+esac

@@ -21,6 +21,17 @@ function claimSection(): string {
   return section.split("\n## ")[0] ?? "";
 }
 
+/** 着手中の Issue を再開する節。**ここが claim を通らない入口だった。** */
+function resumeSection(): string {
+  const section = read(".claude/commands/loop-worker.md").split(
+    "### 2.2 公開に失敗した周回を再開する",
+  )[1];
+  if (section === undefined) {
+    throw new Error("worker の手順書に再開の節がありません");
+  }
+  return section.split("\n## ")[0] ?? "";
+}
+
 /** その節の bash ブロックだけ。**散文の言及では「実行している」ことにならない。** */
 function bashBlocks(section: string): string {
   return section
@@ -32,7 +43,20 @@ function bashBlocks(section: string): string {
 
 describe("着手の取り合い", () => {
   it("手順書は取り合いをスクリプトに任せる", () => {
-    expect(bashBlocks(claimSection())).toContain("bin/loop-claim");
+    expect(bashBlocks(claimSection())).toContain("bin/loop-claim take");
+  });
+
+  it("再開する側も、持ち主を確かめてから進む", () => {
+    // **入口は 2 つある。** ステップ 2.2 は label しか見ておらず、**claim を通らずに
+    // 実装へ入れた**（#100 のレビュー指摘）。取った側がブランチを作る前の窓が、
+    // そのまま重複 PR になる
+    expect(bashBlocks(resumeSection())).toContain("bin/loop-claim resume");
+  });
+
+  it("別の作業場が実装中なら触らないと書いてある", () => {
+    // **「自分の中断した作業」と「他人が実装中」を区別する。** label には持ち主が無い
+    expect(resumeSection()).toMatch(/別の作業場/);
+    expect(resumeSection()).toMatch(/触らない|飛ばす|次へ/);
   });
 
   it("素の label 付け替えが残っていない", () => {

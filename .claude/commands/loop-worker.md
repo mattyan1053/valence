@@ -162,7 +162,25 @@ push / PR 作成に失敗した周回は、**Issue が `in-progress` のまま�
 gh issue list --label in-progress --limit 100 --json number,title
 ```
 
-0 件ならステップ 4（新規実装）へ。あるなら、その Issue のブランチの状態を見る。
+0 件ならステップ 4（新規実装）へ。
+
+**あるなら、まず持ち主を確かめる。label には持ち主が書かれていない。**
+`in-progress` だけを見て進むと、**別の作業場が取った直後——ブランチができるまでの窓**に
+入り込み、**この経路から重複が生まれる**（ステップ 4 の `bin/loop-claim` を通らないため）。
+
+```bash
+bin/loop-claim resume <N>
+```
+
+- **exit 0** → 自分の中断した作業である（または持ち主が居なくなっている）。下の分岐へ進む
+- **exit 1** → **別の作業場が実装中**か、着手中ではない。**触らない。**
+  その Issue は飛ばし、残りが無ければステップ 4 へ進む。**待たない**
+- **exit 2** → 判定できない。標準エラーに出た内容を報告して終わる
+
+**落ちた周回の Issue は引き継げる**（期限を過ぎた記録は `[WARN]` を出して引き継ぐ）。
+2.2 は元々「公開に失敗した周回を拾う」ための経路なので、**拾えなくなっては意味が無い。**
+
+進んでよいと分かったら、その Issue のブランチの状態を見る。
 
 ```bash
 git branch --format='%(refname:short)' | grep -v '^main$'
@@ -283,7 +301,7 @@ gh issue list --label ready --limit 100 --json number,title,body
 `bin/loop-claim` が、読み・付け替え・確認をひとつながりにして 1 つの周回だけに取らせる。
 
 ```bash
-bin/loop-claim <N>
+bin/loop-claim take <N>
 ```
 
 - **exit 0** → 取れた。そのまま実装へ進む
