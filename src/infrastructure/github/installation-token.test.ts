@@ -12,7 +12,7 @@ const { privateKey } = generateKeyPairSync("rsa", {
   publicKeyEncoding: { type: "spki", format: "pem" },
 });
 
-const credentials: AppCredentials = { appId: "1234", installationId: "5678", privateKey };
+const credentials: AppCredentials = { appId: "1234", privateKey };
 
 /**
  * **`fetch` を引数で受けて差し替える。** `vi.stubGlobal` を使わないのは、
@@ -83,7 +83,7 @@ describe("installation token を取ってくる", () => {
   const success = '{"token":"ghs_ok","expires_at":"2026-08-10T01:00:00Z"}';
 
   it("成功した応答から token と期限を取り出す", async () => {
-    const token = await requestInstallationToken(credentials, now, respondingWith(success));
+    const token = await requestInstallationToken(credentials, "5678", now, respondingWith(success));
 
     expect(token.token).toBe("ghs_ok");
     expect(token.expiresAt).toEqual(new Date("2026-08-10T01:00:00Z"));
@@ -92,7 +92,7 @@ describe("installation token を取ってくる", () => {
   it("installation の access_tokens へ POST する", async () => {
     // **黙って壊れるところ。** URL もメソッドも、間違えて初めて分かるのは実接続時になる
     const { calls, fetchImpl } = recordingFetch();
-    await requestInstallationToken(credentials, now, fetchImpl);
+    await requestInstallationToken(credentials, "5678", now, fetchImpl);
 
     expect(calls[0]?.method).toBe("POST");
     expect(calls[0]?.url).toBe("https://api.github.com/app/installations/5678/access_tokens");
@@ -101,7 +101,7 @@ describe("installation token を取ってくる", () => {
   it("App の JWT を Bearer で載せる", async () => {
     // installation token は **App として署名した JWT** でしか取れない
     const { calls, fetchImpl } = recordingFetch();
-    await requestInstallationToken(credentials, now, fetchImpl);
+    await requestInstallationToken(credentials, "5678", now, fetchImpl);
     const authorization = calls[0]?.headers.get("authorization") ?? "";
 
     expect(authorization.startsWith("Bearer ")).toBe(true);
@@ -110,7 +110,7 @@ describe("installation token を取ってくる", () => {
 
   it("断られたら投げる", async () => {
     await expect(
-      requestInstallationToken(credentials, now, respondingWith('{"message":"Bad"}', 401)),
+      requestInstallationToken(credentials, "5678", now, respondingWith('{"message":"Bad"}', 401)),
     ).rejects.toThrow(/401/);
   });
 
@@ -119,11 +119,13 @@ describe("installation token を取ってくる", () => {
     // 「取得できませんでした」と出て、原因がどちらか分からなくなる
     const rejected = await requestInstallationToken(
       credentials,
+      "5678",
       now,
       respondingWith('{"message":"Bad"}', 401),
     ).catch((error: unknown) => String(error));
     const unreadable = await requestInstallationToken(
       credentials,
+      "5678",
       now,
       respondingWith("not json", 201),
     ).catch((error: unknown) => String(error));
@@ -134,7 +136,7 @@ describe("installation token を取ってくる", () => {
 
   it("項目が欠けた応答も読めなかったものとして投げる", async () => {
     await expect(
-      requestInstallationToken(credentials, now, respondingWith('{"token":"ghs_ok"}')),
+      requestInstallationToken(credentials, "5678", now, respondingWith('{"token":"ghs_ok"}')),
     ).rejects.toThrow(/読め/);
   });
 
@@ -142,10 +144,26 @@ describe("installation token を取ってくる", () => {
     // **この要求の応答には token そのものが入る。** 失敗経路でも出さない
     const leaky = '{"token":"ghs_leaked","expires_at":"壊れた日付"}';
 
-    const message = await requestInstallationToken(credentials, now, respondingWith(leaky)).catch(
-      (error: unknown) => String(error),
-    );
+    const message = await requestInstallationToken(
+      credentials,
+      "5678",
+      now,
+      respondingWith(leaky),
+    ).catch((error: unknown) => String(error));
 
     expect(message).not.toContain("ghs_leaked");
+  });
+
+  it("installation ごとに取りに行く", async () => {
+    // **installation を跨いで使い回せない。** 1 つ取って全部に使う作りにすると、
+    // 2 つ目のリポジトリで 404 になり、設定ミスと見分けがつかなくなる
+    const { calls, fetchImpl } = recordingFetch();
+    await requestInstallationToken(credentials, "5678", now, fetchImpl);
+    await requestInstallationToken(credentials, "9012", now, fetchImpl);
+
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.github.com/app/installations/5678/access_tokens",
+      "https://api.github.com/app/installations/9012/access_tokens",
+    ]);
   });
 });

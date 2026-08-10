@@ -4,7 +4,6 @@ import { readAppCredentials } from "./app-credentials";
 /** `.env` に入る形（PEM は 1 行に潰して `\n` でエスケープする）。 */
 const env = {
   GITHUB_APP_ID: "1234",
-  GITHUB_APP_INSTALLATION_ID: "5678",
   GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\\nMIIE\\n-----END PRIVATE KEY-----\\n",
 };
 
@@ -13,7 +12,6 @@ describe("GitHub App の資格情報を読む", () => {
     const credentials = readAppCredentials(env);
 
     expect(credentials.appId).toBe("1234");
-    expect(credentials.installationId).toBe("5678");
   });
 
   it("1 行に潰された PEM を改行へ戻す", () => {
@@ -44,9 +42,6 @@ describe("GitHub App の資格情報を読む", () => {
     // **`!== ""` では通ってしまう。** 通すと `iss` や URL に空白が載り、
     // 症状が 401 / 404 になって**設定ミスだと分からなくなる**
     expect(() => readAppCredentials({ ...env, GITHUB_APP_ID: " " })).toThrow(/GITHUB_APP_ID/);
-    expect(() => readAppCredentials({ ...env, GITHUB_APP_INSTALLATION_ID: "  " })).toThrow(
-      /GITHUB_APP_INSTALLATION_ID/,
-    );
     expect(() => readAppCredentials({ ...env, GITHUB_APP_PRIVATE_KEY: " \n " })).toThrow(
       /GITHUB_APP_PRIVATE_KEY/,
     );
@@ -56,9 +51,6 @@ describe("GitHub App の資格情報を読む", () => {
     // App ID も installation ID も **GitHub が振る数値**である。
     // URL に載ってから 404 で気づくのでは、設定ミスだと分からない
     expect(() => readAppCredentials({ ...env, GITHUB_APP_ID: "my-app" })).toThrow(/GITHUB_APP_ID/);
-    expect(() => readAppCredentials({ ...env, GITHUB_APP_INSTALLATION_ID: "56 78" })).toThrow(
-      /GITHUB_APP_INSTALLATION_ID/,
-    );
   });
 
   it("ID の前後の空白は落として使う", () => {
@@ -84,5 +76,12 @@ describe("GitHub App の資格情報を読む", () => {
     } catch (error) {
       expect(String(error)).not.toContain("leaked");
     }
+  });
+
+  it("installation は要求しない", () => {
+    // **installation は設定ではなく実行時の状態である。** App ごとに 1 つではなく、
+    // **インストール先ごとに増える**ので、資格情報に混ぜると 1 つしか扱えなくなる
+    expect(() => readAppCredentials(env)).not.toThrow();
+    expect(Object.keys(readAppCredentials(env))).toEqual(["appId", "privateKey"]);
   });
 });
