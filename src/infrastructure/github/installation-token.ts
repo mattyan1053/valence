@@ -45,6 +45,17 @@ export function tokenRequestError(status: number, _body: string): Error {
   return new Error(`installation token を取得できませんでした (HTTP ${status})`);
 }
 
+/**
+ * 応答は返ってきたが読めなかったときのエラー。
+ *
+ * **「断られた」と別の文面にする。** 同じにすると、`HTTP 200` で
+ * 「取得できませんでした」と出て、**GitHub が断ったのか、こちらが読めなかったのか**が
+ * 分からなくなる。ここでも中身は載せない。
+ */
+export function tokenResponseError(status: number, _body: string): Error {
+  return new Error(`installation token の応答を読めませんでした (HTTP ${status})`);
+}
+
 /** 応答のうち使う項目だけを検証する。 */
 const responseSchema = z.object({
   token: z.string().min(1),
@@ -60,8 +71,14 @@ const responseSchema = z.object({
 export async function requestInstallationToken(
   credentials: AppCredentials,
   now: Date,
+  /**
+   * **差し替えるための引数であって、抽象ではない。** interface も HTTP クライアントの層も
+   * 作らない。ここが引数でないと、URL・メソッド・認証ヘッダーが壊れても
+   * **実際に GitHub へ繋ぐまで分からない**。
+   */
+  fetchImpl: typeof fetch = fetch,
 ): Promise<InstallationToken> {
-  const response = await fetch(
+  const response = await fetchImpl(
     `https://api.github.com/app/installations/${credentials.installationId}/access_tokens`,
     {
       method: "POST",
@@ -81,7 +98,7 @@ export async function requestInstallationToken(
   const parsed = responseSchema.safeParse(safeJson(body));
   if (!parsed.success) {
     // **検証に落ちた中身も載せない。** token が入っている応答である
-    throw tokenRequestError(response.status, body);
+    throw tokenResponseError(response.status, body);
   }
   return { token: parsed.data.token, expiresAt: new Date(parsed.data.expires_at) };
 }
