@@ -54,6 +54,9 @@ readonly STOP_IDS=(
   # label を外せるのは master だけなので、外し忘れると永久にマージされない。
   # head SHA を入れるので、worker が push した周回は別状態として数え直される。
   "changes-requested:<PR番号>@<SHA>|master: 出した要求が満たされていない (label が外れない)"
+  # 件数を付けない。**溜まるほど件数が変わる**ので、付けると連続回数が数え直しになり、
+  # 3 周続いても止まらない (`bin/loop-deferred-budget` が件数を出す)。
+  "deferred-overflow|master: 外出しした指摘が溜まりすぎている (deferred-finding が上限超え)"
 )
 
 usage() {

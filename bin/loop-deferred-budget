@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# 外出しした指摘が**溜まりすぎていないか**を見る。
+#
+#   exit 0 = まだ余裕がある
+#   exit 1 = 閾値を超えた（**人を呼ぶ**。`bin/loop-stall "deferred-overflow"`）
+#   exit 2 = 判定できない
+#
+# **既定を「Issue へ外出ししてマージ」にした以上、歯止めはここにしかない**（#73）。
+# 無いと「**外出しすれば通る**」が無制限になり、指摘が静かに積み上がるだけになる。
+#
+# **閾値の根拠は「人が 1 回座って読み切れる量」でしかない。** 正確な値ではないので、
+# 環境変数で変えられるようにしてある。**根拠のない数字を根拠ありげに書かない。**
+#
+# 数えるのは **open かつ `deferred-finding`** のものだけである。閉じたものは
+# 読まれた後なので数えない。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+readonly MAX="${LOOP_DEFERRED_MAX:-5}"
+
+if ! [[ $MAX =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_DEFERRED_MAX は 0 以上の整数で指定してください" >&2
+  exit 2
+fi
+
+# **これから作る分を数に入れられるようにする。** 作ってから数えると、
+# **label 検索の索引が数十秒遅れる**ので自分の 1 件が見えない（この環境で実測済み。#101）。
+# 作る前に「増やしたらどうなるか」を訊けば、遅れの影響を受けない。
+adding=0
+if (($# > 0)); then
+  [[ $# -eq 2 && $1 == "--adding" && $2 =~ ^[0-9]+$ ]] || {
+    echo "使い方: bin/loop-deferred-budget [--adding <これから作る件数>]" >&2
+    exit 2
+  }
+  adding="$2"
+fi
+
+# **上限より 1 件だけ多く取る。** `--limit` は「取ってくる件数の上限」なので、
+# そこで丸められると**上限ちょうどに見えて歯止めが効かない**。
+# 知りたいのは「超えているか」だけなので、1 件多く取れれば足りる。
+if ! count="$(gh issue list --state open --label deferred-finding --limit "$((MAX + 1))" \
+  --json number --jq 'length')" || [[ ! $count =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 外出しした指摘の件数を取得できません" >&2
+  exit 2
+fi
+
+if ((count + adding > MAX)); then
+  echo "[FAIL] 外出しした指摘が $((count + adding)) 件になります（上限 ${MAX} 件）。読み切ってから進めてください" >&2
+  echo "       一覧: gh issue list --state open --label deferred-finding" >&2
+  exit 1
+fi

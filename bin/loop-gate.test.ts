@@ -121,6 +121,13 @@ exit \${FAKE_FIXUP_EXIT:-0}
     { mode: 0o755 },
   );
   writeFileSync(
+    join(bin, "loop-deferred-budget"),
+    `#!/usr/bin/env bash
+exit \${FAKE_DEFERRED_EXIT:-0}
+`,
+    { mode: 0o755 },
+  );
+  writeFileSync(
     join(bin, "loop-open-requests"),
     `#!/usr/bin/env bash
 echo "fake"
@@ -143,8 +150,25 @@ exit \${FAKE_REQUESTS_EXIT:-0}
   return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
+describe("外出しした指摘の残量", () => {
+  it("溜まりすぎていればマージさせない", () => {
+    // **既定を「外出ししてマージ」にした以上、歯止めはここにしかない**（#73）。
+    // 外出しの経路だけで見ると、**その周回のマージが 1 回遅れるだけ**で、
+    // 次の周回はゲートが通って素通りする（#103 のレビューで指摘された）
+    const gate = runGate({ FAKE_DEFERRED_EXIT: "1" });
+
+    expect(gate.status).toBe(1);
+    expect(gate.stdout).toMatch(/\[FAIL\].*外出し/);
+  });
+
+  it("判定できなければマージさせない", () => {
+    // **判定不能を合格として扱わない**（このゲートの原則）
+    expect(runGate({ FAKE_DEFERRED_EXIT: "2" }).status).toBe(1);
+  });
+});
+
 describe("bin/loop-gate の合格", () => {
-  it("6 条件すべて成立なら exit 0 で、検証した head SHA を出す", () => {
+  it("7 条件すべて成立なら exit 0 で、検証した head SHA を出す", () => {
     const result = runGate();
 
     expect(result.status).toBe(0);
