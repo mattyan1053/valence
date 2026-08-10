@@ -48,6 +48,11 @@ describe("bin/loop-await-review", () => {
     const result = spawnSync(join(sandbox, "loop-await-review"), args, {
       cwd: sandbox,
       encoding: "utf8",
+      // **実時間の上限は `spawnSync` 自身に持たせる。** vitest のタイムアウトでは
+      // 同期呼び出しを中断できないので、**締切を引き伸ばす変異が測れない**。
+      // kill されると `status` は null になり、下の `?? -1` で status を見る
+      // テストがそのまま落ちる。`MAX_SEC=2` の正常実行が偶然当たらない幅を取る
+      timeout: 10_000,
       env: {
         // **`process.env` を土台にする。** 一から組むと `ProcessEnv` の必須項目
         // （`NODE_ENV`）が欠けて型検査が落ちる。**PATH は後から上書きするので絞れている**
