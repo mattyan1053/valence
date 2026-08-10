@@ -80,5 +80,9 @@ describe("周回を捨てるかの判定", () => {
 
     expect(afterMerge).toContain("bin/loop-procedure-changed");
     expect(afterMerge).toMatch(/ステップ 6/);
+    // **比較の右辺がマージ後の状態になっていること。** 手元の HEAD は
+    // マージでは動かないので、取り直さずに比べると必ず「変わっていない」になる
+    expect(afterMerge).toContain("git fetch origin main");
+    expect(afterMerge).toMatch(/bin\/loop-procedure-changed [^\n]+ FETCH_HEAD/);
   });
 });

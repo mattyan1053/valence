@@ -26,7 +26,14 @@ set -uo pipefail
 #
 # `bin/` はまるごと対象にする。master はここのスクリプトを直接呼ぶので、
 # 1 本ずつ並べると**足したときに書き漏らす**。
+#
+# **`AGENTS.md` だけは「守り」ではなく「合図」である。** 共通指示は
+# **セッション開始時に読み込まれる**ので、周回を捨てても**読んでいる内容は変わらない**
+# （手順書は周回のたびに読み直すので、そこが違う）。捨てた理由の出力に `AGENTS.md` が
+# 出ることで、**セッションを開き直すべきだと分かる**——それがここに入っている理由である。
+# **「対象に入っているから守られている」と読まないこと。**
 readonly WATCHED=(
+  "AGENTS.md"
   ".claude/commands/loop-master.md"
   "bin/"
   "task"
@@ -34,9 +41,20 @@ readonly WATCHED=(
 )
 
 usage() {
-  echo "使い方: bin/loop-procedure-changed <追随する前の SHA>" >&2
+  echo "使い方: bin/loop-procedure-changed <前の SHA> [<後の SHA>]" >&2
+  echo "       後の SHA を省くと HEAD と比べる" >&2
   echo "       bin/loop-procedure-changed --list   対象の一覧を出す" >&2
   exit 2
+}
+
+# 指定された rev を解決する。**解決できないものを黙って通さない。**
+resolve() {
+  local rev="$1" resolved
+  if ! resolved="$(git rev-parse --verify --quiet "$rev^{commit}")" || [[ -z $resolved ]]; then
+    echo "[FAIL] commit を特定できません: $rev" >&2
+    exit 2
+  fi
+  printf '%s' "$resolved"
 }
 
 if [[ ${1-} == "--list" ]]; then
@@ -45,15 +63,16 @@ if [[ ${1-} == "--list" ]]; then
   exit 0
 fi
 
-[[ $# -eq 1 ]] || usage
-readonly BEFORE="$1"
+(($# == 1 || $# == 2)) || usage
 
-if ! git rev-parse --verify --quiet "$BEFORE^{commit}" >/dev/null; then
-  echo "[FAIL] 追随する前の commit を特定できません: $BEFORE" >&2
-  exit 2
-fi
+# **比較先を渡せるようにする。** マージしても手元の HEAD は動かない
+# （GitHub 側でマージするだけ）ので、HEAD と比べると必ず「変わっていない」になり、
+# **手順書を変えた PR の直後に古い手順のまま進む**。
+BEFORE="$(resolve "$1")"
+AFTER="$(resolve "${2:-HEAD}")"
+readonly BEFORE AFTER
 
-if ! changed="$(git diff --name-only "$BEFORE" HEAD -- "${WATCHED[@]}" 2>/dev/null)"; then
+if ! changed="$(git diff --name-only "$BEFORE" "$AFTER" -- "${WATCHED[@]}" 2>/dev/null)"; then
   echo "[FAIL] 差分を取得できません" >&2
   exit 2
 fi

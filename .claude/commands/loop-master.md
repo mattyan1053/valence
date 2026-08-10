@@ -254,7 +254,11 @@ fi
 **掃除まで済んだら、この周回を続ける。**
 
 ```bash
-bin/loop-procedure-changed "$before"      # 1.1 で控えた SHA
+# **マージしても手元の HEAD は動かない**（GitHub 側でマージするだけ）。
+# 取り直さずに比べると**必ず「変わっていない」**になり、
+# **手順書を変えた PR の直後に古い手順のまま進む**
+git fetch origin main
+bin/loop-procedure-changed "$(git rev-parse HEAD)" FETCH_HEAD
 ```
 
 **`exit 1` だけが「続けてよい」**（1.1 と同じ扱い。**1 以外はすべて捨てる**）。

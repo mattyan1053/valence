@@ -41,17 +41,21 @@ describe("bin/loop-procedure-changed", () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  it.each([".claude/commands/loop-master.md", "bin/loop-gate", "task", "loop/README.md"])(
-    "%s が変わったら、変わったと判定する",
-    (path) => {
-      // **master が周回中に読む・実行するもの。** 入れ替わったまま走ると、
-      // いま読んでいる手順書と、これから実行する手順書が食い違う
-      const before = commit("src/other.ts", "前\n");
-      commit(path, "後\n");
+  it.each([
+    ".claude/commands/loop-master.md",
+    "bin/loop-gate",
+    "task",
+    "loop/README.md",
+    // **master は共通指示も読む。** 判断基準とセキュリティ規則がここにある
+    "AGENTS.md",
+  ])("%s が変わったら、変わったと判定する", (path) => {
+    // **master が周回中に読む・実行するもの。** 入れ替わったまま走ると、
+    // いま読んでいる手順書と、これから実行する手順書が食い違う
+    const before = commit("src/other.ts", "前\n");
+    commit(path, "後\n");
 
-      expect(run(before).status).toBe(0);
-    },
-  );
+    expect(run(before).status).toBe(0);
+  });
 
   it("対象外のファイルだけなら、変わっていないと判定する", () => {
     // **これが本題。** マージのたびに周回を捨てていたのは、`src/` しか触らない
@@ -101,5 +105,23 @@ describe("bin/loop-procedure-changed", () => {
 
     expect(listed.status).toBe(0);
     expect(listed.stdout).toContain("bin/");
+  });
+
+  it("比較先を指定できる", () => {
+    // **マージしても手元の HEAD は動かない**（GitHub 側でマージするだけ）。
+    // HEAD と比べると必ず「変わっていない」になり、**手順書を変えた PR の直後に
+    // 古い手順のまま進む**
+    const before = commit("src/a.ts", "前\n");
+    const after = commit("bin/loop-gate", "後\n");
+    git("checkout", "--quiet", before);
+
+    expect(run(before, after).status).toBe(0);
+    expect(run(before).status).toBe(1); // HEAD は before のままなので変わらない
+  });
+
+  it("比較先が不正なら 2 で落ちる", () => {
+    const before = commit("src/a.ts", "前\n");
+
+    expect(run(before, "0000000000000000000000000000000000000000").status).toBe(2);
   });
 });
