@@ -35,6 +35,19 @@ function executedByMaster(): string[] {
 }
 
 describe("周回を捨てるかの判定", () => {
+  /** 呼び直しの手前で何をするかが書かれた bash ブロック。 */
+  function codeBlockWithRerun(section: string): string {
+    const block = section
+      .split("```bash")
+      .slice(1)
+      .map((chunk) => chunk.split("```")[0] ?? "")
+      .find((chunk) => chunk.includes("/loop-master"));
+    if (block === undefined) {
+      throw new Error("呼び直しの手順が bash ブロックに書かれていません");
+    }
+    return block;
+  }
+
   it("手順書は判定をスクリプトに任せる", () => {
     expect(read(".claude/commands/loop-master.md")).toContain("bin/loop-procedure-changed");
   });
@@ -84,5 +97,56 @@ describe("周回を捨てるかの判定", () => {
     // マージでは動かないので、取り直さずに比べると必ず「変わっていない」になる
     expect(afterMerge).toContain("git fetch origin main");
     expect(afterMerge).toMatch(/bin\/loop-procedure-changed [^\n]+ FETCH_HEAD/);
+    // **呼び直す前に切り替える。** `fetch` は `FETCH_HEAD` を更新するだけで
+    // **作業ツリーはマージ前のまま**なので、呼び直した先が**古い手順書を読む**
+    // （1.1 の経路はそこで `switch --detach` しているので問題ない）
+    const rerun = codeBlockWithRerun(afterMerge);
+
+    expect(rerun.indexOf("git switch --detach origin/main")).toBeGreaterThanOrEqual(0);
+    expect(rerun.indexOf("git switch --detach origin/main")).toBeLessThan(
+      rerun.indexOf("/loop-master"),
+    );
+  });
+
+  /** 打ち切りが書かれている 2 か所。**片方だけ直すと、そちらだけ空く。** */
+  const DISCARD_POINTS = [
+    { name: "1.1", heading: "### 1.1 手順とスクリプトを最新にする" },
+    { name: "マージの段", heading: "### exit 0 — マージする" },
+  ] as const;
+
+  function sectionOf(heading: string): string {
+    const section = read(".claude/commands/loop-master.md").split(heading)[1];
+    if (section === undefined) {
+      throw new Error(`loop-master.md に「${heading}」がありません`);
+    }
+    return section.split("\n### ")[0]?.split("\n## ")[0] ?? "";
+  }
+
+  it.each(DISCARD_POINTS)("$name で打ち切ったら、その場で呼び直す", ({ heading }) => {
+    // **打ち切り自体は正しい。** 直すのは「そのあと」で、
+    // **新しい手順書を読み直す機会が次の cron しか無い**ことが問題である
+    const section = sectionOf(heading);
+
+    expect(section).toContain("/loop-master");
+
+    // **順序は「呼び直す手前で何をするか」で見る。** 散文の言及を拾うと、
+    // **本文で名前に触れただけで順序が満たされたことになる**（実際にそうなった）
+    const block = codeBlockWithRerun(section);
+
+    // **カウンタを消してから呼び直す。** 順序を変えない
+    expect(block.indexOf("bin/loop-stall --reset")).toBeGreaterThanOrEqual(0);
+    expect(block.indexOf("bin/loop-stall --reset")).toBeLessThan(block.indexOf("/loop-master"));
+    // **lease も返してから呼び直す。** 握ったまま呼び直すと、呼び直された周回が
+    // **1.0 で自分自身に阻まれて何もせず終わる**（結局、次の cron まで動かない）
+    expect(block.indexOf("bin/loop-lease release master")).toBeGreaterThanOrEqual(0);
+    expect(block.indexOf("bin/loop-lease release master")).toBeLessThan(
+      block.indexOf("/loop-master"),
+    );
+  });
+
+  it.each(DISCARD_POINTS)("$name の呼び直しは 1 回だけと書いてある", ({ heading }) => {
+    // **入れ替わりは追随した時点で収束する**ので、2 回続くのは異常である。
+    // 繰り返す形にすると、壊れたときに止まらなくなる
+    expect(sectionOf(heading)).toMatch(/1 回だけ/);
   });
 });
