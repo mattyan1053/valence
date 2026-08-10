@@ -295,14 +295,18 @@ describe("GitHub から PR 一覧を取ってくる", () => {
       [PULLS_URL]: { body: stacked },
     });
 
-    const plan = await planReviewOrder(
-      createGitHubPullRequestSource({
+    const plan = await planReviewOrder({
+      pullRequests: createGitHubPullRequestSource({
         credentials,
         repository,
         fetchImpl,
         now: clockFrom("2026-08-10T00:00:00Z"),
       }),
-    );
+      // **ここで見たいのは一覧の口が繋がること**なので、材料は空の実装で足りる
+      changes: {
+        listChangeSummaries: () => Promise.resolve({ summaries: new Map(), unavailable: [] }),
+      },
+    });
 
     expect(plan.edges).toEqual([{ dependent: 9, dependsOn: 8 }]);
     expect(plan.order.ordered).toEqual([8, 9]);
