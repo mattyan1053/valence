@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# master が実行するものが、この周回の間に入れ替わったかを判定する。
+#
+#   exit 0 = 変わった (**この周回は捨てる**)
+#   exit 1 = 変わっていない (そのまま進んでよい)
+#   exit 2 = 判定できない / 使い方の誤り
+#
+# master は毎周回 `origin/main` へ追随する。**追随そのものは正しい**が、
+# 「HEAD が動いた」で打ち切ると、**master が実行するファイルを 1 つも変えていない PR**
+# （`src/` だけの変更など）でも周回を捨てる。**マージのたびに必ず起きる**ので、
+# 定常的に周回が消える。
+#
+# **判定はここ 1 箇所に持つ。** 手順書に対象の一覧を書き写すと、ファイルが増えたときに
+# 片方だけ直して食い違う (`bin/loop-stall` の停止識別子と同じ理由)。
+#
+# **判定できないときは「変わった」に倒さない。** 倒すと、判定が壊れているあいだ
+# **周回が永久に捨てられる**ことになり、症状が「ループが動かない」だけになる。
+# 呼び出し側 (手順書) が exit 2 を「捨てる」へ倒す — **どちらへ倒すかは呼ぶ側の判断**で、
+# ここは「分からなかった」ことだけを返す。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **master が周回中に読む・実行するもの。** ここに無いものは、入れ替わっても
+# master の実行内容を変えない。
+#
+# `bin/` はまるごと対象にする。master はここのスクリプトを直接呼ぶので、
+# 1 本ずつ並べると**足したときに書き漏らす**。
+#
+# **`AGENTS.md` だけは「守り」ではなく「合図」である。** 共通指示は
+# **セッション開始時に読み込まれる**ので、周回を捨てても**読んでいる内容は変わらない**
+# （手順書は周回のたびに読み直すので、そこが違う）。捨てた理由の出力に `AGENTS.md` が
+# 出ることで、**セッションを開き直すべきだと分かる**——それがここに入っている理由である。
+# **「対象に入っているから守られている」と読まないこと。**
+readonly WATCHED=(
+  "AGENTS.md"
+  ".claude/commands/loop-master.md"
+  "bin/"
+  "task"
+  "loop/README.md"
+)
+
+usage() {
+  echo "使い方: bin/loop-procedure-changed <前の SHA> [<後の SHA>]" >&2
+  echo "       後の SHA を省くと HEAD と比べる" >&2
+  echo "       bin/loop-procedure-changed --list   対象の一覧を出す" >&2
+  exit 2
+}
+
+# 指定された rev を解決する。**解決できないものを黙って通さない。**
+resolve() {
+  local rev="$1" resolved
+  if ! resolved="$(git rev-parse --verify --quiet "$rev^{commit}")" || [[ -z $resolved ]]; then
+    echo "[FAIL] commit を特定できません: $rev" >&2
+    exit 2
+  fi
+  printf '%s' "$resolved"
+}
+
+if [[ ${1-} == "--list" ]]; then
+  [[ $# -eq 1 ]] || usage
+  printf '%s\n' "${WATCHED[@]}"
+  exit 0
+fi
+
+(($# == 1 || $# == 2)) || usage
+
+# **比較先を渡せるようにする。** マージしても手元の HEAD は動かない
+# （GitHub 側でマージするだけ）ので、HEAD と比べると必ず「変わっていない」になり、
+# **手順書を変えた PR の直後に古い手順のまま進む**。
+BEFORE="$(resolve "$1")"
+AFTER="$(resolve "${2:-HEAD}")"
+readonly BEFORE AFTER
+
+if ! changed="$(git diff --name-only "$BEFORE" "$AFTER" -- "${WATCHED[@]}" 2>/dev/null)"; then
+  echo "[FAIL] 差分を取得できません" >&2
+  exit 2
+fi
+
+if [[ -n $changed ]]; then
+  # 何が入れ替わったかを出す。**捨てた理由が後から分かるようにする。**
+  printf '%s\n' "$changed"
+  exit 0
+fi
+exit 1
