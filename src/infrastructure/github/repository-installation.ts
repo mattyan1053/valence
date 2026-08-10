@@ -1,8 +1,9 @@
 /**
  * リポジトリの installation を実行時に解決する。
  *
- * **installation は設定ではない。** App ごとに 1 つではなく、**App を新しい
- * リポジトリへ入れるたびに増える**ので、環境変数に固定すると 1 つしか扱えない。
+ * **installation は設定ではない。** installation は**アカウント（org / ユーザー）ごと**に
+ * あり、同じアカウントのリポジトリは同じ installation を共有する。**増えるのは
+ * インストール先のアカウントが増えたとき**なので、設定に固定すると 1 つしか扱えない。
  * 引くのは **App として**（installation token はまだ持っていない段階である）。
  */
 
@@ -25,13 +26,17 @@ export type GitHubRepository = {
  * 入れると、**App の資格で別の endpoint を叩く**ことになる。いまの呼び出し側は
  * テストだけだが、**UI からリポジトリを選ばせた瞬間に外部入力になる**。
  *
- * **落ちたら投げる。直して続行しない。** `..` を除去して進むと、
- * **別のリポジトリを黙って見に行く**ほうの事故になる。
+ * **落ちたら投げる。直して続行しない。** 畳まれた先を黙って見に行くほうの事故になる。
+ *
+ * 弾くのは**値そのものが `.` か `..` のとき**だけである。`fetch` は WHATWG URL に従って
+ * その 2 つを畳むので、`/repos/./valence/...` は `/repos/valence/...` へ変わる。
+ * **`foo..bar` は GitHub で有効な名前**なので弾かない（`/` と `%` を落としてあるため、
+ * 値は必ず 1 セグメントで、中の `..` では上へ抜けられない）。
  */
 const nameSchema = z
   .string()
   .regex(/^[A-Za-z0-9._-]+$/)
-  .refine((value) => !value.includes(".."));
+  .refine((value) => value !== "." && value !== "..");
 
 export type ResolveInstallationOptions = {
   readonly credentials: AppCredentials;

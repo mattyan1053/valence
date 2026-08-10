@@ -165,8 +165,28 @@ describe("リポジトリの installation を実行時に解決する", () => {
     await expect(resolve("..%2F..%2Fapp", "valence")).rejects.toThrow(/owner/);
     await expect(resolve("mattyan1053/other", "valence")).rejects.toThrow(/owner/);
     await expect(resolve("mattyan1053", "..")).rejects.toThrow(/name/);
+    // **`.` も畳まれる。** `/repos/./valence/...` は `/repos/valence/...` になり、
+    // **組み立てた URL と実際に飛ぶ URL が変わる**
+    await expect(resolve(".", "valence")).rejects.toThrow(/owner/);
+    await expect(resolve("mattyan1053", ".")).rejects.toThrow(/name/);
     await expect(resolve("", "valence")).rejects.toThrow(/owner/);
     // **直して続行しない。** 別のリポジトリを黙って見に行くほうが悪い
     expect(calls).toEqual([]);
+  });
+
+  it("ピリオドが連続する名前は有効なので通す", async () => {
+    // **`foo..bar` は GitHub で使える。** 正規表現が `/` と `%` を落としているので
+    // 値は必ず 1 セグメントで、中に `..` があっても上へは抜けられない
+    const url = "https://api.github.com/repos/mattyan1053/foo..bar/installation";
+    const { fetchImpl } = respondingWith({ [url]: { body: '{"id":5678}' } });
+
+    const installation = await resolveRepositoryInstallation({
+      credentials,
+      repository: { owner: "mattyan1053", name: "foo..bar" },
+      now,
+      fetchImpl,
+    });
+
+    expect(installation).toBe("5678");
   });
 });
