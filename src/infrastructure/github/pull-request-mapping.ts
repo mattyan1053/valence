@@ -7,29 +7,11 @@
  */
 
 import { z } from "zod";
+import type {
+  InvalidPullRequest,
+  PullRequestListing,
+} from "../../application/ports/pull-request-source";
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
-
-/**
- * 変換の結果。
- *
- * **落ちたものを黙って捨てない。** 捨てると「取得できたが読めなかった」と
- * 「そもそも無かった」が区別できず、**依存が抜けた図が正しい顔で出る**。
- */
-export type PullRequestMapping = {
-  readonly pullRequests: readonly PullRequestRef[];
-  readonly invalid: readonly InvalidPullRequest[];
-};
-
-/** 検証に落ちた 1 件。 */
-export type InvalidPullRequest = {
-  /**
-   * 応答の何件目か（0 始まり）。**番号ではなく位置で示す**のは、
-   * 番号そのものが読めないことがあるためである。
-   */
-  readonly index: number;
-  /** 何が読めなかったか。 */
-  readonly reason: string;
-};
 
 /**
  * ブランチの参照。
@@ -62,7 +44,7 @@ const pullRequestSchema = z.object({
  * **一覧そのものが読めなければ落とす。** 空の配列を返すと、取得の失敗が
  * 「PR が 0 件」に化ける。1 件ずつの失敗とは別の話なので、扱いも分ける。
  */
-export function toPullRequestRefs(response: unknown): PullRequestMapping {
+export function toPullRequestRefs(response: unknown): PullRequestListing {
   const listed = z.array(z.unknown()).safeParse(response);
   if (!listed.success) {
     throw new Error(`PR の一覧として読めません: ${z.prettifyError(listed.error)}`);
