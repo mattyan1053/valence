@@ -77,5 +77,7 @@ describe("状態が矛盾したとき", () => {
     const exitThree = section.split("- **exit 3**")[1]?.split("\n\n")[0] ?? "";
 
     expect(exitThree).toMatch(/送/);
+    // **送らない周回でも記録する。** 飛ばすと、同じ状態が続く間ずっと 1 回のままになる
+    expect(exitThree).toMatch(/出力が無くても|送らない周回でも/);
   });
 });

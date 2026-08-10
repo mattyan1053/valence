@@ -324,6 +324,26 @@ describe("bin/loop-handoff", () => {
       expect(run("master").status).toBe(3);
     });
 
+    it("同じ状態が続く間も、毎周知らせる", () => {
+      // **記録が 1 回で止まると、3 周に到達しない。** 食い違いを気づかせるための
+      // 仕組みが、**気づかせたい状態でだけ黙る**（#115 のレビュー指摘）。
+      // 「送るかどうか」と「記録するかどうか」は別の判断である
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+
+      expect(run("master").status).toBe(3);
+      expect(run("master").status).toBe(3);
+    });
+
+    it("送らない周回でも知らせる", () => {
+      // **自己宛てでも重複でも通る。** その状態が続いていること自体が、記録したい事実
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+
+      const handoff = run("worker");
+
+      expect(handoff.status).toBe(3);
+      expect(handoff.stdout).toBe("");
+    });
+
     it("label が付いていれば矛盾ではない", () => {
       withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
 
@@ -359,7 +379,8 @@ describe("bin/loop-handoff", () => {
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
       expect(run("master").stdout).toMatch(/^worker\t/);
-      expect(run("worker").status).toBe(1);
+      // **worker から呼べば自分宛てなので送らない**（記録は別の判断なので通る）
+      expect(run("worker").stdout).toBe("");
     });
 
     it("返信だけでも、また送る", () => {
