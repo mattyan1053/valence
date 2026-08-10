@@ -380,7 +380,18 @@ describe("bin/loop-handoff", () => {
     });
 
     it("未解決スレッドを読めなければ 2 で落ちる", () => {
-      withState({ prs: [{ number: 12 }], failsOn: "api graphql" });
+      // **落とす場所を絞る。** 「GraphQL なら落ちる」にすると、
+      // **PR 一覧の取得で先に落ちて、スレッドを取りに行く前に終わる**——
+      // 名前は「未解決スレッド」なのに、**そこへ届いていない**（#123 のレビュー指摘）
+      withState({ prs: [{ number: 12 }], failsOn: "reviewThreads" });
+
+      expect(run("master").status).toBe(2);
+    });
+
+    it("PR の一覧を読めなければ 2 で落ちる", () => {
+      // **手前で落ちる経路も、名前を付けて別に持つ。**
+      // 相乗りさせると、**片方が壊れてももう片方の名前で緑になる**
+      withState({ prs: [{ number: 12 }], failsOn: "pullRequests(states:OPEN" });
 
       expect(run("master").status).toBe(2);
     });
