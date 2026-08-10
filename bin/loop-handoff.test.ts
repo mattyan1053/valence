@@ -14,6 +14,8 @@ type State = {
   /** open PR。`labels` は付いている label 名。 */
   prs?: {
     number: number;
+    /** `Closes #N` を含む本文。**保留した PR の Issue を数えるのに使う。** */
+    body?: string;
     labels?: string[];
     /** 未解決スレッドの最後の発言。**件数だけでは持ち手が決まらない。** */
     unresolvedBy?: ("bot" | "us")[];
@@ -24,8 +26,6 @@ type State = {
   ready?: number;
   inProgress?: number;
   backlog?: number;
-  /** `parked` な PR が閉じる予定の Issue 番号（PR 本文の `Closes #N`）。 */
-  parkedCloses?: number[];
   /** `gh` が失敗する（判定不能）。 */
   fails?: boolean;
   /** その取得だけが失敗する。**最初の 1 つだけを試すと、後ろの取得を試せない。** */
@@ -70,8 +70,14 @@ describe("bin/loop-handoff", () => {
 
   function withState(state: State): void {
     const prs = (state.prs ?? [])
-      .map((pr) => `${pr.number}\t${(pr.labels ?? []).join(",")}\t${pr.head ?? "a".repeat(40)}`)
+      .map(
+        (pr) =>
+          `${pr.number}\t${(pr.labels ?? []).join(",")}\t${pr.head ?? "a".repeat(40)}\t${pr.body ?? ""}`,
+      )
       .join("\n");
+    // **一覧（検索）は古い値を返しうる。** ここでは**わざと古い値**を返させ、
+    // **新しい口だけを見ていること**を確かめる（#101。実測で 4 秒ほど遅れる）
+    const staleCounts = "0";
     // **ゲートと同じものを見る。** 未解決スレッドは GraphQL からしか取れない。
     // 1 行 1 スレッドで、**最後の発言の ID と書いた人**を返す
     const threads = (state.prs ?? [])
@@ -82,7 +88,6 @@ describe("bin/loop-handoff", () => {
         ),
       )
       .join("\n");
-    const parked = (state.parkedCloses ?? []).map((n) => `Closes #${n}`).join("\n");
 
     writeFileSync(
       join(path, "gh"),
@@ -90,6 +95,14 @@ describe("bin/loop-handoff", () => {
         "#!/usr/bin/env bash",
         ...failureLines(state),
         ...answerLines("repo view", "owner\nrepo"),
+        // **件数は検索を通さない口から取る。** 一覧側（下）はわざと 0 を返すので、
+        // ここを見ていなければ「ready が 1 件ある」に到達しない
+        ...answerLines(
+          "totalCount",
+          `${state.ready ?? 0}\t${state.inProgress ?? 0}\t${state.backlog ?? 0}`,
+        ),
+        // **PR 一覧も検索を通さない口から取る。** label を付けた直後は一覧が古い
+        ...answerLines("pullRequests(states:OPEN", prs),
         // **ゲートと同じ読み方をしているか。** スレッド自体をページングしていないと、
         // 101 件目以降にだけ未解決が残る PR を 0 件と数える
         'if [[ $* == *"api graphql"* ]]; then',
@@ -99,16 +112,10 @@ describe("bin/loop-handoff", () => {
         "  fi",
         "fi",
         ...answerLines("api graphql", threads),
-        // **`parked` の問い合わせも `pr list` を含む。** 先に見ないと取り違える
-        ...answerLines("parked", parked),
-        ...answerLines("pr list", prs),
-        'if [[ $* == *"--label ready"* ]]; then echo ' + String(state.ready ?? 0) + "; exit 0; fi",
-        'if [[ $* == *"--label in-progress"* ]]; then echo ' +
-          String(state.inProgress ?? 0) +
-          "; exit 0; fi",
-        'if [[ $* == *"--label backlog"* ]]; then echo ' +
-          String(state.backlog ?? 0) +
-          "; exit 0; fi",
+        // **ここから下は「古い一覧」である。** 検索の索引を経由する口は、
+        // 付け替えた直後に古い値を返す。**これを見ていたら通知が落ちる**
+        ...answerLines("pr list", ""),
+        `if [[ $* == *"--label"* ]]; then echo ${staleCounts}; exit 0; fi`,
         'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
         "exit 2",
       ].join("\n"),
@@ -240,7 +247,7 @@ describe("bin/loop-handoff", () => {
     { name: "すべて", state: { fails: true } },
     // **後ろの取得だけが落ちる場合も試す。** 最初の 1 つだけだと、
     // **2 つ目以降で握り潰していても気づけない**
-    { name: "ready の取得だけ", state: { failsOn: "--label ready" } },
+    { name: "件数の取得だけ", state: { failsOn: "totalCount" } },
   ])("状態を読めなければ 2 で落ちる（$name）", ({ state }) => {
     // **判定不能を「送らない」に倒さない。** 倒すと、止まっていることに気づけない
     withState(state);
@@ -289,13 +296,35 @@ describe("bin/loop-handoff", () => {
     // 見ると「渡すものが無い」と答えてしまい、**#92 がいちばん埋めたかった沈黙**になる
     // （master のステップ 6 も同じ理由で除いている）
     withState({
-      prs: [{ number: 12, labels: ["parked"] }],
-      parkedCloses: [7],
+      prs: [{ number: 12, labels: ["parked"], body: "Closes #7" }],
       ready: 1,
       inProgress: 1,
     });
 
     expect(run("master").stdout).toMatch(/^worker\t/);
+  });
+
+  describe("一覧が古くても取りこぼさない", () => {
+    it("`ready` を付けた直後でも、worker へ渡る", () => {
+      // **一覧（検索）は付け替えた直後に古い値を返す**（実測で 4 秒ほど 0 件のまま）。
+      // **昇格させた直後は必ず 0 件に見える**ので、
+      // **`ready` を付けて通知する、というもっとも普通の受け渡しがもっとも落ちやすい**。
+      // 偽の `gh` は**一覧では 0 件**、**検索を通さない口では 1 件**を返す
+      withState({ ready: 1 });
+
+      const handoff = run("master");
+
+      expect(handoff.status).toBe(0);
+      expect(handoff.stdout).toMatch(/^worker\t/);
+    });
+
+    it("PR の label も、古い一覧から読まない", () => {
+      // 同じ遅れは PR 側にもある（実測）。`changes-requested` を付けた直後に
+      // **古い一覧を見ると、要求が残っているのに「ゲートを回せる」と読む**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      expect(run("master").stdout).toMatch(/^worker\t/);
+    });
   });
 
   describe("ゲートと同じものを見る", () => {

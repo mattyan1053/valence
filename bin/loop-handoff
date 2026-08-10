@@ -60,8 +60,28 @@ fail_unknown() {
   exit 2
 }
 
-prs="$(gh pr list --state open --limit 200 --json number,labels,headRefOid \
-  --jq '.[] | "\(.number)\t\(.labels | map(.name) | join(","))\t\(.headRefOid)"')" || fail_unknown "open PR"
+# **一覧（検索）を信じない。** `gh issue list` / `gh pr list` の label 絞り込みは
+# **検索の索引を経由するので、付け替えた直後は古い値が返る**（実測: `ready` を付けた直後、
+# 一覧は 4 秒ほど 0 件のまま。同じ瞬間に GraphQL は 1 件を返す）。
+# **昇格させた直後は必ず 0 件に見える**ので、**`ready` を付けて通知する、という
+# もっとも普通の受け渡しが、もっとも落ちやすい**（#101。master が毎回手で回し直していた）。
+#
+# **リポジトリの issues / pullRequests を直接引く**（検索ではない）ので遅れない。
+# owner / repo は `{owner}` の置換が効かない（置換されるのは `gh api` の
+# エンドポイントだけ）ので、先に引く。
+repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || fail_unknown "リポジトリ"
+mapfile -t repo_parts <<<"$repo_ref"
+
+prs="$(gh api graphql --paginate \
+  -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+  -f query='query($owner:String!,$repo:String!,$endCursor:String){
+    repository(owner:$owner,name:$repo){
+      pullRequests(states:OPEN,first:50,after:$endCursor){
+        pageInfo{hasNextPage endCursor}
+        nodes{number headRefOid body labels(first:50){nodes{name}}}}}}' \
+  --jq '.data.repository.pullRequests.nodes[]
+    | "\(.number)\t\([.labels.nodes[].name] | join(","))\t\(.headRefOid)\t\((.body // "") | gsub("\\s+"; " "))"')" ||
+  fail_unknown "open PR"
 
 # **未解決スレッドを、ゲートと同じ読み方で取る。**
 #
@@ -77,14 +97,11 @@ prs="$(gh pr list --state open --limit 200 --json number,labels,headRefOid \
 # **組み立てはゲートと 2 箇所に分かれている。** ゲートは 1 本の PR について合否を出し、
 # ここは open な PR すべてについて持ち手を決めるので、必要な形が違う。
 # **片方だけ直すと食い違う**ので、どちらかを触るときはもう一方も見ること。
-repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || fail_unknown "リポジトリ"
-mapfile -t repo_parts <<<"$repo_ref"
-
 # 未解決スレッドの「最後の発言」を PR 番号で引けるようにする。
 declare -A unresolved_of=()
 declare -A last_comment_of=()
 declare -A last_author_of=()
-while IFS=$'\t' read -r number _labels _head; do
+while IFS=$'\t' read -r number _labels _head _body; do
   [[ -n $number ]] || continue
   threads="$(gh api graphql --paginate \
     -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" -F number="$number" \
@@ -117,11 +134,16 @@ details=""
 for number in "${!unresolved_of[@]}"; do
   details+="${number}:${unresolved_of[$number]}:${last_comment_of[$number]-} "
 done
-ready="$(gh issue list --label ready --limit 200 --json number --jq 'length')" || fail_unknown "ready"
-in_progress="$(gh issue list --label in-progress --limit 200 --json number --jq 'length')" ||
-  fail_unknown "in-progress"
-backlog="$(gh issue list --label backlog --limit 200 --json number --jq 'length')" ||
-  fail_unknown "backlog"
+# **件数も検索を通さない。** ここが遅れると `ready` の昇格が伝わらない。
+counts="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+  -f query='query($owner:String!,$repo:String!){
+    repository(owner:$owner,name:$repo){
+      ready: issues(states:OPEN, labels:["ready"]){totalCount}
+      inProgress: issues(states:OPEN, labels:["in-progress"]){totalCount}
+      backlog: issues(states:OPEN, labels:["backlog"]){totalCount}}}' \
+  --jq '.data.repository | "\(.ready.totalCount)\t\(.inProgress.totalCount)\t\(.backlog.totalCount)"')" ||
+  fail_unknown "Issue の件数"
+IFS=$'\t' read -r ready in_progress backlog <<<"$counts"
 
 for count in "$ready" "$in_progress" "$backlog"; do
   [[ $count =~ ^[0-9]+$ ]] || fail_unknown "件数が数値ではありません: $count"
@@ -132,9 +154,11 @@ done
 # **`parked` な PR に紐づく Issue は「着手中」に数えない**（master のステップ 6 と同じ理由）。
 # 保留した PR の Issue は `in-progress` のまま残るので、数えると
 # **保留中はいつも「渡すものが無い」**になり、**保留がいちばん埋めたかった沈黙を作る**。
-parked_issues="$(gh pr list --state open --limit 200 --json number,labels,body \
-  --jq '.[] | select([.labels[].name] | index("parked")) | .body' |
-  grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+' | sort -u | wc -l)" || parked_issues=0
+# **同じ一覧から数える。** 別の口で取り直すと、そこだけ古い値になりうる。
+parked_issues="$(while IFS=$'\t' read -r _number labels _head body; do
+  [[ ",$labels," == *",parked,"* ]] || continue
+  grep -oE 'Closes #[0-9]+' <<<"$body" | grep -oE '[0-9]+'
+done <<<"$prs" | sort -u | wc -l)" || parked_issues=0
 [[ $parked_issues =~ ^[0-9]+$ ]] || parked_issues=0
 ((in_progress -= parked_issues))
 ((in_progress < 0)) && in_progress=0
@@ -184,7 +208,7 @@ gateable=""
 mismatched=""
 # **答えを待っている側**の PR（未解決があり、最後に書いたのが自分たちの役）。
 answered=""
-while IFS=$'\t' read -r number labels _head; do
+while IFS=$'\t' read -r number labels _head _body; do
   [[ -n $number ]] || continue
   unresolved="${unresolved_of[$number]-0}"
   [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
