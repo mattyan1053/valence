@@ -10,7 +10,7 @@ import { z } from "zod";
 import type {
   InvalidPullRequest,
   PullRequestListing,
-} from "../../application/ports/pull-request-mapper";
+} from "../../application/ports/pull-request-source";
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 
 /**

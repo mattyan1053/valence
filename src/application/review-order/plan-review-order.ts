@@ -9,14 +9,7 @@ import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependen
 import { buildDependencyEdges } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import { orderByDependency } from "../../domain/graph/dependency-order";
-import type { InvalidPullRequest, PullRequestMapper } from "../ports/pull-request-mapper";
-import type { PullRequestSource } from "../ports/pull-request-source";
-
-/** ユースケースが要る口。差し替えるのは合成ルートの仕事。 */
-export type ReviewOrderDependencies = {
-  readonly source: PullRequestSource;
-  readonly mapper: PullRequestMapper;
-};
+import type { InvalidPullRequest, PullRequestSource } from "../ports/pull-request-source";
 
 /**
  * レビューの交通整理に要るもの一式。
@@ -39,12 +32,8 @@ export type ReviewOrderPlan = {
  * **「取得できなかった」が「PR が 0 件」に化ける**。呼び出し側は例外の有無で
  * 区別できる。
  */
-export async function planReviewOrder({
-  source,
-  mapper,
-}: ReviewOrderDependencies): Promise<ReviewOrderPlan> {
-  const response = await source.listPullRequests();
-  const { pullRequests, invalid } = mapper(response);
+export async function planReviewOrder(source: PullRequestSource): Promise<ReviewOrderPlan> {
+  const { pullRequests, invalid } = await source.listPullRequests();
   const edges = buildDependencyEdges(pullRequests);
   return { pullRequests, edges, order: orderByDependency(pullRequests, edges), invalid };
 }
