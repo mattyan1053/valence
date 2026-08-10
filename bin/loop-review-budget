@@ -127,9 +127,13 @@ notice_at=""
 requests=()
 while IFS=$'\t' read -r at login body; do
   [[ -n $at ]] || continue
-  if [[ $login != "$REVIEW_BOT" ]] && [[ $body =~ @codex[[:space:]]+review ]]; then
+  # **小文字へ畳んでから比べる。** 元は jq の `test(…; "i")` で大文字小文字を
+  # 無視していた。bash の `=~` は区別するので、**畳まないと `@Codex Review` を
+  # 取りこぼす**——そのとき「要求済みで未応答」が見えず、**要求を重ねる**。
+  lowered="${body,,}"
+  if [[ $login != "$REVIEW_BOT" ]] && [[ $lowered =~ @codex[[:space:]]+review ]]; then
     requests+=("$at")
-  elif [[ $login == "$REVIEW_BOT" ]] && [[ $body == *"create an environment"* ]]; then
+  elif [[ $login == "$REVIEW_BOT" ]] && [[ $lowered == *"create an environment"* ]]; then
     ((notice++))
     [[ $at > $notice_at ]] && notice_at="$at"
   fi

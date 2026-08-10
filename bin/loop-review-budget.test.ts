@@ -237,6 +237,42 @@ describe("bin/loop-review-budget", () => {
     });
   });
 
+  describe("大文字小文字を区別しない", () => {
+    // **移し替えでは、確かめるものが 1 つ増える**——**論理が正しいか**に加えて、
+    // **前と同じ答えを返すか**。`jq` の `test(…; "i")` は無視していたので、
+    // **前が受け取れて後が落とす入力**をここに置く（#122 のレビュー指摘）。
+    it("`@Codex Review` も要求として数える", () => {
+      // 数えられないと「要求済みで未応答」が見えず、**要求を重ねる**——
+      // このスクリプトが守っている絶対ルールそのもの
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(120),
+          comments: [{ at: minutesAgo(5), login: US, body: "@Codex Review" }],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.status).toBe(3);
+    });
+
+    it("応答不能の通知も、書き方が違っても数える", () => {
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [
+            request(minutesAgo(200)),
+            { at: minutesAgo(100), login: BOT, body: "I need you to Create An Environment" },
+          ],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.status).toBe(0);
+    });
+  });
+
   it("応答不能の通知より後の要求だけを未応答として数える", () => {
     // **通知を消化しないと、元の要求が永久に未応答として残る**（復旧しても再要求できない）
     const budget = run(
