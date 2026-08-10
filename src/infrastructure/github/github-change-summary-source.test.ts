@@ -18,18 +18,23 @@ const HEAD = "a".repeat(40);
 /** どの URL に何を返すか。**本物の GitHub を呼ばない。** */
 type Routes = Record<string, { status?: number; body: unknown | (() => unknown); link?: string }>;
 
+/** token の取得はここでは主題ではないので、素通しにする。 */
+function tokenResponse(url: string): Response | undefined {
+  if (!url.includes("/installation") && !url.includes("/access_tokens")) {
+    return undefined;
+  }
+  return new Response(JSON.stringify({ id: 1, token: "t", expires_at: "2999-01-01T00:00:00Z" }), {
+    status: url.includes("/access_tokens") ? 201 : 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 function fakeFetch(routes: Routes): typeof fetch {
   return (async (input: string | URL | Request) => {
     const url = String(input);
-    // token の取得はここでは主題ではないので、素通しにする
-    if (url.includes("/installation") || url.includes("/access_tokens")) {
-      return new Response(
-        JSON.stringify({ id: 1, token: "t", expires_at: "2999-01-01T00:00:00Z" }),
-        {
-          status: url.includes("/access_tokens") ? 201 : 200,
-          headers: { "content-type": "application/json" },
-        },
-      );
+    const token = tokenResponse(url);
+    if (token !== undefined) {
+      return token;
     }
     const route = Object.entries(routes).find(([key]) => url.includes(key))?.[1];
     if (route === undefined) {
