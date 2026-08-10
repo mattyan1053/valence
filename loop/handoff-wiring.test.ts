@@ -56,3 +56,26 @@ describe("周回の出口", () => {
     expect(exitZero).not.toContain(`\`${role}\``);
   });
 });
+
+describe("状態が矛盾したとき", () => {
+  it.each(PROCEDURES)("$role の出口に exit 3 の行き先が書いてある", ({ path }) => {
+    // **「送るものが無い」と「状態が矛盾している」を混ぜない**（#105）。
+    // 混ぜると、食い違いが起きても**どこにも記録が残らない**
+    const section = read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+
+    expect(section).toMatch(/- \*\*exit 3\*\*/);
+    expect(section).toContain("handoff-mismatch");
+  });
+
+  it("停止識別子が用意されている", () => {
+    expect(read("bin/loop-stall")).toContain("handoff-mismatch");
+  });
+
+  it.each(PROCEDURES)("$role は exit 3 でも送ると書いてある", ({ path }) => {
+    // **記録するために黙ると、#105 が塞ごうとした沈黙をそのまま作る**
+    const section = read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+    const exitThree = section.split("- **exit 3**")[1]?.split("\n\n")[0] ?? "";
+
+    expect(exitThree).toMatch(/送/);
+  });
+});

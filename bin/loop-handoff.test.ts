@@ -12,7 +12,7 @@ type Run = { status: number; stdout: string; stderr: string };
 /** GitHub の状態。**偽の `gh` はこれを返すだけ**にして、判断だけを試す。 */
 type State = {
   /** open PR。`labels` は付いている label 名。 */
-  prs?: { number: number; labels?: string[] }[];
+  prs?: { number: number; labels?: string[]; unresolved?: number; head?: string }[];
   ready?: number;
   inProgress?: number;
   backlog?: number;
@@ -32,36 +32,54 @@ describe("bin/loop-handoff", () => {
    * **本物の `gh` を呼ばない。** 見たいのは「GitHub の状態から誰へ渡すか」であって、
    * 取得の仕方ではない。PATH を絞って偽物だけを置く。
    */
+  /** 落ち方の指定。**最初の 1 つだけを試すと、後ろの取得を試せない。** */
+  function failureLines(state: State): string[] {
+    return [
+      ...(state.fails === true ? ['echo "gh が落ちた" >&2', "exit 1"] : []),
+      ...(state.failsOn === undefined
+        ? []
+        : [
+            `if [[ $* == *${JSON.stringify(state.failsOn)}* ]]; then`,
+            '  echo "gh が落ちた" >&2',
+            "  exit 1",
+            "fi",
+          ]),
+    ];
+  }
+
+  /** 1 行 1 件で返すだけの分岐。**空のときに余計な改行を足さない。** */
+  function answerLines(match: string, payload: string): string[] {
+    return [
+      `if [[ $* == *${JSON.stringify(match)}* ]]; then`,
+      // **`%b` で出す。** `%s` だと `\t` がリテラルのまま出て、列が壊れる
+      // （`bin/loop-await-review` のテストで 1 度踏んだ）
+      `  printf '%b' ${JSON.stringify(payload)}`,
+      `  [[ -n ${JSON.stringify(payload)} ]] && echo`,
+      "  exit 0",
+      "fi",
+    ];
+  }
+
   function withState(state: State): void {
     const prs = (state.prs ?? [])
       .map((pr) => `${pr.number}\t${(pr.labels ?? []).join(",")}`)
       .join("\n");
+    // **ゲートと同じものを見る。** 未解決スレッドと head SHA は GraphQL からしか取れない
+    const details = (state.prs ?? [])
+      .map((pr) => `${pr.number}\t${pr.head ?? "a".repeat(40)}\t${pr.unresolved ?? 0}`)
+      .join("\n");
+    const parked = (state.parkedCloses ?? []).map((n) => `Closes #${n}`).join("\n");
+
     writeFileSync(
       join(path, "gh"),
       [
         "#!/usr/bin/env bash",
-        ...(state.fails === true ? ['echo "gh が落ちた" >&2', "exit 1"] : []),
-        ...(state.failsOn === undefined
-          ? []
-          : [
-              `if [[ $* == *${JSON.stringify(state.failsOn)}* ]]; then`,
-              '  echo "gh が落ちた" >&2',
-              "  exit 1",
-              "fi",
-            ]),
+        ...failureLines(state),
+        ...answerLines("repo view", "owner\nrepo"),
+        ...answerLines("api graphql", details),
         // **`parked` の問い合わせも `pr list` を含む。** 先に見ないと取り違える
-        'if [[ $* == *"parked"* ]]; then',
-        `  printf '%b' ${JSON.stringify((state.parkedCloses ?? []).map((n) => `Closes #${n}`).join("\n"))}`,
-        `  [[ -n ${JSON.stringify((state.parkedCloses ?? []).join(","))} ]] && echo`,
-        "  exit 0",
-        "fi",
-        'if [[ $* == *"pr list"* ]]; then',
-        // **`%b` で出す。** `%s` だと `\t` がリテラルのまま出て、列が壊れる
-        // （`bin/loop-await-review` のテストで 1 度踏んだ）
-        `  printf '%b' ${JSON.stringify(prs)}`,
-        `  [[ -n ${JSON.stringify(prs)} ]] && echo`,
-        "  exit 0",
-        "fi",
+        ...answerLines("parked", parked),
+        ...answerLines("pr list", prs),
         'if [[ $* == *"--label ready"* ]]; then echo ' + String(state.ready ?? 0) + "; exit 0; fi",
         'if [[ $* == *"--label in-progress"* ]]; then echo ' +
           String(state.inProgress ?? 0) +
@@ -256,6 +274,76 @@ describe("bin/loop-handoff", () => {
     });
 
     expect(run("master").stdout).toMatch(/^worker\t/);
+  });
+
+  describe("ゲートと同じものを見る", () => {
+    it("未解決スレッドが残る PR は master の持ち物にしない", () => {
+      // **ゲートは未解決スレッドを見て落とすのに、handoff は label だけを見ていた。**
+      // label が 0 件だと「master がゲートを回せる」と読み、**自分宛なので黙る**
+      // （#103 と #107 で実際に起きた。手順書どおりに進んでも label は付かない）
+      withState({ prs: [{ number: 12, unresolved: 1 }] });
+
+      const handoff = run("master");
+
+      expect(handoff.stdout).toMatch(/^worker\t/);
+    });
+
+    it("未解決が無ければ、これまでどおり master がゲートを回す", () => {
+      withState({ prs: [{ number: 12, unresolved: 0 }] });
+
+      expect(run("worker").stdout).toMatch(/^master\t/);
+    });
+
+    it("label と実態が食い違っていたら、別の終了コードで知らせる", () => {
+      // **「送るものが無い」と「状態が矛盾している」を混ぜない**（#105）。
+      // 未解決があるのに `changes-requested` が無いのは、運用が壊れている
+      withState({ prs: [{ number: 12, unresolved: 1 }] });
+
+      expect(run("master").status).toBe(3);
+    });
+
+    it("label が付いていれば矛盾ではない", () => {
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolved: 1 }] });
+
+      expect(run("master").status).toBe(0);
+    });
+
+    it("未解決スレッドを読めなければ 2 で落ちる", () => {
+      withState({ prs: [{ number: 12 }], failsOn: "api graphql" });
+
+      expect(run("master").status).toBe(2);
+    });
+  });
+
+  describe("push した周回", () => {
+    it("head が変われば、また送る", () => {
+      // **指紋が PR の中身を持たないと、往復して元の値へ戻る**（#105 の 3 回目）。
+      // 直して push しても「同じ状態」と読まれ、**master へ届かない**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], head: "a".repeat(40) }] });
+      expect(run("master").status).toBe(0);
+
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], head: "b".repeat(40) }] });
+
+      expect(run("master").status).toBe(0);
+    });
+
+    it("head が同じなら 2 通目を送らない", () => {
+      // **送り合いを作らない。** head SHA は「変われば前へ進んだ」を表す値である
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], head: "a".repeat(40) }] });
+      expect(run("master").status).toBe(0);
+
+      expect(run("master").status).toBe(1);
+    });
+
+    it("未解決スレッドが増えれば、また送る", () => {
+      // **push が無くても master が指摘を返せば状態は動く。** SHA だけでは足りない
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolved: 1 }] });
+      expect(run("master").status).toBe(0);
+
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolved: 2 }] });
+
+      expect(run("master").status).toBe(0);
+    });
   });
 
   it("parked でない着手中があれば渡さない", () => {

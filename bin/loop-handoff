@@ -4,6 +4,14 @@
 #   exit 0 = 渡す相手がいる。`<役>\t<理由>` を stdout に出す
 #   exit 1 = 渡さない (相手に持ち物が無い / 動けるのは自分 / 同じ状態で送信済み)
 #   exit 2 = 状態を読めない / 使い方の誤り
+#   exit 3 = 渡す相手はいる (出力は exit 0 と同じ) が、**状態が矛盾している**。
+#            送ったうえで記録する
+#
+# **判断の根拠を 2 種類持たない。** ゲートは**未解決スレッド**を見て落とすのに、
+# ここは **label** だけを見ていた。label が 0 件の PR は「master がゲートを回せる」と
+# 読まれ、**自分宛なので黙る**。#103（手順書から外れた経路）と #107（**手順書どおり**の
+# 経路。レビュースレッドへ返信する段に label を付ける指示が無い）で実際に起きた。
+# **経路を数えるのではなく、状態から決める。**
 #
 # **通知は「〜した」ときにだけ送られていた。** 周回を終える経路は 9 つ以上あり、
 # **何もせずに終わる経路には 1 つも通知が無い**ので、そこを通ると
@@ -51,6 +59,22 @@ fail_unknown() {
 
 prs="$(gh pr list --state open --limit 200 --json number,labels \
   --jq '.[] | "\(.number)\t\(.labels | map(.name) | join(","))"')" || fail_unknown "open PR"
+
+# **未解決スレッドと head SHA を取る。** `gh pr list --json` は未解決スレッドを返さない
+# ので GraphQL で取る。owner / repo は `{owner}` の置換が効かない（置換されるのは
+# `gh api` のエンドポイントだけ）ので、先に引く。
+repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || fail_unknown "リポジトリ"
+mapfile -t repo_parts <<<"$repo_ref"
+details="$(gh api graphql --paginate \
+  -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+  -f query='query($owner:String!,$repo:String!,$endCursor:String){
+    repository(owner:$owner,name:$repo){
+      pullRequests(states:OPEN,first:50,after:$endCursor){
+        pageInfo{hasNextPage endCursor}
+        nodes{number headRefOid reviewThreads(first:100){nodes{isResolved}}}}}}' \
+  --jq '.data.repository.pullRequests.nodes[]
+    | "\(.number)\t\(.headRefOid)\t\([.reviewThreads.nodes[] | select(.isResolved == false)] | length)"')" ||
+  fail_unknown "未解決スレッド"
 ready="$(gh issue list --label ready --limit 200 --json number --jq 'length')" || fail_unknown "ready"
 in_progress="$(gh issue list --label in-progress --limit 200 --json number --jq 'length')" ||
   fail_unknown "in-progress"
@@ -73,7 +97,12 @@ parked_issues="$(gh pr list --state open --limit 200 --json number,labels,body \
 ((in_progress -= parked_issues))
 ((in_progress < 0)) && in_progress=0
 
-readonly STATE="prs=${prs}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
+# **PR の中身も指紋に入れる。** label と件数だけだと、**往復すると元の値へ戻る**——
+# 直して push した周回も、指摘を返した周回も「同じ状態」と読まれて黙った（#105）。
+# **head SHA は「変われば前へ進んだ」を表す値**なので、時刻のように毎回変わる値を
+# 入れるのとは違う（`bin/loop-stall` の識別子と同じ制約を満たす）。
+# **未解決スレッド数も要る。** push が無くても master が指摘を返せば状態は動く。
+readonly STATE="prs=${prs}|detail=${details}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
 
 if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
   echo "[FAIL] git の共通ディレクトリを特定できません" >&2
@@ -106,13 +135,31 @@ for role in "${ROLES[@]}"; do
   }
 done
 
+# 未解決スレッド数を PR 番号で引けるようにする。
+declare -A unresolved_of=()
+while IFS=$'\t' read -r number _head unresolved; do
+  [[ -n $number ]] || continue
+  unresolved_of[$number]="$unresolved"
+done <<<"$details"
+
 changes_requested=""
 gateable=""
+# **label と実態の食い違い。** 未解決が残っているのに `changes-requested` が無い状態で、
+# 運用が壊れている（付け忘れではなく、**付ける段が無い経路がある**）。
+mismatched=""
 while IFS=$'\t' read -r number labels; do
   [[ -n $number ]] || continue
+  unresolved="${unresolved_of[$number]-0}"
+  [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
   if [[ ",$labels," == *",changes-requested,"* ]]; then
     changes_requested="$number"
-  elif [[ ",$labels," != *",parked,"* ]]; then
+  elif [[ ",$labels," == *",parked,"* ]]; then
+    :
+  elif ((unresolved > 0)); then
+    # **ゲートが落とす PR は master の持ち物ではない。** 直すのは worker である
+    changes_requested="$number"
+    mismatched="$number"
+  else
     gateable="$number"
   fi
 done <<<"$prs"
@@ -143,3 +190,10 @@ fi
 [[ "${previous[$to]}" == "$STATE" ]] && exit 1
 
 printf '%s\t%s\n' "$to" "$reason"
+
+# **「送るものが無い」と「状態が矛盾している」を混ぜない。** 混ぜると、
+# 食い違いが起きても**どこにも記録が残らない**（#105）。
+if [[ -n $mismatched ]]; then
+  echo "[WARN] PR #${mismatched}: 未解決スレッドがあるのに changes-requested がありません" >&2
+  exit 3
+fi
