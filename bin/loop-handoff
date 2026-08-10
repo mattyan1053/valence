@@ -118,13 +118,24 @@ if ! flock -w "${LOOP_HANDOFF_LOCK_WAIT_SEC:-10}" 9; then
   exit 2
 fi
 
+already_sent=0
 if [[ -f $SENT ]] && [[ "$(cat "$SENT")" == "$STATE" ]]; then
   # **同じ状態で 2 通目を送らない。** 相手はもう知っている。
-  exit 1
+  already_sent=1
 fi
-printf '%s' "$STATE" >"$SENT" || {
-  echo "[FAIL] 送信記録を書き込めません: $SENT" >&2
-  exit 2
-}
+
+# **評価するたびに、すべての役の記録を更新する。** 受け手のぶんだけ書くと、
+# **行き先が入れ替わって戻ったとき（A→B→A）に 3 通目が出ない**
+# （A の記録が古い状態のまま残り、「送信済み」と読む）。
+# **新しい値（連番・時刻）は足さない。** 判断が変わっていないのに指紋だけ変わると、
+# 2 通目が飛ぶ。
+for role in "${ROLES[@]}"; do
+  printf '%s' "$STATE" >"$common_dir/valence-loop-handoff-$role" || {
+    echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$role" >&2
+    exit 2
+  }
+done
+
+((already_sent == 1)) && exit 1
 
 printf '%s\t%s\n' "$to" "$reason"

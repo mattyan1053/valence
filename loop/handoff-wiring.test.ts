@@ -45,4 +45,14 @@ describe("周回の出口", () => {
     // ここが 1 つ以下になったら、出口の書き方が変わったということなので読み直す
     expect(exitCount(read(path))).toBeGreaterThan(1);
   });
+
+  it.each(PROCEDURES)("$role の出口は、自分自身へ送ると読めない", ({ role, path }) => {
+    // **`bin/loop-handoff` は自分自身を除く**ので、exit 0 で出るのは相手役だけである。
+    // ここに自分の役を書くと、**書いてあるとおり実行して自分へ送ろうとする**
+    // （**役の名前が逆**は文面だけで判定できる種類の誤りである）
+    const section = read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+    const exitZero = section.split("- **exit 0**")[1]?.split("- **exit 1**")[0] ?? "";
+
+    expect(exitZero).not.toContain(`\`${role}\``);
+  });
 });

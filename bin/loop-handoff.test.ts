@@ -193,4 +193,19 @@ describe("bin/loop-handoff", () => {
     expect(run("workers").status).toBe(2);
     expect(run().status).toBe(2);
   });
+
+  it("行き先が入れ替わって戻ったら、また送る", () => {
+    // **記録を受け手のぶんしか更新しないと、A→B→A の 3 通目が出ない**
+    // （worker の記録が A のままなので「送信済み」と読む）。
+    // **評価するたびに、すべての役の記録を更新する**
+    withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
+    expect(run("master").status).toBe(0);
+
+    withState({ prs: [{ number: 12 }] }); // → master
+    expect(run("worker").status).toBe(0);
+
+    withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker（戻る）
+
+    expect(run("master").status).toBe(0);
+  });
 });

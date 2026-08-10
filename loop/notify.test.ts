@@ -13,9 +13,11 @@ function read(path: string): string {
 }
 
 describe("受け渡しの通知", () => {
-  it.each(PROCEDURES)("%s に、通知を送る場面が書いてある", (path) => {
-    // **どの出来事で送るかを決めておかないと、送る / 送らないが周回ごとにぶれる**
-    expect(read(path)).toContain("### 通知を送る場面");
+  it.each(PROCEDURES)("%s に、場面別の表を戻さない", (path) => {
+    // **送るのは出口の 1 回だけ**（`bin/loop-handoff`）。場面別の表を併存させると、
+    // **通常経路で 2 通飛ぶ**うえ、**列挙の漏れはそのまま残る**——
+    // 出口へ一本化した意味が消える
+    expect(read(path)).not.toContain("### 通知を送る場面");
   });
 
   it.each(PROCEDURES)("%s に、受け取ったらその場で 1 周回すことが書いてある", (path) => {
