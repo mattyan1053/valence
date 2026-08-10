@@ -317,6 +317,8 @@ describe("bin/loop-claim", () => {
       /** **本文は渡さない。** `Closes` の書き方を自分で解析しない（GitHub に訊く）。 */
       prs?: { number: number; closes: number[] }[];
       labelsOf?: Record<number, string[]>;
+      /** label の付け替えが失敗する。**部分的に成功した状態を作らせない**ための試験。 */
+      editFails?: boolean;
     }): void {
       const prs = (options.prs ?? []).map((pr) => String(pr.number)).join("\n");
       const closesOf = (options.prs ?? [])
@@ -351,7 +353,7 @@ describe("bin/loop-claim", () => {
           // label の付け替えを記録する（**書いたら読み直す**の確認に使う）
           'if [[ $* == *"issue edit"* ]]; then',
           `  echo "$*" >>${JSON.stringify(join(repo, "edits.log"))}`,
-          "  exit 0",
+          `  exit ${options.editFails === true ? 1 : 0}`,
           "fi",
           'if [[ $* == *"issue view"* ]]; then',
           "  for word in $*; do",
@@ -434,6 +436,32 @@ describe("bin/loop-claim", () => {
 
       expect(audited.status).toBe(1);
       expect(readFileSync(join(repo, "edits.log"), "utf8")).toMatch(/issue edit 73.*blocked/);
+    });
+
+    it("label を付け替えられなければ、止めたことにしない", () => {
+      // **付けるほうだけ成功して外すほうが失敗すると、`ready` が残る**——
+      // `take` は `ready` だけを見るので、**止めたつもりで取られる**。
+      // **1 回の付け替えにまとめる**ので、部分的に成功した状態がそもそも作れない
+      withAudit({
+        prs: [{ number: 12, closes: [73] }],
+        labelsOf: { 73: ["ready"] },
+        editFails: true,
+      });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(2);
+      expect(audited.stdout).not.toContain("blocked へ移しました");
+    });
+
+    it("ready が付いていれば、同じ 1 回で外す", () => {
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
+
+      run(["audit"]);
+
+      const edits = readFileSync(join(repo, "edits.log"), "utf8").trim().split("\n");
+      expect(edits).toHaveLength(1);
+      expect(edits[0]).toMatch(/--add-label blocked.*--remove-label ready/);
     });
 
     it("ロックを取れないなら、label にも触らない", () => {

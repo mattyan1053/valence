@@ -177,12 +177,14 @@ if [[ $ACTION == "audit" ]]; then
       # **記録するだけでは防止にならない。** 次の周回で `take` できてしまい、
       # **進捗が出るとカウンタが消える**——**止めたかった当の出来事が記録を消す**。
       # **その 1 件だけを止める**（全ループは進める。#109 と同じ整理）。
-      if ! gh issue edit "$closed" --add-label blocked >/dev/null; then
+      # **足し引きを 1 回で行う。** 分けると、**付いたのに外れていない**状態が作れる——
+      # `take` は `ready` だけを見る（`blocked` は見ない）ので、
+      # **止めたつもりで取られる**。1 回にまとめれば、その状態がそもそも作れない。
+      edit_args=(--add-label blocked)
+      has_label "ready" "$labels" && edit_args+=(--remove-label ready)
+      if ! gh issue edit "$closed" "${edit_args[@]}" >/dev/null; then
         echo "[FAIL] #$closed を blocked へ移せません" >&2
         exit 2
-      fi
-      if has_label "ready" "$labels"; then
-        gh issue edit "$closed" --remove-label ready >/dev/null || true
       fi
       echo "[NG] PR #${pr} は #${closed} を閉じようとしていますが、着手中ではありません（blocked へ移しました）"
       mismatched=1
