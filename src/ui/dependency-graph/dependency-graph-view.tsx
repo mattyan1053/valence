@@ -13,6 +13,7 @@
  * 判断したときに、理由と一緒に入れる。
  */
 
+import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 
@@ -36,6 +37,14 @@ export type DependencyGraphViewProps = {
   readonly edges: readonly DependencyEdge[];
   readonly order: DependencyOrder;
   readonly invalid: readonly UnreadablePullRequest[];
+  /**
+   * 各行へ足す表示。
+   *
+   * **ここに何を出すかは知らない。** 行の並び（順序・循環・どこにも並ばないもの）は
+   * この部品が持っているので、**載せる側が並びを作り直さずに済む**ようにするための口である。
+   * 作り直すと、片方だけ直して**画面から PR が消える**穴が復活する。
+   */
+  readonly renderAside?: (pullRequestNumber: number) => ReactNode;
 };
 
 function dependsOnOf(edges: readonly DependencyEdge[], number: number): readonly number[] {
@@ -45,9 +54,11 @@ function dependsOnOf(edges: readonly DependencyEdge[], number: number): readonly
 function PullRequestRow({
   pullRequest,
   dependsOn,
+  aside,
 }: {
   pullRequest: PullRequestRef;
   dependsOn: readonly number[];
+  aside?: ReactNode;
 }) {
   return (
     <li>
@@ -57,6 +68,7 @@ function PullRequestRow({
       ) : (
         <span> ← {pullRequest.base.branch}</span>
       )}
+      {aside}
     </li>
   );
 }
@@ -66,6 +78,7 @@ export function DependencyGraphView({
   edges,
   order,
   invalid,
+  renderAside,
 }: DependencyGraphViewProps) {
   const byNumber = new Map(pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]));
   const rowsFor = (numbers: readonly number[]) =>
@@ -77,6 +90,7 @@ export function DependencyGraphView({
           key={pullRequest.number}
           pullRequest={pullRequest}
           dependsOn={dependsOnOf(edges, pullRequest.number)}
+          aside={renderAside?.(pullRequest.number)}
         />
       ));
 
