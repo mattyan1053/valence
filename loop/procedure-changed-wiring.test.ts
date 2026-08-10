@@ -85,4 +85,34 @@ describe("周回を捨てるかの判定", () => {
     expect(afterMerge).toContain("git fetch origin main");
     expect(afterMerge).toMatch(/bin\/loop-procedure-changed [^\n]+ FETCH_HEAD/);
   });
+
+  /** 打ち切りが書かれている 2 か所。**片方だけ直すと、そちらだけ空く。** */
+  const DISCARD_POINTS = [
+    { name: "1.1", heading: "### 1.1 手順とスクリプトを最新にする" },
+    { name: "マージの段", heading: "### exit 0 — マージする" },
+  ] as const;
+
+  function sectionOf(heading: string): string {
+    const section = read(".claude/commands/loop-master.md").split(heading)[1];
+    if (section === undefined) {
+      throw new Error(`loop-master.md に「${heading}」がありません`);
+    }
+    return section.split("\n### ")[0]?.split("\n## ")[0] ?? "";
+  }
+
+  it.each(DISCARD_POINTS)("$name で打ち切ったら、その場で呼び直す", ({ heading }) => {
+    // **打ち切り自体は正しい。** 直すのは「そのあと」で、
+    // **新しい手順書を読み直す機会が次の cron しか無い**ことが問題である
+    const section = sectionOf(heading);
+
+    expect(section).toContain("/loop-master");
+    // **カウンタを消してから呼び直す。** 順序を変えない
+    expect(section.indexOf("bin/loop-stall --reset")).toBeLessThan(section.indexOf("/loop-master"));
+  });
+
+  it.each(DISCARD_POINTS)("$name の呼び直しは 1 回だけと書いてある", ({ heading }) => {
+    // **入れ替わりは追随した時点で収束する**ので、2 回続くのは異常である。
+    // 繰り返す形にすると、壊れたときに止まらなくなる
+    expect(sectionOf(heading)).toMatch(/1 回だけ/);
+  });
 });
