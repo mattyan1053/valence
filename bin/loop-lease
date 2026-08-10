@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# 同じ役の周回を直列化する。
+#
+# 通知で始めた周回と cron の周回が重なると、**同じ作業ツリーで checkout・commit・push が
+# 並行する**。実際に一度起きている (#68: ブランチを切った直後に main へ戻され、
+# main の上で commit された)。レビュー要求も、判定と投稿の間に割り込まれると
+# **同時に 2 件投稿され、枠を一度に使い切る**。
+#
+#   exit 0 = 取れた (acquire は token を stdout に出す)
+#   exit 1 = 走っている周回がある / token が合わない
+#   exit 2 = 使い方の誤り / 設定の誤り / 判定不能
+#
+# **周回をまたいで保持する**ので、flock を持ち続ける形にはできない (1 周は複数の
+# コマンドに分かれる)。ファイルに「誰が・いつ」を書き、その読み書きだけを flock で
+# 守る。落ちた周回が抱えたままにならないよう、期限を過ぎた lease は引き継ぐ。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# 直列化する単位。**役ごとに 1 つ。** master と worker は別の作業ツリーで動くので
+# 互いを待たせない。語彙を固定するのは、綴り違いで別の lease を取ると
+# **直列化しているつもりで 2 つ走る**ためである。
+readonly ROLES=(master worker)
+
+# 抱えたままの lease を引き継ぐまでの時間。**周回が落ちても、その役のループが
+# 二度と動かなくならないようにする。** 1 周が長引くより十分に長く取る。
+readonly TTL_SEC="${LOOP_LEASE_TTL_SEC:-1800}"
+
+# 読み書きのロックを待つ時間。ここは一瞬で終わる操作なので短くてよい。
+readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
+
+usage() {
+  echo "使い方: bin/loop-lease acquire <役>" >&2
+  echo "        bin/loop-lease release <役> <token>" >&2
+  echo "        役: ${ROLES[*]}" >&2
+  exit 2
+}
+
+role_is_known() {
+  local candidate="$1" role
+  for role in "${ROLES[@]}"; do
+    [[ $role == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+[[ $# -ge 2 ]] || usage
+readonly ACTION="$1"
+readonly ROLE="$2"
+
+if ! role_is_known "$ROLE"; then
+  echo "[FAIL] 未知の役: $ROLE" >&2
+  echo "       使えるのは次のものだけ: ${ROLES[*]}" >&2
+  exit 2
+fi
+
+if ! [[ $TTL_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_LEASE_TTL_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_LEASE_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+
+# **git の共通ディレクトリに置く。** master は worktree で動くので、作業ツリーごとに
+# 置くと同じ役が 2 つ走っても気づけない。`bin/loop-stall` と同じ理由・同じ形。
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+# worktree からだと相対パスを返すことがある。**物理パスで解決する。**
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+readonly STATE="$common_dir/valence-loop-lease-$ROLE"
+
+# 判定と書き込みの間に割り込まれると、**両方の周回が「空いている」と読む**。
+# ここを守らないと、直列化そのものが成立しない。
+exec 9>"$STATE.lock" || {
+  echo "[FAIL] lease のロックを作成できません: $STATE.lock" >&2
+  exit 2
+}
+if ! flock -w "$LOCK_WAIT_SEC" 9; then
+  echo "[FAIL] lease のロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+  exit 2
+fi
+
+now="$(date +%s)"
+
+# 保持されている lease を読む。期限切れは「誰も持っていない」として扱う。
+held_token=""
+held_since=""
+if [[ -f $STATE ]]; then
+  IFS=$'\t' read -r held_token held_since <"$STATE"
+  if ! [[ $held_since =~ ^[0-9]+$ ]]; then
+    echo "[FAIL] lease の記録を読めません: $STATE" >&2
+    exit 2
+  fi
+  if ((now - held_since >= TTL_SEC)); then
+    # **黙って上書きしない。** 期限切れの引き継ぎは、落ちた周回の跡である。
+    echo "[WARN] $ROLE の lease が期限切れでした（$((now - held_since)) 秒前に取得）。引き継ぎます" >&2
+    held_token=""
+  fi
+fi
+
+case "$ACTION" in
+acquire)
+  [[ $# -eq 2 ]] || usage
+  if [[ -n $held_token ]]; then
+    echo "[FAIL] $ROLE の周回が走っています（$((now - held_since)) 秒前に開始）。この周回は何もしません" >&2
+    echo "       待たずに終わるのは、走っている側が同じ状態を読むためです。" >&2
+    echo "       読み終えた後だった場合は 1 拍落ちますが、次の周回（保険）が拾います" >&2
+    exit 1
+  fi
+  # token は「返す資格」を表すだけなので、衝突しなければよい。
+  if ! token="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')" || [[ -z $token ]]; then
+    echo "[FAIL] token を生成できません" >&2
+    exit 2
+  fi
+  printf '%s\t%s\n' "$token" "$now" >"$STATE" || {
+    echo "[FAIL] lease を書き込めません: $STATE" >&2
+    exit 2
+  }
+  echo "$token"
+  ;;
+release)
+  [[ $# -eq 3 ]] || usage
+  if [[ -z $held_token ]]; then
+    echo "[FAIL] $ROLE の lease は誰も持っていません" >&2
+    exit 1
+  fi
+  # **他人の lease を返させない。** 引き継がれた後に返すと、走っている周回の
+  # 直列化が崩れる（自分は終わったつもりで、相手はまだ走っている）。
+  if [[ $held_token != "$3" ]]; then
+    echo "[FAIL] $ROLE の lease は別の周回が持っています" >&2
+    exit 1
+  fi
+  rm -f "$STATE" || {
+    echo "[FAIL] lease を消せません: $STATE" >&2
+    exit 2
+  }
+  ;;
+*)
+  usage
+  ;;
+esac
