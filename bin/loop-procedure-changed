@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# master が実行するものが、この周回の間に入れ替わったかを判定する。
+#
+#   exit 0 = 変わった (**この周回は捨てる**)
+#   exit 1 = 変わっていない (そのまま進んでよい)
+#   exit 2 = 判定できない / 使い方の誤り
+#
+# master は毎周回 `origin/main` へ追随する。**追随そのものは正しい**が、
+# 「HEAD が動いた」で打ち切ると、**master が実行するファイルを 1 つも変えていない PR**
+# （`src/` だけの変更など）でも周回を捨てる。**マージのたびに必ず起きる**ので、
+# 定常的に周回が消える。
+#
+# **判定はここ 1 箇所に持つ。** 手順書に対象の一覧を書き写すと、ファイルが増えたときに
+# 片方だけ直して食い違う (`bin/loop-stall` の停止識別子と同じ理由)。
+#
+# **判定できないときは「変わった」に倒さない。** 倒すと、判定が壊れているあいだ
+# **周回が永久に捨てられる**ことになり、症状が「ループが動かない」だけになる。
+# 呼び出し側 (手順書) が exit 2 を「捨てる」へ倒す — **どちらへ倒すかは呼ぶ側の判断**で、
+# ここは「分からなかった」ことだけを返す。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **master が周回中に読む・実行するもの。** ここに無いものは、入れ替わっても
+# master の実行内容を変えない。
+#
+# `bin/` はまるごと対象にする。master はここのスクリプトを直接呼ぶので、
+# 1 本ずつ並べると**足したときに書き漏らす**。
+readonly WATCHED=(
+  ".claude/commands/loop-master.md"
+  "bin/"
+  "task"
+  "loop/README.md"
+)
+
+usage() {
+  echo "使い方: bin/loop-procedure-changed <追随する前の SHA>" >&2
+  echo "       bin/loop-procedure-changed --list   対象の一覧を出す" >&2
+  exit 2
+}
+
+if [[ ${1-} == "--list" ]]; then
+  [[ $# -eq 1 ]] || usage
+  printf '%s\n' "${WATCHED[@]}"
+  exit 0
+fi
+
+[[ $# -eq 1 ]] || usage
+readonly BEFORE="$1"
+
+if ! git rev-parse --verify --quiet "$BEFORE^{commit}" >/dev/null; then
+  echo "[FAIL] 追随する前の commit を特定できません: $BEFORE" >&2
+  exit 2
+fi
+
+if ! changed="$(git diff --name-only "$BEFORE" HEAD -- "${WATCHED[@]}" 2>/dev/null)"; then
+  echo "[FAIL] 差分を取得できません" >&2
+  exit 2
+fi
+
+if [[ -n $changed ]]; then
+  # 何が入れ替わったかを出す。**捨てた理由が後から分かるようにする。**
+  printf '%s\n' "$changed"
+  exit 0
+fi
+exit 1
