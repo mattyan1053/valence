@@ -4,6 +4,14 @@
 #   exit 0 = 渡す相手がいる。`<役>\t<理由>` を stdout に出す
 #   exit 1 = 渡さない (相手に持ち物が無い / 動けるのは自分 / 同じ状態で送信済み)
 #   exit 2 = 状態を読めない / 使い方の誤り
+#   exit 3 = 渡す相手はいる (出力は exit 0 と同じ) が、**状態が矛盾している**。
+#            送ったうえで記録する
+#
+# **判断の根拠を 2 種類持たない。** ゲートは**未解決スレッド**を見て落とすのに、
+# ここは **label** だけを見ていた。label が 0 件の PR は「master がゲートを回せる」と
+# 読まれ、**自分宛なので黙る**。#103（手順書から外れた経路）と #107（**手順書どおり**の
+# 経路。レビュースレッドへ返信する段に label を付ける指示が無い）で実際に起きた。
+# **経路を数えるのではなく、状態から決める。**
 #
 # **通知は「〜した」ときにだけ送られていた。** 周回を終える経路は 9 つ以上あり、
 # **何もせずに終わる経路には 1 つも通知が無い**ので、そこを通ると
@@ -27,6 +35,9 @@ set -uo pipefail
 
 readonly ROLES=(master worker)
 
+# 自動レビューの bot。**この人が最後なら、まだ誰も答えていない。**
+readonly REVIEW_BOT="chatgpt-codex-connector"
+
 usage() {
   echo "使い方: bin/loop-handoff <役>   役: ${ROLES[*]}" >&2
   exit 2
@@ -49,8 +60,63 @@ fail_unknown() {
   exit 2
 }
 
-prs="$(gh pr list --state open --limit 200 --json number,labels \
-  --jq '.[] | "\(.number)\t\(.labels | map(.name) | join(","))"')" || fail_unknown "open PR"
+prs="$(gh pr list --state open --limit 200 --json number,labels,headRefOid \
+  --jq '.[] | "\(.number)\t\(.labels | map(.name) | join(","))\t\(.headRefOid)"')" || fail_unknown "open PR"
+
+# **未解決スレッドを、ゲートと同じ読み方で取る。**
+#
+# `gh pr list --json` は未解決スレッドを返さないので GraphQL で取る。
+# owner / repo は `{owner}` の置換が効かない（置換されるのは `gh api` の
+# エンドポイントだけ）ので、先に引く。
+#
+# **スレッド自体をページングする。** 内側の接続に `pageInfo` と `after` が無いと
+# `--paginate` は外側しか進めず、**101 件目以降にだけ未解決が残る PR を 0 件と数える**。
+# `bin/loop-gate` も同じ形でページングしている——**同じものを、同じ読み方で見る**のが
+# この仕組みの主題で、読み方が違えば同じ食い違いが戻る。
+#
+# **組み立てはゲートと 2 箇所に分かれている。** ゲートは 1 本の PR について合否を出し、
+# ここは open な PR すべてについて持ち手を決めるので、必要な形が違う。
+# **片方だけ直すと食い違う**ので、どちらかを触るときはもう一方も見ること。
+repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || fail_unknown "リポジトリ"
+mapfile -t repo_parts <<<"$repo_ref"
+
+# 未解決スレッドの「最後の発言」を PR 番号で引けるようにする。
+declare -A unresolved_of=()
+declare -A last_comment_of=()
+declare -A last_author_of=()
+while IFS=$'\t' read -r number _labels _head; do
+  [[ -n $number ]] || continue
+  threads="$(gh api graphql --paginate \
+    -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" -F number="$number" \
+    -f query='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){
+      repository(owner:$owner,name:$repo){
+        pullRequest(number:$number){
+          reviewThreads(first: 100, after: $endCursor){
+            pageInfo{hasNextPage endCursor}
+            nodes{isResolved comments(last:1){nodes{databaseId author{login}}}}}}}}' \
+    --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)
+      | .comments.nodes[0] | "\(.databaseId)\t\(.author.login)"')" ||
+    fail_unknown "未解決スレッド (#$number)"
+  count=0
+  while IFS=$'\t' read -r comment_id author; do
+    [[ -n $comment_id ]] || continue
+    ((count++))
+    # **いちばん新しい発言を持つ。** ID は増える一方なので、大きいほうが新しい
+    if [[ -z ${last_comment_of[$number]-} || $comment_id -gt ${last_comment_of[$number]} ]]; then
+      last_comment_of[$number]="$comment_id"
+      last_author_of[$number]="$author"
+    fi
+  done <<<"$threads"
+  unresolved_of[$number]="$count"
+done <<<"$prs"
+
+# **最後の発言も指紋に入れる。** コードを変えずに理由だけ返信すると、head も件数も
+# label も動かない。**「状態が動いたのに指紋が持っていない」**が、入口を変えて戻る。
+# ID は**新しい発言があったときだけ変わる**ので、時刻のように毎回変わる値ではない。
+details=""
+for number in "${!unresolved_of[@]}"; do
+  details+="${number}:${unresolved_of[$number]}:${last_comment_of[$number]-} "
+done
 ready="$(gh issue list --label ready --limit 200 --json number --jq 'length')" || fail_unknown "ready"
 in_progress="$(gh issue list --label in-progress --limit 200 --json number --jq 'length')" ||
   fail_unknown "in-progress"
@@ -73,7 +139,12 @@ parked_issues="$(gh pr list --state open --limit 200 --json number,labels,body \
 ((in_progress -= parked_issues))
 ((in_progress < 0)) && in_progress=0
 
-readonly STATE="prs=${prs}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
+# **PR の中身も指紋に入れる。** label と件数だけだと、**往復すると元の値へ戻る**——
+# 直して push した周回も、指摘を返した周回も「同じ状態」と読まれて黙った（#105）。
+# **head SHA は「変われば前へ進んだ」を表す値**なので、時刻のように毎回変わる値を
+# 入れるのとは違う（`bin/loop-stall` の識別子と同じ制約を満たす）。
+# **未解決スレッド数も要る。** push が無くても master が指摘を返せば状態は動く。
+readonly STATE="prs=${prs}|detail=${details}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
 
 if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
   echo "[FAIL] git の共通ディレクトリを特定できません" >&2
@@ -108,17 +179,44 @@ done
 
 changes_requested=""
 gateable=""
-while IFS=$'\t' read -r number labels; do
+# **label と実態の食い違い。** 未解決が残っているのに `changes-requested` が無い状態で、
+# 運用が壊れている（付け忘れではなく、**付ける段が無い経路がある**）。
+mismatched=""
+# **答えを待っている側**の PR（未解決があり、最後に書いたのが自分たちの役）。
+answered=""
+while IFS=$'\t' read -r number labels _head; do
   [[ -n $number ]] || continue
-  if [[ ",$labels," == *",changes-requested,"* ]]; then
+  unresolved="${unresolved_of[$number]-0}"
+  [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
+  if [[ ",$labels," == *",parked,"* ]]; then
+    :
+  elif ((unresolved > 0)) && [[ ${last_author_of[$number]-} != "$REVIEW_BOT"* ]]; then
+    # **件数だけでは持ち手が決まらない。** 同じ「未解決 1 件」に
+    # 「指摘が返ってきた直後」と「直して返信し終えた直後」が混ざっている。
+    # **役は同じアカウントで動く**ので、GitHub 側の名前では見分けられない——
+    # **呼んだ側は、その周回で書き終えている**ので、渡す先は相手役である。
+    answered="$number"
+  elif ((unresolved > 0)); then
+    # まだ誰も答えていない指摘。直すのは worker である
     changes_requested="$number"
-  elif [[ ",$labels," != *",parked,"* ]]; then
+    [[ ",$labels," == *",changes-requested,"* ]] || mismatched="$number"
+  elif [[ ",$labels," == *",changes-requested,"* ]]; then
+    changes_requested="$number"
+  else
     gateable="$number"
   fi
 done <<<"$prs"
 
 # 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
-if [[ -n $changes_requested ]]; then
+if [[ -n $answered ]]; then
+  # 相手役へ渡す。**自分は今の周回で書き終えている**
+  to="worker"
+  reason="PR #${answered} に未解決の指摘がある"
+  if [[ $ROLE == "worker" ]]; then
+    to="master"
+    reason="PR #${answered} の対応が返っている（確認して resolve できる）"
+  fi
+elif [[ -n $changes_requested ]]; then
   to="worker"
   reason="PR #${changes_requested} に master の要求が残っている"
 elif [[ -n $gateable ]]; then
@@ -135,11 +233,27 @@ else
   exit 1
 fi
 
+# **「送るかどうか」と「記録するかどうか」は別の判断である。**
+#
+#   重複抑止      … 送り合いを防ぐ。**前回と同じ状態か**を見る
+#   食い違いの記録 … 気づかないまま続くのを防ぐ。**食い違いが今あるか**を見る
+#
+# **同じ条件で両方を決めると、記録が 1 回で止まる**（送らない周回はここへ来ないので、
+# 3 周に到達せず人を呼べない）。**気づかせたい状態でだけ黙る**ことになる。
+mismatch_exit=0
+if [[ -n $mismatched ]]; then
+  echo "[WARN] PR #${mismatched}: 未解決スレッドがあるのに changes-requested がありません" >&2
+  mismatch_exit=3
+fi
+
 # **自分自身へは送らない。** 自分が動けるなら次の周回でやればよい
 # （自己通知で新しい手順書に載れる保証も無い）。
-[[ $to == "$ROLE" ]] && exit 1
-
 # **同じ状態で 2 通目を送らない。** 相手はもう知っている。
-[[ "${previous[$to]}" == "$STATE" ]] && exit 1
+# どちらの場合も**記録は通す**——その状態が続いていること自体が、記録したい事実である。
+if [[ $to == "$ROLE" || "${previous[$to]}" == "$STATE" ]]; then
+  ((mismatch_exit == 3)) && exit 3
+  exit 1
+fi
 
 printf '%s\t%s\n' "$to" "$reason"
+exit "$mismatch_exit"

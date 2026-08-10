@@ -57,6 +57,9 @@ readonly STOP_IDS=(
   # 件数を付けない。**溜まるほど件数が変わる**ので、付けると連続回数が数え直しになり、
   # 3 周続いても止まらない (`bin/loop-deferred-budget` が件数を出す)。
   "deferred-overflow|master: 外出しした指摘が溜まりすぎている (deferred-finding が上限超え)"
+  # label と実態が食い違っている状態。**「送るものが無い」と混ぜない**ために別で数える。
+  # PR 番号を入れるので、別の PR で起きたら数え直される。
+  "handoff-mismatch:<PR番号>|両方: 未解決スレッドがあるのに changes-requested が無い"
 )
 
 usage() {
