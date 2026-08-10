@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# 要求したレビューが返るまで、**その周回の中で**待つ。
+#
+#   exit 0 = 基準より新しいレビューが返った
+#   exit 1 = 上限まで返らなかった (**正常な待ち。空転として数えない**)
+#   exit 2 = 使い方の誤り / 設定の誤り / 判定不能
+#
+# **Codex はループの外にいて通知を送ってこない。** 周回で確認すると、
+# レビューが 2 分で返っても気づくのは次の周回になる。ここで待てば周回を消費しない
+# (sleep している間はトークンを使わないので、**回して確認するより安い**)。
+#
+# **上限は「1 回のツール呼び出しに収まる」こと**を優先して決める。長くしすぎると
+# 呼び出し側が先に切られ、待った結果を受け取れない。返らなければ 1 で抜け、
+# **次の周回で `bin/loop-review-budget` の判定に委ねる** (猶予の内側なら exit 3、
+# 猶予を過ぎた未応答なら exit 1)。**待ち方を変えても、あちらは時刻で測るので判定は変わらない。**
+#
+# 「返った」の判定は `bin/loop-review-commits` に任せる。**応答は 3 通りあり
+# (指摘あり / 会話コメント / 👍 だけ)、SHA を持たないものもある**ので、
+# ここで数え方を作り直すと、きれいな PR ほど待ち続けることになる。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# 待つ上限。**ツール呼び出しの制限より短くする。**
+readonly MAX_SEC="${LOOP_AWAIT_REVIEW_MAX_SEC:-480}"
+
+# 見に行く間隔。**忙しく回さない。** 待つこと自体が安いので、詰めても得が無い。
+readonly INTERVAL_SEC="${LOOP_AWAIT_REVIEW_INTERVAL_SEC:-30}"
+
+usage() {
+  echo "使い方: bin/loop-await-review <PR番号> <基準時刻>" >&2
+  echo "        基準時刻は要求を投げる前の最新レビューの時刻 (無ければ空文字)" >&2
+  exit 2
+}
+
+[[ $# -eq 2 ]] || usage
+# 数字だけを受け付ける。PR 番号以外が渡る経路を作らない。
+[[ $1 =~ ^[0-9]+$ ]] || usage
+readonly PR="$1"
+readonly SINCE="$2"
+
+if ! [[ $MAX_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_AWAIT_REVIEW_MAX_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+if ! [[ $INTERVAL_SEC =~ ^[0-9]+$ ]] || ((INTERVAL_SEC < 1)); then
+  echo "[FAIL] 設定: LOOP_AWAIT_REVIEW_INTERVAL_SEC は 1 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+
+# 最新のレビューの時刻を返す。無ければ空。
+# **時刻は GitHub 側の値をそのまま使う。** こちらの時計と比べると、ずれた分だけ
+# 「返っていないのに返った」または「返ったのに待ち続ける」になる。
+latest_review_at() {
+  local reviewed
+  reviewed="$("$(dirname "$0")/loop-review-commits" "$PR")" || return 1
+  printf '%s' "$reviewed" | tail -n 1 | cut -f1
+}
+
+waited=0
+while :; do
+  if ! latest="$(latest_review_at)"; then
+    echo "[FAIL] PR #$PR のレビューを読み取れません" >&2
+    exit 2
+  fi
+  # ISO8601 (UTC, 固定長) なので文字列比較で時刻順になる。
+  # **基準が空なら、1 件目が返った時点で返ったとみなす。**
+  if [[ -n $latest && $latest > $SINCE ]]; then
+    exit 0
+  fi
+  ((waited + INTERVAL_SEC > MAX_SEC)) && break
+  sleep "$INTERVAL_SEC"
+  waited=$((waited + INTERVAL_SEC))
+done
+
+echo "[WARN] PR #$PR のレビューは ${MAX_SEC} 秒では返りませんでした" >&2
+echo "       この周回はここで終わります。次の周回で bin/loop-review-budget が判定します" >&2
+exit 1
