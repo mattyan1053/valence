@@ -28,7 +28,16 @@ describe("bin/loop-deferred-budget", () => {
             '  echo "スタブ: label で絞っていない: $*" >&2',
             "  exit 3",
             "fi",
-            `echo ${count}`,
+            // **`--limit` は「取ってくる上限」である。** 本物の `gh` と同じく、
+            // ここで丸める。丸めを再現しないと、**取りこぼしても緑のまま**になる
+            "limit=0",
+            "while (($# > 0)); do",
+            '  [[ $1 == "--limit" ]] && limit="$2"',
+            "  shift",
+            "done",
+            `count=${count}`,
+            'if ((count > limit)); then count="$limit"; fi',
+            'echo "$count"',
           ].join("\n"),
       { mode: 0o755 },
     );
@@ -83,6 +92,15 @@ describe("bin/loop-deferred-budget", () => {
 
     expect(run({ LOOP_DEFERRED_MAX: "10" }).status).toBe(0);
     expect(run({ LOOP_DEFERRED_MAX: "5" }).status).toBe(1);
+  });
+
+  it("上限より多く取ってきて数える", () => {
+    // **`--limit` は取得件数の上限**なので、そこで丸められると
+    // **上限ちょうどに見えて歯止めが効かない**。上限を超えているかを知るには
+    // 上限より 1 件多く取れればよい
+    withOpenDeferred(201);
+
+    expect(run({ LOOP_DEFERRED_MAX: "200" }).status).toBe(1);
   });
 
   it("件数を読めなければ 2 で落ちる", () => {

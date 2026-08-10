@@ -29,7 +29,10 @@ fi
   exit 2
 }
 
-if ! count="$(gh issue list --state open --label deferred-finding --limit 200 \
+# **上限より 1 件だけ多く取る。** `--limit` は「取ってくる件数の上限」なので、
+# そこで丸められると**上限ちょうどに見えて歯止めが効かない**。
+# 知りたいのは「超えているか」だけなので、1 件多く取れれば足りる。
+if ! count="$(gh issue list --state open --label deferred-finding --limit "$((MAX + 1))" \
   --json number --jq 'length')" || [[ ! $count =~ ^[0-9]+$ ]]; then
   echo "[FAIL] 外出しした指摘の件数を取得できません" >&2
   exit 2

@@ -57,9 +57,11 @@ describe("上限に達したあとの行き先", () => {
     expect(section).toMatch(/SHA/);
   });
 
-  it("溜まりすぎたら人を呼ぶ経路がある", () => {
-    // **既定をマージにする以上、歯止めはここにしかない**
-    expect(bashBlocks(triageSection())).toContain("bin/loop-deferred-budget");
+  it("歯止めはマージの手前（ゲート）にある", () => {
+    // **外出しの経路だけに置いても効かない。** そこで止めても、次の周回は
+    // 未解決スレッドが無くなっていてゲートが通り、**マージが 1 周遅れるだけ**になる
+    // （#103 のレビューで指摘された）。**マージの手前は全部ゲートを通る**
+    expect(read("bin/loop-gate")).toContain("loop-deferred-budget");
 
     const listed = execFileSync(join(REPO_ROOT, "bin/loop-stall"), ["--list"], {
       cwd: REPO_ROOT,
@@ -67,7 +69,21 @@ describe("上限に達したあとの行き先", () => {
     });
 
     expect(listed).toContain("deferred-overflow");
-    expect(triageSection()).toContain("deferred-overflow");
+  });
+
+  it("ゲートが落ちたときの行き先が手順書にある", () => {
+    // **記録しないと、溜まったまま何周でも回る**（他の停止と同じ理由）
+    // **節を切って見る。** 切らないと、後ろの節にある同じ語で満たされる（実際に通った）
+    const failTable = read(".claude/commands/loop-master.md")
+      .split("### exit 1 — 何が足りないかで分ける")[1]
+      ?.split("\n### ")[0];
+
+    expect(failTable).toContain("deferred-overflow");
+  });
+
+  it("外出しの節は、歯止めを自前で持たない", () => {
+    // **2 箇所に持つと、片方だけ直して食い違う**（判定が 2 通りになる）
+    expect(bashBlocks(triageSection())).not.toContain("bin/loop-deferred-budget");
   });
 
   it("差し戻す側でも記録が残ると書いてある", () => {
