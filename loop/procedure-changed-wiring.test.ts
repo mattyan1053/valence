@@ -35,6 +35,19 @@ function executedByMaster(): string[] {
 }
 
 describe("周回を捨てるかの判定", () => {
+  /** 呼び直しの手前で何をするかが書かれた bash ブロック。 */
+  function codeBlockWithRerun(section: string): string {
+    const block = section
+      .split("```bash")
+      .slice(1)
+      .map((chunk) => chunk.split("```")[0] ?? "")
+      .find((chunk) => chunk.includes("/loop-master"));
+    if (block === undefined) {
+      throw new Error("呼び直しの手順が bash ブロックに書かれていません");
+    }
+    return block;
+  }
+
   it("手順書は判定をスクリプトに任せる", () => {
     expect(read(".claude/commands/loop-master.md")).toContain("bin/loop-procedure-changed");
   });
@@ -84,6 +97,15 @@ describe("周回を捨てるかの判定", () => {
     // マージでは動かないので、取り直さずに比べると必ず「変わっていない」になる
     expect(afterMerge).toContain("git fetch origin main");
     expect(afterMerge).toMatch(/bin\/loop-procedure-changed [^\n]+ FETCH_HEAD/);
+    // **呼び直す前に切り替える。** `fetch` は `FETCH_HEAD` を更新するだけで
+    // **作業ツリーはマージ前のまま**なので、呼び直した先が**古い手順書を読む**
+    // （1.1 の経路はそこで `switch --detach` しているので問題ない）
+    const rerun = codeBlockWithRerun(afterMerge);
+
+    expect(rerun.indexOf("git switch --detach origin/main")).toBeGreaterThanOrEqual(0);
+    expect(rerun.indexOf("git switch --detach origin/main")).toBeLessThan(
+      rerun.indexOf("/loop-master"),
+    );
   });
 
   /** 打ち切りが書かれている 2 か所。**片方だけ直すと、そちらだけ空く。** */
@@ -91,19 +113,6 @@ describe("周回を捨てるかの判定", () => {
     { name: "1.1", heading: "### 1.1 手順とスクリプトを最新にする" },
     { name: "マージの段", heading: "### exit 0 — マージする" },
   ] as const;
-
-  /** 呼び直しの手前で何をするかが書かれた bash ブロック。 */
-  function codeBlockWithRerun(section: string): string {
-    const block = section
-      .split("```bash")
-      .slice(1)
-      .map((chunk) => chunk.split("```")[0] ?? "")
-      .find((chunk) => chunk.includes("/loop-master"));
-    if (block === undefined) {
-      throw new Error("呼び直しの手順が bash ブロックに書かれていません");
-    }
-    return block;
-  }
 
   function sectionOf(heading: string): string {
     const section = read(".claude/commands/loop-master.md").split(heading)[1];

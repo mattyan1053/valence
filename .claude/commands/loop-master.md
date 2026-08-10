@@ -300,6 +300,10 @@ bin/loop-procedure-changed "$(git rev-parse HEAD)" FETCH_HEAD
 **呼び直す前に、カウンタを消して lease を返す。**
 
 ```bash
+# **切り替えてから呼び直す。** `fetch` は `FETCH_HEAD` を更新するだけで、
+# **作業ツリーはマージ前のまま**である。切り替えずに呼び直すと、
+# **呼び直した先が古い手順書を読み**、1.1 でまた打ち切りになって終わる
+git switch --detach origin/main
 bin/loop-stall --reset
 bin/loop-lease release master "<token>"
 # ここで /loop-master を呼び直す
