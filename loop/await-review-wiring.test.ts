@@ -54,4 +54,15 @@ describe("レビューの到着を待つ配線", () => {
       expect(pathSegment(path)).toMatch(/timeout/);
     },
   );
+
+  it.each(["exit 0", "exit 3"] as const)(
+    "%s の経路で、一覧を先に変数へ受けて失敗したら投げずに終える",
+    (path) => {
+      // **パイプに繋ぐと終了コードは `cut` のものになる。** 取得に失敗しても
+      // 基準が空のまま進み、**過去のレビューが「新しい」と読まれて即座に戻る**——
+      // 待っているつもりで一度も待たない形になる（#76 で 1 度直したのと同じ）
+      expect(pathSegment(path)).toMatch(/if ! \w+="\$\(bin\/loop-review-commits/);
+      expect(pathSegment(path)).toContain('bin/loop-stall "review-budget-unknown:');
+    },
+  );
 });

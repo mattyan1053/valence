@@ -322,7 +322,15 @@ bin/loop-await-review <PR番号> "$since"
   **ここでも待つ。**
 
   ```bash
-  bin/loop-await-review <PR番号> "$(bin/loop-review-commits --responses <PR番号> | tail -n 1 | cut -f1)"
+  # **一覧は先に変数へ受ける**（exit 0 の経路と同じ形）。パイプに繋ぐと終了コードは
+  # `cut` のものになり、**取得の失敗が「レビューが 1 件も無い」に化ける**。
+  # 空の基準で待つと、過去のレビューが「新しい」と読まれて即座に戻るので、
+  # **待っているつもりで一度も待たない**ことになる
+  if ! reviewed="$(bin/loop-review-commits <PR番号>)"; then
+    bin/loop-stall "review-budget-unknown:<PR番号>"
+    exit
+  fi
+  bin/loop-await-review <PR番号> "$(printf '%s' "$reviewed" | tail -n 1 | cut -f1)"
   ```
 
   **初回レビューは Codex が自動で走らせる**ので、master は要求しない。
