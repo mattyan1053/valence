@@ -21,16 +21,27 @@ function reviewBudgetSection(): string {
 /**
  * 経路ごとに切り出す。**節全体を見ると、片方の配線を外しても
  * もう片方が拾ってしまい、変異を捕まえられない**（実際に 0 件だった）。
+ *
+ * **終端も要る。** 次のトップレベルの分岐で切らないと、**その経路の中身を消しても
+ * 後ろの分岐が拾って通る**（これも実際に 0 件だった）。
  */
 function pathSegment(path: "exit 0" | "exit 3"): string {
   const section = reviewBudgetSection();
-  const start = section.indexOf(`- ${path} →`);
+  const branches = [...section.matchAll(/^- exit \d+ →/gm)];
+  const start = branches.findIndex((branch) => branch[0].startsWith(`- ${path} →`));
   if (start < 0) {
     throw new Error(`3.2 に「${path}」の分岐がありません`);
   }
-  const rest = section.slice(start + 1);
-  const end = rest.indexOf("- exit 3 →");
-  return path === "exit 0" && end >= 0 ? rest.slice(0, end) : rest;
+  const from = branches[start]?.index ?? 0;
+  const to = branches[start + 1]?.index ?? section.length;
+  return section.slice(from, to);
+}
+
+/** 3.2 のうち、最初の分岐より前（判定を回す前）の部分。 */
+function beforeBudget(): string {
+  const section = reviewBudgetSection();
+  const firstBranch = section.search(/^- exit \d+ →/m);
+  return firstBranch < 0 ? section : section.slice(0, firstBranch);
 }
 
 describe("レビューの到着を待つ配線", () => {
@@ -55,14 +66,17 @@ describe("レビューの到着を待つ配線", () => {
     },
   );
 
-  it.each(["exit 0", "exit 3"] as const)(
-    "%s の経路で、一覧を先に変数へ受けて失敗したら投げずに終える",
-    (path) => {
-      // **パイプに繋ぐと終了コードは `cut` のものになる。** 取得に失敗しても
-      // 基準が空のまま進み、**過去のレビューが「新しい」と読まれて即座に戻る**——
-      // 待っているつもりで一度も待たない形になる（#76 で 1 度直したのと同じ）
-      expect(pathSegment(path)).toMatch(/if ! \w+="\$\(bin\/loop-review-commits/);
-      expect(pathSegment(path)).toContain('bin/loop-stall "review-budget-unknown:');
-    },
-  );
+  it("基準は判定より前に取る", () => {
+    // **判定と基準取得の間に届いたレビューを、自分で基準にしてしまう。**
+    // そのぶんを「新しい」と読めなくなり、**待つようにしたのに何も拾わない**
+    expect(beforeBudget()).toMatch(/if ! \w+="\$\(bin\/loop-review-commits/);
+    expect(beforeBudget()).toContain('bin/loop-stall "review-budget-unknown:');
+  });
+
+  it.each(["exit 0", "exit 3"] as const)("%s の経路は、先に取った基準を使う", (path) => {
+    // **パイプに繋いで取り直さない。** 終了コードが `cut` のものになり、
+    // 取得の失敗が「レビューが 1 件も無い」に化ける（#76 で 1 度直した形）
+    expect(pathSegment(path)).toMatch(/bin\/loop-await-review <PR番号> "\$since"/);
+    expect(pathSegment(path)).not.toMatch(/bin\/loop-review-commits[^\n]*\|/);
+  });
 });
