@@ -125,63 +125,76 @@ write_record() {
 #   open PR が閉じる Issue が着手中でない … **人の判断が要る**（誰が持つべきか決められない）
 #   記録が指す Issue が着手中でない       … **古い記録**。自動で解放してよい
 if [[ $ACTION == "audit" ]]; then
+  # **確認も付け替えも、`take` / `resume` と同じロックの中で行う。**
+  # 外でやると、**移す前に `take` される**（読んでから書くまでの窓が、塞ぐ側に開く）。
+  exec 9>"$common_dir/valence-loop-claim.lock" || {
+    echo "[FAIL] 取り合いのロックを作成できません" >&2
+    exit 2
+  }
+  if ! flock -w "$LOCK_WAIT_SEC" 9; then
+    echo "[FAIL] 取り合いのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+    exit 2
+  fi
+
   # **一覧（検索）を通さない。** 付け替えた直後は古い値が返る（#101 で実測）。
   repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || {
     echo "[FAIL] リポジトリを特定できません" >&2
     exit 2
   }
   mapfile -t repo_parts <<<"$repo_ref"
-  bodies="$(gh api graphql --paginate \
+  open_prs="$(gh api graphql --paginate \
     -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
     -f query='query($owner:String!,$repo:String!,$endCursor:String){
       repository(owner:$owner,name:$repo){
         pullRequests(states:OPEN,first:50,after:$endCursor){
           pageInfo{hasNextPage endCursor}
-          nodes{number body}}}}' \
-    --jq '.data.repository.pullRequests.nodes[] | "\(.number)\t\((.body // "") | gsub("\\s+"; " "))"')" || {
+          nodes{number}}}}' \
+    --jq '.data.repository.pullRequests.nodes[].number')" || {
     echo "[FAIL] open PR を取得できません" >&2
     exit 2
   }
 
   mismatched=0
-  while IFS=$'\t' read -r pr body; do
+  while read -r pr; do
     [[ -n $pr ]] || continue
-    rest="$body"
-    while [[ $rest =~ [Cc]loses[[:space:]]+#([0-9]+) ]]; do
-      closed="${BASH_REMATCH[1]}"
-      rest="${rest#*"${BASH_REMATCH[0]}"}"
+    # **閉じる Issue は GitHub に訊く。** 本文を自分で解析すると、
+    # `close` / `fixes` / `resolved` … と**大文字小文字**まで写し取ることになり、
+    # **写した規則は必ず本家からずれる**（#122 で `i` を落として踏んだ形）。
+    # **人が手で作った PR は `Fixes #N` と書く**ので、
+    # **この検査がいちばん必要な場面**で黙ることになる。
+    if ! closes="$(gh pr view "$pr" --json closingIssuesReferences \
+      --jq '.closingIssuesReferences[].number')"; then
+      echo "[FAIL] PR #$pr が閉じる Issue を読めません" >&2
+      exit 2
+    fi
+    while read -r closed; do
+      [[ -n $closed ]] || continue
       if ! labels="$(gh issue view "$closed" --json labels --jq '.labels[].name')"; then
         echo "[FAIL] #$closed の label を読めません" >&2
         exit 2
       fi
-      if ! has_label "in-progress" "$labels"; then
-        echo "[NG] PR #${pr} は #${closed} を閉じようとしていますが、着手中ではありません"
-        mismatched=1
+      has_label "in-progress" "$labels" && continue
+      # **記録するだけでは防止にならない。** 次の周回で `take` できてしまい、
+      # **進捗が出るとカウンタが消える**——**止めたかった当の出来事が記録を消す**。
+      # **その 1 件だけを止める**（全ループは進める。#109 と同じ整理）。
+      if ! gh issue edit "$closed" --add-label blocked >/dev/null; then
+        echo "[FAIL] #$closed を blocked へ移せません" >&2
+        exit 2
       fi
-    done
-  done <<<"$bodies"
+      if has_label "ready" "$labels"; then
+        gh issue edit "$closed" --remove-label ready >/dev/null || true
+      fi
+      echo "[NG] PR #${pr} は #${closed} を閉じようとしていますが、着手中ではありません（blocked へ移しました）"
+      mismatched=1
+    done <<<"$closes"
+  done <<<"$open_prs"
 
   # **古い記録は、その場で解放する。** 「誰も作業していないのに持ち主が居る」記録は、
   # 作業場が増えた瞬間に**再開を止める**（#82 の前に消しておきたい）。
-  #
-  # **確認と削除は `take` / `resume` と同じロックの中で行う。**
-  # ロックの外で読んだ値を中で使うと、**読んでから消すまでの窓**が開き、
-  # **`take` が書いたばかりの記録を消す**——**塞ぎたいものと同じ形を、塞ぐ側が作る**。
-  exec 9>"$common_dir/valence-loop-claim.lock" || {
-    echo "[FAIL] 取り合いのロックを作成できません" >&2
-    exit 2
-  }
-  if ! flock -w "$LOCK_WAIT_SEC" 9; then
-    # **取れないうちは記録に触らない。** 走っている周回が書いている最中である
-    echo "[FAIL] 取り合いのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
-    exit 2
-  fi
-
   for record in "$common_dir"/valence-loop-claim-[0-9]*; do
     [[ -f $record ]] || continue
     number="${record##*valence-loop-claim-}"
     [[ $number =~ ^[0-9]+$ ]] || continue
-    # **ロックの中で読み直す。** 外で読んだ値は、もう古いかもしれない
     if ! labels="$(gh issue view "$number" --json labels --jq '.labels[].name')"; then
       echo "[FAIL] #$number の label を読めません" >&2
       exit 2

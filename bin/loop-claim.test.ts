@@ -314,10 +314,17 @@ describe("bin/loop-claim", () => {
   describe("audit — label と実態の食い違いを見つける", () => {
     /** open PR の本文と、Issue ごとの label を返す偽の `gh`。 */
     function withAudit(options: {
-      prs?: { number: number; body: string }[];
+      /** **本文は渡さない。** `Closes` の書き方を自分で解析しない（GitHub に訊く）。 */
+      prs?: { number: number; closes: number[] }[];
       labelsOf?: Record<number, string[]>;
     }): void {
-      const prs = (options.prs ?? []).map((pr) => `${pr.number}\t${pr.body}`).join("\n");
+      const prs = (options.prs ?? []).map((pr) => String(pr.number)).join("\n");
+      const closesOf = (options.prs ?? [])
+        .map(
+          (pr) =>
+            `    ${pr.number}) printf '%b' ${JSON.stringify(pr.closes.join("\n"))}; echo; exit 0 ;;`,
+        )
+        .join("\n");
       writeFileSync(
         join(path, "gh"),
         [
@@ -330,6 +337,20 @@ describe("bin/loop-claim", () => {
           'if [[ $* == *"repo view"* ]]; then',
           '  echo "owner"',
           '  echo "repo"',
+          "  exit 0",
+          "fi",
+          // **閉じる Issue は GitHub に訊く。** 本文を自分で解析しない
+          'if [[ $* == *"closingIssuesReferences"* ]]; then',
+          "  for word in $*; do",
+          "    case $word in",
+          closesOf,
+          "    esac",
+          "  done",
+          "  exit 0",
+          "fi",
+          // label の付け替えを記録する（**書いたら読み直す**の確認に使う）
+          'if [[ $* == *"issue edit"* ]]; then',
+          `  echo "$*" >>${JSON.stringify(join(repo, "edits.log"))}`,
           "  exit 0",
           "fi",
           'if [[ $* == *"issue view"* ]]; then',
@@ -357,7 +378,7 @@ describe("bin/loop-claim", () => {
     it("in-progress でない Issue を閉じる open PR を見つける", () => {
       // **`ready` は「まだ誰も着手していない」を意味する。** そのまま PR があると、
       // **2 人目が同じ Issue を取れる**（#84 / #100 が防ごうとした形そのもの）
-      withAudit({ prs: [{ number: 12, body: "Closes #73" }], labelsOf: { 73: ["ready"] } });
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
 
       const audited = run(["audit"]);
 
@@ -367,7 +388,7 @@ describe("bin/loop-claim", () => {
 
     it("in-progress なら食い違いではない", () => {
       withAudit({
-        prs: [{ number: 12, body: "Closes #73" }],
+        prs: [{ number: 12, closes: [73] }],
         labelsOf: { 73: ["in-progress"] },
       });
 
@@ -401,6 +422,39 @@ describe("bin/loop-claim", () => {
       writeRecord(82);
 
       expect(run(["audit"]).status).toBe(0);
+    });
+
+    it("見つけたら、その Issue を blocked へ移す", () => {
+      // **記録するだけでは防止にならない。** 次の周回で `take` できてしまい、
+      // **進捗が出るとカウンタが消える**——**止めたかった当の出来事が記録を消す**。
+      // **その 1 件だけを止める**（全ループは進める）
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(1);
+      expect(readFileSync(join(repo, "edits.log"), "utf8")).toMatch(/issue edit 73.*blocked/);
+    });
+
+    it("ロックを取れないなら、label にも触らない", () => {
+      // **移す前に `take` される窓**を作らない（P1 で直したのと同じ理由）
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
+      const lock = join(repo, ".git", "valence-loop-claim.lock");
+      const held = spawnSync(
+        "bash",
+        [
+          "-c",
+          `setsid flock -x ${JSON.stringify(lock)} -c "sleep 5" </dev/null >/dev/null 2>&1 & echo $!`,
+        ],
+        { encoding: "utf8" },
+      ).stdout.trim();
+
+      try {
+        expect(run(["audit"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } }).status).toBe(2);
+        expect(existsSync(join(repo, "edits.log"))).toBe(false);
+      } finally {
+        spawnSync("kill", [held]);
+      }
     });
 
     it("読めなければ 2 で落ちる", () => {
