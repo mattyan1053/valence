@@ -426,6 +426,42 @@ describe("bin/loop-claim", () => {
       expect(run(["audit"]).status).toBe(0);
     });
 
+    /**
+     * ロックを握らせてから `body` を動かす。
+     *
+     * **待ち合わせを「速さ」ではなく「事実」で取る。** `sleep` で間を空ける形にすると、
+     * **遅い環境では握る前に本体が走って落ち**、**速い環境では永久に気づけない**
+     * （手元で緑・CI で赤、を実際に踏んだ）。**握ったと相手が知らせてから**動かす。
+     */
+    function withHeldLock(body: () => void): void {
+      const lock = join(repo, ".git", "valence-loop-claim.lock");
+      const ready = join(repo, "lock.ready");
+      const release = join(repo, "lock.release");
+      const held = spawnSync(
+        "bash",
+        [
+          "-c",
+          `setsid flock -x ${JSON.stringify(lock)} -c ${JSON.stringify(
+            `touch ${ready}; while [ ! -e ${release} ]; do sleep 0.02; done`,
+          )} </dev/null >/dev/null 2>&1 & echo $!`,
+        ],
+        { encoding: "utf8" },
+      ).stdout.trim();
+
+      try {
+        const deadline = Date.now() + 20_000;
+        while (!existsSync(ready) && Date.now() < deadline) {
+          spawnSync("sleep", ["0.02"]);
+        }
+        expect(existsSync(ready), "ロックを握れていない").toBe(true);
+
+        body();
+      } finally {
+        writeFileSync(release, "");
+        spawnSync("kill", [held]);
+      }
+    }
+
     it("見つけたら、その Issue を blocked へ移す", () => {
       // **記録するだけでは防止にならない。** 次の周回で `take` できてしまい、
       // **進捗が出るとカウンタが消える**——**止めたかった当の出来事が記録を消す**。
@@ -467,22 +503,10 @@ describe("bin/loop-claim", () => {
     it("ロックを取れないなら、label にも触らない", () => {
       // **移す前に `take` される窓**を作らない（P1 で直したのと同じ理由）
       withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
-      const lock = join(repo, ".git", "valence-loop-claim.lock");
-      const held = spawnSync(
-        "bash",
-        [
-          "-c",
-          `setsid flock -x ${JSON.stringify(lock)} -c "sleep 5" </dev/null >/dev/null 2>&1 & echo $!`,
-        ],
-        { encoding: "utf8" },
-      ).stdout.trim();
-
-      try {
+      withHeldLock(() => {
         expect(run(["audit"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } }).status).toBe(2);
         expect(existsSync(join(repo, "edits.log"))).toBe(false);
-      } finally {
-        spawnSync("kill", [held]);
-      }
+      });
     });
 
     it("読めなければ 2 で落ちる", () => {
@@ -518,25 +542,13 @@ describe("bin/loop-claim", () => {
       // **塞ぐ側に開く**（#124 のレビュー指摘）
       withAudit({ labelsOf: { 82: ["backlog"] } });
       writeRecord(82);
-      const lock = join(repo, ".git", "valence-loop-claim.lock");
-      const held = spawnSync(
-        "bash",
-        [
-          "-c",
-          `setsid flock -x ${JSON.stringify(lock)} -c "sleep 5" </dev/null >/dev/null 2>&1 & echo $!`,
-        ],
-        { encoding: "utf8" },
-      ).stdout.trim();
-
-      try {
+      withHeldLock(() => {
         // **ロックを取れないうちは、記録に触らない。**
         const audited = run(["audit"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } });
 
         expect(audited.status).toBe(2);
         expect(existsSync(join(repo, ".git", "valence-loop-claim-82"))).toBe(true);
-      } finally {
-        spawnSync("kill", [held]);
-      }
+      });
     });
   });
 
