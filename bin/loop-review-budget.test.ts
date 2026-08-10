@@ -1,0 +1,292 @@
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+const SCRIPT = fileURLToPath(new URL("./loop-review-budget", import.meta.url));
+
+const HEAD = "a".repeat(40);
+
+type Comment = { at: string; login: string; body: string };
+
+/** GitHub 側の状態。**偽の `gh` はこれを返すだけ**にして、判定だけを試す。 */
+type State = {
+  /** `bin/loop-review-commits --all` が返す行（`<時刻>\t<SHA>\t<live|stale>`）。 */
+  reviews?: string[];
+  comments?: Comment[];
+  createdAt?: string;
+  headSha?: string;
+  /** その取得だけが落ちる。**最初の 1 つだけ試すと、後ろの取得を試せない。** */
+  failsOn?: string;
+  reviewsExit?: number;
+};
+
+type Run = { status: number; stdout: string; stderr: string };
+
+/**
+ * **本物の `gh` を呼ばない。** 見たいのは「状態から終了コードをどう決めるか」であって、
+ * 取得の仕方ではない。**`jq` も置かない**——開発コンテナに無いので、
+ * **外部に依存したままだとこのスクリプトだけテストが書けない**（`bin/loop-gate` と同じ理由）。
+ */
+function run(state: State, env: Record<string, string> = {}): Run {
+  const dir = mkdtempSync(join(tmpdir(), "review-budget-"));
+  const bin = join(dir, "bin");
+  const path = join(dir, "path");
+  mkdirSync(bin);
+  mkdirSync(path);
+  for (const command of ["bash", "date", "cat", "dirname", "grep", "sed", "tr", "sort"]) {
+    const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
+    if (found !== "") {
+      symlinkSync(found, join(path, command));
+    }
+  }
+
+  const script = join(bin, "loop-review-budget");
+  copyFileSync(SCRIPT, script);
+  chmodSync(script, 0o755);
+
+  const comments = (state.comments ?? [])
+    .map((comment) => `${comment.at}\t${comment.login}\t${comment.body}`)
+    .join("\n");
+
+  writeFileSync(
+    join(path, "gh"),
+    [
+      "#!/usr/bin/env bash",
+      ...(state.failsOn === undefined
+        ? []
+        : [`if [[ $* == *${JSON.stringify(state.failsOn)}* ]]; then exit 1; fi`]),
+      'if [[ $* == *"headRefOid"* ]]; then',
+      `  echo ${JSON.stringify(state.headSha ?? HEAD)}`,
+      "  exit 0",
+      "fi",
+      'if [[ $* == *"createdAt"* ]]; then',
+      `  echo ${JSON.stringify(state.createdAt ?? "2026-01-01T00:00:00Z")}`,
+      "  exit 0",
+      "fi",
+      'if [[ $* == *"/comments"* ]]; then',
+      // **集計はスクリプト側で行わせる。** 取り出し済みの答えを返すと、数え方を試せない
+      `  printf '%b' ${JSON.stringify(comments)}`,
+      `  [[ -n ${JSON.stringify(comments)} ]] && echo`,
+      "  exit 0",
+      "fi",
+      'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+      "exit 2",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  writeFileSync(
+    join(bin, "loop-review-commits"),
+    [
+      "#!/usr/bin/env bash",
+      `printf '%b' ${JSON.stringify((state.reviews ?? []).join("\n"))}`,
+      `[[ -n ${JSON.stringify((state.reviews ?? []).join("\n"))} ]] && echo`,
+      `exit ${state.reviewsExit ?? 0}`,
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = spawnSync(script, ["12"], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: path, ...env },
+    timeout: 20_000,
+  });
+  rmSync(dir, { recursive: true, force: true });
+  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** いまから `minutes` 分前の時刻。**猶予の境目を跨がせるのに使う。** */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+const BOT = "chatgpt-codex-connector[bot]";
+const US = "mattyan1053";
+
+function request(at: string): Comment {
+  return { at, login: US, body: "@codex review" };
+}
+
+describe("bin/loop-review-budget", () => {
+  describe("exit 0 — 要求してよい", () => {
+    it("初回の猶予を過ぎても、レビューが 1 件も無い", () => {
+      const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+      expect(budget.status).toBe(0);
+    });
+
+    it("上限の 1 つ手前なら、まだ要求できる", () => {
+      // **上限の前後を必ず含める**（off-by-one で健全な PR が止まる）
+      const budget = run(
+        { reviews: [`${minutesAgo(60)}\t${"b".repeat(40)}\tlive`], createdAt: minutesAgo(120) },
+        { LOOP_MAX_REVIEW_ROUNDS: "2" },
+      );
+
+      expect(budget.status).toBe(0);
+    });
+  });
+
+  describe("exit 1 — 要求してはいけない", () => {
+    it("現 head が既にレビュー済み", () => {
+      // **何も変わっていないものを二度レビューさせない。** ここが浪費を止める本丸
+      const budget = run({ reviews: [`${minutesAgo(60)}\t${HEAD}\tlive`] });
+
+      expect(budget.status).toBe(1);
+    });
+
+    it("上限に達している", () => {
+      const budget = run(
+        {
+          reviews: [
+            `${minutesAgo(90)}\t${"b".repeat(40)}\tlive`,
+            `${minutesAgo(60)}\t${"c".repeat(40)}\tlive`,
+          ],
+          createdAt: minutesAgo(120),
+        },
+        { LOOP_MAX_REVIEW_ROUNDS: "2" },
+      );
+
+      expect(budget.status).toBe(1);
+    });
+
+    it("要求済みで未応答、猶予も過ぎている", () => {
+      const budget = run(
+        { reviews: [], comments: [request(minutesAgo(60))], createdAt: minutesAgo(120) },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.status).toBe(1);
+    });
+  });
+
+  describe("exit 3 — まだ要求しない（正常な待ち）", () => {
+    it("PR を開いた直後は、自動で入るレビューを待つ", () => {
+      const budget = run({ reviews: [], createdAt: minutesAgo(1) });
+
+      expect(budget.status).toBe(3);
+    });
+
+    it("要求してから猶予の内側なら待つ", () => {
+      // **1 と 3 の取り違えは、健全な PR を `loop/STOP` へ運ぶ**
+      const budget = run(
+        { reviews: [], comments: [request(minutesAgo(5))], createdAt: minutesAgo(120) },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.status).toBe(3);
+    });
+
+    it("猶予の内と外で、1 と 3 が分かれる", () => {
+      // **境目そのものを見る。** 判定を消さずに**境目だけずらす**変異を捕まえる
+      const inside = run(
+        { reviews: [], comments: [request(minutesAgo(29))], createdAt: minutesAgo(120) },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+      const outside = run(
+        { reviews: [], comments: [request(minutesAgo(31))], createdAt: minutesAgo(120) },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect([inside.status, outside.status]).toEqual([3, 1]);
+    });
+
+    it("初回の猶予も、内と外で分かれる", () => {
+      const inside = run(
+        { reviews: [], createdAt: minutesAgo(9) },
+        { LOOP_INITIAL_REVIEW_GRACE_MIN: "10" },
+      );
+      const outside = run(
+        { reviews: [], createdAt: minutesAgo(11) },
+        { LOOP_INITIAL_REVIEW_GRACE_MIN: "10" },
+      );
+
+      expect([inside.status, outside.status]).toEqual([3, 0]);
+    });
+  });
+
+  describe("exit 2 — 判定できない", () => {
+    it.each([
+      ["head SHA", { failsOn: "headRefOid" }],
+      ["レビュー済み commit", { reviewsExit: 1 }],
+      ["コメント", { failsOn: "/comments" }],
+    ])("%s を取得できない", (_name, state) => {
+      // **判定不能を「要求してよい」に倒さない。** 倒すと、壊れているときほど回る
+      expect(run({ reviews: [], createdAt: minutesAgo(60), ...state }).status).toBe(2);
+    });
+
+    it("使い方の誤り", () => {
+      const bad = spawnSync(SCRIPT, ["#12"], { encoding: "utf8" });
+
+      expect(bad.status).toBe(2);
+    });
+
+    it("設定が壊れていれば止まる", () => {
+      expect(run({ reviews: [] }, { LOOP_MAX_REVIEW_ROUNDS: "0" }).status).toBe(2);
+      expect(run({ reviews: [] }, { LOOP_MAX_REVIEW_ROUNDS: "たくさん" }).status).toBe(2);
+    });
+  });
+
+  describe("大文字小文字を区別しない", () => {
+    // **移し替えでは、確かめるものが 1 つ増える**——**論理が正しいか**に加えて、
+    // **前と同じ答えを返すか**。`jq` の `test(…; "i")` は無視していたので、
+    // **前が受け取れて後が落とす入力**をここに置く（#122 のレビュー指摘）。
+    it("`@Codex Review` も要求として数える", () => {
+      // 数えられないと「要求済みで未応答」が見えず、**要求を重ねる**——
+      // このスクリプトが守っている絶対ルールそのもの
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(120),
+          comments: [{ at: minutesAgo(5), login: US, body: "@Codex Review" }],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.status).toBe(3);
+    });
+
+    it("応答不能の通知も、書き方が違っても数える", () => {
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [
+            request(minutesAgo(200)),
+            { at: minutesAgo(100), login: BOT, body: "I need you to Create An Environment" },
+          ],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.status).toBe(0);
+    });
+  });
+
+  it("応答不能の通知より後の要求だけを未応答として数える", () => {
+    // **通知を消化しないと、元の要求が永久に未応答として残る**（復旧しても再要求できない）
+    const budget = run(
+      {
+        reviews: [],
+        createdAt: minutesAgo(300),
+        comments: [
+          request(minutesAgo(200)),
+          { at: minutesAgo(100), login: BOT, body: "I need you to create an environment" },
+        ],
+      },
+      { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+    );
+
+    expect(budget.status).toBe(0);
+  });
+});

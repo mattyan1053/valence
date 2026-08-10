@@ -107,39 +107,51 @@ done <<<"$responses"
 # 「受け取ったレビュー」だけを数えると、レビューが返ってこない場合に上限へ到達せず、
 # 要求だけを毎周投げ続ける。実際にレビュー機能が使えない状態を踏んだ。
 # 投げた要求と、bot からの応答不能通知も数える。
-if ! comments_json="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" 2>/dev/null \
-  | jq -rs --arg bot "$REVIEW_BOT" --arg since "$last_at" \
-    'add
-     | {requests: (map(select(.user.login != $bot
-                              and (.body | test("@codex\\s+review"; "i"))
-                              and ($since == "" or .created_at > $since))
-                       | .created_at)),
-        pending: (map(select(.user.login != $bot
-                             and (.body | test("@codex\\s+review"; "i"))
-                             and ($since == "" or .created_at > $since))) | length),
-        notice: (map(select(.user.login == $bot
-                            and (.body | test("create an environment"; "i")))) | length),
-        notice_at: (map(select(.user.login == $bot
-                               and (.body | test("create an environment"; "i")))
-                        | .created_at) | max)}')"; then
+#
+# **集計は jq に寄せない。** 開発コンテナに `jq` が無いので、依存したままだと
+# **判定を持つこのスクリプトだけテストが書けない**（`bin/loop-gate` と同じ理由で、
+# **合否を決めるところほど検証できる形にしておく**）。gh の `--jq` には
+# **1 行 1 コメントの生の値**だけを出させ、数えるのはここで行う。
+if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" \
+  --jq '.[] | [.created_at, .user.login, (.body | gsub("\\s+"; " "))] | @tsv')"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
   exit 2
 fi
-pending="$(jq -r '.pending' <<<"$comments_json")"
-notice="$(jq -r '.notice' <<<"$comments_json")"
-notice_at="$(jq -r '.notice_at' <<<"$comments_json")"
-# 未応答の要求のうち **最も新しいもの** の時刻。猶予の起点に使う。
-pending_at="$(jq -r '.requests | max // ""' <<<"$comments_json")"
 
-# 「環境が無い」通知は SHA を持たないのでレビュー扱いにはできないが、
-# 要求に対する応答ではある。これを消化しないと、元の要求が永久に未応答として
-# 残り、原因を直しても再要求できなくなる。通知より前の要求は応答済みとみなす。
-if [[ -n $notice_at && $notice_at != "null" ]] && [[ -z $last_at || $notice_at > $last_at ]]; then
-  pending="$(jq -rn --argjson c "$comments_json" --arg at "$notice_at" \
-    '$c.requests | map(select(. > $at)) | length' 2>/dev/null || echo "$pending")"
-  pending_at="$(jq -rn --argjson c "$comments_json" --arg at "$notice_at" \
-    '$c.requests | map(select(. > $at)) | max // ""' 2>/dev/null || echo "$pending_at")"
+# 未応答の要求と、応答不能の通知を数える。
+# **時刻の比較は文字列で足りる**（ISO 8601 は辞書順と時刻順が一致する）。
+pending=0
+pending_at=""
+notice=0
+notice_at=""
+requests=()
+while IFS=$'\t' read -r at login body; do
+  [[ -n $at ]] || continue
+  # **小文字へ畳んでから比べる。** 元は jq の `test(…; "i")` で大文字小文字を
+  # 無視していた。bash の `=~` は区別するので、**畳まないと `@Codex Review` を
+  # 取りこぼす**——そのとき「要求済みで未応答」が見えず、**要求を重ねる**。
+  lowered="${body,,}"
+  if [[ $login != "$REVIEW_BOT" ]] && [[ $lowered =~ @codex[[:space:]]+review ]]; then
+    requests+=("$at")
+  elif [[ $login == "$REVIEW_BOT" ]] && [[ $lowered == *"create an environment"* ]]; then
+    ((notice++))
+    [[ $at > $notice_at ]] && notice_at="$at"
+  fi
+done <<<"$comments"
+
+# **直近のレビューより後の要求だけが「未応答」である。**
+# 「環境が無い」通知は SHA を持たないのでレビュー扱いにはできないが、要求に対する
+# 応答ではある。これを消化しないと、元の要求が永久に未応答として残り、原因を直しても
+# 再要求できなくなる。**通知より前の要求は応答済みとみなす。**
+answered_at="$last_at"
+if [[ -n $notice_at && ( -z $answered_at || $notice_at > $answered_at ) ]]; then
+  answered_at="$notice_at"
 fi
+for at in ${requests+"${requests[@]}"}; do
+  [[ -n $answered_at && ! $at > $answered_at ]] && continue
+  ((pending++))
+  [[ $at > $pending_at ]] && pending_at="$at"
+done
 
 echo "pr=$PR head=${head_sha:0:8} rounds=$rounds max=$MAX_ROUNDS reviewed_head=$reviewed_head pending=$pending"
 
@@ -161,7 +173,7 @@ fi
 if ((pending > 0)); then
   # 猶予の内側は「正常な待ち」。空転として数えさせない (exit 3)。
   # ここを周回数で数えると、閾値が master のポーリング間隔で決まってしまう。
-  if [[ -n $pending_at && $pending_at != "null" ]]; then
+  if [[ -n $pending_at ]]; then
     requested_epoch="$(date -d "$pending_at" +%s 2>/dev/null || echo "")"
     if [[ -n $requested_epoch ]] \
       && (($(date +%s) - requested_epoch < PENDING_GRACE_MIN * 60)); then
