@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { buildDependencyEdges, type PullRequestRef } from "./dependency-graph";
 
-/** テストの見通しのために、必要な 3 つだけを渡す。 */
+/** 同じリポジトリに閉じた PR。ほとんどの例はこの形になる。 */
 function pr(number: number, baseBranch: string, headBranch: string): PullRequestRef {
-  return { number, baseBranch, headBranch };
+  return {
+    number,
+    base: { repository: "upstream", branch: baseBranch },
+    head: { repository: "upstream", branch: headBranch },
+  };
 }
 
 describe("PR の依存グラフ", () => {
@@ -94,5 +98,70 @@ describe("PR の依存グラフ", () => {
       { dependent: 3, dependsOn: 2 },
       { dependent: 2, dependsOn: 1 },
     ]);
+  });
+});
+
+describe("fork をまたぐ PR", () => {
+  it("同名でもリポジトリが違えば辺を作らない", () => {
+    // **参照は (リポジトリ, ブランチ) の組である。** public リポジトリなので
+    // fork からの PR は普通に来る。名前一致で繋ぐと、**upstream の feature を
+    // base にする PR が、fork の同名ブランチに積まれているように見える**
+    const edges = buildDependencyEdges([
+      {
+        number: 1,
+        base: { repository: "upstream", branch: "main" },
+        head: { repository: "fork", branch: "feature" },
+      },
+      {
+        number: 2,
+        base: { repository: "upstream", branch: "feature" },
+        head: { repository: "upstream", branch: "feat/b" },
+      },
+    ]);
+
+    expect(edges).toEqual([]);
+  });
+
+  it("fork の中で積まれていれば辺ができる", () => {
+    // リポジトリが同じなら従来どおり。**名前だけを見ないことと、
+    // fork を一律に切り捨てることは別**である
+    const edges = buildDependencyEdges([
+      {
+        number: 1,
+        base: { repository: "upstream", branch: "main" },
+        head: { repository: "fork", branch: "feature" },
+      },
+      {
+        number: 2,
+        base: { repository: "fork", branch: "feature" },
+        head: { repository: "fork", branch: "feat/b" },
+      },
+    ]);
+
+    expect(edges).toEqual([{ dependent: 2, dependsOn: 1 }]);
+  });
+
+  // 識別子もブランチ名も境界から来る文字列なので、**連結して鍵にすると
+  // 区切りを含む名前で別の組と衝突させられる**。実際に衝突する入力で固定する。
+  it.each([
+    // `${repository}:${branch}` で連結すると、どちらも "a:b:c" になる
+    {
+      delimiter: "コロン",
+      left: { repository: "a", branch: "b:c" },
+      right: { repository: "a:b", branch: "c" },
+    },
+    // 区切り無しで連結すると、どちらも "abc" になる
+    {
+      delimiter: "区切り無し",
+      left: { repository: "a", branch: "bc" },
+      right: { repository: "ab", branch: "c" },
+    },
+  ])("$delimiter で連結したときに衝突する組でも、別の参照として扱う", ({ left, right }) => {
+    const edges = buildDependencyEdges([
+      { number: 1, base: { repository: "upstream", branch: "main" }, head: left },
+      { number: 2, base: right, head: { repository: "upstream", branch: "feat/b" } },
+    ]);
+
+    expect(edges).toEqual([]);
   });
 });

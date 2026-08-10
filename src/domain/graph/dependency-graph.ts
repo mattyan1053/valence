@@ -6,13 +6,29 @@
  * 変換は infrastructure の責務。
  */
 
+/**
+ * ブランチの参照。
+ *
+ * **名前だけでは参照は決まらない。** public なリポジトリには fork からの PR が来るので、
+ * upstream の `feature` と fork の `feature` が同時に居うる。名前一致で繋ぐと、
+ * **存在しない依存が描かれる**。
+ */
+export type BranchRef = {
+  /**
+   * リポジトリの識別子。**中身は解釈しない不透明な文字列**で、
+   * 「同じ文字列なら同じリポジトリ」とだけ決める。何を入れるかは境界が決める。
+   */
+  readonly repository: string;
+  readonly branch: string;
+};
+
 /** 依存を決めるのに要る、PR の最小限の情報。 */
 export type PullRequestRef = {
   readonly number: number;
-  /** マージ先のブランチ名。 */
-  readonly baseBranch: string;
-  /** この PR が持ち込むブランチ名。 */
-  readonly headBranch: string;
+  /** マージ先。 */
+  readonly base: BranchRef;
+  /** この PR が持ち込むブランチ。 */
+  readonly head: BranchRef;
 };
 
 /** 「この PR は、あの PR の上に積まれている」を表す辺。 */
@@ -26,7 +42,7 @@ export type DependencyEdge = {
 /**
  * PR の集合から辺を導く。
  *
- * **辺は「ある PR の base が、別の PR の head と一致する」ことだけで決まる。**
+ * **辺は「ある PR の base が、別の PR の head と同じ参照である」ことだけで決まる。**
  * 「base が `main` 以外か」では判定しない。既定ブランチ名はリポジトリごとに違い、
  * 埋め込むと別名のリポジトリで壊れる。既定ブランチは「どの PR の head でもない」
  * というだけで自然に外れる。
@@ -37,11 +53,11 @@ export type DependencyEdge = {
 export function buildDependencyEdges(
   pullRequests: readonly PullRequestRef[],
 ): readonly DependencyEdge[] {
-  const byHead = indexByHeadBranch(pullRequests);
+  const byHead = indexByHead(pullRequests);
 
   const edges: DependencyEdge[] = [];
   for (const pullRequest of pullRequests) {
-    const dependsOn = byHead.get(pullRequest.baseBranch);
+    const dependsOn = byHead.get(refKey(pullRequest.base));
     if (dependsOn === undefined || dependsOn === AMBIGUOUS) {
       continue;
     }
@@ -61,17 +77,26 @@ export function buildDependencyEdges(
  * 通常は起きないが、閉じた PR を含めると起こりうる。**どちらに積まれたのかを
  * 決められない**ので、片方を選ばずに辺を作らない（分からないものを辺にしない）。
  */
-const AMBIGUOUS = Symbol("ambiguous head branch");
+const AMBIGUOUS = Symbol("ambiguous head ref");
 
-function indexByHeadBranch(
+/**
+ * 参照を突き合わせるための鍵。
+ *
+ * **区切り文字で連結しない。** 識別子もブランチ名も境界から来る文字列なので、
+ * 区切りを含む名前で**別の組と衝突させられる**。JSON は値ごとに引用符とエスケープが
+ * 付くので、組が一意に決まる。
+ */
+function refKey(ref: BranchRef): string {
+  return JSON.stringify([ref.repository, ref.branch]);
+}
+
+function indexByHead(
   pullRequests: readonly PullRequestRef[],
 ): ReadonlyMap<string, number | typeof AMBIGUOUS> {
   const byHead = new Map<string, number | typeof AMBIGUOUS>();
   for (const pullRequest of pullRequests) {
-    byHead.set(
-      pullRequest.headBranch,
-      byHead.has(pullRequest.headBranch) ? AMBIGUOUS : pullRequest.number,
-    );
+    const key = refKey(pullRequest.head);
+    byHead.set(key, byHead.has(key) ? AMBIGUOUS : pullRequest.number);
   }
   return byHead;
 }
