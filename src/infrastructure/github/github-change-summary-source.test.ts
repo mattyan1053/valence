@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppCredentials } from "./app-credentials";
 import { createGitHubChangeSummarySource } from "./github-change-summary-source";
 
@@ -223,6 +223,144 @@ describe("createGitHubChangeSummarySource", () => {
 
     expect(listing.summaries.has(1)).toBe(false);
     expect(asked.some((url) => url.includes("orgs/other/secrets"))).toBe(false);
+  });
+
+  describe("打ち切りの合図", () => {
+    /**
+     * **本当に返らない `fetch`。** 応答を作らない。
+     *
+     * **即座に落ちる偽物では確かめられない**——それは**遅い口ではなく、壊れた口**である。
+     * **合図を受け取ってはじめて返る**形にしてあるので、**受け取らない実装は止まらない。**
+     */
+    function silentFetch(seen: { count: number }): typeof fetch {
+      return (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const token = tokenResponse(url);
+        if (token !== undefined) {
+          return token;
+        }
+        seen.count += 1;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("中断されました")), {
+            once: true,
+          });
+        });
+      }) as unknown as typeof fetch;
+    }
+
+    it("合図を受けたら、取れたぶんを持って返る", async () => {
+      // **最後まで回すと、呼んだ側が縮退したあとも往復が続く**——
+      // **止まるのは呼んだ側だけ**になる
+      const deadline = new AbortController();
+      const seen = { count: 0 };
+      const listing = createGitHubChangeSummarySource({
+        credentials: CREDENTIALS,
+        repository: REPOSITORY,
+        fetchImpl: silentFetch(seen),
+      }).listChangeSummaries([1, 2, 3], { signal: deadline.signal });
+
+      // **要求が飛んでから打ち切る。** 先に切ると、1 本も呼ばない経路になる
+      await vi.waitFor(() => expect(seen.count).toBeGreaterThan(0));
+      deadline.abort();
+      const result = await listing;
+
+      expect(result.summaries.size).toBe(0);
+      expect(result.unavailable.map((entry) => entry.pullRequestNumber)).toEqual([1, 2, 3]);
+      expect(result.unavailable.every((entry) => entry.kind === "timedout")).toBe(true);
+    });
+
+    it("合図は fetch まで届く", async () => {
+      // **口の中で握り潰さない。** 届かないと、**中断したのに往復だけ続く**
+      const deadline = new AbortController();
+      const signals: (AbortSignal | undefined)[] = [];
+      const listing = createGitHubChangeSummarySource({
+        credentials: CREDENTIALS,
+        repository: REPOSITORY,
+        fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+          const token = tokenResponse(String(input));
+          if (token !== undefined) {
+            return token;
+          }
+          signals.push(init?.signal ?? undefined);
+          // **合図でだけ返る。** 何も起こさない口にすると、
+          // **合図が届いていても届いていなくても、この試験は返らない**
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("中断されました")), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof fetch,
+      }).listChangeSummaries([1], { signal: deadline.signal });
+
+      await vi.waitFor(() => expect(signals).toHaveLength(1));
+      deadline.abort();
+      await listing;
+
+      expect(signals[0], "合図が fetch に渡っていない").toBe(deadline.signal);
+    });
+
+    /** URL ごとの本文。**分岐を偽物の中で積まない**（読む側も検査器も追えなくなる）。 */
+    function bodyFor(url: string): unknown {
+      if (url.includes("/files")) {
+        return [];
+      }
+      if (url.includes("/check-runs")) {
+        return { check_runs: [] };
+      }
+      if (url.includes("/status")) {
+        return { statuses: [] };
+      }
+      return { changed_files: 1, additions: 1, deletions: 0, head: { sha: HEAD } };
+    }
+
+    it("1 本取れた直後に切れたら、次の PR は取りに行かない", async () => {
+      // **合図を見る場所が要る。** 中断で投げる `fetch` なら**捕まえた側**でも気づけるが、
+      // **1 本ぶんが正常に終わってから切れた場合**、次の周回へ入る手前で見ていないと
+      // **打ち切ったのに往復が続く**。
+      const deadline = new AbortController();
+      const asked: string[] = [];
+      const listing = await createGitHubChangeSummarySource({
+        credentials: CREDENTIALS,
+        repository: REPOSITORY,
+        fetchImpl: (async (input: string | URL | Request) => {
+          const url = String(input);
+          const token = tokenResponse(url);
+          if (token !== undefined) {
+            return token;
+          }
+          asked.push(url);
+          // **1 本目の取得が終わる直前に切る。** 時間ではなく、**経路の位置**で切る
+          if (url.includes("/status")) {
+            deadline.abort();
+          }
+          return new Response(JSON.stringify(bodyFor(url)), { status: 200 });
+        }) as unknown as typeof fetch,
+      }).listChangeSummaries([1, 2], { signal: deadline.signal });
+
+      expect(
+        asked.some((url) => url.includes("/pulls/2")),
+        "2 本目を取りに行っている",
+      ).toBe(false);
+      expect(listing.summaries.has(1)).toBe(true);
+      expect(listing.unavailable).toEqual([
+        { pullRequestNumber: 2, kind: "timedout", reason: "期限までに材料が返りませんでした" },
+      ]);
+    });
+
+    it("合図が無ければ、これまでどおり最後まで集める", async () => {
+      // **既定を変えない。** 合図を渡さない呼び出しは、いままでと同じ振る舞いをする
+      const listing = await source({
+        "/pulls/1/files": { body: [] },
+        "/check-runs": { body: { check_runs: [] } },
+        "/status": { body: { statuses: [] } },
+        "/pulls/1": {
+          body: { changed_files: 1, additions: 1, deletions: 0, head: { sha: HEAD } },
+        },
+      }).listChangeSummaries([1]);
+
+      expect(listing.summaries.has(1)).toBe(true);
+      expect(listing.unavailable).toEqual([]);
+    });
   });
 
   it("番号を渡さなければ何も取りに行かない", async () => {

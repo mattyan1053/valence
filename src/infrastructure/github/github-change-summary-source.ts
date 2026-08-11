@@ -38,6 +38,17 @@ const API_ORIGIN = "https://api.github.com";
  */
 const MAX_PAGES = 3;
 
+/**
+ * 打ち切られたか。
+ *
+ * **その都度読む。** `signal?.aborted` を式のまま書くと、型検査が
+ * **「1 度見たら変わらない」**と絞り込む——**待っている間に変わる**のがこの値の役目で、
+ * **変わりうることを関数で表す**。
+ */
+function abandoned(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
 export type GitHubChangeSummarySourceOptions = {
   readonly credentials: AppCredentials;
   /** **設定に埋めない**（`AGENTS.md` §1）。選ぶのは合成ルートの仕事である。 */
@@ -68,8 +79,10 @@ export function createGitHubChangeSummarySource({
   }
 
   /** **応答の中身を理由に載せない。** 秘密が混ざりうる（`AGENTS.md` §6）。 */
-  async function readJson(url: string, header: string): Promise<unknown> {
+  // **合図は最後まで運ぶ。** 途中で落とすと、**中断したのに往復だけ続く**
+  async function readJson(url: string, header: string, signal?: AbortSignal): Promise<unknown> {
     const response = await fetchImpl(url, {
+      signal,
       headers: {
         authorization: header,
         accept: "application/vnd.github+json",
@@ -90,11 +103,15 @@ export function createGitHubChangeSummarySource({
     path: string,
     pick: (body: unknown) => unknown[] | undefined,
     header: string,
+    signal?: AbortSignal,
   ): Promise<{ items: unknown[]; truncated: boolean }> {
     const items: unknown[] = [];
     for (let page = 1; page <= MAX_PAGES; page++) {
       const url = `${API_ORIGIN}/repos/${repository.owner}/${repository.name}${path}?per_page=100&page=${page}`;
-      const result = (await readJson(url, header)) as { body: unknown; link: string | null };
+      const result = (await readJson(url, header, signal)) as {
+        body: unknown;
+        link: string | null;
+      };
       const chunk = pick(result.body);
       if (chunk === undefined) {
         throw new Error("一覧を読めませんでした");
@@ -113,17 +130,22 @@ export function createGitHubChangeSummarySource({
     pick: (body: unknown) => unknown[] | undefined,
     header: string,
     what: string,
+    signal?: AbortSignal,
   ): Promise<unknown[]> {
-    const { items, truncated } = await readPages(path, pick, header);
+    const { items, truncated } = await readPages(path, pick, header, signal);
     if (truncated) {
       throw new Error(`${what}が多すぎて最後まで見切れませんでした`);
     }
     return items;
   }
 
-  async function summaryOf(number: number, header: string): Promise<ChangeSummary> {
+  async function summaryOf(
+    number: number,
+    header: string,
+    signal?: AbortSignal,
+  ): Promise<ChangeSummary> {
     const base = `${API_ORIGIN}/repos/${repository.owner}/${repository.name}`;
-    const detail = (await readJson(`${base}/pulls/${number}`, header)) as { body: unknown };
+    const detail = (await readJson(`${base}/pulls/${number}`, header, signal)) as { body: unknown };
     // **検証してから URL へ入れる**（`AGENTS.md` §6）。素通しにすると、
     // **installation トークンを付けたまま別の endpoint を叩ける**。
     const head = toHeadSha(detail.body);
@@ -134,6 +156,7 @@ export function createGitHubChangeSummarySource({
       `/pulls/${number}/files`,
       (body) => (Array.isArray(body) ? body : undefined),
       header,
+      signal,
     );
     // **CI の結果も最後まで読む。** ファイルだけ手当てして片方を 1 ページで済ませると、
     // **見ていない run が「通っている」に化ける**。
@@ -145,12 +168,14 @@ export function createGitHubChangeSummarySource({
       (body) => (body as { check_runs?: unknown })?.check_runs as unknown[] | undefined,
       header,
       "CI の結果",
+      signal,
     );
     const statuses = await readAll(
       `/commits/${head}/status`,
       (body) => (body as { statuses?: unknown })?.statuses as unknown[] | undefined,
       header,
       "CI の状態",
+      signal,
     );
 
     // **3 回の取得は別々の瞬間を見ている。** 間に push が入ると、
@@ -158,7 +183,7 @@ export function createGitHubChangeSummarySource({
     // **未検証の新しい版に「読まずにマージしてよい」と出る**。
     // **取り直さない**——また間に push が入りうるので終わらない。材料にしなければ、
     // 行は残ったまま次の周回で埋まる（#112）。
-    const again = (await readJson(`${base}/pulls/${number}`, header)) as { body: unknown };
+    const again = (await readJson(`${base}/pulls/${number}`, header, signal)) as { body: unknown };
     if (toHeadSha(again.body) !== head) {
       throw new Error("取得の途中で PR が更新されました（別々の版が混ざるため材料にしません）");
     }
@@ -176,27 +201,82 @@ export function createGitHubChangeSummarySource({
     return result.summary;
   }
 
-  return {
-    async listChangeSummaries(pullRequestNumbers): Promise<ChangeSummaryListing> {
-      const summaries = new Map<number, ChangeSummary>();
-      const unavailable: UnavailableChangeSummary[] = [];
-      if (pullRequestNumbers.length === 0) {
-        return { summaries, unavailable };
-      }
+  /** 打ち切られたぶん。**「読めなかった」と同じ場所に出るが、同じものではない。** */
+  function giveUp(numbers: readonly number[]): UnavailableChangeSummary[] {
+    return numbers.map((pullRequestNumber) => ({
+      pullRequestNumber,
+      kind: "timedout" as const,
+      reason: "期限までに材料が返りませんでした",
+    }));
+  }
 
-      const header = await authorization();
-      for (const number of pullRequestNumbers) {
-        try {
-          summaries.set(number, await summaryOf(number, header));
-        } catch (error) {
-          // **落とさない。** ここで投げると、1 本の失敗で全体が消える
-          unavailable.push({
-            pullRequestNumber: number,
-            reason: error instanceof Error ? error.message : "材料を取得できませんでした",
-          });
-        }
+  /**
+   * 1 本ぶんの結果。**投げずに返す**ので、集める側に try/catch が入らない
+   * （入れ子が増えると、**読む人も検査器も追えなくなる**）。
+   */
+  type Attempt =
+    | { readonly ok: true; readonly summary: ChangeSummary }
+    | { readonly ok: false; readonly reason: string };
+
+  async function attempt(
+    number: number,
+    header: string,
+    signal: AbortSignal | undefined,
+  ): Promise<Attempt> {
+    try {
+      return { ok: true, summary: await summaryOf(number, header, signal) };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : "材料を取得できませんでした",
+      };
+    }
+  }
+
+  /**
+   * 1 本ずつ集める。**合図を見たら、取れたぶんを持って返る。**
+   *
+   * 最後まで回すと、**呼んだ側が縮退したあとも往復が続く**——**止まるのは呼んだ側だけ**
+   * になる。**残りは打ち切りとして残す**ので、**「読めなかった」とは混ざらない。**
+   */
+  async function collectSummaries(
+    numbers: readonly number[],
+    header: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ChangeSummaryListing> {
+    const summaries = new Map<number, ChangeSummary>();
+    const unavailable: UnavailableChangeSummary[] = [];
+    const stopAt = (index: number): ChangeSummaryListing => ({
+      summaries,
+      unavailable: [...unavailable, ...giveUp(numbers.slice(index))],
+    });
+
+    for (const [index, number] of numbers.entries()) {
+      if (abandoned(signal)) {
+        return stopAt(index);
       }
-      return { summaries, unavailable };
+      const result = await attempt(number, header, signal);
+      if (result.ok) {
+        summaries.set(number, result.summary);
+        continue;
+      }
+      // **取り消しの跡を「読めなかった」にしない。** fetch は中断されると投げる
+      if (abandoned(signal)) {
+        return stopAt(index);
+      }
+      // **落とさない。** ここで投げると、1 本の失敗で全体が消える
+      unavailable.push({ pullRequestNumber: number, kind: "unreadable", reason: result.reason });
+    }
+    return { summaries, unavailable };
+  }
+
+  return {
+    async listChangeSummaries(pullRequestNumbers, request): Promise<ChangeSummaryListing> {
+      if (pullRequestNumbers.length === 0) {
+        return { summaries: new Map(), unavailable: [] };
+      }
+      const header = await authorization();
+      return collectSummaries(pullRequestNumbers, header, request?.signal);
     },
   };
 }
