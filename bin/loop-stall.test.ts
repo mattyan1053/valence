@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { holdingSnippet } from "../test/held-lock";
-import { MODELLED_SPAWNS } from "../test/slow-machine";
+import { MODELLED_SPAWNS, SCRIPT_TEST_TIMEOUT_MS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-stall", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -465,7 +465,7 @@ describe("共有カウンタの排他", () => {
         // **知らせ合いが噛み合わないと、どちらも相手を待って固まる。**
         // `spawnSync` は vitest の枠では中断できないので、**外側に上限を置く**——
         // **判定には使わない**（合否は下の表明が決める）。固まったら落ちる
-        timeout: 30_000,
+        timeout: SCRIPT_TEST_TIMEOUT_MS,
       },
     );
     const elapsed = Number(/elapsed_ms=(\d+)/.exec(holder.stdout)?.[1] ?? "0");
@@ -491,7 +491,7 @@ describe("共有カウンタの排他", () => {
       encoding: "utf8",
       env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
       // **知らせ合いが噛み合わなければ固まらずに落ちる**（下の試験で確かめている）
-      timeout: 30_000,
+      timeout: SCRIPT_TEST_TIMEOUT_MS,
     });
     const counted = readFileSync(state, "utf8");
     rmSync(repo, { recursive: true, force: true });
@@ -512,7 +512,30 @@ describe("握り合わせが噛み合わなかったとき", () => {
   // **「今回は落ちた」を根拠にしない。** 変異で赤が出たことは**そのとき返っただけ**で、
   // **必ず返る保証**ではない。**保持側が残っていないことを直接見る。**
 
+  /**
+   * この試験のラッパーを打ち切る枠。**ここだけ短く切る**——見たいのは
+   * 「打ち切られたときに後始末が働くか」なので、待つ理由が無い。
+   */
+  const ORPHAN_CUTOFF_MS = 10_000;
+
+  /**
+   * この試験の保持側だけが持つ上限。**わざと枠より長い。**
+   *
+   * **既定（`HOLD_LIMIT_SEC`）は「包む枠より短い」が約束である。** ここだけ逆にするのは、
+   * **この試験の主題が後始末そのもの**だからである——**保持側が自分で消えてしまうと、
+   * `trap` が壊れていてもロックが空き、表明が通る**（空振りする）。
+   *
+   * **他の保持側にこの形を持ち込まない。** 枠より長い上限は、**打ち切られたあとに
+   * その差だけ残る**ことを意味する。ここは**残っていないことを直後に確かめている**ので
+   * 成り立つ。
+   */
+  const ORPHAN_HOLD_SEC = (ORPHAN_CUTOFF_MS / 1_000) * 2;
+
   it("上限で打ち切られても、保持側を残さない", () => {
+    // **枠の関係が崩れたら、この試験は空振りする。** 先に確かめる
+    expect(ORPHAN_CUTOFF_MS, "保持側が自分で消えるので、後始末を試せていない").toBeLessThan(
+      ORPHAN_HOLD_SEC * 1_000,
+    );
     const repo = mkdtempSync(join(tmpdir(), "loop-stall-orphan-"));
     spawnSync("git", ["init", "--quiet", repo]);
     const lock = join(repo, "held.lock");
@@ -532,7 +555,7 @@ describe("握り合わせが噛み合わなかったとき", () => {
       [
         "-c",
         `mkfifo '${repo}/held' '${repo}/never'
-         ${holdingSnippet({ lock, held: `${repo}/held`, release: `${repo}/never` })}
+         ${holdingSnippet({ lock, held: `${repo}/held`, release: `${repo}/never`, limitSeconds: ORPHAN_HOLD_SEC })}
          holder=$!
          trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
          read -r _ < '${repo}/held' || exit 3
@@ -542,7 +565,7 @@ describe("握り合わせが噛み合わなかったとき", () => {
       // **起動待ちと停止待ちで分け合っている。** 起動が遅い日にここが尽きても、
       // 下の「握った」の表明が落ちるので**空振りは緑にならない**。
       // 起動は実測で 1 秒未満なので、10 秒あれば停止待ちに十分残る
-      { cwd: repo, encoding: "utf8", timeout: 10_000 },
+      { cwd: repo, encoding: "utf8", timeout: ORPHAN_CUTOFF_MS },
     );
 
     // **ロックが空いていれば、保持側は残っていない。** 「返ってきた」だけでは、
