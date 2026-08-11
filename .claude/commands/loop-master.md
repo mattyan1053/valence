@@ -489,6 +489,21 @@ gh pr comment <PR番号> --body-file <file>           # 後
 **指摘の当否を判断してから付ける。** 「レビューが来たら機械的に付ける」ではない——
 **外出しする**（`defer`）ものや、**直さないと決める**ものには付けない。
 
+**既に `changes-requested` が付いている PR に、新しい指摘が届いたとき**は、**付け直す。**
+
+```bash
+gh pr edit <PR番号> --remove-label changes-requested
+gh pr edit <PR番号> --add-label changes-requested     # 付け直して初めて、判断した記録になる
+```
+
+**label は PR 全体の状態であって、指摘ごとの印ではない。** CI の失敗・規模超過・
+1 つ前の指摘で既に付いていることがあるので、`bin/loop-handoff` は
+**label より後に立ったスレッドを「まだ見ていない」**と読む。**付け直さないと、
+新しい指摘を見た記録がどこにも残らず、持ち手が master のまま worker へ渡らない。**
+
+**外したまま失敗しても黙って落ちることはない**——label が無い状態は
+`handoff-mismatch` として記録される。
+
 ### 返信を確かめる
 
 未解決スレッドごとに、次を見る。

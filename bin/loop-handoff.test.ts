@@ -9,6 +9,11 @@ const SCRIPT = fileURLToPath(new URL("./loop-handoff", import.meta.url));
 
 type Run = { status: number; stdout: string; stderr: string };
 
+/** スレッドが立った既定の時刻。**label より前**（master が見てから付けた形）。 */
+const THREAD_AT = "2026-01-01T00:00:00Z";
+/** `changes-requested` を付けた既定の時刻。**スレッドより後**。 */
+const LABELED_AT = "2026-06-01T00:00:00Z";
+
 /** GitHub の状態。**偽の `gh` はこれを返すだけ**にして、判断だけを試す。 */
 type State = {
   /** open PR。`labels` は付いている label 名。 */
@@ -19,6 +24,19 @@ type State = {
     labels?: string[];
     /** 未解決スレッドの最後の発言。**件数だけでは持ち手が決まらない。** */
     unresolvedBy?: ("bot" | "us")[];
+    /**
+     * スレッドが立った時刻（`unresolvedBy` と同じ並び）。
+     *
+     * **label より後に立ったかどうかで、当否が判断済みかが決まる。**
+     * 既定は label より前。
+     */
+    threadsAt?: string[];
+    /**
+     * `changes-requested` を最後に付けた時刻。
+     *
+     * **既定はスレッドより後**（master が指摘を見てから付けた、いつもの順序）。
+     */
+    labeledAt?: string;
     /** 最後の発言の ID。**返信だけでも動く値**である。 */
     lastComment?: number;
     head?: string;
@@ -69,10 +87,11 @@ describe("bin/loop-handoff", () => {
   }
 
   function withState(state: State): void {
+    // **本文は最後に置く。** 途中に置くと、本文に混じった空白で列がずれる
     const prs = (state.prs ?? [])
       .map(
         (pr) =>
-          `${pr.number}\t${(pr.labels ?? []).join(",")}\t${pr.head ?? "a".repeat(40)}\t${pr.body ?? ""}`,
+          `${pr.number}\t${(pr.labels ?? []).join(",")}\t${pr.head ?? "a".repeat(40)}\t${pr.labeledAt ?? LABELED_AT}\t${pr.body ?? ""}`,
       )
       .join("\n");
     // **一覧（検索）は古い値を返しうる。** ここでは**わざと古い値**を返させ、
@@ -84,7 +103,7 @@ describe("bin/loop-handoff", () => {
       .flatMap((pr) =>
         (pr.unresolvedBy ?? []).map(
           (who, index) =>
-            `${pr.lastComment ?? 100 + index}\t${who === "bot" ? "chatgpt-codex-connector" : "mattyan1053"}`,
+            `${pr.lastComment ?? 100 + index}\t${who === "bot" ? "chatgpt-codex-connector" : "mattyan1053"}\t${pr.threadsAt?.[index] ?? THREAD_AT}`,
         ),
       )
       .join("\n");
@@ -486,6 +505,45 @@ describe("bin/loop-handoff", () => {
 
       expect(handoff.stdout).toMatch(/^master\t/);
       expect(handoff.status).toBe(3);
+    });
+
+    it("label が付いていても、あとから届いた指摘は master の持ち物", () => {
+      // **`changes-requested` は PR 全体の状態**であって、**個別の指摘を見た証拠ではない。**
+      // CI の失敗・規模超過・前の指摘で既に付いていることがあり、
+      // **その label を「当否は判断済み」と読むと、あとから届いた指摘が
+      // 当否の判断を経ないまま worker の持ち物になる**——
+      // **worker の周回は自分宛て → 沈黙**なので、master は気づけない
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: ["changes-requested"],
+            unresolvedBy: ["bot"],
+            labeledAt: "2026-08-01T00:00:00Z",
+            threadsAt: ["2026-08-02T00:00:00Z"],
+          },
+        ],
+      });
+
+      expect(run("worker").stdout).toMatch(/^master\t/);
+    });
+
+    it("label より前からある指摘は、これまでどおり worker の持ち物", () => {
+      // **付けた時点で見えていたものは、当否が判断されている。**
+      // ここまで master 宛にすると、**label を付けても worker が呼ばれない**
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: ["changes-requested"],
+            unresolvedBy: ["bot"],
+            labeledAt: "2026-08-02T00:00:00Z",
+            threadsAt: ["2026-08-01T00:00:00Z"],
+          },
+        ],
+      });
+
+      expect(run("master").stdout).toMatch(/^worker\t/);
     });
 
     it("すべて答えてあれば、これまでどおり復路になる", () => {
