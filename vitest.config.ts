@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig, type ViteUserConfig } from "vitest/config";
-import { SCRIPT_TEST_TIMEOUT_MS } from "./test/slow-machine";
+import { budgetFor, MODELLED_HOOK_SPAWNS, SCRIPT_TEST_TIMEOUT_MS } from "./test/slow-machine";
 
 /**
  * 試験を 2 つに分ける。**分ける理由は「プロセスを起こすかどうか」**である。
@@ -29,6 +29,8 @@ export const projects = [
       // bin/ のループ用スクリプトもテストする。ここが壊れるとループが空転し続ける。
       include: ["bin/**/*.test.ts", "loop/**/*.test.ts"],
       testTimeout: SCRIPT_TEST_TIMEOUT_MS,
+      // **本体だけ伸ばしても、本体へ到達する前に落ちる。** hook は別枠である。
+      hookTimeout: budgetFor(MODELLED_HOOK_SPAWNS),
       // 落ちたときに、負荷が原因かどうかを出力から判別できるようにする。
       setupFiles: ["./test/slow-machine-setup.ts"],
     },

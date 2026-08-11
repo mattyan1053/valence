@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { config, projects } from "../vitest.config";
-import { budgetFor, loadNote, MODELLED_SPAWNS, SCRIPT_TEST_TIMEOUT_MS } from "./slow-machine";
+import {
+  budgetFor,
+  loadNote,
+  MODELLED_HOOK_SPAWNS,
+  MODELLED_SPAWNS,
+  SCRIPT_TEST_TIMEOUT_MS,
+} from "./slow-machine";
 
 describe("落ちたときに、負荷が原因だと分かる", () => {
   // **これが無いと、負荷で落ちたことを外から判別できない。**
@@ -8,7 +14,13 @@ describe("落ちたときに、負荷が原因だと分かる", () => {
   // `expected … to contain` は**普通なら本物の不具合の顔**をしている。
   // 「同じ試験が同じ形で落ちたら本物」という判定は、そのせいで成り立たなかった。
 
-  const base = { name: "3 周続くと loop/STOP が配られる", durationMs: 5000, timeoutMs: 5000 };
+  const FINISHED = 1_786_427_223_856;
+  const base = {
+    name: "3 周続くと loop/STOP が配られる",
+    startedAt: FINISHED - 120,
+    finishedAt: FINISHED,
+    timeoutMs: 30_000,
+  };
 
   it("CPU 数に見合う負荷なら、何も言わない", () => {
     // **負荷のせいにしない。** 空いている機械で落ちたなら、それは本物である
@@ -21,22 +33,50 @@ describe("落ちたときに、負荷が原因だと分かる", () => {
 
     expect(note).not.toBeNull();
     expect(note).toContain("34");
-    expect(note).toContain("1");
+    expect(note).toContain("CPU 1");
+  });
+
+  it("かかった時間は、開始と終了の差から出す", () => {
+    // **vitest は afterEach の時点で `result.duration` を持っていない**（実測: undefined）。
+    // それを 0 に丸めると、**どの失敗も「0 ms」になる**
+    const note = loadNote({ ...base, startedAt: FINISHED - 657, load1: 34, cpus: 1 });
+
+    expect(note).toContain("657");
+    expect(note).not.toContain("0 ms");
   });
 
   it("枠に届かなかったこと（時間切れ）が分かる", () => {
-    const note = loadNote({ ...base, durationMs: 5001, timeoutMs: 5000, load1: 34, cpus: 1 });
+    // **注記のいちばん大事な仕事。** ここが出ないと、時間切れが
+    // **表明の破れと同じ顔**で並ぶ（実測で「0 ms で失敗」と出ていた）
+    const note = loadNote({
+      ...base,
+      startedAt: FINISHED - 30_500,
+      timeoutMs: 30_000,
+      load1: 34,
+      cpus: 1,
+    });
 
     expect(note).toContain("時間切れ");
+    expect(note).toContain("30500");
   });
 
   it("時間切れでなくても言う（表明の破れが混ざる）", () => {
     // **ここがこの Issue の核心。** timeout だけを対象にすると、
     // **負荷で壊れた表明を本物の不具合として追いかける**
-    const note = loadNote({ ...base, durationMs: 120, timeoutMs: 5000, load1: 34, cpus: 1 });
+    const note = loadNote({ ...base, startedAt: FINISHED - 120, load1: 34, cpus: 1 });
 
     expect(note).not.toBeNull();
     expect(note).not.toContain("時間切れ");
+  });
+
+  it("開始時刻が取れなければ、0 ms と言わずに取れないと言う", () => {
+    // **分からないものを 0 に丸めない。** 丸めた結果が
+    // 「0 ms で失敗」という**嘘の注記**だった
+    const note = loadNote({ ...base, startedAt: undefined, load1: 34, cpus: 1 });
+
+    expect(note).not.toBeNull();
+    expect(note).not.toContain("0 ms");
+    expect(note).toContain("取れません");
   });
 
   it("確かめ方まで書く", () => {
@@ -83,6 +123,13 @@ describe("プロセスを起こす試験の枠", () => {
   it("負荷の注記は、プロセスを起こす側に配線されている", () => {
     // **落ちるのはそちら**なので、注記が要るのもそちらである
     expect(named("scripts")?.test.setupFiles).toContain("./test/slow-machine-setup.ts");
+  });
+
+  it("hook にも同じ根拠の枠を与える", () => {
+    // **本体だけ伸ばしても、本体へ到達する前に落ちる。**
+    // `bin/loop-claim.test.ts` の `beforeEach` は 16 プロセスを同期実行する
+    // （git 2 回と `which` 14 回）。既定の hookTimeout は 10 秒しかない
+    expect(named("scripts")?.test.hookTimeout).toBe(budgetFor(MODELLED_HOOK_SPAWNS));
   });
 
   it("枠は起こす回数に比例する", () => {

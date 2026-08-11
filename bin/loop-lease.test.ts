@@ -4,6 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { budgetFor } from "../test/slow-machine";
+
+/**
+ * 同時に取りに行く数。**枠もここから導く**ので、増やしたら枠も一緒に増える
+ * （`budgetFor(CONCURRENT_ACQUIRES + 1)`。+1 は束ねる bash）。
+ */
+const CONCURRENT_ACQUIRES = 16;
 
 const SCRIPT = fileURLToPath(new URL("./loop-lease", import.meta.url));
 
@@ -132,21 +139,32 @@ describe("bin/loop-lease", () => {
     expect(acquire("worker", { LOOP_LEASE_TTL_SEC: "しばらく" }).status).toBe(2);
   });
 
-  it("同時に取りに行っても 1 つしか成功しない", () => {
-    // **判定と書き込みの間に割り込まれると、両方が「空いている」と読む。**
-    // これは `bin/loop-review-budget` で実際に起きる形と同じである。
-    // **順に呼んでは意味がない**（保持の検査だけを通ってしまう）ので、
-    // シェルの背景ジョブで**本当に同時に**走らせる
-    const parallel = spawnSync(
-      "bash",
-      ["-c", `for _ in $(seq 16); do "${SCRIPT}" acquire worker && echo ok & done; wait`],
-      { cwd: sandbox, encoding: "utf8" },
-    );
+  it(
+    "同時に取りに行っても 1 つしか成功しない",
+    () => {
+      // **判定と書き込みの間に割り込まれると、両方が「空いている」と読む。**
+      // これは `bin/loop-review-budget` で実際に起きる形と同じである。
+      // **順に呼んでは意味がない**（保持の検査だけを通ってしまう）ので、
+      // シェルの背景ジョブで**本当に同時に**走らせる
+      const parallel = spawnSync(
+        "bash",
+        [
+          "-c",
+          `for _ in $(seq ${CONCURRENT_ACQUIRES}); do "${SCRIPT}" acquire worker && echo ok & done; wait`,
+        ],
+        { cwd: sandbox, encoding: "utf8" },
+      );
 
-    const acquired = parallel.stdout.split("\n").filter((line) => line === "ok");
+      const acquired = parallel.stdout.split("\n").filter((line) => line === "ok");
 
-    expect(acquired).toHaveLength(1);
-  });
+      expect(acquired).toHaveLength(1);
+    },
+    // **この 1 件だけ枠が違う。** bash 1 つと lease を CONCURRENT_ACQUIRES 個、
+    // 合わせて 17 プロセスを起こす。**同時に起こしても 1 vCPU では費用は壁時計に乗る**
+    // ので、project 全体の枠（10 プロセスぶん）では足りない。
+    // **全体を上げない**——上げると、本物の無限ループの検出が遅れるだけになる
+    budgetFor(CONCURRENT_ACQUIRES + 1),
+  );
 
   describe("worker はセッションごとに取る", () => {
     /** 同じリポジトリの worktree を足す。**共通ディレクトリを共有する**ので、鍵も共有される。 */

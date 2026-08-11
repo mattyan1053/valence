@@ -38,6 +38,18 @@ const WORST_SPAWN_MS = 1_000;
  * **減らせない。** 回数のほとんどは「使い捨ての git リポジトリと worktree を作る」ためで、
  * **`loop/STOP` が両方の worktree へ配られること**を見るのに要る。使い回すと
  * カウンタの状態が試験を跨いで漏れ、**この試験が守っているものが守れなくなる**。
+ *
+ * **これは「いちばん重い試験」ではなく「既定として面倒を見る回数」である。**
+ * 全 scripts 試験を機械的に数える手立ては無い——**helper の中で何個起こすかは
+ * ソースの見た目から決まらない**（`bash -c` の中で 16 個起こす試験が実際にあった）。
+ *
+ * **超えるものは、その試験が自分で枠を宣言する**（`it(name, fn, budgetFor(n))`）。
+ * いまの宣言はここに 1 件ある。
+ *
+ *   bin/loop-lease.test.ts「同時に取りに行っても 1 つしか成功しない」… 17 プロセス
+ *
+ * **見つけ方は注記である。** 時間切れの注記が出た試験を数え直して、
+ * ここを超えていれば宣言を足す。**全体を上げて合わせない。**
  */
 export const MODELLED_SPAWNS = 10;
 
@@ -66,11 +78,32 @@ export function budgetFor(spawns: number): number {
   return spawns * WORST_SPAWN_MS * MARGIN;
 }
 
+/**
+ * hook が起こすプロセスの数（いちばん重い `beforeEach`）。
+ *
+ * `bin/loop-claim.test.ts` の `beforeEach` が **git 2 回** と、PATH を絞るための
+ * **`which` 14 回**を同期実行する。**本体の枠を伸ばしても、hook は別枠**なので、
+ * ここを与えないと**本体へ到達する前に落ちる**（既定は 10 秒）。
+ *
+ * **写した数である。** 数え違いは起こす側で検出する——`bin/loop-claim.test.ts` の
+ * `beforeEach` が自分の起こした回数を数え、この値と一致しなければ落ちる。
+ */
+export const MODELLED_HOOK_SPAWNS = 16;
+
 export type LoadContext = {
   /** 落ちた試験の名前。並んだ出力の中で、どれに付いた注記か分かるようにする。 */
   name: string;
-  /** 実際にかかった時間（ミリ秒）。 */
-  durationMs: number;
+  /**
+   * 試験が始まった時刻（epoch ミリ秒）。
+   *
+   * **`result.duration` は使えない。** `afterEach` の時点では vitest がまだ
+   * 記録しておらず、**実測で `undefined`** だった。0 に丸めた結果、
+   * **時間切れが「0 ms で失敗」と表示され**、注記のいちばん大事な仕事が失われていた。
+   * **取れないこともある**ので、その場合は取れないと言う。
+   */
+  startedAt: number | undefined;
+  /** 落ちたことが分かった時刻（epoch ミリ秒）。 */
+  finishedAt: number;
   /** その試験に与えられていた枠（ミリ秒）。 */
   timeoutMs: number;
   /** loadavg の 1 分値。**実行待ちの数**であって使用率ではない。 */
@@ -91,14 +124,21 @@ export function loadNote(context: LoadContext): string | null {
   if (context.load1 <= context.cpus) {
     return null;
   }
-  const how =
-    context.durationMs >= context.timeoutMs
-      ? `枠 ${context.timeoutMs} ms に届かず時間切れ`
-      : `${context.durationMs} ms で失敗`;
   return [
     `[負荷] ${context.name}`,
-    how,
+    howItFailed(context),
     `実行待ち ${context.load1.toFixed(1)} / CPU ${context.cpus}`,
     "単独で走らせ直して再現するか確かめること（再現しなければ負荷が原因）",
   ].join(" / ");
+}
+
+function howItFailed(context: LoadContext): string {
+  if (context.startedAt === undefined) {
+    // **推測で埋めない。** 0 に丸めると「0 ms で失敗」という嘘になる。
+    return "かかった時間を取れません";
+  }
+  const elapsed = context.finishedAt - context.startedAt;
+  return elapsed >= context.timeoutMs
+    ? `枠 ${context.timeoutMs} ms に届かず時間切れ（${elapsed} ms）`
+    : `${elapsed} ms で失敗`;
 }
