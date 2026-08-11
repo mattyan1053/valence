@@ -66,6 +66,41 @@ describe("bin/loop-procedure-changed", () => {
     expect(run(before).status).toBe(1);
   });
 
+  it("bin の試験だけなら、変わっていないと判定する", () => {
+    // **master は試験ファイルを実行しない。** `src/` しか触らない PR で捨てないのと
+    // 同じ理由で、ここも捨てない——**試験だけを直した PR の直後に、毎回 1 周が空振りする**
+    // （実測で 2 回。#152 / #155 のマージ直後）。
+    //
+    // **空振りは 1 周の遅れでは終わらない。** 打ち切ると呼び直すので、
+    // **「新しい版が読み込まれる保証は無い」（実測 2 回中 1 回）に毎回賭ける**
+    const before = commit("bin/loop-gate", "前\n");
+    commit("bin/loop-stall.test.ts", "後\n");
+
+    expect(run(before).status).toBe(1);
+  });
+
+  it("bin の実体が変わったら、試験も一緒でも、変わったと判定する", () => {
+    // **判定を緩めて「変わっていない」に倒さない。**
+    // **master が古いスクリプトで走り続けるほうが、空振りより危険**である（#93）
+    const before = commit("src/a.ts", "前\n");
+    mkdirSync(join(repo, "bin"), { recursive: true });
+    writeFileSync(join(repo, "bin/loop-gate"), "後\n");
+    writeFileSync(join(repo, "bin/loop-gate.test.ts"), "後\n");
+    git("add", "-A");
+    git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "本体と試験");
+
+    expect(run(before).status).toBe(0);
+  });
+
+  it("--list は、除いているものも隠さない", () => {
+    // **判定だけ別の場所で例外にすると、`--list` が嘘をつく。**
+    // **対象はスクリプトが 1 つ持つ**のがこの仕組みの前提である
+    const listed = run("--list");
+
+    expect(listed.stdout).toContain("bin/");
+    expect(listed.stdout).toContain("test.ts");
+  });
+
   it("worker の手順書だけなら、変わっていないと判定する", () => {
     // master が実行するのは master の手順書である。**worker 側の変更で捨てない**
     const before = commit("bin/loop-gate", "前\n");
