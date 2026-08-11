@@ -264,6 +264,16 @@ cmd_help() {
   ' "$0"
 }
 
+# **周回が生きていることを記録する。** lease の期限は「取得からの経過」ではなく
+# 「最後に何かが起きてからの経過」で測る (bin/loop-lease)。長い処理はすべてここを
+# 通るので、**打つ場所をここ 1 つにすれば、書き忘れる経路が無い**。
+#
+# **失敗しても止めない。** ループと関係なく `./task` を使うときに、
+# lease の都合でコマンドが落ちてはいけない。
+heartbeat() {
+  ./bin/loop-lease heartbeat worker >/dev/null 2>&1 || true
+}
+
 main() {
   local raw="${1:-help}"
   shift || true
@@ -278,6 +288,7 @@ main() {
     exit 1
   fi
 
+  heartbeat
   "$fn" "$@"
 }
 
