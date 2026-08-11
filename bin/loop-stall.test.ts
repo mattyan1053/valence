@@ -398,6 +398,34 @@ describe("共有カウンタの排他", () => {
     return { repo, script, state: join(repo, ".git", "valence-loop-stall") };
   }
 
+  /**
+   * ロックを握らせたまま本体を走らせる bash。**時間はどこにも要らない。**
+   *
+   * **保持側は自分のプロセスグループで起こし、標準出力を切り離す。**
+   *   - **切り離す理由**: 継承したままだと、外側の bash が殺されても
+   *     **`spawnSync` がパイプの終わりを待ち続ける**（返ってこない）
+   *   - **グループにする理由**: `timeout` が届くのは**直下の bash だけ**なので、
+   *     **背後の保持側が生き残る**。グループごと終えられる形にしておく
+   *   - **`trap` を張る理由**: 上限で殺されたときにも後始末を通すため。
+   *     **`EXIT` だけでは、シグナルで死んだときに走らない**
+   *
+   * **`setsid` と `trap` のどちらか一方では足りない。** 前者だけだと後始末を
+   * 呼ぶ者がおらず、後者だけだと**送る先が直下の 1 つ**になる。
+   */
+  function holdingScript(paths: { repo: string; script: string; state: string }): string {
+    const { repo, script, state } = paths;
+    return `mkfifo '${repo}/held' '${repo}/release'
+      setsid flock '${state}.lock' -c 'echo x > "${repo}/held"; read -r _ < "${repo}/release"' \
+        </dev/null >/dev/null 2>&1 &
+      holder=$!
+      trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
+      read -r _ < '${repo}/held'
+      '${script}' no-work
+      echo "stall_exit=$?"
+      echo x > '${repo}/release'
+      wait "$holder" 2>/dev/null`;
+  }
+
   it("ロックが取られている間は待ち、解放されてから数える", () => {
     // **カウンタは master と worker が同じ周期で書きうる。** 読んでから書くまでを
     // 排他しないと、後から書いた側が相手の増分を消す（記録が増えないまま周回が進み、
@@ -415,7 +443,10 @@ describe("共有カウンタの排他", () => {
       [
         "-c",
         `mkfifo '${repo}/held'
-         flock '${state}.lock' -c 'echo x > "${repo}/held"; sleep 1' &
+         setsid flock '${state}.lock' -c 'echo x > "${repo}/held"; sleep 1' \
+           </dev/null >/dev/null 2>&1 &
+         holder=$!
+         trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
          read -r _ < '${repo}/held'
          start=$(date +%s%N)
          '${script}' no-work
@@ -451,26 +482,13 @@ describe("共有カウンタの排他", () => {
     // **負荷が高いと本体の起動と待ちの合計が 2 秒を超え、先に放してしまう**——
     // すると本体はロックを取れてしまい、`count=2` になる（#141 の実際の壊れ方）。
     // **握ったことを知らせ合い、本体が終わってから放す**——時間はどこにも要らない
-    const result = spawnSync(
-      "/usr/bin/bash",
-      [
-        "-c",
-        `mkfifo '${repo}/held' '${repo}/release'
-         flock '${state}.lock' -c 'echo x > "${repo}/held"; read -r _ < "${repo}/release"' &
-         read -r _ < '${repo}/held'
-         '${script}' no-work
-         echo "stall_exit=$?"
-         echo x > '${repo}/release'
-         wait`,
-      ],
-      {
-        cwd: repo,
-        encoding: "utf8",
-        env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
-        // 上と同じ理由。**知らせ合いが噛み合わなければ固まらずに落ちる**
-        timeout: 30_000,
-      },
-    );
+    const result = spawnSync("/usr/bin/bash", ["-c", holdingScript({ repo, script, state })], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
+      // **知らせ合いが噛み合わなければ固まらずに落ちる**（下の試験で確かめている）
+      timeout: 30_000,
+    });
     const counted = readFileSync(state, "utf8");
     rmSync(repo, { recursive: true, force: true });
 
@@ -479,6 +497,45 @@ describe("共有カウンタの排他", () => {
     expect(result.stderr).toContain("ロック");
     // 数えていないこと（1 のまま）
     expect(counted).toContain("1\tno-work");
+  });
+});
+
+describe("握り合わせが噛み合わなかったとき", () => {
+  // **安全網そのものを試す。** 前の版は「上限を置いた」と書いてあるだけで、
+  // **上限が届くのは直下の bash だけ**だった——**背後の保持側は標準出力を継承したまま
+  // 生き残る**ので、**`spawnSync` はパイプの終わりを待ち続ける**。
+  //
+  // **「今回は落ちた」を根拠にしない。** 変異で赤が出たことは**そのとき返っただけ**で、
+  // **必ず返る保証**ではない。**保持側が残っていないことを直接見る。**
+
+  it("上限で打ち切られても、保持側を残さない", () => {
+    const repo = mkdtempSync(join(tmpdir(), "loop-stall-orphan-"));
+    spawnSync("git", ["init", "--quiet", repo]);
+    const lock = join(repo, "held.lock");
+    writeFileSync(lock, "");
+
+    // **わざと噛み合わせない。** 知らせを読む側が居ないので、保持側は書き込みで止まる
+    const stuck = spawnSync(
+      "/usr/bin/bash",
+      [
+        "-c",
+        `mkfifo '${repo}/held' '${repo}/never'
+         setsid flock '${lock}' -c 'echo x > "${repo}/held"; read -r _ < "${repo}/never"' \
+           </dev/null >/dev/null 2>&1 &
+         holder=$!
+         trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
+         read -r _ < '${repo}/never'`,
+      ],
+      { cwd: repo, encoding: "utf8", timeout: 3_000 },
+    );
+
+    // **ロックが空いていれば、保持側は残っていない。** 「返ってきた」だけでは、
+    // 背後に居座っているかどうかが分からない
+    const free = spawnSync("/usr/bin/flock", ["-n", lock, "-c", "true"], { encoding: "utf8" });
+    rmSync(repo, { recursive: true, force: true });
+
+    expect(stuck.status, "上限で打ち切られていない").not.toBe(0);
+    expect(free.status, "ロックが解放されていない（保持側が残っている）").toBe(0);
   });
 });
 
