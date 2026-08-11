@@ -19,6 +19,17 @@
 # (`bin/loop-procedure-changed` の「1 以外はすべて」と同じ理由)。
 # **出口を 1 本にして、そこで必ず持ち手を決める。**
 #
+# **両側が同じものを見て、同じ判定を返す。** 役ごとに見るものを変えない。
+# 変えると、**同じ PR の同じ瞬間に「対応が返っている」と「label が無い」が同時に成り立つ**——
+# **どちらの記録が本当かを、人が突き合わせる**ことになる（#150）。
+# 役で変わるのは**行き先だけ**で、**状態の読み方と終了コードは同じ**である。
+#
+# **持ち手は「次に動ける人」であって「直す人」ではない。** 当否がまだ判断されていない
+# 指摘は、**`changes-requested` を付け外しできる master** にしか動かせない。
+# ここを直す側（worker）へ渡していたので、**worker の周回は自分宛て → 沈黙**になり、
+# **master は自分の周回まで気づけなかった**。その間ずっと食い違いが記録され、
+# **PR が健全でも 3 周で `loop/STOP`** に達する（#149 / #152 で実際に踏んだ）。
+#
 # **ping-pong を作らない。** 「暇そうだから起こす」を許すと
 # 「やることなし → 起こす → やることなし → 起こす」で焼き切れる。
 #
@@ -37,6 +48,19 @@ readonly ROLES=(master worker)
 
 # 自動レビューの bot。**この人が最後なら、まだ誰も答えていない。**
 readonly REVIEW_BOT="chatgpt-codex-connector"
+
+# 列の区切り。**タブを使わない。**
+#
+# **タブは IFS の空白なので、連続すると 1 区切りに畳まれる。** label が 1 つも無い PR
+# （外した直後など）で列が左へずれ、**時刻の欄に PR 本文が入る**。数字は英字より前に
+# 並ぶので時刻の比較は**必ず偽**になり、**「判断済み」の枝 → worker 宛 → 自分宛て →
+# 沈黙**——**この仕組みが消しに来た沈黙が、直したはずの経路の中に戻る。**
+# **空の列があっても畳まれない文字**にすれば、`read` の並びがずれない。
+#
+# **同じ穴を `bin/loop-merge` が踏んでいる**（`mergedAt` が空のとき `headRefName` が
+# そこへ入り、**未マージを「マージ済み」と誤判定**した）。**あちらは 1 行 1 値で受ける**。
+# ここは 1 行が 1 件（PR・スレッド）なので、**区切りのほうを変える**。
+readonly FIELD=$'\037'
 
 usage() {
   echo "使い方: bin/loop-handoff <役>   役: ${ROLES[*]}" >&2
@@ -78,9 +102,13 @@ prs="$(gh api graphql --paginate \
     repository(owner:$owner,name:$repo){
       pullRequests(states:OPEN,first:50,after:$endCursor){
         pageInfo{hasNextPage endCursor}
-        nodes{number headRefOid body labels(first:50){nodes{name}}}}}}' \
+        nodes{number headRefOid body labels(first:50){nodes{name}}
+          timelineItems(itemTypes:LABELED_EVENT, last:50){
+            nodes{... on LabeledEvent{createdAt label{name}}}}}}}}' \
   --jq '.data.repository.pullRequests.nodes[]
-    | "\(.number)\t\([.labels.nodes[].name] | join(","))\t\(.headRefOid)\t\((.body // "") | gsub("\\s+"; " "))"')" ||
+    | "\(.number)\u001f\([.labels.nodes[].name] | join(","))\u001f\(.headRefOid)\u001f\(
+        [.timelineItems.nodes[] | select(.label.name == "changes-requested") | .createdAt] | max // ""
+      )\u001f\((.body // "") | gsub("\\s+"; " "))"')" ||
   fail_unknown "open PR"
 
 # **未解決スレッドを、ゲートと同じ読み方で取る。**
@@ -101,7 +129,19 @@ prs="$(gh api graphql --paginate \
 declare -A unresolved_of=()
 declare -A last_comment_of=()
 declare -A last_author_of=()
-while IFS=$'\t' read -r number _labels _head _body; do
+# **まだ誰も答えていないスレッドの数。** 件数とは別に持つ。
+#
+# さらに 2 つに分ける。**`changes-requested` は PR 全体の状態であって、
+# スレッドごとの印ではない**——CI の失敗・規模超過・1 つ前の指摘で既に付いている
+# ところへ新しい指摘が届くと、**当否を判断していないのに「判断済み」になる**。
+# **label を付けた時刻より後に立ったスレッドは、付けた人には見えていない。**
+#
+# **「master が返信したスレッドは判断済み」では解けない。** 役は同じアカウントで
+# 動くので、**GitHub 側の名前では master と worker を見分けられない**——
+# そこへ寄せると、**worker の返信を master の判断として読む**。
+declare -A untriaged_of=()
+declare -A requested_of=()
+while IFS="$FIELD" read -r number _labels _head labeled_at _body; do
   [[ -n $number ]] || continue
   threads="$(gh api graphql --paginate \
     -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" -F number="$number" \
@@ -110,14 +150,30 @@ while IFS=$'\t' read -r number _labels _head _body; do
         pullRequest(number:$number){
           reviewThreads(first: 100, after: $endCursor){
             pageInfo{hasNextPage endCursor}
-            nodes{isResolved comments(last:1){nodes{databaseId author{login}}}}}}}}' \
+            nodes{isResolved
+              opened: comments(first:1){nodes{createdAt}}
+              comments(last:1){nodes{databaseId author{login}}}}}}}}' \
     --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)
-      | .comments.nodes[0] | "\(.databaseId)\t\(.author.login)"')" ||
+      | "\(.comments.nodes[0].databaseId)\u001f\(.comments.nodes[0].author.login)\u001f\(.opened.nodes[0].createdAt)"')" ||
     fail_unknown "未解決スレッド (#$number)"
   count=0
-  while IFS=$'\t' read -r comment_id author; do
+  untriaged=0
+  requested=0
+  while IFS="$FIELD" read -r comment_id author opened_at; do
     [[ -n $comment_id ]] || continue
     ((count++))
+    # **スレッドごとに数える。** PR ごとに「いちばん新しい発言」だけで決めると、
+    # **新しいほうへ返信しただけで、答えの無いスレッドが隠れる**——
+    # **指摘が 1 つ、誰にも拾われずに消える**。
+    if [[ $author == "$REVIEW_BOT"* ]]; then
+      # **label より後に立ったスレッドは、付けた時点で見えていない。**
+      # 時刻はどちらも GitHub が記録した値で、書式が同じなので文字列で比べられる。
+      if [[ -z $labeled_at || $opened_at > $labeled_at ]]; then
+        ((untriaged++))
+      else
+        ((requested++))
+      fi
+    fi
     # **いちばん新しい発言を持つ。** ID は増える一方なので、大きいほうが新しい
     if [[ -z ${last_comment_of[$number]-} || $comment_id -gt ${last_comment_of[$number]} ]]; then
       last_comment_of[$number]="$comment_id"
@@ -125,6 +181,8 @@ while IFS=$'\t' read -r number _labels _head _body; do
     fi
   done <<<"$threads"
   unresolved_of[$number]="$count"
+  untriaged_of[$number]="$untriaged"
+  requested_of[$number]="$requested"
 done <<<"$prs"
 
 # **最後の発言も指紋に入れる。** コードを変えずに理由だけ返信すると、head も件数も
@@ -141,9 +199,9 @@ counts="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}
       ready: issues(states:OPEN, labels:["ready"]){totalCount}
       inProgress: issues(states:OPEN, labels:["in-progress"]){totalCount}
       backlog: issues(states:OPEN, labels:["backlog"]){totalCount}}}' \
-  --jq '.data.repository | "\(.ready.totalCount)\t\(.inProgress.totalCount)\t\(.backlog.totalCount)"')" ||
+  --jq '.data.repository | "\(.ready.totalCount)\u001f\(.inProgress.totalCount)\u001f\(.backlog.totalCount)"')" ||
   fail_unknown "Issue の件数"
-IFS=$'\t' read -r ready in_progress backlog <<<"$counts"
+IFS="$FIELD" read -r ready in_progress backlog <<<"$counts"
 
 for count in "$ready" "$in_progress" "$backlog"; do
   [[ $count =~ ^[0-9]+$ ]] || fail_unknown "件数が数値ではありません: $count"
@@ -163,7 +221,7 @@ done
 # **読めなかったときの受け皿は上にある**（`$prs` の取得が失敗すれば `fail_unknown`）。
 # ここは**取れている本文から数えるだけ**なので、失敗しうる操作を挟まない。
 declare -A parked_seen=()
-while IFS=$'\t' read -r _number labels _head body; do
+while IFS="$FIELD" read -r _number labels _head _labeled_at body; do
   [[ ",$labels," == *",parked,"* ]] || continue
   rest="$body"
   while [[ $rest =~ Closes[[:space:]]+#([0-9]+) ]]; do
@@ -220,22 +278,36 @@ gateable=""
 mismatched=""
 # **答えを待っている側**の PR（未解決があり、最後に書いたのが自分たちの役）。
 answered=""
-while IFS=$'\t' read -r number labels _head _body; do
+# **当否がまだ判断されていない指摘がある** PR。**動けるのは master だけ**である。
+untriaged=""
+while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
   [[ -n $number ]] || continue
   unresolved="${unresolved_of[$number]-0}"
   [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
+  untriaged_here="${untriaged_of[$number]-0}"
+  requested_here="${requested_of[$number]-0}"
   if [[ ",$labels," == *",parked,"* ]]; then
     :
-  elif ((unresolved > 0)) && [[ ${last_author_of[$number]-} != "$REVIEW_BOT"* ]]; then
+  elif ((untriaged_here > 0)); then
+    # **まだ誰も答えておらず、当否も判断されていない。**
+    # **`changes-requested` を付け外しできるのは master だけ**なので、
+    # ここを worker 宛にすると **worker の周回は自分宛て → 沈黙**になり、
+    # **master は自分の周回まで気づけない**。その間ずっと下の食い違いが記録され、
+    # **PR が健全でも 3 周で `loop/STOP`** に達する（#149 / #152 で実際に踏んだ）。
+    untriaged="$number"
+    # **食い違いは「label が 1 つも付いていない」ときだけ**である。
+    # 既に付いている PR へ新しい指摘が届いた状態は、**運用が壊れているのではない**——
+    # 渡す先が master だというだけなので、ここで記録すると**正常な受け渡しで人を呼ぶ**。
+    [[ ",$labels," == *",changes-requested,"* ]] || mismatched="$number"
+  elif ((requested_here > 0)); then
+    # 当否は判断済み（その指摘が見えている時点で label が付いている）。直すのは worker
+    changes_requested="$number"
+  elif ((unresolved > 0)); then
     # **件数だけでは持ち手が決まらない。** 同じ「未解決 1 件」に
     # 「指摘が返ってきた直後」と「直して返信し終えた直後」が混ざっている。
     # **役は同じアカウントで動く**ので、GitHub 側の名前では見分けられない——
     # **呼んだ側は、その周回で書き終えている**ので、渡す先は相手役である。
     answered="$number"
-  elif ((unresolved > 0)); then
-    # まだ誰も答えていない指摘。直すのは worker である
-    changes_requested="$number"
-    [[ ",$labels," == *",changes-requested,"* ]] || mismatched="$number"
   elif [[ ",$labels," == *",changes-requested,"* ]]; then
     changes_requested="$number"
   else
@@ -244,7 +316,12 @@ while IFS=$'\t' read -r number labels _head _body; do
 done <<<"$prs"
 
 # 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
-if [[ -n $answered ]]; then
+if [[ -n $untriaged ]]; then
+  # **当否を判断できるのは master だけ**である。**放っておくとループが止まる側**なので、
+  # 他の持ち物より先に見る。
+  to="master"
+  reason="PR #${untriaged} の指摘が未処理（当否を判断して changes-requested を付けるか、外出しする）"
+elif [[ -n $answered ]]; then
   # 相手役へ渡す。**自分は今の周回で書き終えている**
   to="worker"
   reason="PR #${answered} に未解決の指摘がある"

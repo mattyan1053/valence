@@ -9,6 +9,19 @@ const SCRIPT = fileURLToPath(new URL("./loop-handoff", import.meta.url));
 
 type Run = { status: number; stdout: string; stderr: string };
 
+/**
+ * 列の区切り。**スクリプトと同じ US を使う**（タブは連続すると畳まれる）。
+ *
+ * **`printf '%b'` が読む形で書く。** ここに実物の制御文字を置くと、
+ * 偽の `gh` を書き出すときにエスケープされ、**`%b` が戻せない形**になる。
+ */
+const FIELD = "\\0037";
+
+/** スレッドが立った既定の時刻。**label より前**（master が見てから付けた形）。 */
+const THREAD_AT = "2026-01-01T00:00:00Z";
+/** `changes-requested` を付けた既定の時刻。**スレッドより後**。 */
+const LABELED_AT = "2026-06-01T00:00:00Z";
+
 /** GitHub の状態。**偽の `gh` はこれを返すだけ**にして、判断だけを試す。 */
 type State = {
   /** open PR。`labels` は付いている label 名。 */
@@ -19,6 +32,21 @@ type State = {
     labels?: string[];
     /** 未解決スレッドの最後の発言。**件数だけでは持ち手が決まらない。** */
     unresolvedBy?: ("bot" | "us")[];
+    /**
+     * スレッドが立った時刻（`unresolvedBy` と同じ並び）。
+     *
+     * **label より後に立ったかどうかで、当否が判断済みかが決まる。**
+     * 既定は label より前。
+     */
+    threadsAt?: string[];
+    /**
+     * `changes-requested` を最後に付けた時刻。
+     *
+     * **既定は label の有無から決まる**——付いていればスレッドより後（master が
+     * 指摘を見てから付けた、いつもの順序）、付いていなければ**記録なし**。
+     * **外したあとも記録は残る**ので、その形を作るときはここへ明示する。
+     */
+    labeledAt?: string;
     /** 最後の発言の ID。**返信だけでも動く値**である。 */
     lastComment?: number;
     head?: string;
@@ -68,11 +96,26 @@ describe("bin/loop-handoff", () => {
     ];
   }
 
+  /**
+   * `changes-requested` を付けた時刻。**付いていない PR には記録が無い**のが既定である。
+   *
+   * **一律に時刻を返さない。** label の無い PR にまで「付けた記録」を与えると、
+   * **付けたことが 1 度も無い PR を「判断済み」に見せる**——**試験のほうが
+   * 起こりえない状態を作って、実装の誤りを隠す**ことになる。
+   */
+  function labeledAtOf(pr: NonNullable<State["prs"]>[number]): string {
+    if (pr.labeledAt !== undefined) {
+      return pr.labeledAt;
+    }
+    return (pr.labels ?? []).includes("changes-requested") ? LABELED_AT : "";
+  }
+
   function withState(state: State): void {
+    // **本文は最後に置く。** 途中に置くと、本文に混じった空白で列がずれる
     const prs = (state.prs ?? [])
       .map(
         (pr) =>
-          `${pr.number}\t${(pr.labels ?? []).join(",")}\t${pr.head ?? "a".repeat(40)}\t${pr.body ?? ""}`,
+          `${pr.number}${FIELD}${(pr.labels ?? []).join(",")}${FIELD}${pr.head ?? "a".repeat(40)}${FIELD}${labeledAtOf(pr)}${FIELD}${pr.body ?? ""}`,
       )
       .join("\n");
     // **一覧（検索）は古い値を返しうる。** ここでは**わざと古い値**を返させ、
@@ -84,7 +127,7 @@ describe("bin/loop-handoff", () => {
       .flatMap((pr) =>
         (pr.unresolvedBy ?? []).map(
           (who, index) =>
-            `${pr.lastComment ?? 100 + index}\t${who === "bot" ? "chatgpt-codex-connector" : "mattyan1053"}`,
+            `${pr.lastComment ?? 100 + index}${FIELD}${who === "bot" ? "chatgpt-codex-connector" : "mattyan1053"}${FIELD}${pr.threadsAt?.[index] ?? THREAD_AT}`,
         ),
       )
       .join("\n");
@@ -99,7 +142,7 @@ describe("bin/loop-handoff", () => {
         // ここを見ていなければ「ready が 1 件ある」に到達しない
         ...answerLines(
           "totalCount",
-          `${state.ready ?? 0}\t${state.inProgress ?? 0}\t${state.backlog ?? 0}`,
+          `${state.ready ?? 0}${FIELD}${state.inProgress ?? 0}${FIELD}${state.backlog ?? 0}`,
         ),
         // **PR 一覧も検索を通さない口から取る。** label を付けた直後は一覧が古い
         ...answerLines("pullRequests(states:OPEN", prs),
@@ -328,15 +371,13 @@ describe("bin/loop-handoff", () => {
   });
 
   describe("ゲートと同じものを見る", () => {
-    it("未解決スレッドが残る PR は master の持ち物にしない", () => {
+    it("未解決スレッドが残る PR を、ゲートを回せる側へ渡さない", () => {
       // **ゲートは未解決スレッドを見て落とすのに、handoff は label だけを見ていた。**
       // label が 0 件だと「master がゲートを回せる」と読み、**自分宛なので黙る**
       // （#103 と #107 で実際に起きた。手順書どおりに進んでも label は付かない）
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
-      const handoff = run("master");
-
-      expect(handoff.stdout).toMatch(/^worker\t/);
+      expect(run("worker").stdout).not.toContain("ゲート");
     });
 
     it("未解決が無ければ、これまでどおり master がゲートを回す", () => {
@@ -364,10 +405,12 @@ describe("bin/loop-handoff", () => {
     });
 
     it("送らない周回でも知らせる", () => {
-      // **自己宛てでも重複でも通る。** その状態が続いていること自体が、記録したい事実
+      // **自己宛てでも重複でも通る。** その状態が続いていること自体が、記録したい事実。
+      // **当否がまだ判断されていない指摘の持ち手は master** なので、
+      // **master から呼んだ周回が自己宛て**になる
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
-      const handoff = run("worker");
+      const handoff = run("master");
 
       expect(handoff.status).toBe(3);
       expect(handoff.stdout).toBe("");
@@ -414,12 +457,13 @@ describe("bin/loop-handoff", () => {
       expect(run("master").stdout).toMatch(/^worker\t/);
     });
 
-    it("誰も答えていない指摘は worker の持ち物", () => {
-      // レビューの bot が最後なら、**まだ誰も答えていない**
-      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+    it("誰も答えていない指摘は、label が付いていれば worker の持ち物", () => {
+      // レビューの bot が最後なら、**まだ誰も答えていない**。
+      // **当否の判断は済んでいる**（master が label を付けている）ので、直すのは worker
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
 
       expect(run("master").stdout).toMatch(/^worker\t/);
-      // **worker から呼べば自分宛てなので送らない**（記録は別の判断なので通る）
+      // **worker から呼べば自分宛てなので送らない**
       expect(run("worker").stdout).toBe("");
     });
 
@@ -438,6 +482,131 @@ describe("bin/loop-handoff", () => {
       });
 
       expect(run("worker").status).toBe(0);
+    });
+  });
+
+  describe("当否がまだ判断されていない指摘", () => {
+    /** #152 と同じ形。**指摘が返ってきて、worker がまだ返信していない瞬間。** */
+    const untriaged = { prs: [{ number: 12, unresolvedBy: ["bot"] as ("bot" | "us")[] }] };
+
+    it("持ち手は master である（付けられるのは master だけ）", () => {
+      // **`changes-requested` を付け外しできるのは master だけ**なので、
+      // **当否が判断されるまで worker には持ち物が無い**。ここを worker 宛にすると、
+      // **worker から呼んだ周回は自分宛て → 沈黙**になり、**master は自分の周回まで気づけない**。
+      // その間 `handoff-mismatch` が積まれ、**PR が健全でも 3 周で `loop/STOP`** に達する（#152 で 1/3）
+      withState(untriaged);
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout).toMatch(/^master\t/);
+      expect(handoff.stdout).toContain("12");
+    });
+
+    it("label が付けば、持ち手は worker へ移る", () => {
+      // **当否の判断が済めば、次に動けるのは直す側である。**
+      // ここが動かないと、label を付けても worker が呼ばれない
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
+
+      expect(run("master").stdout).toMatch(/^worker\t/);
+    });
+
+    it.each(["master", "worker"])("%s から見ても、同じ状態には同じ終了コードを返す", (role) => {
+      // **両側で別々の判定が同時に成り立つ形にしない。**
+      // 片方が「対応が返っている」、もう片方が「label が無い」を返すと、
+      // **どちらの記録が本当かを人が突き合わせる**ことになる
+      withState(untriaged);
+
+      expect(run(role).status).toBe(3);
+    });
+
+    it("別のスレッドへ返信しても、答えの無い指摘は隠れない", () => {
+      // **PR ごとに「いちばん新しい発言」だけで決めると、答えの無いスレッドが隠れる。**
+      // 新しいほうへ返信しただけで「対応が返っている」に落ち、**master は当否を
+      // 判断しないまま resolve の確認へ進む**——**指摘が 1 つ、誰にも拾われずに消える**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot", "us"] }] });
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout).toMatch(/^master\t/);
+      expect(handoff.status).toBe(3);
+    });
+
+    it("label が付いていても、あとから届いた指摘は master の持ち物", () => {
+      // **`changes-requested` は PR 全体の状態**であって、**個別の指摘を見た証拠ではない。**
+      // CI の失敗・規模超過・前の指摘で既に付いていることがあり、
+      // **その label を「当否は判断済み」と読むと、あとから届いた指摘が
+      // 当否の判断を経ないまま worker の持ち物になる**——
+      // **worker の周回は自分宛て → 沈黙**なので、master は気づけない
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: ["changes-requested"],
+            unresolvedBy: ["bot"],
+            labeledAt: "2026-08-01T00:00:00Z",
+            threadsAt: ["2026-08-02T00:00:00Z"],
+          },
+        ],
+      });
+
+      expect(run("worker").stdout).toMatch(/^master\t/);
+    });
+
+    it("label より前からある指摘は、これまでどおり worker の持ち物", () => {
+      // **付けた時点で見えていたものは、当否が判断されている。**
+      // ここまで master 宛にすると、**label を付けても worker が呼ばれない**
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: ["changes-requested"],
+            unresolvedBy: ["bot"],
+            labeledAt: "2026-08-02T00:00:00Z",
+            threadsAt: ["2026-08-01T00:00:00Z"],
+          },
+        ],
+      });
+
+      expect(run("master").stdout).toMatch(/^worker\t/);
+    });
+
+    it("label が 1 つも無い PR でも、列がずれない", () => {
+      // **タブは IFS の空白なので、連続すると 1 区切りに畳まれる。**
+      // label を外した PR——`LABELED_EVENT` は残る——でここを踏むと**列が左へずれ**、
+      // **`labeled_at` に PR 本文が入る**。数字は英字より前に並ぶので時刻の比較は
+      // **必ず偽**になり、**「判断済み」の枝 → worker 宛 → 自分宛て → 沈黙**。
+      // しかも食い違いの記録は untriaged の枝でしか立たないので、**記録も残らない**。
+      //
+      // **本文を空にしない。** 空だと**ずれた先も空**になって、
+      // **畳まれたままでも同じ答えが出る**——**確認そのものが空振りする**
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: [],
+            body: "本文がある",
+            labeledAt: "2026-08-01T00:00:00Z",
+            unresolvedBy: ["bot"],
+            threadsAt: ["2026-08-02T00:00:00Z"],
+          },
+        ],
+      });
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout).toMatch(/^master\t/);
+      // label が 1 つも無いまま答えの無い指摘が残る形は、これまでどおり記録される
+      expect(handoff.status).toBe(3);
+    });
+
+    it("すべて答えてあれば、これまでどおり復路になる", () => {
+      // **答えの無いものが 1 つも無い**なら、確かめる対象がある
+      withState({ prs: [{ number: 12, unresolvedBy: ["us", "us"] }] });
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout).toMatch(/^master\t/);
+      expect(handoff.status).toBe(0);
     });
   });
 
