@@ -65,6 +65,20 @@ readonly STOP_IDS=(
   "claim-mismatch:<Issue番号>|master: 着手中でない Issue を閉じる open PR がある"
 )
 
+# **worker が動いて解く状態。** 第 4 層の数え方をここだけ変える (下の counted を参照)。
+#
+# **識別子ごとに主体が違う。** たとえば review-unanswered は「Codex が返さない」ので、
+# **worker が元気に別の周回をまわしていても解けない**。「worker が動いているから待つ」と
+# 読むのは主体が違うので、**worker が主体のものだけに効かせる**。
+#
+# **STOP_IDS とは別の軸**なので別に持つ (あちらは「誰が記録するか」で、これは
+# 「誰が解くか」)。**綴りがずれると黙って効かなくなる**ので、
+# 一覧に無い綴りが混ざっていないことを試験で押さえてある。
+readonly WORKER_FIXES=(
+  "blocking-findings"
+  "changes-requested"
+)
+
 usage() {
   echo "使い方: bin/loop-stall <停止識別子>" >&2
   echo "       bin/loop-stall --reset        周回が前へ進んだときに呼ぶ" >&2
@@ -229,26 +243,115 @@ fi
 #   <回数><TAB><識別子>  を 1 行ずつ
 #
 # 書式に合わない行は捨てる (壊れた記録・古い書式で数えない)。
+#   <回数><TAB><識別子><TAB><数えたときの worker の周回>  を 1 行ずつ
 count=0
 others=()
+prev_epoch=""
 if [[ -f $STATE ]]; then
-  while IFS=$'\t' read -r prev_count prev_id; do
+  while IFS=$'\t' read -r prev_count prev_id prev_id_epoch; do
     [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
     if [[ $prev_id == "$ID" ]]; then
       count="$prev_count"
+      prev_epoch="$prev_id_epoch"
     else
-      others+=("$prev_count"$'\t'"$prev_id")
+      others+=("$prev_count"$'\t'"$prev_id"$'\t'"$prev_id_epoch")
     fi
   done < "$STATE"
 fi
-count=$((count + 1))
 
-printf '%s\n' "${others[@]}" "$count"$'\t'"$ID" > "$STATE" || {
+# **数える単位を「相手の周回」にする。**
+#
+# 第 4 層は master の周回で数えるが、**前へ進めるのは worker の周回**である。
+# master は何倍も速く回るので、**指摘の修正に master の何周ぶんもかかる作業は
+# 必ず止まる** (実測で 5 回。5 回とも worker は 1 周も終えておらず、5 回とも人が
+# 手で再開した)。**難しい指摘ほど踏む**——レビューが良い仕事をするほど罰される (#126)。
+#
+# **見るのは「worker の周回が動いているか」であって「誰かが `./task` を叩いたか」ではない。**
+# 心拍 (bin/loop-lease の活動の記録) は **人が worker の作業場で `./task` を叩いても
+# 新しくなる**ので、**worker が死んだあとも「作業中」に見え続ける**。それを使うと
+# **カウンタが永久に止まる**——**第 4 層が黙って死ぬ側**の壊れ方である。
+#
+# **周回だけが出せる信号を使う。** `bin/loop-lease acquire` が書く印 (ROUNDS) は
+# **周回の開始でしか動かない**。人が `./task` を叩いても動かない。
+#
+#   印が動いた           … 1 周終えて次が始まった → **数える**
+#   印が同じで、まだ窓の内 … その周回が続いている   → **数えない**
+#   印が窓より古い       … 周回が始まっていない     → **数える** (worker が死んだ場合もここ)
+#
+# **窓は書き写した閾値ではない。** `bin/loop-lease` が release のたびに残す
+# **いちばん長かった周回の実測**の 2 倍を使う (記録が無ければ lease の期限で代用)。
+# **1 周が長い機械では窓も広がる**ので、**長い周回の途中で止められない**。
+#
+# **worker の作業ツリーは読まない。** 見るのは worker 自身が git の共通ディレクトリへ
+# 書いた記録だけである。master が相手の作業場を覗く形にすると、
+# 「GitHub を唯一の正とする」という設計に穴が開く。
+worker_epoch=""
+worker_round_window=0
+if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
+  && lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" \
+  && [[ $lease_ttl =~ ^[0-9]+$ ]]; then
+  # **始めた周回の印。** lease と違って返しても消えないので、
+  # **周回と周回の間でも「どの周回まで始めたか」が読める**。
+  for rounds in "$common_dir"/valence-loop-rounds-worker*; do
+    [[ -f $rounds ]] || continue
+    read -r started <"$rounds" 2>/dev/null || continue
+    [[ $started =~ ^[0-9]+$ ]] || continue
+    [[ -z $worker_epoch ]] || ((started > worker_epoch)) && worker_epoch="$started"
+  done
+  # 窓 = いちばん長かった周回 × 2。**実測が無ければ lease の期限で代用する。**
+  longest_round=0
+  for len in "$common_dir"/valence-loop-roundlen-worker*; do
+    [[ -f $len ]] || continue
+    read -r seconds <"$len" 2>/dev/null || continue
+    [[ $seconds =~ ^[0-9]+$ ]] || continue
+    ((seconds > longest_round)) && longest_round="$seconds"
+  done
+  ((longest_round > 0)) && worker_round_window=$((longest_round * 2)) \
+    || worker_round_window="$lease_ttl"
+fi
+
+# **worker が解く状態か。** 主体が違うものに worker の周回を効かせない
+# （review-unanswered は Codex が返さないので、worker が元気でも解けない）。
+worker_fixes_this=0
+for kind in "${WORKER_FIXES[@]}"; do
+  [[ ${ID%%:*} == "$kind" ]] && worker_fixes_this=1
+done
+
+# **周回が動いているか。** 印が窓の内側にあれば動いている。
+worker_rounding=0
+if [[ -n $worker_epoch ]] && ((worker_round_window > 0)) \
+  && (($(date +%s) - worker_epoch < worker_round_window)); then
+  worker_rounding=1
+fi
+
+counted="yes"
+if ((worker_rounding == 1 && worker_fixes_this == 1)); then
+  if [[ $worker_epoch == "$prev_epoch" ]]; then
+    counted="no"
+  elif [[ -z $prev_epoch ]]; then
+    # この識別子を、この周回で初めて見た。**印だけ覚えて数えない。**
+    counted="first"
+    prev_epoch="$worker_epoch"
+  else
+    count=$((count + 1))
+    prev_epoch="$worker_epoch"
+  fi
+else
+  count=$((count + 1))
+fi
+
+printf '%s\n' "${others[@]}" "$count"$'\t'"$ID"$'\t'"$prev_epoch" > "$STATE" || {
   echo "[FAIL] 停止カウンタを書き込めません: $STATE" >&2
   exit 2
 }
 
-echo "stall id=$ID count=$count max=$MAX_REPEATS"
+if [[ $counted == "no" ]]; then
+  echo "stall id=$ID count=$count max=$MAX_REPEATS (worker が同じ周回の中なので数えない)"
+elif [[ $counted == "first" ]]; then
+  echo "stall id=$ID count=$count max=$MAX_REPEATS (worker はこの周回を始めたばかりなので数えない)"
+else
+  echo "stall id=$ID count=$count max=$MAX_REPEATS"
+fi
 
 if ((count >= MAX_REPEATS)); then
   echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める"

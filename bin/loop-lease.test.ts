@@ -364,6 +364,87 @@ describe("bin/loop-lease", () => {
       expect(retaken.stderr).toContain("引き継ぎます");
     });
 
+    it("周回の印は、返しても消えない", () => {
+      // **「いま持っているか」ではなく「新しい周回を始めたか」を外から見るための印。**
+      // lease と同じ寿命にすると、**周回と周回の間が「始めていない」と同じ見え方**になり、
+      // 空転の判定（bin/loop-stall）が**何周まわしても数えられなくなる**（実際に踏んだ）
+      const token = acquire().stdout.trim();
+      const rounds = () =>
+        readdirSync(join(sandbox, ".git")).filter((entry) =>
+          entry.startsWith("valence-loop-rounds-worker"),
+        );
+
+      expect(rounds()).toHaveLength(1);
+      const started = readFileSync(join(sandbox, ".git", rounds()[0] ?? ""), "utf8").trim();
+
+      expect(run(["release", "worker", token]).status).toBe(0);
+
+      expect(rounds()).toHaveLength(1);
+      expect(readFileSync(join(sandbox, ".git", rounds()[0] ?? ""), "utf8").trim()).toBe(started);
+    });
+
+    it("取り直すと印が変わる", () => {
+      // **1 周ごとに 1 回だけ数えられるように、周回ごとに違う値**でなければならない
+      const first = acquire().stdout.trim();
+      const name = readdirSync(join(sandbox, ".git")).find((entry) =>
+        entry.startsWith("valence-loop-rounds-worker"),
+      );
+      const before = readFileSync(join(sandbox, ".git", name ?? ""), "utf8").trim();
+      expect(run(["release", "worker", first]).status).toBe(0);
+      // **待たずに作る。** 取得時刻を過去へずらしてから取り直す
+      writeFileSync(join(sandbox, ".git", name ?? ""), `${Number(before) - 600}\n`);
+
+      expect(acquire().status).toBe(0);
+
+      expect(readFileSync(join(sandbox, ".git", name ?? ""), "utf8").trim()).not.toBe(
+        `${Number(before) - 600}`,
+      );
+    });
+
+    it("返すときに、いちばん長かった周回を残す", () => {
+      // **窓を実測から決めるため**（bin/loop-stall）。書き写した閾値だと、
+      // **1 周が長い機械で周回の途中に止められる**
+      const token = acquire().stdout.trim();
+      const scope = readdirSync(join(sandbox, ".git")).find((entry) =>
+        entry.startsWith("valence-loop-rounds-worker"),
+      );
+      // **待たずに長い周回を作る。** 取得時刻を過去へずらす
+      const lease = join(sandbox, ".git", (scope ?? "").replace("rounds", "lease"));
+      writeFileSync(lease, `${token}\t${Math.floor(Date.now() / 1000) - 300}\n`);
+
+      expect(run(["release", "worker", token]).status).toBe(0);
+
+      const lengths = readdirSync(join(sandbox, ".git")).filter((entry) =>
+        entry.startsWith("valence-loop-roundlen-worker"),
+      );
+      expect(lengths).toHaveLength(1);
+      const seconds = Number(readFileSync(join(sandbox, ".git", lengths[0] ?? ""), "utf8").trim());
+
+      expect(seconds).toBeGreaterThanOrEqual(300);
+    });
+
+    it("短い周回で、いちばん長かった記録を上書きしない", () => {
+      // **短いほうで上書きすると、窓が縮んで長い周回の途中で止められる**
+      const first = acquire().stdout.trim();
+      const rounds = readdirSync(join(sandbox, ".git")).find((entry) =>
+        entry.startsWith("valence-loop-rounds-worker"),
+      );
+      const lease = join(sandbox, ".git", (rounds ?? "").replace("rounds", "lease"));
+      writeFileSync(lease, `${first}\t${Math.floor(Date.now() / 1000) - 300}\n`);
+      expect(run(["release", "worker", first]).status).toBe(0);
+
+      // 2 周目は一瞬で終わる
+      const second = acquire().stdout.trim();
+      expect(run(["release", "worker", second]).status).toBe(0);
+
+      const longest = readdirSync(join(sandbox, ".git")).find((entry) =>
+        entry.startsWith("valence-loop-roundlen-worker"),
+      );
+      const seconds = Number(readFileSync(join(sandbox, ".git", longest ?? ""), "utf8").trim());
+
+      expect(seconds).toBeGreaterThanOrEqual(300);
+    });
+
     it("書けなければ、黙って成功しない", () => {
       // **書けていないのに成功を返すと、周回は延命できたつもりで走り続ける。**
       // 期限が切れれば別の周回が入るので、**気づけるのは事故が起きたときだけ**になる
