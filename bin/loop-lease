@@ -136,13 +136,21 @@ readonly STATE="$common_dir/valence-loop-lease-$lease_scope"
 # ようにするため (`./task` は周回の外でも走る)。
 readonly ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
 
-# **活動の記録は lease を読まない。** ロックも要らない (最後に書いた者が勝ってよい)。
-# **失敗しても落とさない**——`./task` から毎回呼ぶので、ここで落ちると
-# **ループと関係のないコマンドまで失敗する**。書けなければ、期限は取得時刻だけで
-# 決まる (いままでどおり) ので、**安全な側へ倒れる**。
+# **活動の記録は lease を読まない。** ロックも要らない——ただし**置き換えは原子的に行う**。
+# `>` は切り詰めてから書くので、**その隙間を `acquire` が読むと空に見え**、
+# **活動中なのに「記録なし」として引き継がれる**。一時ファイルへ書いて `mv` で置き換える。
+#
+# **書けなかったことを黙らない。** 書けない状態は「安全な側」ではない——
+# **期限が取得時刻だけで決まる状態**、つまり**この仕組みが直した当の壊れ方**に戻る。
+# 呼ぶ側 (`./task`) が**コマンド自体は落とさない**のは別の判断で、そこは変えない。
 if [[ $ACTION == "heartbeat" ]]; then
   [[ $# -eq 2 ]] || usage
-  date +%s >"$ACTIVITY" 2>/dev/null || true
+  if ! date +%s >"$ACTIVITY.tmp" 2>/dev/null || ! mv -f "$ACTIVITY.tmp" "$ACTIVITY" 2>/dev/null; then
+    rm -f "$ACTIVITY.tmp" 2>/dev/null || true
+    echo "[WARN] $SCOPE_LABEL の活動を記録できません: $ACTIVITY" >&2
+    echo "       この周回は、取得時刻だけで期限を判定されます（長い周回は途中で奪われます）" >&2
+    exit 1
+  fi
   exit 0
 fi
 

@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -264,6 +265,15 @@ describe("bin/loop-lease", () => {
       return join(dir, name ?? "");
     }
 
+    /** 活動の記録の名前。**作り方は試験に写さない。** */
+    function activityName(): string {
+      const name = readdirSync(join(sandbox, ".git")).find(
+        (entry) => entry.startsWith("valence-loop-activity-") && !entry.endsWith(".tmp"),
+      );
+      expect(name, "活動の記録が見つからない").toBeDefined();
+      return name ?? "";
+    }
+
     /** lease の記録から作業場ぶんの識別子を取る。**名前の作り方は試験に写さない。** */
     function activityScope(): string {
       return stateFile().replace(/^.*valence-loop-lease-/, "");
@@ -352,6 +362,44 @@ describe("bin/loop-lease", () => {
 
       expect(retaken.status).toBe(0);
       expect(retaken.stderr).toContain("引き継ぎます");
+    });
+
+    it("書けなければ、黙って成功しない", () => {
+      // **書けていないのに成功を返すと、周回は延命できたつもりで走り続ける。**
+      // 期限が切れれば別の周回が入るので、**気づけるのは事故が起きたときだけ**になる
+      const dir = join(sandbox, ".git");
+      chmodSync(dir, 0o555);
+      const beat = run(["heartbeat", "worker"]);
+      chmodSync(dir, 0o755);
+
+      expect(beat.status).not.toBe(0);
+      expect(beat.stderr).toContain("活動を記録できません");
+    });
+
+    it("記録は切り詰めではなく差し替えで置く", () => {
+      // **`>` は切り詰めてから書く。** その隙間を `acquire` が読むと、
+      // **活動中なのに「記録なし」**として引き継がれる。
+      //
+      // **競り自体は試験にしない。** 隙間に読ませる試験は時間に依存し、
+      // #131 で直したばかりの形を作り直すことになる。**代わりに機構を見る**——
+      // 差し替え（rename）なら **inode が変わる**。切り詰めなら変わらない
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+      const file = join(sandbox, ".git", activityName());
+      const first = statSync(file).ino;
+
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+
+      expect(statSync(file).ino, "切り詰めて書いている（差し替えになっていない）").not.toBe(first);
+    });
+
+    it("置き換えたあとに一時ファイルを残さない", () => {
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+
+      const leftovers = readdirSync(join(sandbox, ".git")).filter(
+        (entry) => entry.startsWith("valence-loop-activity-") && entry.endsWith(".tmp"),
+      );
+
+      expect(leftovers).toEqual([]);
     });
 
     it("./task は活動を記録する", () => {
