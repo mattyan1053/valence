@@ -544,9 +544,15 @@ describe("worker が作業しているあいだは数えない", () => {
    * **周回と周回の間が「始めていない」と同じ見え方**になり、**何周まわしても
    * 数えられない**（実際にそう書いて指摘された）。
    */
-  function workerState(options: { activityAgo: number; startedAt?: number }): void {
+  function workerState(options: {
+    activityAgo: number;
+    startedAt?: number;
+    longestRound?: number;
+  }): void {
     const now = Math.floor(Date.now() / 1000);
     const scope = `worker${repo.replace(/\//g, "_")}`;
+    // **活動の記録は「人が ./task を叩いた」でも新しくなる。**
+    // 判定に使っていないことを見るために、**新しいまま置く**
     writeFileSync(
       join(repo, ".git", `valence-loop-activity-${scope}`),
       `${now - options.activityAgo}\n`,
@@ -556,6 +562,12 @@ describe("worker が作業しているあいだは数えない", () => {
       rmSync(rounds, { force: true });
     } else {
       writeFileSync(rounds, `${options.startedAt}\n`);
+    }
+    const longest = join(repo, ".git", `valence-loop-roundlen-${scope}`);
+    if (options.longestRound === undefined) {
+      rmSync(longest, { force: true });
+    } else {
+      writeFileSync(longest, `${options.longestRound}\n`);
     }
   }
 
@@ -641,6 +653,32 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(stall("review-unanswered:142@abc1234").stdout).toContain("count=2");
 
     expect(stall("review-unanswered:142@abc1234").stdout).toContain("[STOP]");
+  });
+
+  it("印が古ければ、活動が新しくても数える", () => {
+    // **ここが本題。** 活動の記録は **人が worker の作業場で `./task` を叩いても**
+    // 新しくなるので、**worker が死んだあとも「作業中」に見え続ける**。
+    // それを判定に使うと、**カウンタが永久に止まる**（第 4 層が黙って死ぬ側）。
+    // **周回の印は `acquire` でしか動かない**ので、そちらで見る
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 1, startedAt: now - 7200, longestRound: 600 });
+
+    expect(stall().stdout).toContain("count=1");
+    expect(stall().stdout).toContain("count=2");
+
+    expect(stall().stdout).toContain("[STOP]");
+  });
+
+  it("長い周回の途中なら、印が同じでも数えない", () => {
+    // **窓は実測（いちばん長かった周回）から広げる。** 書き写した閾値だと、
+    // **1 周が長い機械で、周回の途中に止められる**
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 3000, longestRound: 3600 });
+
+    const results = [stall(), stall(), stall(), stall()];
+
+    expect(results.map((result) => result.status)).toEqual([0, 0, 0, 0]);
+    expect(results.at(-1)?.stdout).toContain("count=0");
   });
 
   it("worker が黙ったら、これまでどおり master の周回で数えて止める", () => {

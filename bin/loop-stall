@@ -262,71 +262,70 @@ fi
 # **数える単位を「相手の周回」にする。**
 #
 # 第 4 層は master の周回で数えるが、**前へ進めるのは worker の周回**である。
-# master は 7〜10 分ごと、**worker の 1 周は 40〜60 分**。同じ状態を 3 回見るのに
-# 21〜30 分しかかからないので、**指摘の修正に master 3 周ぶんかかる作業は必ず止まる**
-# (実測で 5 回。5 回とも worker は 1 周も終えておらず、5 回とも人が手で再開した)。
-# **難しい指摘ほど踏む**——レビューが良い仕事をするほど罰される (#126 と同じ逆相関)。
+# master は何倍も速く回るので、**指摘の修正に master の何周ぶんもかかる作業は
+# 必ず止まる** (実測で 5 回。5 回とも worker は 1 周も終えておらず、5 回とも人が
+# 手で再開した)。**難しい指摘ほど踏む**——レビューが良い仕事をするほど罰される (#126)。
 #
-# **worker が生きているあいだは、worker が 1 周を始めるたびに 1 回だけ数える。**
+# **見るのは「worker の周回が動いているか」であって「誰かが `./task` を叩いたか」ではない。**
+# 心拍 (bin/loop-lease の活動の記録) は **人が worker の作業場で `./task` を叩いても
+# 新しくなる**ので、**worker が死んだあとも「作業中」に見え続ける**。それを使うと
+# **カウンタが永久に止まる**——**第 4 層が黙って死ぬ側**の壊れ方である。
 #
-#   worker が生きている … 活動の記録が期限内 (bin/loop-lease が持つ値。書き写さない)
-#   worker の周回       … lease の取得時刻。**取り直すたびに変わる**
+# **周回だけが出せる信号を使う。** `bin/loop-lease acquire` が書く印 (ROUNDS) は
+# **周回の開始でしか動かない**。人が `./task` を叩いても動かない。
 #
-# **心拍を「前へ進んだ」と読まない。** 生きているだけで永久に猶予すると、
-# `./task` を叩き続けるだけの周回が通ってしまう。**3 周まわしても変わらなければ止める。**
+#   印が動いた           … 1 周終えて次が始まった → **数える**
+#   印が同じで、まだ窓の内 … その周回が続いている   → **数えない**
+#   印が窓より古い       … 周回が始まっていない     → **数える** (worker が死んだ場合もここ)
 #
-# **黙ったらこれまでどおり数える。** worker が死んだときにカウンタが進まなくなるのは
-# 危険側の穴なので、**活動が期限切れなら master の周回で数える**。
-# **記録が無い場合も同じ**——知らない状態を「作業中」に倒さない。
+# **窓は書き写した閾値ではない。** `bin/loop-lease` が release のたびに残す
+# **いちばん長かった周回の実測**の 2 倍を使う (記録が無ければ lease の期限で代用)。
+# **1 周が長い機械では窓も広がる**ので、**長い周回の途中で止められない**。
 #
 # **worker の作業ツリーは読まない。** 見るのは worker 自身が git の共通ディレクトリへ
 # 書いた記録だけである。master が相手の作業場を覗く形にすると、
 # 「GitHub を唯一の正とする」という設計に穴が開く。
 worker_epoch=""
-worker_alive=0
+worker_round_window=0
 if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
   && lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" \
   && [[ $lease_ttl =~ ^[0-9]+$ ]]; then
-  newest_activity=0
-  for activity in "$common_dir"/valence-loop-activity-worker*; do
-    [[ -f $activity ]] || continue
-    read -r seen <"$activity" 2>/dev/null || continue
-    [[ $seen =~ ^[0-9]+$ ]] || continue
-    ((seen > newest_activity)) && newest_activity="$seen"
+  # **始めた周回の印。** lease と違って返しても消えないので、
+  # **周回と周回の間でも「どの周回まで始めたか」が読める**。
+  for rounds in "$common_dir"/valence-loop-rounds-worker*; do
+    [[ -f $rounds ]] || continue
+    read -r started <"$rounds" 2>/dev/null || continue
+    [[ $started =~ ^[0-9]+$ ]] || continue
+    [[ -z $worker_epoch ]] || ((started > worker_epoch)) && worker_epoch="$started"
   done
-  if ((newest_activity > 0)) && (($(date +%s) - newest_activity < lease_ttl)); then
-    worker_alive=1
-    # **始めた周回の印。** lease と違って返しても消えないので、
-    # **周回と周回の間でも「どの周回まで始めたか」が読める**。
-    for rounds in "$common_dir"/valence-loop-rounds-worker*; do
-      [[ -f $rounds ]] || continue
-      read -r started <"$rounds" 2>/dev/null || continue
-      [[ $started =~ ^[0-9]+$ ]] || continue
-      [[ -z $worker_epoch ]] || ((started > worker_epoch)) && worker_epoch="$started"
-    done
-  fi
+  # 窓 = いちばん長かった周回 × 2。**実測が無ければ lease の期限で代用する。**
+  longest_round=0
+  for len in "$common_dir"/valence-loop-roundlen-worker*; do
+    [[ -f $len ]] || continue
+    read -r seconds <"$len" 2>/dev/null || continue
+    [[ $seconds =~ ^[0-9]+$ ]] || continue
+    ((seconds > longest_round)) && longest_round="$seconds"
+  done
+  ((longest_round > 0)) && worker_round_window=$((longest_round * 2)) \
+    || worker_round_window="$lease_ttl"
 fi
 
-# **worker が解く状態か。** 主体が違うものに worker の生死を効かせない。
+# **worker が解く状態か。** 主体が違うものに worker の周回を効かせない
+# （review-unanswered は Codex が返さないので、worker が元気でも解けない）。
 worker_fixes_this=0
 for kind in "${WORKER_FIXES[@]}"; do
   [[ ${ID%%:*} == "$kind" ]] && worker_fixes_this=1
 done
 
-# **数えるのは「周回が変わったか」であって「いま持っているか」ではない。**
-# lease は返すと消えるので、それを見ていると **周回と周回の間が「始めていない」と
-# 同じ見え方**になり、**何周まわしても数えられない**（実際にそう書いて指摘された）。
-# 印は返しても消えない (bin/loop-lease の ROUNDS)。
-#
-# **最初に見た周回は数えない。** 数えたいのは「**1 周終えても変わらなかった**」なので、
-# **始まったばかりの周回を 1 と数えると、上限に達するのが 1 周早くなる**——
-# **worker が上限ぶんの周回を試せる**ようにする。
-#
-# **印が無ければ数える。** 書けなかったとき (bin/loop-lease は印を書けなくても lease は
-# 渡す) や、**この仕組みが入った直後**——活動の記録はあるのに印はまだ無い——に
-# 数えないほうへ倒すと、**第 4 層が黙って死ぬ**。「分からない」は「数える」へ倒す。
+# **周回が動いているか。** 印が窓の内側にあれば動いている。
+worker_rounding=0
+if [[ -n $worker_epoch ]] && ((worker_round_window > 0)) \
+  && (($(date +%s) - worker_epoch < worker_round_window)); then
+  worker_rounding=1
+fi
+
 counted="yes"
-if ((worker_alive == 1 && worker_fixes_this == 1)) && [[ -n $worker_epoch ]]; then
+if ((worker_rounding == 1 && worker_fixes_this == 1)); then
   if [[ $worker_epoch == "$prev_epoch" ]]; then
     counted="no"
   elif [[ -z $prev_epoch ]]; then

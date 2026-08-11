@@ -150,6 +150,9 @@ readonly STATE="$common_dir/valence-loop-lease-$lease_scope"
 # 消してしまうと**周回と周回の間が「始めていない」と同じ見え方**になる
 # （bin/loop-stall がそれで数えられなくなった）。
 readonly ROUNDS="$common_dir/valence-loop-rounds-$lease_scope"
+# **いちばん長かった周回の秒数。** 「周回が動いているか」を外から判断するのに使う
+# （bin/loop-stall）。**書き写した閾値を置かないため**に、実測を溜める形にしてある。
+readonly ROUND_LEN="$common_dir/valence-loop-roundlen-$lease_scope"
 # **活動は lease とは別のファイルに置く。** lease を持っていなくても記録できる
 # ようにするため (`./task` は周回の外でも走る)。
 readonly ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
@@ -256,6 +259,22 @@ release)
     echo "[FAIL] $SCOPE_LABEL の lease は別の周回が持っています" >&2
     exit 1
   fi
+  # **周回の長さを残す。** 「印が古い＝周回が動いていない」の境目を、
+  # **この機械で実際にかかった時間から**決めるためのもの（bin/loop-stall）。
+  # **いちばん長かったものだけを残す**——短い周回で上書きすると、
+  # 長い周回の途中で「止まっている」と読まれる。
+  round_len=$((now - held_since))
+  previous_len=0
+  if [[ -f $ROUND_LEN ]]; then
+    read -r previous_len <"$ROUND_LEN" 2>/dev/null || previous_len=0
+    [[ $previous_len =~ ^[0-9]+$ ]] || previous_len=0
+  fi
+  ((round_len > previous_len)) || round_len="$previous_len"
+  printf '%s\n' "$round_len" >"$ROUND_LEN.tmp" 2>/dev/null \
+    && mv -f "$ROUND_LEN.tmp" "$ROUND_LEN" 2>/dev/null || {
+    rm -f "$ROUND_LEN.tmp" 2>/dev/null || true
+    echo "[WARN] $SCOPE_LABEL の周回の長さを記録できません: $ROUND_LEN" >&2
+  }
   rm -f "$STATE" || {
     echo "[FAIL] lease を消せません: $STATE" >&2
     exit 2
