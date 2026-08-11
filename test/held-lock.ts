@@ -9,7 +9,7 @@
  * **後始末に頼らない。** `finally` も `trap` も、**打ち切られた経路では走らない**
  * （vitest はワーカーごと落とす）。**外から掛ける安全装置**が要る。
  */
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 

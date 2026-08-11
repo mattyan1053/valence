@@ -129,6 +129,54 @@ describe("bin/loop-lease", () => {
     expect(run(["release", "worker", stale]).status).toBe(1);
   });
 
+  describe("held — 周回が lease を持っているか", () => {
+    // **入口は散文の指示のままだった。** 「冒頭で呼べ」と書いてあるだけなので、
+    // **呼ばずに進める**——実際に飛ばした（通知で始めた周回で 2 回中 2 回）。
+    // **飛ばしても何も起きない**ので、並行したときだけ壊れ、そのときは
+    // **「レビュー要求が 2 件」**などの形で出て、原因が入口だと分からない。
+
+    it("持っていれば 0 を返す", () => {
+      acquire();
+
+      expect(run(["held", "worker"]).status).toBe(0);
+    });
+
+    it("誰も持っていなければ 1 を返す", () => {
+      expect(run(["held", "worker"]).status).toBe(1);
+    });
+
+    it("返したあとは 1 を返す", () => {
+      const token = acquire().stdout.trim();
+      run(["release", "worker", token]);
+
+      expect(run(["held", "worker"]).status).toBe(1);
+    });
+
+    it("期限が切れていれば 1 を返す", () => {
+      // **持っているように見えて、実際は引き継がれる状態**である。
+      // ここを 0 にすると、**落ちた周回の跡を「持っている」と読む**
+      acquire("worker", { LOOP_LEASE_TTL_SEC: "0" });
+
+      expect(run(["held", "worker"], { LOOP_LEASE_TTL_SEC: "0" }).status).toBe(1);
+    });
+
+    it("読むだけで、状態を変えない", () => {
+      // **確かめるために奪わない。** `acquire` と違って印も書かない——
+      // **見ただけで「新しい周回が始まった」ことにすると、bin/loop-stall の数え方が狂う**
+      const token = acquire().stdout.trim();
+
+      expect(run(["held", "worker"]).status).toBe(0);
+      expect(run(["release", "worker", token]).status).toBe(0);
+    });
+
+    it("役ごとに見る", () => {
+      acquire("master");
+
+      expect(run(["held", "master"]).status).toBe(0);
+      expect(run(["held", "worker"]).status).toBe(1);
+    });
+  });
+
   it("知らない役は受け付けない", () => {
     // **語彙を固定する。** 綴り違いで別の lease を取ると、直列化しているつもりで
     // 2 つ走る

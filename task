@@ -249,8 +249,37 @@ cmd_loop_resume() {
   ((found == 1)) || echo "==> STOP は無い（停止していない）"
 }
 
+# **入口を飛ばした周回の記録を見せる。** `bin/loop-handoff` が積む
+# （出口で lease を持っていなかった周回。#143）。
+#
+# **記録するだけでは終わらない。** 誰も読まない場所に積むと、「あとから分かる」が
+# **「探し方を知っている人にだけ分かる」**になる——**気づけないこと**が、この記録が
+# 塞ごうとしている当のものである。**周回のたびに読む場所へ出す。**
+#
+# **無ければ何も言わない。** 静かなときに騒ぐと、**騒いでいることが普通**になる。
+show_missing_lease() {
+  local common record count
+  common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0
+  [[ -n $common ]] || return 0
+  record="$common/valence-loop-lease-missing"
+  [[ -f $record ]] || return 0
+  # **「1 度も飛ばしていない」と「読めない」を同じ静けさにしない。**
+  #
+  # **書けなかった場合は、ここでは分からない**——**分かるのは書こうとした瞬間だけ**
+  # なので、そこで言う（`bin/loop-handoff`）。**2 箇所で同じことを見張らない。**
+  # ここで分かるのは**「ファイルはあるのに読めない」**までである。
+  if ! count="$(wc -l <"$record" 2>/dev/null)"; then
+    echo "入口を飛ばした周回の記録を読めません: $record"
+    return 0
+  fi
+  ((count > 0)) || return 0
+  echo "入口を飛ばした周回 (lease 無しで出口へ来た): ${count} 件"
+  tail -3 "$record" | sed 's/^/  /'
+}
+
 # ループの現在地を表示する (open PR / Issue / STOP)
 cmd_loop_status() {
+  show_missing_lease
   if [[ -f loop/STOP ]]; then
     echo "STOP: あり"
     sed 's/^/  /' loop/STOP
@@ -330,4 +359,9 @@ main() {
   "$fn" "$@"
 }
 
-main "$@"
+# **実行されたときだけ走らせる。** `source` して関数だけを試せるようにしておく——
+# ここが無いと、**読み込んだ瞬間に help を出して終わる**ので、
+# **`./task` の中身は試験から触れない**（触れないものは、壊れても気づけない）。
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

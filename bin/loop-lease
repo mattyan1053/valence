@@ -43,6 +43,7 @@ readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
 usage() {
   echo "使い方: bin/loop-lease acquire <役>" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
+  echo "        bin/loop-lease held <役>        その周回が lease を持っているか（読むだけ）" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
   echo "        bin/loop-lease ttl              期限（秒）を出す" >&2
   echo "        役: ${ROLES[*]}" >&2
@@ -213,12 +214,24 @@ if [[ -f $STATE ]]; then
   fi
   if ((now - alive_since >= TTL_SEC)); then
     # **黙って上書きしない。** 期限切れの引き継ぎは、落ちた周回の跡である。
-    echo "[WARN] $SCOPE_LABEL の lease が期限切れでした（$((now - held_since)) 秒前に取得、$(activity_age) ）。引き継ぎます" >&2
+    # **`held` は読むだけ**なので、引き継ぎの警告は出さない（誰も引き継がない）。
+    [[ $ACTION == "held" ]] ||
+      echo "[WARN] $SCOPE_LABEL の lease が期限切れでした（$((now - held_since)) 秒前に取得、$(activity_age) ）。引き継ぎます" >&2
     held_token=""
   fi
 fi
 
 case "$ACTION" in
+held)
+  # **持っているかを読むだけ。** 書かない・奪わない・印も残さない。
+  #
+  # **見るのは「その単位を誰かが持っているか」**であって、「呼んだ周回自身が
+  # 持っているか」ではない（token を渡さないため）。**入口を飛ばした周回と、
+  # 同じ単位で別の周回が走っている状態は区別できない**——後者は `acquire` が
+  # 弾く側なので、ここで見たいのは**誰も持っていないまま進んだ周回**である。
+  [[ $# -eq 2 ]] || usage
+  [[ -n $held_token ]] || exit 1
+  ;;
 acquire)
   [[ $# -eq 2 ]] || usage
   if [[ -n $held_token ]]; then
