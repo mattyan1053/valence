@@ -133,20 +133,23 @@ while IFS=$'\t' read -r at login body; do
   lowered="${body,,}"
   if [[ $login != "$REVIEW_BOT" ]] && [[ $lowered =~ @codex[[:space:]]+review ]]; then
     requests+=("$at")
-  elif [[ $login == "$REVIEW_BOT" ]]; then
-    # **文言で見分けない。** 以前は「環境が無い」旨だけを応答として数えていたので、
-    # **一覧に無い文言（`Something went wrong`）が「応答なし」に落ちて**、
-    # `pending` が減らず**再要求が永久に禁じられた**——**Codex 自身が
-    # 「`@codex review` で再試行しろ」と書いているのに、その経路が塞がる**。
-    # 実際に**全ループが約 2 時間止まり、人が外から解くまで戻らなかった**。
-    #
-    # **一覧を足す形にしない**（#90 と同じ形——**並べ忘れた値がどの分岐にも入らない**）。
-    # **bot が何か言った＝要求には応答した**、とだけ読む。**レビューしたかどうかは
-    # 別の軸**で、そちらは `bin/loop-review-commits` が `Reviewed commit:` で見る。
-    ((notice++))
-    [[ $at > $notice_at ]] && notice_at="$at"
   fi
 done <<<"$comments"
+
+# **「応答があったか」は 1 箇所で決める。**
+#
+# ここで独自に数えていたときは、**同じ文言の列挙を 2 箇所に持っていた**——
+# **片方だけ直すと食い違う**の裏返しで、**両方直したから両方壊れた**（#159 のレビュー）。
+# **判定は `bin/loop-review-commits` が持つ**（引き金との対応付けを含む）。
+if ! answers="$("$(dirname "$0")/loop-review-commits" --answers "$PR")"; then
+  echo "[FAIL] PR #$PR の応答を取得できません" >&2
+  exit 2
+fi
+while IFS= read -r at; do
+  [[ -n $at ]] || continue
+  ((notice++))
+  [[ $at > $notice_at ]] && notice_at="$at"
+done <<<"$answers"
 
 # **直近のレビューより後の要求だけが「未応答」である。**
 # bot の応答は SHA を持たないことがある（環境が無い・エラー・その他）ので**レビュー扱いには

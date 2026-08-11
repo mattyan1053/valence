@@ -75,6 +75,28 @@ REVIEW_BOT="chatgpt-codex-connector[bot]"
 export REVIEW_BOT
 readonly REVIEW_BOT
 
+# **bot の投稿が「レビュー要求への応答」かを決める。**
+#
+# **ログイン名だけでは足りない。** 本文に `@codex` が混ざると、**レビューを頼んで
+# いないのに bot が答える**——`AGENTS.md` にこの経路そのものが書いてある
+# （**バッククォートで囲んでも拾われる**）。それを応答として数えると、
+#
+#   - **記録を消費する** → **古い head への 👍 が新しい記録に結び付き、
+#     見ていない head が「レビュー済み」になる**（`bin/loop-review-head` が塞いだ穴）
+#   - **`pending` を解除する** → **実際のレビューが処理中でも要求を重ねられる**
+#
+# **文言では見分けられない。** Codex の断り文句は、レビューでもタスクでも同じ形で返る。
+# **見分けるのは引き金の側**である——**`@codex` の混入と、bot の投稿を対応させる**。
+# 混入があれば、次の bot の投稿は**そのタスクへの応答**とみなして数えない。
+#
+# **判定できないときは数えない側へ倒す。** 数えて困るのは**未レビューが通る**側で、
+# **誰も気づけない**。数えないで困るのは**もう 1 回要求する**側で、
+# **`review-unanswered` が 3 周で人を呼ぶ**。
+#
+# **文言の列挙へは戻さない**（#159）。**未知の断り文句でも、混入が無ければ解ける。**
+readonly REVIEW_REQUEST='@codex[[:space:]]+review'
+readonly CODEX_MENTION='@codex'
+
 # **本物のレビューの印。** これだけが「レビューした」を表す。
 #
 # **文言を列挙しない。** 以前は「レビューでない応答」の文言を並べていて、
@@ -104,8 +126,9 @@ reviewed_sha() {
 
 usage() {
   echo "使い方: bin/loop-review-commits [--all] <PR番号>" >&2
-  echo "  --all  落とさずに出し、第 3 列へ live / stale を添える" >&2
-  echo "  --bot  レビュー用の bot のログイン名を出す" >&2
+  echo "  --all      落とさずに出し、第 3 列へ live / stale を添える" >&2
+  echo "  --answers  レビュー要求に応えた bot の投稿の時刻を出す" >&2
+  echo "  --bot      レビュー用の bot のログイン名を出す" >&2
   exit 2
 }
 
@@ -119,6 +142,13 @@ if [[ ${1-} == "--bot" ]]; then
   printf '%s\n' "$REVIEW_BOT"
   exit 0
 fi
+
+answers_only=0
+if [[ ${1-} == "--answers" ]]; then
+  answers_only=1
+  shift
+fi
+readonly answers_only
 
 include_stale=0
 if [[ ${1-} == "--all" ]]; then
@@ -161,17 +191,51 @@ done <<<"$reviews_raw")"
 # 後者を落とすと、その応答が記録を消費しないまま残り、あとから来た 👍 が
 # そこへ吸われて **現 head が永久にレビュー済みにならない**。
 # bin/loop-review-budget は前から通知を応答として扱っており、定義を揃える。
+# **bot だけを取らない。** 引き金（`@codex` の混入）と対応させるので、
+# **誰が何を書いたか**を時刻順に見る必要がある。
 if ! comments_raw="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" \
-  --jq 'map(select(.user.login == env.REVIEW_BOT))
-        | map("\(.created_at)\t" + ((.body // "") | gsub("\\s+"; " ")))
-        | .[]' 2>/dev/null)"; then
+  --jq '.[] | [.created_at, .user.login, ((.body // "") | gsub("\\s+"; " "))] | @tsv' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
   exit 2
 fi
-comments="$(while IFS=$'\t' read -r at body; do
+
+# 時刻順に見て、**混入と bot の投稿を対応させる**。
+#
+#   混入（`@codex` を含み、レビュー要求ではない）… 次の bot の投稿がその応答になる
+#   bot の投稿                                    … 未対応の混入があればそれへ、無ければレビューへ
+#
+# **印を持つ投稿は、いつでもレビューである**（自分でそう名乗っている）。
+comments=""
+answers=""
+stray=0
+while IFS=$'\t' read -r at login body; do
   [[ -n $at ]] || continue
-  printf '%s\t%s\n' "$at" "$(reviewed_sha "$body")"
-done <<<"$comments_raw")"
+  lowered="${body,,}"
+  if [[ $login != "$REVIEW_BOT" ]]; then
+    # **要求そのものは混入に数えない。** 数えると、要求のたびに応答が 1 つ食われる
+    if [[ $lowered =~ $CODEX_MENTION ]] && ! [[ $lowered =~ $REVIEW_REQUEST ]]; then
+      ((stray++))
+    fi
+    continue
+  fi
+  sha="$(reviewed_sha "$body")"
+  if [[ $sha == "-" ]] && ((stray > 0)); then
+    # **レビュー以外の Codex タスクへの応答。** 記録も `pending` も動かさない
+    ((stray--))
+    continue
+  fi
+  comments+="${at}"$'\t'"${sha}"$'\n'
+  answers+="${at}"$'\n'
+done <<<"$comments_raw"
+comments="${comments%$'\n'}"
+answers="${answers%$'\n'}"
+
+# **応答の時刻だけを返す口。** `bin/loop-review-budget` が「未応答か」を判断するのに使う。
+# **判定を 2 箇所に置かない**——置くと、**片方だけ直して食い違う**（今回それで両方壊れた）。
+if ((answers_only == 1)); then
+  [[ -z $answers ]] || printf '%s\n' "$answers"
+  exit 0
+fi
 
 # 👍 リアクション。SHA を持たないので、時刻だけを取って空の SHA 欄で流す。
 if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" \

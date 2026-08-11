@@ -9,6 +9,8 @@ const SCRIPT = fileURLToPath(new URL("./loop-review-commits", import.meta.url));
 
 /** 現 head。祖先かどうかは compare の status で決まる。 */
 const HEAD = "c".repeat(40);
+/** レビュー用の bot（`--bot` が出す名前と同じ）。 */
+const BOT = "chatgpt-codex-connector[bot]";
 /** 現 head の祖先である commit（rebase されていない）。 */
 const LIVE = "a".repeat(40);
 /** rebase で消えた commit（現 head の祖先ではない）。 */
@@ -159,7 +161,7 @@ describe("bin/loop-review-commits", () => {
           "#!/usr/bin/env bash",
           `if [[ $* == *"/pulls/${pr}/reviews"* ]]; then exit 0; fi`,
           `if [[ $* == *"/issues/${pr}/comments"* ]]; then`,
-          `  printf '%s\\t%s\\n' ${JSON.stringify(laterThanNow(60))} ${JSON.stringify(body)}`,
+          `  printf '%s\\t%s\\t%s\\n' ${JSON.stringify(laterThanNow(60))} ${JSON.stringify(BOT)} ${JSON.stringify(body)}`,
           "  exit 0",
           "fi",
           `if [[ $* == *"/issues/${pr}/reactions"* ]]; then`,
@@ -199,6 +201,84 @@ describe("bin/loop-review-commits", () => {
 
       expect(listed.status).toBe(0);
       expect(listed.stdout, "エラー応答が落とされ、👍 が記録を吸っている").not.toContain(HEAD);
+    });
+
+    /** `--answers` の出力（応答として数えた時刻）。 */
+    function answersOf(pr: number, comments: { login: string; body: string }[]): string {
+      const dir = mkdtempSync(join(tmpdir(), "loop-review-commits-gh-"));
+      symlinkSync("/usr/bin/bash", join(dir, "bash"));
+      const rows = comments
+        .map((comment, index) => `${laterThanNow(60 + index)}\t${comment.login}\t${comment.body}`)
+        .join("\n");
+      writeFileSync(
+        join(dir, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          `if [[ $* == *"/issues/${pr}/comments"* ]]; then`,
+          // **ヒアドキュメントで渡す。** `printf '%b' "…"` だと**本文のバッククォートが
+          // コマンド置換になり**、`Reviewed commit: \`sha\`` が空になる——
+          // **実物は正しいのに試験だけが落ちる**（実際に踏んだ）
+          "  cat <<'ROWS'",
+          rows,
+          "ROWS",
+          "  exit 0",
+          "fi",
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const result = spawnSync(SCRIPT, ["--answers", String(pr)], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      });
+      rmSync(dir, { recursive: true, force: true });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout;
+    }
+
+    it("知らない断り文句でも、応答として数える", () => {
+      // **文言の列挙へ戻さない**（#159）。**列挙から漏れたものが「応答なし」に落ちると、
+      // `pending` が減らず再要求が永久に禁じられる**——昨夜これで 2 時間止まった
+      const answers = answersOf(50, [{ login: BOT, body: "まだ誰も見たことのない断り文句" }]);
+
+      expect(answers.trim(), "知らない文言を落としている").not.toBe("");
+    });
+
+    it("レビュー以外の Codex タスクへの応答は、数えない", () => {
+      // **本文に `@codex` が混ざると、レビューを頼んでいないのに bot が答える**
+      // （`AGENTS.md` にこの経路そのものが書いてある）。**それを数えると、
+      // 記録を消費して未レビューの head を通し、`pending` も勝手に解除される**。
+      // **文言では見分けられない**ので、**引き金の側と対応させる**
+      const answers = answersOf(51, [
+        { login: "mattyan1053", body: "説明のために @codex と書いてしまった" },
+        { login: BOT, body: "To use Codex here, create an environment" },
+      ]);
+
+      expect(answers.trim(), "無関係な応答を数えている").toBe("");
+    });
+
+    it("要求そのものは、引き金に数えない", () => {
+      // **`@codex review` を混入に数えると、要求のたびに応答が 1 つ食われる**——
+      // **本物の応答が届いても解けない**（#159 の塞がりへ戻る）
+      const answers = answersOf(52, [
+        { login: "mattyan1053", body: "@codex review" },
+        { login: BOT, body: "Codex Review: Something went wrong." },
+      ]);
+
+      expect(answers.trim(), "要求を引き金に数えている").not.toBe("");
+    });
+
+    it("印を持つ応答は、混入があってもレビューである", () => {
+      // **自分でレビューだと名乗っている**ものまで落とすと、**きれいな PR ほど
+      // マージできない**（この仕組みが最初に踏んだ逆転）
+      const answers = answersOf(53, [
+        { login: "mattyan1053", body: "@codex" },
+        { login: BOT, body: `Reviewed commit: \`${LIVE.slice(0, 10)}\`` },
+      ]);
+
+      expect(answers.trim(), "印を持つ応答を落としている").not.toBe("");
     });
 
     it("印を持たない応答は、レビューとして数えない", () => {

@@ -359,7 +359,7 @@ describe("createGitHubChangeSummarySource", () => {
       const listing = createGitHubChangeSummarySource({
         credentials: CREDENTIALS,
         repository: REPOSITORY,
-        fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+        fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
           // **token の口も応答しない。** ここを返してしまうと、
           // **認証を抜けた先**しか試せない
           signals.push(init?.signal ?? undefined);

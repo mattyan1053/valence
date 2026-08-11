@@ -24,6 +24,13 @@ type State = {
   /** `bin/loop-review-commits --all` が返す行（`<時刻>\t<SHA>\t<live|stale>`）。 */
   reviews?: string[];
   comments?: Comment[];
+  /**
+   * `bin/loop-review-commits --answers` が返す時刻。
+   *
+   * **どれが応答かの判定は、こちらでは持たない**——**1 箇所（`loop-review-commits`）に
+   * 置いた**ので、ここで真似ると**2 箇所に持つことになる**（今回それで両方壊れた）。
+   */
+  answers?: string[];
   createdAt?: string;
   headSha?: string;
   /** その取得だけが落ちる。**最初の 1 つだけ試すと、後ろの取得を試せない。** */
@@ -32,6 +39,28 @@ type State = {
 };
 
 type Run = { status: number; stdout: string; stderr: string };
+
+/**
+ * 偽の `bin/loop-review-commits`。
+ *
+ * **どれが応答かの判定は持たない。** 判定は本物が 1 箇所で持つので、
+ * ここは**試験が宣言した答え**をそのまま返す（真似ると 2 箇所に持つことになる）。
+ */
+function fakeReviewCommits(state: State): string {
+  const answers = (state.answers ?? []).join("\n");
+  const reviews = (state.reviews ?? []).join("\n");
+  return [
+    "#!/usr/bin/env bash",
+    'if [[ $1 == "--answers" ]]; then',
+    `  printf '%b' ${JSON.stringify(answers)}`,
+    `  [[ -n ${JSON.stringify(answers)} ]] && echo`,
+    "  exit 0",
+    "fi",
+    `printf '%b' ${JSON.stringify(reviews)}`,
+    `[[ -n ${JSON.stringify(reviews)} ]] && echo`,
+    `exit ${state.reviewsExit ?? 0}`,
+  ].join("\n");
+}
 
 /**
  * **本物の `gh` を呼ばない。** 見たいのは「状態から終了コードをどう決めるか」であって、
@@ -86,16 +115,7 @@ function run(state: State, env: Record<string, string> = {}): Run {
     { mode: 0o755 },
   );
 
-  writeFileSync(
-    join(bin, "loop-review-commits"),
-    [
-      "#!/usr/bin/env bash",
-      `printf '%b' ${JSON.stringify((state.reviews ?? []).join("\n"))}`,
-      `[[ -n ${JSON.stringify((state.reviews ?? []).join("\n"))} ]] && echo`,
-      `exit ${state.reviewsExit ?? 0}`,
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  writeFileSync(join(bin, "loop-review-commits"), fakeReviewCommits(state), { mode: 0o755 });
 
   const result = spawnSync(script, ["12"], {
     encoding: "utf8",
@@ -255,52 +275,23 @@ describe("bin/loop-review-budget", () => {
 
       expect(budget.status).toBe(3);
     });
-
-    it("応答不能の通知も、書き方が違っても数える", () => {
-      const budget = run(
-        {
-          reviews: [],
-          createdAt: minutesAgo(300),
-          comments: [
-            request(minutesAgo(200)),
-            { at: minutesAgo(100), login: BOT, body: "I need you to Create An Environment" },
-          ],
-        },
-        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
-      );
-
-      expect(budget.status).toBe(0);
-    });
   });
 
-  describe("Codex が何を言っても、応答は応答として数える", () => {
-    /**
-     * **実データを写す**（#158 に残っていたもの）。
-     *
-     * **実在の PR を見に行かない。** PR は消えうるし、**見に行く試験は、
-     * その PR が消えた日に「通っているのに何も試していない」**になる（#105 で踏んだ形）。
-     */
-    const WENT_WRONG = [
-      "Codex Review: Something went wrong. Try again later by commenting “@codex review”.",
-      "",
-      "```",
-      "An unknown error occurred",
-      "```",
-    ].join("\n");
+  describe("応答があったかどうかは、1 箇所で決める", () => {
+    // **どれが応答かの判定は `bin/loop-review-commits` が持つ**（引き金との対応付けを含む）。
+    // ここで真似ると**同じ規則を 2 箇所に持つ**ことになり、**片方だけ直して食い違う**——
+    // 実際、**同じ文言の列挙を 2 箇所に持っていたので、両方直したら両方壊れた**。
 
-    it("エラー応答で、未応答が解ける", () => {
-      // **文言の一覧に無いものを「応答なし」に落としていた。** そのせいで
-      // `pending` が減らず、**再要求が永久に禁じられる**——
-      // **Codex 自身が「`@codex review` で再試行しろ」と書いているのに、その経路が塞がる**。
-      // **昨夜、全ループが約 2 時間止まった**（人が外から解くまで戻らなかった）
+    it("応答があれば、未応答が解ける", () => {
+      // **文言は見ない。** `Something went wrong` でも「環境が無い」でも、
+      // **応答として数えられていれば解ける**——**Codex 自身が「再試行しろ」と
+      // 書いているのに、その経路が塞がる**のを防ぐ（昨夜これで 2 時間止まった）
       const budget = run(
         {
           reviews: [],
           createdAt: minutesAgo(300),
-          comments: [
-            request(minutesAgo(200)),
-            { at: minutesAgo(100), login: BOT, body: WENT_WRONG },
-          ],
+          comments: [request(minutesAgo(200))],
+          answers: [minutesAgo(100)],
         },
         { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
       );
@@ -309,40 +300,36 @@ describe("bin/loop-review-budget", () => {
       expect(budget.status, "再要求できない").toBe(0);
     });
 
-    it("エラー応答を、レビュー済みにはしない", () => {
-      // **ここを取り違えると、未レビューの head がマージ可能になる**——
-      // **この仕組みが最初に塞いだ穴**である
+    it("応答が無ければ、未応答のまま", () => {
+      // **レビュー以外の Codex タスクへの応答は、ここまで届かない**
+      // （`loop-review-commits` が引き金と対応させて落とす）。**届かない以上、解けない**
       const budget = run(
         {
           reviews: [],
           createdAt: minutesAgo(300),
-          comments: [
-            request(minutesAgo(200)),
-            { at: minutesAgo(100), login: BOT, body: WENT_WRONG },
-          ],
+          comments: [request(minutesAgo(200))],
+          answers: [],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.stdout, "無関係な応答で解けている").toContain("pending=1");
+      expect(budget.status, "重ねて要求できてしまう").toBe(1);
+    });
+
+    it("応答があっても、レビュー済みにはしない", () => {
+      // **ここを取り違えると、未レビューの head がマージ可能になる**
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [request(minutesAgo(200))],
+          answers: [minutesAgo(100)],
         },
         { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
       );
 
       expect(budget.stdout).toContain("reviewed_head=no");
-    });
-
-    it("知らない文言でも同じように解ける", () => {
-      // **列挙に戻さない。** 一覧を足す形だと、**次の新しい文言でまた塞がる**——
-      // **並べ忘れた値がどの分岐にも入らない**（#90 と同じ形）
-      const budget = run(
-        {
-          reviews: [],
-          createdAt: minutesAgo(300),
-          comments: [
-            request(minutesAgo(200)),
-            { at: minutesAgo(100), login: BOT, body: "まだ誰も見たことのない断り文句" },
-          ],
-        },
-        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
-      );
-
-      expect(budget.status).toBe(0);
     });
   });
 
@@ -356,6 +343,7 @@ describe("bin/loop-review-budget", () => {
           request(minutesAgo(200)),
           { at: minutesAgo(100), login: BOT, body: "I need you to create an environment" },
         ],
+        answers: [minutesAgo(100)],
       },
       { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
     );
