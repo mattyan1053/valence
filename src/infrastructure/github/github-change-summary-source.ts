@@ -65,15 +65,24 @@ export function createGitHubChangeSummarySource({
 }: GitHubChangeSummarySourceOptions): ChangeSummarySource {
   let cached: InstallationToken | undefined;
 
-  async function authorization(): Promise<string> {
+  // **認証の往復にも合図を届ける。** ここが素通しだと、**呼んだ側が縮退したあとも
+  // installation の解決と token の発行だけが走り続ける**——**止まるのは呼んだ側だけ**になる。
+  async function authorization(signal?: AbortSignal): Promise<string> {
     if (cached === undefined || needsRefresh(cached, now())) {
       const installationId = await resolveRepositoryInstallation({
         credentials,
         repository,
         now: now(),
         fetchImpl,
+        signal,
       });
-      cached = await requestInstallationToken(credentials, installationId, now(), fetchImpl);
+      cached = await requestInstallationToken(
+        credentials,
+        installationId,
+        now(),
+        fetchImpl,
+        signal,
+      );
     }
     return `Bearer ${cached.token}`;
   }
@@ -275,7 +284,17 @@ export function createGitHubChangeSummarySource({
       if (pullRequestNumbers.length === 0) {
         return { summaries: new Map(), unavailable: [] };
       }
-      const header = await authorization();
+      // **認証で落ちたときも、打ち切りは打ち切りとして残す。** ここで投げると、
+      // **1 本の失敗で全体が消える**（この口が守ってきたもの）
+      let header: string;
+      try {
+        header = await authorization(request?.signal);
+      } catch (error) {
+        if (abandoned(request?.signal)) {
+          return { summaries: new Map(), unavailable: giveUp(pullRequestNumbers) };
+        }
+        throw error;
+      }
       return collectSummaries(pullRequestNumbers, header, request?.signal);
     },
   };

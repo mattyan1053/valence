@@ -44,6 +44,13 @@ export type ResolveInstallationOptions = {
   readonly now: Date;
   /** **差し替えるための引数であって、抽象ではない**（#64 と同じ形）。 */
   readonly fetchImpl?: typeof fetch;
+  /**
+   * 打ち切りの合図。
+   *
+   * **認証の往復にも届かせる。** ここが素通しだと、**呼んだ側が縮退したあとも
+   * installation の解決だけが走り続ける**——**止まるのは呼んだ側だけ**になる。
+   */
+  readonly signal?: AbortSignal;
 };
 
 /**
@@ -65,6 +72,7 @@ export async function resolveRepositoryInstallation({
   repository,
   now,
   fetchImpl = fetch,
+  signal,
 }: ResolveInstallationOptions): Promise<string> {
   requireName(repository.owner, "owner");
   requireName(repository.name, "name");
@@ -72,6 +80,7 @@ export async function resolveRepositoryInstallation({
   const response = await fetchImpl(
     `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/installation`,
     {
+      signal,
       headers: {
         authorization: `Bearer ${createAppJwt(credentials, now)}`,
         accept: "application/vnd.github+json",

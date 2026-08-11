@@ -82,11 +82,17 @@ export async function requestInstallationToken(
    * **実際に GitHub へ繋ぐまで分からない**。
    */
   fetchImpl: typeof fetch = fetch,
+  /**
+   * 打ち切りの合図。**認証の往復にも届かせる**——ここが素通しだと、
+   * **呼んだ側が縮退したあとも token の発行だけが走り続ける**。
+   */
+  signal?: AbortSignal,
 ): Promise<InstallationToken> {
   const response = await fetchImpl(
     `https://api.github.com/app/installations/${installationId}/access_tokens`,
     {
       method: "POST",
+      signal,
       headers: {
         authorization: `Bearer ${createAppJwt(credentials, now)}`,
         accept: "application/vnd.github+json",

@@ -347,6 +347,80 @@ describe("createGitHubChangeSummarySource", () => {
       ]);
     });
 
+    it("認証の往復も、合図で止まる", async () => {
+      // **`authorization()` は installation の解決と token の発行で 2 回往復する。**
+      // ここに合図が届かないと、**呼んだ側は縮退したのに、認証の要求だけが走り続ける**——
+      // **この PR が消しに来た「止まるのは呼んだ側だけ」**が、認証経路に残る。
+      //
+      // **既存の偽物は認証を即座に返していた**ので、**この経路を 1 度も通っていない**
+      // （**起こりえない状態を作る偽物**——#154 と同じ形）
+      const deadline = new AbortController();
+      const signals: (AbortSignal | undefined)[] = [];
+      const listing = createGitHubChangeSummarySource({
+        credentials: CREDENTIALS,
+        repository: REPOSITORY,
+        fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+          // **token の口も応答しない。** ここを返してしまうと、
+          // **認証を抜けた先**しか試せない
+          signals.push(init?.signal ?? undefined);
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("中断されました")), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof fetch,
+      }).listChangeSummaries([1], { signal: deadline.signal });
+
+      await vi.waitFor(() => expect(signals).toHaveLength(1));
+      deadline.abort();
+      const result = await listing;
+
+      expect(signals[0], "認証の fetch に合図が渡っていない").toBe(deadline.signal);
+      // **止まったことを、打ち切りとして残す。** ここで投げると、
+      // **1 本の失敗で全体が消える**（この口が守ってきたもの）
+      expect(result.unavailable).toEqual([
+        { pullRequestNumber: 1, kind: "timedout", reason: "期限までに材料が返りませんでした" },
+      ]);
+    });
+
+    it("token の発行も、合図で止まる", async () => {
+      // **認証は 2 回往復する。** installation の解決だけに合図を通しても、
+      // **token の発行は誰にも止められないまま走り続ける**——
+      // **1 本目だけ直して「届いた」ことにしない。**
+      //
+      // ここでは **installation だけ即座に返し、token の口を応答させない**
+      const deadline = new AbortController();
+      const signals: (AbortSignal | undefined)[] = [];
+      const listing = createGitHubChangeSummarySource({
+        credentials: CREDENTIALS,
+        repository: REPOSITORY,
+        fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          // **token の URL にも "installation" が入る**（`/app/installations/1/access_tokens`）。
+          // 素直に部分一致で分けると、**token の要求に installation の応答を返す**
+          if (url.includes("/installation") && !url.includes("/access_tokens")) {
+            return new Response(JSON.stringify({ id: 1 }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          signals.push(init?.signal ?? undefined);
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("中断されました")), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof fetch,
+      }).listChangeSummaries([1], { signal: deadline.signal });
+
+      await vi.waitFor(() => expect(signals).toHaveLength(1));
+      deadline.abort();
+      const result = await listing;
+
+      expect(signals[0], "token の fetch に合図が渡っていない").toBe(deadline.signal);
+      expect(result.unavailable.every((entry) => entry.kind === "timedout")).toBe(true);
+    });
+
     it("合図が無ければ、これまでどおり最後まで集める", async () => {
       // **既定を変えない。** 合図を渡さない呼び出しは、いままでと同じ振る舞いをする
       const listing = await source({
