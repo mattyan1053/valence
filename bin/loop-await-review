@@ -74,6 +74,18 @@ while :; do
   fi
   remaining=$((DEADLINE - $(date +%s)))
   ((remaining <= 0)) && break
+  # **待つ前に、master が生きていることを記録する。** lease の期限は
+  # 「最後に活動してからの経過」で測る (bin/loop-lease)。**master の時間はこの待ちに
+  # 集中している**ので、ここで打たないと**待っている最中に期限が切れ**、別の master が
+  # 引き継いでレビュー要求とマージ判定が並行する。
+  #
+  # **打つ場所は「長い区間の直前」だけに限る。** 増やすと、`bin/loop-handoff` で
+  # 出口を 1 本にしたときと同じ「書き忘れる経路」が戻る。**いま長いのは 2 つだけ**——
+  # `./task` のコマンドと、この待ち。**どちらも試験で押さえてある。**
+  #
+  # **打てなくても待つ。** ここで失敗して待ちを飛ばすと、**上限まで忙しく回る**。
+  # 失敗は標準エラーに出るので、握りつぶしてはいない。
+  "$(dirname "$0")/loop-lease" heartbeat master || true
   # **残りが間隔より短ければ、残りだけ待つ。** 超過して待つと上限の意味が無くなる。
   ((remaining < INTERVAL_SEC)) && sleep "$remaining" || sleep "$INTERVAL_SEC"
 done

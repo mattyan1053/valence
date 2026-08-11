@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,7 +79,21 @@ describe("bin/loop-await-review", () => {
     // **PATH を絞る。** 偽物を置き忘れても本物へ落ちないようにする
     const path = join(sandbox, "path");
     spawnSync("mkdir", ["-p", path]);
-    for (const command of ["bash", "sleep", "date", "dirname", "cat", "tail", "cut"]) {
+    // **git を通す。** 待つあいだに `bin/loop-lease heartbeat master` を打つので、
+    // git の共通ディレクトリを引けないと記録できない
+    expect(spawnSync("git", ["init", "--quiet", sandbox]).status).toBe(0);
+    for (const command of [
+      "bash",
+      "sleep",
+      "date",
+      "dirname",
+      "cat",
+      "tail",
+      "cut",
+      "git",
+      "mv",
+      "rm",
+    ]) {
       const source = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
       if (source !== "") {
         symlinkSync(source, join(path, command));
@@ -81,6 +103,28 @@ describe("bin/loop-await-review", () => {
 
   afterEach(() => {
     rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it("待っているあいだ、master の活動を記録する", () => {
+    // **master の周回は、この待ちに時間の大半を使う**（8 分の待ちが 2 回）。
+    // ここで打たないと、**待っている最中に lease の期限が切れ**、別の master が
+    // 引き継いでレビュー要求とマージ判定が並行する。
+    // **打つ場所は「長い区間の直前」だけ**——増やすと書き忘れる経路が戻るので、
+    // 長い区間はここと `./task` の 2 つに限る（どちらも試験で押さえてある）
+    copyFileSync(
+      fileURLToPath(new URL("./loop-lease", import.meta.url)),
+      join(sandbox, "loop-lease"),
+    );
+    chmodSync(join(sandbox, "loop-lease"), 0o755);
+    withReviews("");
+
+    expect(run(["74", ""]).status).toBe(1);
+
+    const activity = readdirSync(join(sandbox, ".git")).filter((entry) =>
+      entry.startsWith("valence-loop-activity-"),
+    );
+
+    expect(activity).toEqual(["valence-loop-activity-master"]);
   });
 
   it("新しいレビューが返ったら 0 で終わる", () => {

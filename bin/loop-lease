@@ -25,7 +25,16 @@ set -uo pipefail
 readonly ROLES=(master worker)
 
 # 抱えたままの lease を引き継ぐまでの時間。**周回が落ちても、その役のループが
-# 二度と動かなくならないようにする。** 1 周が長引くより十分に長く取る。
+# 二度と動かなくならないようにする。**
+#
+# **これは「周回の長さ」への賭けではない。** 以前はそう読んでいて、実装する周回が
+# `./task check` を含むと 1 時間近くかかるため、**返す前に期限が切れていた**
+# (実測で 4 周連続)。切れた窓へ別の周回が入ると、**同じ作業ツリーで checkout と
+# commit が並行する** (#68 の形)。
+#
+# **いまは「最後に何かが起きてからの経過」を測る。** 長い処理はすべて `./task` を通り、
+# そこが活動を記録するので、**周回が何分かかっても、動いているかぎり切れない**。
+# 賭けているのは**周回の長さではなく、活動と活動の間隔**である。
 readonly TTL_SEC="${LOOP_LEASE_TTL_SEC:-1800}"
 
 # 読み書きのロックを待つ時間。ここは一瞬で終わる操作なので短くてよい。
@@ -34,6 +43,7 @@ readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
 usage() {
   echo "使い方: bin/loop-lease acquire <役>" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
+  echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
   echo "        役: ${ROLES[*]}" >&2
   echo "        master は役ごとに 1 つ（判定を並列にしない）" >&2
   echo "        worker は作業場ごとに 1 つ（作業場が増えたぶん並列になる）" >&2
@@ -46,6 +56,15 @@ role_is_known() {
     [[ $role == "$candidate" ]] && return 0
   done
   return 1
+}
+
+# 「最後の活動」を人が読める形にする。**分からないときは分からないと言う。**
+activity_age() {
+  if [[ -z $last_activity ]]; then
+    printf '%s' "活動の記録なし"
+  else
+    printf '最後の活動 %s 秒前' "$((now - last_activity))"
+  fi
 }
 
 [[ $# -ge 2 ]] || usage
@@ -113,6 +132,27 @@ if [[ $ROLE == "worker" ]]; then
 fi
 readonly lease_scope SCOPE_LABEL
 readonly STATE="$common_dir/valence-loop-lease-$lease_scope"
+# **活動は lease とは別のファイルに置く。** lease を持っていなくても記録できる
+# ようにするため (`./task` は周回の外でも走る)。
+readonly ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+
+# **活動の記録は lease を読まない。** ロックも要らない——ただし**置き換えは原子的に行う**。
+# `>` は切り詰めてから書くので、**その隙間を `acquire` が読むと空に見え**、
+# **活動中なのに「記録なし」として引き継がれる**。一時ファイルへ書いて `mv` で置き換える。
+#
+# **書けなかったことを黙らない。** 書けない状態は「安全な側」ではない——
+# **期限が取得時刻だけで決まる状態**、つまり**この仕組みが直した当の壊れ方**に戻る。
+# 呼ぶ側 (`./task`) が**コマンド自体は落とさない**のは別の判断で、そこは変えない。
+if [[ $ACTION == "heartbeat" ]]; then
+  [[ $# -eq 2 ]] || usage
+  if ! date +%s >"$ACTIVITY.tmp" 2>/dev/null || ! mv -f "$ACTIVITY.tmp" "$ACTIVITY" 2>/dev/null; then
+    rm -f "$ACTIVITY.tmp" 2>/dev/null || true
+    echo "[WARN] $SCOPE_LABEL の活動を記録できません: $ACTIVITY" >&2
+    echo "       この周回は、取得時刻だけで期限を判定されます（長い周回は途中で奪われます）" >&2
+    exit 1
+  fi
+  exit 0
+fi
 
 # 判定と書き込みの間に割り込まれると、**両方の周回が「空いている」と読む**。
 # ここを守らないと、直列化そのものが成立しない。
@@ -128,6 +168,13 @@ fi
 now="$(date +%s)"
 
 # 保持されている lease を読む。期限切れは「誰も持っていない」として扱う。
+# 最後の活動。**読めなければ「活動なし」として扱う**——推測で新しくしない。
+last_activity=""
+if [[ -f $ACTIVITY ]]; then
+  read -r last_activity <"$ACTIVITY" || last_activity=""
+  [[ $last_activity =~ ^[0-9]+$ ]] || last_activity=""
+fi
+
 held_token=""
 held_since=""
 if [[ -f $STATE ]]; then
@@ -136,9 +183,16 @@ if [[ -f $STATE ]]; then
     echo "[FAIL] lease の記録を読めません: $STATE" >&2
     exit 2
   fi
-  if ((now - held_since >= TTL_SEC)); then
+  # **取得時刻と最後の活動の、新しいほうから測る。** 取得時刻だけで測ると、
+  # **長い周回がそれだけで奪われる**。活動だけで測ると、**活動が 1 度も無い周回**
+  # （取った直後に落ちた）が測れない。
+  alive_since="$held_since"
+  if [[ -n $last_activity ]] && ((last_activity > alive_since)); then
+    alive_since="$last_activity"
+  fi
+  if ((now - alive_since >= TTL_SEC)); then
     # **黙って上書きしない。** 期限切れの引き継ぎは、落ちた周回の跡である。
-    echo "[WARN] $SCOPE_LABEL の lease が期限切れでした（$((now - held_since)) 秒前に取得）。引き継ぎます" >&2
+    echo "[WARN] $SCOPE_LABEL の lease が期限切れでした（$((now - held_since)) 秒前に取得、$(activity_age) ）。引き継ぎます" >&2
     held_token=""
   fi
 fi
@@ -147,7 +201,10 @@ case "$ACTION" in
 acquire)
   [[ $# -eq 2 ]] || usage
   if [[ -n $held_token ]]; then
-    echo "[FAIL] $SCOPE_LABEL の周回が走っています（$((now - held_since)) 秒前に開始）。この周回は何もしません" >&2
+    # **「走っている」と「返し忘れ」を、この 1 行で見分けられるようにする。**
+    # 手順書は「何周も取れないなら返し忘れ」と読ませるが、**活動が見えないと
+    # その判断ができない**。
+    echo "[FAIL] $SCOPE_LABEL の周回が走っています（$((now - held_since)) 秒前に開始、$(activity_age) ）。この周回は何もしません" >&2
     echo "       待たずに終わるのは、走っている側が同じ状態を読むためです。" >&2
     echo "       読み終えた後だった場合は 1 拍落ちますが、次の周回（保険）が拾います" >&2
     exit 1

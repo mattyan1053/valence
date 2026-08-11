@@ -1,5 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -233,6 +243,186 @@ describe("bin/loop-lease", () => {
 
       expect(released.status).toBe(0);
       expect(acquireIn(sandbox).status).toBe(0);
+    });
+  });
+
+  describe("長い周回のあいだ、期限切れにしない", () => {
+    // **TTL は「周回の長さ」への賭けだった。** 実装する周回は `./task check` を含むので
+    // 1 時間近くかかり、**返す前に期限が切れる**（実測で 4 周連続）。切れた窓に
+    // 別の周回が入ると、**同じ作業ツリーで checkout と commit が並行する**（#68 の形）。
+    //
+    // **測るものを変える。** 「取得からの経過」ではなく「**最後に何かが起きてからの経過**」。
+    // 長い処理（`./task`）が動いているあいだは活動が続くので、**周回が何分かかっても
+    // 切れない**。**止まっていれば、いままでどおり引き継ぐ。**
+
+    /** lease の記録（token と取得時刻）。**名前の作り方は試験に写さない。** */
+    function stateFile(): string {
+      const dir = join(sandbox, ".git");
+      const name = readdirSync(dir).find(
+        (entry) => entry.startsWith("valence-loop-lease-worker") && !entry.endsWith(".lock"),
+      );
+      expect(name, "lease の記録が見つからない").toBeDefined();
+      return join(dir, name ?? "");
+    }
+
+    /** 活動の記録の名前。**作り方は試験に写さない。** */
+    function activityName(): string {
+      const name = readdirSync(join(sandbox, ".git")).find(
+        (entry) => entry.startsWith("valence-loop-activity-") && !entry.endsWith(".tmp"),
+      );
+      expect(name, "活動の記録が見つからない").toBeDefined();
+      return name ?? "";
+    }
+
+    /** lease の記録から作業場ぶんの識別子を取る。**名前の作り方は試験に写さない。** */
+    function activityScope(): string {
+      return stateFile().replace(/^.*valence-loop-lease-/, "");
+    }
+
+    /** 取得時刻を過去へずらす。**待たずに古い状態を作る**（#131 の教訓）。 */
+    function ageLease(secondsAgo: number): void {
+      const file = stateFile();
+      const token = (readFileSync(file, "utf8").split("\t")[0] ?? "").trim();
+      writeFileSync(file, `${token}\t${Math.floor(Date.now() / 1000) - secondsAgo}\n`);
+    }
+
+    it("活動が続いていれば、取得から TTL を過ぎても引き継がない", () => {
+      // **これが本題。** 周回が長いだけで lease を奪われてはいけない
+      expect(acquire().status).toBe(0);
+      ageLease(3600);
+
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+      const second = acquire();
+
+      expect(second.status).toBe(1);
+      expect(second.stderr).not.toContain("引き継ぎます");
+    });
+
+    it("活動が止まって TTL を過ぎたら、いままでどおり引き継ぐ", () => {
+      // **落ちた周回の lease が永遠に残ってはいけない**（引き継ぎが要る理由）
+      expect(acquire().status).toBe(0);
+      ageLease(3600);
+
+      const second = acquire();
+
+      expect(second.status).toBe(0);
+      expect(second.stderr).toContain("引き継ぎます");
+    });
+
+    it("活動の記録が古ければ、記録があっても引き継ぐ", () => {
+      // **「記録がある」と「最近だった」は別である。** ファイルの有無で見ると、
+      // **落ちた周回の古い記録が lease を永遠に生かす**
+      expect(acquire().status).toBe(0);
+      ageLease(3600);
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-activity-${activityScope()}`),
+        `${Math.floor(Date.now() / 1000) - 3600}\n`,
+      );
+
+      const second = acquire();
+
+      expect(second.status).toBe(0);
+      expect(second.stderr).toContain("引き継ぎます");
+    });
+
+    it("取れないとき、走っているのか返し忘れなのかが読める", () => {
+      // **手順書は「何周も取れないなら返し忘れ」と読ませる。** 期限切れが常態だと
+      // その判断ができない。**最後の活動からの経過**を出せば、その場で分かる
+      expect(acquire().status).toBe(0);
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+
+      const second = acquire();
+
+      expect(second.status).toBe(1);
+      expect(second.stderr).toMatch(/最後の活動/);
+    });
+
+    it("heartbeat は lease を持っていなくても成功する", () => {
+      // **`./task` から毎回呼ぶ。** 持っていないときに落ちると、
+      // **ループと関係のないコマンドまで失敗する**
+      const beat = run(["heartbeat", "worker"]);
+
+      expect(beat.status).toBe(0);
+    });
+
+    it("heartbeat は別の役の lease を延命しない", () => {
+      // 役が違えば別の周回である。**worker の活動で master の落ちた周回を生かさない**
+      expect(run(["acquire", "master"]).status).toBe(0);
+      const master = readdirSync(join(sandbox, ".git")).find(
+        (entry) => entry === "valence-loop-lease-master",
+      );
+      expect(master).toBeDefined();
+      writeFileSync(
+        join(sandbox, ".git", master ?? ""),
+        `deadbeefdeadbeef\t${Math.floor(Date.now() / 1000) - 3600}\n`,
+      );
+
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+      const retaken = run(["acquire", "master"]);
+
+      expect(retaken.status).toBe(0);
+      expect(retaken.stderr).toContain("引き継ぎます");
+    });
+
+    it("書けなければ、黙って成功しない", () => {
+      // **書けていないのに成功を返すと、周回は延命できたつもりで走り続ける。**
+      // 期限が切れれば別の周回が入るので、**気づけるのは事故が起きたときだけ**になる
+      const dir = join(sandbox, ".git");
+      chmodSync(dir, 0o555);
+      const beat = run(["heartbeat", "worker"]);
+      chmodSync(dir, 0o755);
+
+      expect(beat.status).not.toBe(0);
+      expect(beat.stderr).toContain("活動を記録できません");
+    });
+
+    it("記録は切り詰めではなく差し替えで置く", () => {
+      // **`>` は切り詰めてから書く。** その隙間を `acquire` が読むと、
+      // **活動中なのに「記録なし」**として引き継がれる。
+      //
+      // **競り自体は試験にしない。** 隙間に読ませる試験は時間に依存し、
+      // #131 で直したばかりの形を作り直すことになる。**代わりに機構を見る**——
+      // 差し替え（rename）なら **inode が変わる**。切り詰めなら変わらない
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+      const file = join(sandbox, ".git", activityName());
+      const first = statSync(file).ino;
+
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+
+      expect(statSync(file).ino, "切り詰めて書いている（差し替えになっていない）").not.toBe(first);
+    });
+
+    it("置き換えたあとに一時ファイルを残さない", () => {
+      expect(run(["heartbeat", "worker"]).status).toBe(0);
+
+      const leftovers = readdirSync(join(sandbox, ".git")).filter(
+        (entry) => entry.startsWith("valence-loop-activity-") && entry.endsWith(".tmp"),
+      );
+
+      expect(leftovers).toEqual([]);
+    });
+
+    it("./task は活動を記録する", () => {
+      // **書き忘れる経路を作らない。** 長い処理はすべて `./task` を通るので、
+      // **そこが打てば、周回のどこで止まっていても活動が続く**。
+      // 手順書に「ここで打つこと」と書く形にすると、**書き忘れがそのまま穴**になる
+      const repo = mkdtempSync(join(tmpdir(), "loop-lease-task-"));
+      expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+      mkdirSync(join(repo, "bin"));
+      copyFileSync(fileURLToPath(new URL("../task", import.meta.url)), join(repo, "task"));
+      copyFileSync(SCRIPT, join(repo, "bin", "loop-lease"));
+      chmodSync(join(repo, "task"), 0o755);
+      chmodSync(join(repo, "bin", "loop-lease"), 0o755);
+
+      // docker を使わないコマンドで確かめる（help は自分自身を読んで出すだけ）
+      expect(spawnSync("./task", ["help"], { cwd: repo, encoding: "utf8" }).status).toBe(0);
+
+      const activity = readdirSync(join(repo, ".git")).filter((entry) =>
+        entry.startsWith("valence-loop-activity-"),
+      );
+      rmSync(repo, { recursive: true, force: true });
+
+      expect(activity).toHaveLength(1);
     });
   });
 });
