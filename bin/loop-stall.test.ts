@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, type SpawnSyncReturns, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { MODELLED_SPAWNS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-stall", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -259,17 +260,30 @@ describe("作業が尽きた周回の数え方", () => {
    * **`loop/STOP` が両方の worktree へ配られるところまで**を見る。偽の `task` だと
    * 「呼ばれた」しか分からず、**配る側が壊れても気づけない**。
    */
+  /** steps とは無関係に必ず起こす git の回数（init / add / commit / worktree add・remove）。 */
+  const FIXED_SPAWNS = 5;
+
   function runNoWorkToLimit(steps: string[]): { status: number; stops: boolean[] } {
+    // **起こしたプロセスを数える。** 枠（test/slow-machine.ts）はこの回数から
+    // 導いてあるので、**手で書いた回数と実際がずれると枠が足りなくなる**。
+    // 実際に 1 つずれていた（固定 5 回に steps 最大 5 件で 10 回なのを 9 と数えていた）。
+    // **数えている側で確かめる**——見積もりを 2 箇所に書くと、片方だけ直して食い違う。
+    let spawns = 0;
+    function counted(command: string, args: string[], cwd?: string): SpawnSyncReturns<string> {
+      spawns += 1;
+      return spawnSync(command, args, { cwd, encoding: "utf8" });
+    }
+
     const repo = mkdtempSync(join(tmpdir(), "loop-stall-nowork-"));
-    spawnSync("git", ["init", "--quiet", repo]);
+    counted("git", ["init", "--quiet", repo]);
     copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
     chmodSync(join(repo, "task"), 0o755);
     mkdirSync(join(repo, "bin"));
     const script = join(repo, "bin", "loop-stall");
     copyFileSync(SCRIPT, script);
     chmodSync(script, 0o755);
-    spawnSync("git", ["-C", repo, "add", "-A"]);
-    spawnSync("git", [
+    counted("git", ["-C", repo, "add", "-A"]);
+    counted("git", [
       "-C",
       repo,
       "-c",
@@ -282,19 +296,27 @@ describe("作業が尽きた周回の数え方", () => {
       "init",
     ]);
     const worktree = `${repo}-wt`;
-    spawnSync("git", ["-C", repo, "worktree", "add", "--detach", "--quiet", worktree]);
+    counted("git", ["-C", repo, "worktree", "add", "--detach", "--quiet", worktree]);
 
-    let result = spawnSync(script, [steps[0] ?? "no-work"], { cwd: repo, encoding: "utf8" });
+    let result = counted(script, [steps[0] ?? "no-work"], repo);
     for (const step of steps.slice(1)) {
-      result = spawnSync(script, [step], { cwd: repo, encoding: "utf8" });
+      result = counted(script, [step], repo);
     }
     const stops = [
       existsSync(join(repo, "loop", "STOP")),
       existsSync(join(worktree, "loop", "STOP")),
     ];
-    spawnSync("git", ["-C", repo, "worktree", "remove", "--force", worktree]);
+    counted("git", ["-C", repo, "worktree", "remove", "--force", worktree]);
     rmSync(worktree, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
+
+    // **数え落としも検出する。** 上限だけを見ると、**数える側が壊れたときに
+    // 黙って通る**（0 回はいつでも上限の内側にある）。固定の 5 回と steps の件数から
+    // 出した値と**一致すること**まで見る
+    expect(spawns, "起こしたプロセスの数が見積もりと違う").toBe(FIXED_SPAWNS + steps.length);
+    expect(spawns, "枠の見積もりより多くプロセスを起こしている").toBeLessThanOrEqual(
+      MODELLED_SPAWNS,
+    );
     return { status: result.status ?? -1, stops };
   }
 

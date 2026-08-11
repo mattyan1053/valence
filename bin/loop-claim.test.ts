@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { MODELLED_HOOK_SPAWNS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-claim", import.meta.url));
 
@@ -130,18 +131,29 @@ describe("bin/loop-claim", () => {
   }
 
   beforeEach(() => {
+    // **hook の枠もここから導いてある**（test/slow-machine.ts の MODELLED_HOOK_SPAWNS）。
+    // **数え違いは起こす側で検出する**——見積もりと合わなければここで落ちる。
+    // 本体だけ枠を伸ばしても、**本体へ到達する前に hook が時間切れになる**
+    let hookSpawns = 0;
+    function counted(
+      command: string,
+      args: string[],
+      env?: NodeJS.ProcessEnv,
+    ): SpawnSyncReturns<string> {
+      hookSpawns += 1;
+      return spawnSync(command, args, { encoding: "utf8", env });
+    }
+
     repo = mkdtempSync(join(tmpdir(), "loop-claim-"));
-    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    expect(counted("git", ["init", "--quiet", repo]).status).toBe(0);
     // 作業場を足すには commit が 1 つ要る
     expect(
-      spawnSync("git", ["-C", repo, "commit", "--allow-empty", "--quiet", "-m", "init"], {
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "t",
-          GIT_AUTHOR_EMAIL: "t@e",
-          GIT_COMMITTER_NAME: "t",
-          GIT_COMMITTER_EMAIL: "t@e",
-        },
+      counted("git", ["-C", repo, "commit", "--allow-empty", "--quiet", "-m", "init"], {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@e",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@e",
       }).status,
     ).toBe(0);
     path = join(repo, "path");
@@ -165,12 +177,14 @@ describe("bin/loop-claim", () => {
       "setsid",
       "touch",
     ]) {
-      const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
+      const found = counted("which", [command]).stdout.trim();
       if (found !== "") {
         symlinkSync(found, join(path, command));
       }
     }
     chmodSync(path, 0o755);
+
+    expect(hookSpawns, "hook が起こすプロセスの数が見積もりと違う").toBe(MODELLED_HOOK_SPAWNS);
   });
 
   afterEach(() => {
