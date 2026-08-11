@@ -221,18 +221,32 @@ cmd_loop_stop() {
 
 # 停止を解除する
 cmd_loop_resume() {
-  local p found=0
-  while read -r p; do
-    if [[ -f $p ]]; then rm "$p"; echo "==> 削除: $p"; found=1; fi
-  done < <(loop_stop_paths)
-  ((found == 1)) || echo "==> STOP は無い（停止していない）"
   # **人が打つのは、このコマンド 1 つだけにする。** 空転カウンタを消さないと、
   # **再開した直後に同じ条件でもう 1 回で止まり直す**（実測 6 回。毎回、人が手で
   # `bin/loop-stall --reset` も打っていた）。**手順書に「2 つ打つこと」と書き足す形は
   # 採らない**——書いてあっても飛ばす（#143 と同じ理由）。
   #
   # **消えるのは数だけである。** 直っていなければ、これまでどおりの周回数で止まる。
-  ./bin/loop-stall --resumed || echo "==> 空転カウンタを消せなかった（bin/loop-stall --resumed を手で叩くこと）" >&2
+  #
+  # **順番が要る。カウンタが先、STOP の削除が後。**
+  # 逆にすると、**STOP を消してから消し終わるまでの間に、走っていた周回が
+  # `bin/loop-stall` を呼んで STOP を作り直せる**——**カウンタは 0、STOP はある**という、
+  # **この仕組みが消そうとしている症状と見え方が同じ**状態になる。
+  # **STOP は周回の冒頭でしか効かない**ので、**置いた時点で走っていた周回は最後まで
+  # 走り切る**——**人が resume を打つのは、たいていその最中**である。
+  #
+  # **消せなければ STOP を消さない。** 消してしまうと、**古いカウンタのまま再開して
+  # 1 周で止まり直す**（直そうとしている症状そのもの）。**再開しないほうがよい。**
+  if ! ./bin/loop-stall --resumed; then
+    echo "==> 空転カウンタを消せなかったので、STOP は消しません" >&2
+    echo "    bin/loop-stall --resumed を手で叩いてから、もう一度このコマンドを実行すること" >&2
+    return 1
+  fi
+  local p found=0
+  while read -r p; do
+    if [[ -f $p ]]; then rm "$p"; echo "==> 削除: $p"; found=1; fi
+  done < <(loop_stop_paths)
+  ((found == 1)) || echo "==> STOP は無い（停止していない）"
 }
 
 # ループの現在地を表示する (open PR / Issue / STOP)

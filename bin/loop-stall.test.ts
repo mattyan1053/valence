@@ -856,3 +856,82 @@ describe("人が再開したことを受け取る", () => {
     expect(after.stdout).toContain("count=1");
   });
 });
+
+describe("再開の順番", () => {
+  // **STOP を先に消すと、走っている周回が隙間に入る。**
+  //
+  //   t0    STOP を消す
+  //   t0+ε  走っていた周回が bin/loop-stall を呼び、上限に達して **STOP を作り直す**
+  //   t0+1s --resumed がカウンタを消す
+  //   結果  **カウンタ 0 / STOP あり**——人には「削除」しか見えないので**再開したように見える**
+  //
+  // **窓が狭いから起きない、とは言えない。** **STOP は周回の冒頭でしか効かない**ので、
+  // **STOP を置いた時点で走っていた周回は最後まで走り切る**——**人が resume を打つのは
+  // たいていその最中**である。狭いのは窓の幅であって、巡り合わせの珍しさではない。
+  //
+  // **順番は読んでも正しく見える**ので、**入れ替わったことを検出できる形**で見る。
+
+  let repo: string;
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "loop-resume-order-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    mkdirSync(join(repo, "bin"));
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+    mkdirSync(join(repo, "loop"));
+    writeFileSync(join(repo, "loop", "STOP"), "とめた\n");
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  /**
+   * 偽の `bin/loop-stall`。**呼ばれた時点で STOP がまだあるか**を書き残す。
+   * **順番そのものを見る**ためのもので、「呼ばれた」だけでは入れ替わりを検出できない。
+   */
+  function withStall(exitCode = 0): void {
+    writeFileSync(
+      join(repo, "bin", "loop-stall"),
+      [
+        "#!/usr/bin/env bash",
+        `if [[ -e "${join(repo, "loop", "STOP")}" ]]; then`,
+        `  echo "stop-present $*" >> "${join(repo, "order.log")}"`,
+        "else",
+        `  echo "stop-absent $*" >> "${join(repo, "order.log")}"`,
+        "fi",
+        `exit ${exitCode}`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
+  function resume(): { status: number; stdout: string; stderr: string } {
+    const result = spawnSync("./task", ["loop:resume"], { cwd: repo, encoding: "utf8" });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it("カウンタを消してから STOP を消す", () => {
+    // **逆だと、隙間に入った周回が STOP を作り直したあとでカウンタが消える**
+    withStall();
+
+    expect(resume().status).toBe(0);
+
+    expect(readFileSync(join(repo, "order.log"), "utf8")).toContain("stop-present --resumed");
+    expect(existsSync(join(repo, "loop", "STOP"))).toBe(false);
+  });
+
+  it("カウンタを消せなければ、STOP を消さない", () => {
+    // **消えたのに古いカウンタが残る**と、再開した直後に 1 周で止まり直す
+    // （#127 の症状そのもの）。**消せないなら、再開しないほうがよい**
+    withStall(1);
+
+    const result = resume();
+
+    expect(result.status).not.toBe(0);
+    expect(existsSync(join(repo, "loop", "STOP")), "STOP が消えている").toBe(true);
+    expect(result.stderr).toContain("STOP は消しません");
+  });
+});
