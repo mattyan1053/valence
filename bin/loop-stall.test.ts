@@ -742,3 +742,117 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(stall().stdout).toContain("[STOP]");
   });
 });
+
+describe("人が再開したことを受け取る", () => {
+  // **第 4 層は「3 周続いたら人を呼ぶ」仕組みだが、呼ばれた人が応えたことを
+  // 受け取る口が無かった。** `./task loop:resume` はカウンタを消さないので、
+  // **人が判断して再開した直後に、同じ条件でもう 1 回で止まり直す**（今日 6 回）。
+  //
+  // **合図は `resume` である。** STOP は人にしか解けないので、**resume は
+  // 「人が来て判断した」唯一の証拠**——ただし**「判断した」であって「直った」ではない**。
+  // だから**消すのは数だけ**で、**同じ状態で再び上限に達すれば、そのときは止まる**。
+
+  let repo: string;
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "loop-stall-resume-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    mkdirSync(join(repo, "bin"));
+    for (const name of ["loop-stall", "loop-lease"]) {
+      copyFileSync(join(REPO_ROOT, "bin", name), join(repo, "bin", name));
+      chmodSync(join(repo, "bin", name), 0o755);
+    }
+    writeFileSync(join(repo, "task"), `#!/usr/bin/env bash\ntouch '${repo}/ran'\n`, {
+      mode: 0o755,
+    });
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  function stall(id: string): Run {
+    const result = spawnSync(join(repo, "bin", "loop-stall"), [id], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it("再開の合図は数を消す", () => {
+    // **人が手で --reset を打たなくてよくする**（今日 6 回打っている）
+    stall("no-work");
+    stall("no-work");
+    expect(stall("no-work").stdout).toContain("[STOP]");
+
+    expect(stall("--resumed").status).toBe(0);
+
+    expect(stall("no-work").stdout).toContain("count=1");
+  });
+
+  it("再開しても、直っていなければ上限でまた止まる", () => {
+    // **ただ消すだけにしない。** 人が何もせず再開しただけなら、
+    // **これまでどおりの周回数で止まる**
+    stall("no-work");
+    stall("no-work");
+    stall("no-work");
+    stall("--resumed");
+
+    stall("no-work");
+    stall("no-work");
+
+    expect(stall("no-work").stdout).toContain("[STOP]");
+  });
+
+  it("2 回目の停止は、そう分かる形で出る", () => {
+    // **同じところで繰り返し止まっていることが、記録から読めるようにする。**
+    // 消しただけだと「1 回目と同じ」に見え、**人が同じ判断を繰り返していることに
+    // 誰も気づけない**
+    stall("no-work");
+    stall("no-work");
+    stall("no-work");
+    stall("--resumed");
+    stall("no-work");
+    stall("no-work");
+
+    expect(stall("no-work").stdout).toMatch(/2 回目/);
+  });
+
+  it("止まっていない識別子は、繰り返しに数えない", () => {
+    // **上限に達したものだけが「人を呼んだ」状態である**
+    stall("no-work");
+    stall("dirty");
+    stall("dirty");
+    expect(stall("dirty").stdout).toContain("[STOP]");
+    stall("--resumed");
+
+    stall("no-work");
+    stall("no-work");
+
+    expect(stall("no-work").stdout).not.toMatch(/2 回目/);
+  });
+
+  it("./task loop:resume が再開の合図を通す", () => {
+    // **人が打つのは resume 1 つだけ**にする。手順書に「--reset も打つこと」と
+    // 書き足す形にしない（#143 と同じ理由——書いてあっても飛ばす）
+    const real = mkdtempSync(join(tmpdir(), "loop-stall-resume-task-"));
+    expect(spawnSync("git", ["init", "--quiet", real]).status).toBe(0);
+    mkdirSync(join(real, "bin"));
+    for (const name of ["loop-stall", "loop-lease"]) {
+      copyFileSync(join(REPO_ROOT, "bin", name), join(real, "bin", name));
+      chmodSync(join(real, "bin", name), 0o755);
+    }
+    copyFileSync(join(REPO_ROOT, "task"), join(real, "task"));
+    chmodSync(join(real, "task"), 0o755);
+    const run = (args: string[]) =>
+      spawnSync(join(real, "bin", "loop-stall"), args, { cwd: real, encoding: "utf8" });
+    run(["no-work"]);
+    run(["no-work"]);
+
+    expect(spawnSync("./task", ["loop:resume"], { cwd: real, encoding: "utf8" }).status).toBe(0);
+    const after = run(["no-work"]);
+    rmSync(real, { recursive: true, force: true });
+
+    expect(after.stdout).toContain("count=1");
+  });
+});
