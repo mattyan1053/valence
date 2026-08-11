@@ -407,19 +407,31 @@ describe("共有カウンタの排他", () => {
     spawnSync(script, ["no-work"], { cwd: repo, encoding: "utf8" });
     // 外から 1 秒ロックを保持し、**待たされた時間**を見る。
     // 「結果が正しい」だけでは、ロックを取らない実装でも通ってしまう
+    // **握ったことを事象で待つ。** `sleep` で待つと、**負荷が高い日に「まだ握って
+    // いない」まま本体が走る**（#141）。**保持している長さはここでの測定対象**なので
+    // 残すが、**待つのは時間ではなく「握った」という知らせ**である
     const holder = spawnSync(
       "/usr/bin/bash",
       [
         "-c",
-        `flock '${state}.lock' -c 'sleep 1' &
-         sleep 0.2
+        `mkfifo '${repo}/held'
+         flock '${state}.lock' -c 'echo x > "${repo}/held"; sleep 1' &
+         read -r _ < '${repo}/held'
          start=$(date +%s%N)
          '${script}' no-work
          end=$(date +%s%N)
          echo "elapsed_ms=$(( (end - start) / 1000000 ))"
          wait`,
       ],
-      { cwd: repo, encoding: "utf8", env: { ...process.env, LOOP_MAX_STALL_REPEATS: "99" } },
+      {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, LOOP_MAX_STALL_REPEATS: "99" },
+        // **知らせ合いが噛み合わないと、どちらも相手を待って固まる。**
+        // `spawnSync` は vitest の枠では中断できないので、**外側に上限を置く**——
+        // **判定には使わない**（合否は下の表明が決める）。固まったら落ちる
+        timeout: 30_000,
+      },
     );
     const elapsed = Number(/elapsed_ms=(\d+)/.exec(holder.stdout)?.[1] ?? "0");
     const counted = readFileSync(state, "utf8");
@@ -435,20 +447,28 @@ describe("共有カウンタの排他", () => {
     // **取れないまま数えると、記録が飛んだことに誰も気づけない。**
     const { repo, script, state } = makeRepo();
     spawnSync(script, ["no-work"], { cwd: repo, encoding: "utf8" });
+    // **保持の長さを仮定しない。** 以前は `sleep 2` で保持していたが、
+    // **負荷が高いと本体の起動と待ちの合計が 2 秒を超え、先に放してしまう**——
+    // すると本体はロックを取れてしまい、`count=2` になる（#141 の実際の壊れ方）。
+    // **握ったことを知らせ合い、本体が終わってから放す**——時間はどこにも要らない
     const result = spawnSync(
       "/usr/bin/bash",
       [
         "-c",
-        `flock '${state}.lock' -c 'sleep 2' &
-         sleep 0.2
+        `mkfifo '${repo}/held' '${repo}/release'
+         flock '${state}.lock' -c 'echo x > "${repo}/held"; read -r _ < "${repo}/release"' &
+         read -r _ < '${repo}/held'
          '${script}' no-work
          echo "stall_exit=$?"
+         echo x > '${repo}/release'
          wait`,
       ],
       {
         cwd: repo,
         encoding: "utf8",
         env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
+        // 上と同じ理由。**知らせ合いが噛み合わなければ固まらずに落ちる**
+        timeout: 30_000,
       },
     );
     const counted = readFileSync(state, "utf8");
