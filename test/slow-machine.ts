@@ -26,15 +26,20 @@ const WORST_SPAWN_MS = 1_000;
 /**
  * いちばん重い試験が起こすプロセスの数。
  *
- * `bin/loop-stall.test.ts` の `runNoWorkToLimit` が、
- * git init / add / commit / worktree add / worktree remove の 5 回に加えて
- * `bin/loop-stall` を 3〜4 回起こす。
+ * `bin/loop-stall.test.ts` の `runNoWorkToLimit` が
+ * **固定の git 操作 5 回**（init / add / commit / worktree add / worktree remove）に、
+ * **`steps` の件数**（最大 5）を足した回数を起こす。
+ *
+ * **写した数である。** ここからは `steps` の中身が見えないので、**数え違いは
+ * 起こす側で検出する**——`runNoWorkToLimit` は自分が起こした回数を数え、
+ * この値を超えたら落ちる。**`steps` を増やしたら、まずそこが赤くなる。**
+ * （実際に 1 つ間違えた。9 と数えていて、正しくは 10 だった）
  *
  * **減らせない。** 回数のほとんどは「使い捨ての git リポジトリと worktree を作る」ためで、
  * **`loop/STOP` が両方の worktree へ配られること**を見るのに要る。使い回すと
  * カウンタの状態が試験を跨いで漏れ、**この試験が守っているものが守れなくなる**。
  */
-const WORST_SPAWNS = 9;
+export const MODELLED_SPAWNS = 10;
 
 /**
  * 安全率。**ばらつきが 4.5 倍あるので、最悪値の上にさらに積む。**
@@ -49,7 +54,17 @@ const MARGIN = 3;
  * 「9 回 × 最悪 1 秒」の内側にあり、**間に合わない日があるのが当たり前**だった。
  * 回数か 1 回あたりの費用が変われば、ここも一緒に変わる。
  */
-export const SCRIPT_TEST_TIMEOUT_MS = WORST_SPAWNS * WORST_SPAWN_MS * MARGIN;
+export const SCRIPT_TEST_TIMEOUT_MS = budgetFor(MODELLED_SPAWNS);
+
+/**
+ * 起こす回数から枠を出す。**回数が変われば枠も変わる。**
+ *
+ * `MODELLED_SPAWNS` を超える試験は、**自分の枠をここから宣言する**
+ * （`it(name, fn, budgetFor(n))`）。全体を伸ばして合わせない。
+ */
+export function budgetFor(spawns: number): number {
+  return spawns * WORST_SPAWN_MS * MARGIN;
+}
 
 export type LoadContext = {
   /** 落ちた試験の名前。並んだ出力の中で、どれに付いた注記か分かるようにする。 */
