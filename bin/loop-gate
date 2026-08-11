@@ -194,20 +194,19 @@ fi
 readonly MAX_ROUNDS_GATE="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 
 # 手直し量は **全変更行ではなく、bin/loop-fixup-lines が数えた本体の行数**で測る
-# (テストの追加行だけを除き、テストの削除行は本体と同じに数える。理由はそちらのコメント)。
+# (テストの追加行と、**レビューが要求したファイルの本体行**を除く。理由はそちらのコメント)。
 #
-# 既定値の根拠。**通すべき実例と止めるべき実例の間に置いている。**
+# **既定値 60 は、いまの数え方に対して測り直されていない。**
 #
-#   PR #36 … 本体 44 行 / 1 ファイル (テスト追加 43 行を除いた値)。**通す側**。
-#            中身は gh の非ゼロ終了を「ブランチが消えた」と読まない修正で、
-#            増えた 43 行は上限到達後に master 自身が要求したテストだった
-#   PR #41 … 本体 74 行 / 3 ファイル (テスト追加 13 行を除いた値)。**止める側**。
-#            レビュー後に loop-review-budget / loop-review-commits / master 手順書を
-#            書き直しており、これは「手直し」ではなく人が見るべき変更である
+# もとは全変更行に対する 80 行を、テスト追加を除いた値の実例 (#36 の本体 44 行を通す /
+# #41 の本体 74 行を止める) の中間へ締め直したものだった。**その #41 も、後から
+# 「通してよかった」と分かっている** (#126: 4 件中 4 件で人の結論と食い違っていた)。
+# **止める側の実例が消えた**ので、いまの 60 は上側の根拠を持たない。
 #
-# 以前の 80 行は全変更行に対する値で、**上の 2 件をどちらも止めていた** (どちらも 87 行)。
-# 数える範囲を狭めたまま 80 を据え置くと**緩めただけ**になるので、実例の間 (44 と 74 の
-# ちょうど中間) まで締め直した。**「たまたま超えなかった値」を閾値にしない。**
+# **それでも据え置く。** 数え方が変わった直後の実例はまだ 1 件も無く、
+# **根拠の無い閾値を根拠の無い閾値で置き換えても何も良くならない**。
+# #126 の「数え方が直れば閾値の意味が変わるので、直してから測る」に従い、
+# **実例が溜まってから測り直す。**
 readonly MAX_FIXUP_LINES="${LOOP_MAX_FIXUP_LINES:-60}"
 
 if [[ -z $head_sha || $head_sha == "null" ]]; then
@@ -236,19 +235,26 @@ else
     pass "レビュー: 現 head に対するレビューあり (${rounds} 回)"
   elif ((rounds < MAX_ROUNDS_GATE)); then
     fail "レビュー: 現 head (${head_sha:0:8}) は未レビュー。レビューを要求してください (${rounds}/${MAX_ROUNDS_GATE})"
-  elif ! fixup="$("$(dirname "$0")/loop-fixup-lines" "$last_reviewed" "$head_sha")"; then
+  elif ! fixup="$("$(dirname "$0")/loop-fixup-lines" "$PR" "$last_reviewed" "$head_sha")"; then
     fail "レビュー: レビュー済み commit から head までの差分を取得できません"
   else
-    # <数える行><TAB><除外したテスト追加行>。IFS=タブ の read で割らない。
-    # タブは IFS の空白文字なので連続が畳まれ、片方が空のときに列がずれる。
-    fixup_lines="${fixup%%$'\t'*}"
-    excluded_lines="${fixup#*$'\t'}"
-    if ! [[ $fixup_lines =~ ^[0-9]+$ && $excluded_lines =~ ^[0-9]+$ ]]; then
-      fail "レビュー: 手直し量を数値として読めません"
-    elif ((fixup_lines > MAX_FIXUP_LINES)); then
-      fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したうえ、レビュー後の本体変更が ${fixup_lines} 行 > ${MAX_FIXUP_LINES} 行 (テスト追加 ${excluded_lines} 行は除外)。人の判断が要ります"
+    # <数える行><TAB><除外したテスト追加行><TAB><除外した要求ぶんの行>。
+    # **行ごと正規表現で受ける。** IFS=タブ の read はタブが IFS の空白文字なので
+    # 連続が畳まれ、**欄が空のときに列がずれる**。前方一致で削っていく形も、
+    # **欄が増えたことに気づかないまま古い形を読み続ける**ので使わない
+    # (3 欄目が常に 0 に見え、除外が効いていないことを検出できない)。
+    if [[ $fixup =~ ^([0-9]+)$'\t'([0-9]+)$'\t'([0-9]+)$ ]]; then
+      fixup_lines="${BASH_REMATCH[1]}"
+      excluded_tests="${BASH_REMATCH[2]}"
+      excluded_requested="${BASH_REMATCH[3]}"
+      excluded="テスト追加 ${excluded_tests} 行 / レビューが要求した ${excluded_requested} 行は除外"
+      if ((10#$fixup_lines > MAX_FIXUP_LINES)); then
+        fail "レビュー: 上限 ${MAX_ROUNDS_GATE} 回に達したうえ、レビュー後の本体変更が ${fixup_lines} 行 > ${MAX_FIXUP_LINES} 行 (${excluded})。人の判断が要ります"
+      else
+        pass "レビュー: 上限到達。レビュー後の本体変更は ${fixup_lines} 行で手直しの範囲 (${excluded})"
+      fi
     else
-      pass "レビュー: 上限到達。レビュー後の本体変更は ${fixup_lines} 行で手直しの範囲 (テスト追加 ${excluded_lines} 行は除外)"
+      fail "レビュー: 手直し量を数値として読めません"
     fi
   fi
 fi

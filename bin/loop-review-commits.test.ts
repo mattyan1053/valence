@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -124,5 +124,47 @@ describe("bin/loop-review-commits", () => {
 
     expect(result.status).toBe(2);
     expect(result.stderr).toContain("祖先か判定できません");
+  });
+});
+
+describe("bin/loop-review-commits --bot", () => {
+  /** bash だけを置いた PATH。gh がここに無いので、到達すれば別の失敗になる。 */
+  function runBot(args: string[]): Run {
+    const dir = mkdtempSync(join(tmpdir(), "loop-review-bot-"));
+    symlinkSync("/usr/bin/bash", join(dir, "bash"));
+    const result = spawnSync(SCRIPT, args, {
+      encoding: "utf8",
+      env: { ...process.env, PATH: dir },
+    });
+    rmSync(dir, { recursive: true, force: true });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it("gh を呼ばずにレビュー用の bot 名を出す", () => {
+    // **値の正をここ 1 箇所にする。** 他のスクリプトが「誰のレビューか」を
+    // 判定するとき、**書き写すと片方だけ直して食い違う**
+    const result = runBot(["--bot"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).not.toBe("");
+  });
+
+  it("引数を足すと使い方を出して落ちる", () => {
+    expect(runBot(["--bot", "12"]).status).toBe(2);
+  });
+
+  it("同じ bot を固定している他のスクリプトと食い違わない", () => {
+    // **既に 4 箇所にある。** 一致していることを試験で押さえておかないと、
+    // 片方だけ直したときに **「誰のレビューか」の判定がスクリプトごとにずれる**
+    const bot = runBot(["--bot"]).stdout.trim();
+    const read = (path: string): string =>
+      readFileSync(fileURLToPath(new URL(`../${path}`, import.meta.url)), "utf8");
+
+    expect(read("bin/loop-gate")).toContain(`REVIEW_BOT="${bot}"`);
+    expect(read("bin/loop-review-budget")).toContain(`REVIEW_BOT="${bot}"`);
+    // **GraphQL は `[bot]` を付けずに返す**（REST は付ける）。bin/loop-handoff は
+    // GraphQL で読むので、意図的にそちらの形を持っている
+    expect(bot).toMatch(/\[bot\]$/);
+    expect(read("bin/loop-handoff")).toContain(`REVIEW_BOT="${bot.replace(/\[bot\]$/, "")}"`);
   });
 });

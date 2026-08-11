@@ -67,7 +67,7 @@ require() {
   local frag
   for frag in "$@"; do
     if [[ $args != *"$frag"* ]]; then
-      echo "スタブ: 想定外の gh 呼び出し (\$frag が無い): $args" >&2
+      echo "スタブ: 想定外の gh 呼び出し ($frag が無い): $args" >&2
       exit 1
     fi
   done
@@ -112,10 +112,13 @@ exit \${FAKE_REVIEWED_EXIT:-0}
 `,
     { mode: 0o755 },
   );
+  // **受け取った引数を標準エラーへ出す。** ゲートは標準出力しか読まないので、
+  // 出力を汚さずに「何を渡したか」を確かめられる
   writeFileSync(
     join(bin, "loop-fixup-lines"),
     `#!/usr/bin/env bash
-printf '%s\\n' "\${FAKE_FIXUP-10$'\\t'0}"
+echo "fixup-args: $*" >&2
+printf '%s\\n' "\${FAKE_FIXUP-10$'\\t'0$'\\t'0}"
 exit \${FAKE_FIXUP_EXIT:-0}
 `,
     { mode: 0o755 },
@@ -266,7 +269,18 @@ describe("bin/loop-gate は判定できないものを合格にしない", () =>
       name: "手直し量が数値でない",
       env: {
         FAKE_REVIEWED: `2026-01-01T00:00:00Z\t${"b".repeat(40)}\n2026-01-02T00:00:00Z\t${"c".repeat(40)}`,
-        FAKE_FIXUP: "x\ty",
+        FAKE_FIXUP: "x\ty\tz",
+      },
+      marker: "レビュー",
+    },
+    {
+      // **欄が増えたのに古い形で返ってきたら、黙って読み替えない。**
+      // 3 列目を「無ければ 0」で受けると、要求ぶんが常に 0 に見え、
+      // **除外が効いていないことに気づけない**
+      name: "手直し量の欄が足りない",
+      env: {
+        FAKE_REVIEWED: `2026-01-01T00:00:00Z\t${"b".repeat(40)}\n2026-01-02T00:00:00Z\t${"c".repeat(40)}`,
+        FAKE_FIXUP: "10\t0",
       },
       marker: "レビュー",
     },
@@ -289,16 +303,45 @@ describe("bin/loop-gate の上限到達後の扱い", () => {
   };
 
   it("手直しの範囲なら通す（上限がデッドロックにならない）", () => {
-    const result = runGate({ ...exhausted, FAKE_FIXUP: "10\t0" });
+    const result = runGate({ ...exhausted, FAKE_FIXUP: "10\t0\t0" });
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("手直しの範囲");
   });
 
   it("上限を超えた手直しは人へ渡す", () => {
-    const result = runGate({ ...exhausted, FAKE_FIXUP: "999\t0" });
+    const result = runGate({ ...exhausted, FAKE_FIXUP: "999\t0\t0" });
 
     expect(result.status).toBe(1);
     expect(result.stdout).toMatch(/\[FAIL\][^\n]*レビュー/);
+  });
+
+  it("最後にレビューされた commit と PR 番号を渡して数えさせる", () => {
+    // **PR 番号を渡さないと、どのレビュースレッドを見ればよいか決まらない**
+    // （要求された変更の範囲がそこから決まる）。
+    // **最後の 1 件を基準にする。** 古いほうを渡すと手直し量を過大に見積もる
+    const result = runGate({ ...exhausted, FAKE_FIXUP: "10\t0\t0" });
+
+    expect(result.stderr).toContain(`fixup-args: 12 ${"c".repeat(40)} ${HEAD}`);
+  });
+
+  it("除外した行は、理由ごとに分けて出す", () => {
+    // **人が読んで判断する材料になる。** 「0 行だから通した」とだけ出ると、
+    // **数えなかったのか、本当に変更が無かったのか**が区別できない
+    const result = runGate({ ...exhausted, FAKE_FIXUP: "7\t100\t89" });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("テスト追加 100 行");
+    expect(result.stdout).toContain("レビューが要求した 89 行");
+  });
+
+  it("止めるときも、除外した行を出す", () => {
+    // **止めた理由を人が検算できるようにする。** 除外の内訳が出ないと、
+    // 「数え方が間違っているのか、本当に多いのか」を人が判断できない
+    const result = runGate({ ...exhausted, FAKE_FIXUP: "999\t100\t89" });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("テスト追加 100 行");
+    expect(result.stdout).toContain("レビューが要求した 89 行");
   });
 });

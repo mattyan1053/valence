@@ -78,8 +78,20 @@ readonly REVIEW_BOT
 usage() {
   echo "使い方: bin/loop-review-commits [--all] <PR番号>" >&2
   echo "  --all  落とさずに出し、第 3 列へ live / stale を添える" >&2
+  echo "  --bot  レビュー用の bot のログイン名を出す" >&2
   exit 2
 }
+
+# **「誰のレビューか」の正をここに置く。** 他のスクリプトが判定に使うので、
+# **書き写させない**——2 箇所に持つと、片方だけ直したときに
+# **スクリプトごとに違う相手を信用する**ことになる。
+#
+# **GraphQL は `[bot]` を付けずに返す** (REST は付ける)。呼ぶ側が変換する。
+if [[ ${1-} == "--bot" ]]; then
+  [[ $# -eq 1 ]] || usage
+  printf '%s\n' "$REVIEW_BOT"
+  exit 0
+fi
 
 include_stale=0
 if [[ ${1-} == "--all" ]]; then
