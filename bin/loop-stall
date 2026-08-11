@@ -82,6 +82,7 @@ readonly WORKER_FIXES=(
 usage() {
   echo "使い方: bin/loop-stall <停止識別子>" >&2
   echo "       bin/loop-stall --reset        周回が前へ進んだときに呼ぶ" >&2
+  echo "       bin/loop-stall --resumed      人が再開したときに呼ぶ（./task loop:resume が通す）" >&2
   echo "       bin/loop-stall --list         使える識別子を一覧する" >&2
   echo "  識別子は一覧にあるものだけ。書式まで一致しないと受け付けない" >&2
   exit 2
@@ -134,14 +135,14 @@ if [[ $ID == "--list" ]]; then
 fi
 
 # 識別子はファイル名の一部にしないが、制御文字や改行が混ざるものは受けない。
-[[ $ID == "--reset" ]] || [[ $ID =~ ^[A-Za-z0-9:@._/-]+$ ]] || {
+[[ $ID == "--reset" || $ID == "--resumed" ]] || [[ $ID =~ ^[A-Za-z0-9:@._/-]+$ ]] || {
   echo "[FAIL] 識別子に使えない文字が含まれています (bin/loop-stall --list)" >&2
   exit 2
 }
 
 # 綴りの検査はカウンタを触る前に行う。ゆれた識別子で 1 度でも書き込むと、
 # そこで連続回数が切れてしまう。
-if [[ $ID != "--reset" ]] && ! id_is_known "$ID"; then
+if [[ $ID != "--reset" && $ID != "--resumed" ]] && ! id_is_known "$ID"; then
   echo "[FAIL] 未知の停止識別子: $ID" >&2
   echo "       使えるのは次のものだけ:" >&2
   print_stop_ids | sed 's/^/       /' >&2
@@ -165,6 +166,9 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   exit 2
 }
 readonly STATE="$common_dir/valence-loop-stall"
+# **人が再開したときに、上限へ達していた識別子を積む。** 「同じところで何度目か」を
+# 出すためのもので、**カウンタとは別に持つ**（--reset で消えると、繰り返しが見えなくなる）。
+readonly RESUMED="$common_dir/valence-loop-resumed"
 
 # **master と worker は同じカウンタを、同じ周期で書きうる。** 読んでから書くまでを
 # 排他しないと、後から書いた側が相手の増分を消す (lost update)。記録が増えないまま
@@ -229,6 +233,51 @@ readonly script_common_dir
 if [[ $ID == "--reset" ]]; then
   rm -f "$STATE"
   echo "stall reset"
+  exit 0
+fi
+
+# **人が再開したという合図。** `./task loop:resume` が通す。
+#
+# **第 4 層は「3 周続いたら人を呼ぶ」仕組みだが、呼ばれた人が応えたことを受け取る口が
+# 無かった。** `resume` はカウンタを消さないので、**人が判断して再開した直後に、
+# 同じ条件でもう 1 回で止まり直す** (今日 6 回。毎回、人が手で `--reset` も打っていた)。
+#
+# **合図を `resume` にする理由。** STOP は人にしか解けないので、
+# **resume は「人が来て判断した」唯一の証拠**である。**識別子ごとに違う痕跡
+# (label が変わった / Issue が閉じた) を見に行く形は採らない**——**6 つの見る場所は
+# 6 つの腐る場所**で、しかも**見に行けなかったときに黙って数え直す側へ倒れる**。
+#
+# **「判断した」であって「直った」ではない。** だから**消すのは数だけ**で、
+# **同じ状態で再び上限に達すれば、そのときは止まる**——人が何もせず再開しただけなら、
+# **これまでどおりの周回数で止まる**。**検出器は消えていない。**
+#
+# **上限に達していた識別子だけを、繰り返しとして覚える。** そこだけが「人を呼んだ」
+# 状態であり、**同じところで何度も止まっていることを、記録から読めるようにする**
+# (消すだけだと「1 回目と同じ」に見え、**人が同じ判断を繰り返していることに誰も
+# 気づけない**)。
+if [[ $ID == "--resumed" ]]; then
+  if [[ -f $STATE ]]; then
+    while IFS=$'\t' read -r prev_count prev_id _prev_epoch; do
+      [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
+      ((10#$prev_count >= MAX_REPEATS)) || continue
+      printf '%s\n' "$prev_id" >>"$RESUMED" || {
+        echo "[FAIL] 再開の記録を書けません: $RESUMED" >&2
+        exit 2
+      }
+    done < "$STATE"
+  fi
+  # **消せなかったら成功を返さない。** `task` は終了コードで判断し、消せなければ
+  # STOP を残す（そう約束した）。ここで握りつぶすと、**約束した側が、約束を測る値を
+  # 返していない**ことになる。**カウンタが残ったまま STOP が消える**と、
+  # **再開直後に 1 周で止まり直す**——#127 の症状が、#127 を直す経路の中に残る。
+  #
+  # **`rm -f` は「ファイルが無い」では失敗しない**ので、**まだ 1 度も記録していない
+  # 状態の resume は、これまでどおり通る**。
+  rm -f "$STATE" || {
+    echo "[FAIL] 停止カウンタを消せません: $STATE" >&2
+    exit 2
+  }
+  echo "stall resumed"
   exit 0
 fi
 
@@ -354,7 +403,19 @@ else
 fi
 
 if ((count >= MAX_REPEATS)); then
-  echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める"
+  # **同じところで何度も止まっているなら、そう出す。** 人が同じ判断を繰り返している
+  # ことに気づける唯一の手がかりになる。
+  times=1
+  if [[ -f $RESUMED ]]; then
+    while IFS= read -r resumed_id; do
+      [[ $resumed_id == "$ID" ]] && ((times++))
+    done < "$RESUMED"
+  fi
+  if ((times > 1)); then
+    echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める（この状態で止まるのは ${times} 回目）"
+  else
+    echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める"
+  fi
   if [[ -n $script_common_dir && $script_common_dir == "$common_dir" && -x $TASK ]]; then
     "$TASK" loop:stop "$ID: 同じ状態が $count 回記録されたため停止。人の判断が要る"
   else
