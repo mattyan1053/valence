@@ -514,7 +514,15 @@ describe("握り合わせが噛み合わなかったとき", () => {
     const lock = join(repo, "held.lock");
     writeFileSync(lock, "");
 
-    // **わざと噛み合わせない。** 知らせを読む側が居ないので、保持側は書き込みで止まる
+    // **握らせてから、噛み合わない状態にする。**
+    //
+    // **「握った」を先に確かめないと、確認そのものが空振りする**——保持側が
+    // **1 度も走らなかった**場合（起動に失敗した／上限までにスケジュールされなかった）、
+    // **ロックはそもそも取られていない**ので、下の `flock -n` は**当然成功**する。
+    // **後始末が 1 度も走っていないのに、表明は 2 つとも通る。**
+    //
+    // **握れなかったら、そこで落ちる**（`read` が失敗する）。**「保持していなかった」を
+    // 緑にしない**——それが**この試験が見たかったものの逆**である。
     const stuck = spawnSync(
       "/usr/bin/bash",
       [
@@ -524,9 +532,14 @@ describe("握り合わせが噛み合わなかったとき", () => {
            </dev/null >/dev/null 2>&1 &
          holder=$!
          trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
+         read -r _ < '${repo}/held' || exit 3
+         echo "holder_has_lock"
          read -r _ < '${repo}/never'`,
       ],
-      { cwd: repo, encoding: "utf8", timeout: 3_000 },
+      // **起動待ちと停止待ちで分け合っている。** 起動が遅い日にここが尽きても、
+      // 下の「握った」の表明が落ちるので**空振りは緑にならない**。
+      // 起動は実測で 1 秒未満なので、10 秒あれば停止待ちに十分残る
+      { cwd: repo, encoding: "utf8", timeout: 10_000 },
     );
 
     // **ロックが空いていれば、保持側は残っていない。** 「返ってきた」だけでは、
@@ -534,6 +547,10 @@ describe("握り合わせが噛み合わなかったとき", () => {
     const free = spawnSync("/usr/bin/flock", ["-n", lock, "-c", "true"], { encoding: "utf8" });
     rmSync(repo, { recursive: true, force: true });
 
+    // **まず「握っていた」ことを確かめる。** ここが通らない限り、下の 2 つには意味が無い
+    expect(stuck.stdout, "保持側がロックを握っていない（確認が空振りしている）").toContain(
+      "holder_has_lock",
+    );
     expect(stuck.status, "上限で打ち切られていない").not.toBe(0);
     expect(free.status, "ロックが解放されていない（保持側が残っている）").toBe(0);
   });
