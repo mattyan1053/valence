@@ -71,6 +71,64 @@ describe("状態が矛盾したとき", () => {
     expect(read("bin/loop-stall")).toContain("handoff-mismatch");
   });
 
+  describe("まだ誰も答えていない指摘", () => {
+    /** master のステップ 4。**返信を確かめる段**である。 */
+    function stepFour(): string {
+      return (
+        read(".claude/commands/loop-master.md").split("\n## 4. ")[1]?.split("\n## 5. ")[0] ?? ""
+      );
+    }
+
+    /**
+     * 現れる位置。**無いものを -1 のまま比べない。**
+     *
+     * `indexOf` を素で比べると、**探しているものが 1 つも無いときに -1 が返って
+     * 順序の表明が通る**——**段がまるごと無い状態を緑にする**。実際に、
+     * 段を書く前のこの試験が「手前にある」で緑になっていた。
+     */
+    function positionOf(section: string, needle: string): number {
+      const index = section.indexOf(needle);
+      expect(index, `手順書に見つかりません: ${needle}`).toBeGreaterThanOrEqual(0);
+      return index;
+    }
+
+    it("master の手順書に、まだ答えの無い指摘を扱う段がある", () => {
+      // **`bin/loop-handoff` は label が付いている前提で書かれているのに、
+      // 付ける段が手順書に無かった**（#149 / #152 で実際に踏んだ）。
+      // **PR は健全で worker も普通に対応しているのに、3 周で `loop/STOP` に達する**
+      expect(stepFour()).toContain("まだ誰も答えていない指摘");
+    });
+
+    it("その段は「返信を確かめる」より手前にある", () => {
+      // **返信がまだ 1 つも無いなら、確かめる対象がまだ無い。**
+      // 後ろに置くと、**確かめる段を通り抜けた先**にしか書かれていないことになる
+      const section = stepFour();
+
+      expect(positionOf(section, "まだ誰も答えていない指摘")).toBeLessThan(
+        positionOf(section, "未解決スレッドごとに、次を見る"),
+      );
+    });
+
+    it("label が先、コメントが後の順序が保たれている", () => {
+      // **既存の決まりを変えない。** label を付けてから投稿する
+      // （投稿できて label が付かない状態を作らないため）。
+      //
+      // **段そのものに範囲を絞る。** ステップ 4 全体で見ると、
+      // **別の節にある同じ 2 つの命令に当たって**、この段が無くても緑になる（実際になった）
+      const section = stepFour().split("まだ誰も答えていない指摘")[1]?.split("\n### ")[0] ?? "";
+
+      expect(positionOf(section, "--add-label changes-requested")).toBeLessThan(
+        positionOf(section, "gh pr comment"),
+      );
+    });
+
+    it("機械的に付けるとは書いていない", () => {
+      // **外出しするものや、直さないと決めるものには付けない。**
+      // 「レビューが来たら付ける」に読める書き方だと、**当否の判断が消える**
+      expect(stepFour()).toMatch(/当否を判断/);
+    });
+  });
+
   it.each(PROCEDURES)("$role は exit 3 でも送ると書いてある", ({ path }) => {
     // **記録するために黙ると、#105 が塞ごうとした沈黙をそのまま作る**
     const section = read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";

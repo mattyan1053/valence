@@ -328,15 +328,13 @@ describe("bin/loop-handoff", () => {
   });
 
   describe("ゲートと同じものを見る", () => {
-    it("未解決スレッドが残る PR は master の持ち物にしない", () => {
+    it("未解決スレッドが残る PR を、ゲートを回せる側へ渡さない", () => {
       // **ゲートは未解決スレッドを見て落とすのに、handoff は label だけを見ていた。**
       // label が 0 件だと「master がゲートを回せる」と読み、**自分宛なので黙る**
       // （#103 と #107 で実際に起きた。手順書どおりに進んでも label は付かない）
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
-      const handoff = run("master");
-
-      expect(handoff.stdout).toMatch(/^worker\t/);
+      expect(run("worker").stdout).not.toContain("ゲート");
     });
 
     it("未解決が無ければ、これまでどおり master がゲートを回す", () => {
@@ -364,10 +362,12 @@ describe("bin/loop-handoff", () => {
     });
 
     it("送らない周回でも知らせる", () => {
-      // **自己宛てでも重複でも通る。** その状態が続いていること自体が、記録したい事実
+      // **自己宛てでも重複でも通る。** その状態が続いていること自体が、記録したい事実。
+      // **当否がまだ判断されていない指摘の持ち手は master** なので、
+      // **master から呼んだ周回が自己宛て**になる
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
-      const handoff = run("worker");
+      const handoff = run("master");
 
       expect(handoff.status).toBe(3);
       expect(handoff.stdout).toBe("");
@@ -414,12 +414,13 @@ describe("bin/loop-handoff", () => {
       expect(run("master").stdout).toMatch(/^worker\t/);
     });
 
-    it("誰も答えていない指摘は worker の持ち物", () => {
-      // レビューの bot が最後なら、**まだ誰も答えていない**
-      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+    it("誰も答えていない指摘は、label が付いていれば worker の持ち物", () => {
+      // レビューの bot が最後なら、**まだ誰も答えていない**。
+      // **当否の判断は済んでいる**（master が label を付けている）ので、直すのは worker
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
 
       expect(run("master").stdout).toMatch(/^worker\t/);
-      // **worker から呼べば自分宛てなので送らない**（記録は別の判断なので通る）
+      // **worker から呼べば自分宛てなので送らない**
       expect(run("worker").stdout).toBe("");
     });
 
@@ -438,6 +439,63 @@ describe("bin/loop-handoff", () => {
       });
 
       expect(run("worker").status).toBe(0);
+    });
+  });
+
+  describe("当否がまだ判断されていない指摘", () => {
+    /** #152 と同じ形。**指摘が返ってきて、worker がまだ返信していない瞬間。** */
+    const untriaged = { prs: [{ number: 12, unresolvedBy: ["bot"] as ("bot" | "us")[] }] };
+
+    it("持ち手は master である（付けられるのは master だけ）", () => {
+      // **`changes-requested` を付け外しできるのは master だけ**なので、
+      // **当否が判断されるまで worker には持ち物が無い**。ここを worker 宛にすると、
+      // **worker から呼んだ周回は自分宛て → 沈黙**になり、**master は自分の周回まで気づけない**。
+      // その間 `handoff-mismatch` が積まれ、**PR が健全でも 3 周で `loop/STOP`** に達する（#152 で 1/3）
+      withState(untriaged);
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout).toMatch(/^master\t/);
+      expect(handoff.stdout).toContain("12");
+    });
+
+    it("label が付けば、持ち手は worker へ移る", () => {
+      // **当否の判断が済めば、次に動けるのは直す側である。**
+      // ここが動かないと、label を付けても worker が呼ばれない
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
+
+      expect(run("master").stdout).toMatch(/^worker\t/);
+    });
+
+    it.each(["master", "worker"])("%s から見ても、同じ状態には同じ終了コードを返す", (role) => {
+      // **両側で別々の判定が同時に成り立つ形にしない。**
+      // 片方が「対応が返っている」、もう片方が「label が無い」を返すと、
+      // **どちらの記録が本当かを人が突き合わせる**ことになる
+      withState(untriaged);
+
+      expect(run(role).status).toBe(3);
+    });
+
+    it("別のスレッドへ返信しても、答えの無い指摘は隠れない", () => {
+      // **PR ごとに「いちばん新しい発言」だけで決めると、答えの無いスレッドが隠れる。**
+      // 新しいほうへ返信しただけで「対応が返っている」に落ち、**master は当否を
+      // 判断しないまま resolve の確認へ進む**——**指摘が 1 つ、誰にも拾われずに消える**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot", "us"] }] });
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout).toMatch(/^master\t/);
+      expect(handoff.status).toBe(3);
+    });
+
+    it("すべて答えてあれば、これまでどおり復路になる", () => {
+      // **答えの無いものが 1 つも無い**なら、確かめる対象がある
+      withState({ prs: [{ number: 12, unresolvedBy: ["us", "us"] }] });
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout).toMatch(/^master\t/);
+      expect(handoff.status).toBe(0);
     });
   });
 
