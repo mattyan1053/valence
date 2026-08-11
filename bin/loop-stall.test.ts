@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { holdingSnippet } from "../test/held-lock";
 import { MODELLED_SPAWNS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-stall", import.meta.url));
@@ -415,8 +416,7 @@ describe("共有カウンタの排他", () => {
   function holdingScript(paths: { repo: string; script: string; state: string }): string {
     const { repo, script, state } = paths;
     return `mkfifo '${repo}/held' '${repo}/release'
-      setsid flock '${state}.lock' -c 'echo x > "${repo}/held"; read -r _ < "${repo}/release"' \
-        </dev/null >/dev/null 2>&1 &
+      ${holdingSnippet({ lock: `${state}.lock`, held: `${repo}/held`, release: `${repo}/release` })}
       holder=$!
       trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
       read -r _ < '${repo}/held'
@@ -442,8 +442,12 @@ describe("共有カウンタの排他", () => {
       "/usr/bin/bash",
       [
         "-c",
+        // **保持の長さそのものが測定対象**なので `sleep 1` で握る。上限は要らない
+        // （`sleep` が上限そのものである）。**知らせだけは開いたまま持つ**——
+        // `echo x > FIFO` は**読み手が現れるまで open で止まる**ので、
+        // **親が先に死ぬとそこで永久に残る**
         `mkfifo '${repo}/held'
-         setsid flock '${state}.lock' -c 'echo x > "${repo}/held"; sleep 1' \
+         setsid flock '${state}.lock' /usr/bin/bash -c 'exec 3<>"${repo}/held"; echo x >&3; sleep 1' \
            </dev/null >/dev/null 2>&1 &
          holder=$!
          trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
@@ -528,8 +532,7 @@ describe("握り合わせが噛み合わなかったとき", () => {
       [
         "-c",
         `mkfifo '${repo}/held' '${repo}/never'
-         setsid flock '${lock}' -c 'echo x > "${repo}/held"; read -r _ < "${repo}/never"' \
-           </dev/null >/dev/null 2>&1 &
+         ${holdingSnippet({ lock, held: `${repo}/held`, release: `${repo}/never` })}
          holder=$!
          trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
          read -r _ < '${repo}/held' || exit 3
