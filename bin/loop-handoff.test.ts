@@ -1,11 +1,21 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-handoff", import.meta.url));
+const LEASE = fileURLToPath(new URL("./loop-lease", import.meta.url));
 
 type Run = { status: number; stdout: string; stderr: string };
 
@@ -204,6 +214,83 @@ describe("bin/loop-handoff", () => {
 
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true });
+  });
+
+  describe("入口を飛ばした周回を、出口で見つける", () => {
+    // **入口は散文の指示のままだった。** 「冒頭で `acquire` を呼べ」と書いてあるだけで、
+    // **呼ばずに進める**——実際に飛ばした（通知で始めた周回で 2 回中 2 回）。
+    // **飛ばしても何も起きない**ので、並行したときにだけ壊れ、そのときの症状は
+    // **「レビュー要求が 2 件で枠を使い切った」**——**原因が入口だと分からない**。
+    //
+    // **出口に置く理由。** 周回の中で**必ず呼ばれるもの**が要るが、
+    // `bin/loop-gate` は **open PR が 0 件の周回では呼ばれない**（master の周回の多くが
+    // それだった）。`bin/loop-stall` は止まるときだけである。**出口は #92 で 1 本に
+    // してあり、「何もしなかった場合も含めて必ず通す」**と両方の手順書に書いてある
+    // （`loop/handoff-wiring.test.ts` が押さえている）。
+    //
+    // **「必ず呼ばれる」が保証されているわけではない。** 保証できるのは
+    // **通ったときに分かる**ことまでで、そこは正直に扱う。
+
+    /** 飛ばした記録。**git の共通ディレクトリに置く**（作業場をまたいで 1 つ）。 */
+    function missingRecord(): string {
+      const record = join(repo, ".git", "valence-loop-lease-missing");
+      return existsSync(record) ? readFileSync(record, "utf8") : "";
+    }
+
+    it("lease を持っていなければ、警告して記録する", () => {
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      const handoff = run("master");
+
+      expect(handoff.stderr, "飛ばしたことが出力に残らない").toContain("lease");
+      expect(missingRecord(), "飛ばしたことが記録に残らない").toContain("master");
+    });
+
+    it("持っていれば、何も言わない", () => {
+      // **ループと関係なく叩く場合に邪魔しない**、の裏でもある——
+      // 持っている周回には何も足さない
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      expect(spawnSync(LEASE, ["acquire", "master"], { cwd: repo, encoding: "utf8" }).status).toBe(
+        0,
+      );
+
+      const handoff = run("master");
+
+      expect(handoff.stderr).not.toContain("lease");
+      expect(missingRecord()).toBe("");
+    });
+
+    it("渡すものが無い周回でも見つける", () => {
+      // **open PR が 0 件で終わる周回**でも通る。**ゲートを置き場所にできない理由**が
+      // これで、**master の周回はしばしばゲートを呼ばない**
+      withState({});
+
+      const handoff = run("master");
+
+      expect(handoff.status, "持ち物が無い周回である").toBe(1);
+      expect(missingRecord()).toContain("master");
+    });
+
+    it("持ち手を決める仕事は、これまでどおり行う", () => {
+      // **止めない。** 飛ばしたことは記録するが、**この周回の結論は変えない**——
+      // 変えると、**入口の見落としが出口の沈黙になる**（#92 が消した形が戻る）
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      const handoff = run("master");
+
+      expect(handoff.status).toBe(0);
+      expect(handoff.stdout).toMatch(/^worker\t/);
+    });
+
+    it("記録は積み上がる", () => {
+      // **1 回で止めない。** 同じ癖が続いていることは、**回数でしか分からない**
+      withState({});
+
+      run("master");
+      run("worker");
+
+      expect(missingRecord().split("\n").filter(Boolean)).toHaveLength(2);
+    });
   });
 
   it("changes-requested の PR があれば worker へ渡す", () => {
