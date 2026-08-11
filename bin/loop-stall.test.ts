@@ -398,6 +398,34 @@ describe("共有カウンタの排他", () => {
     return { repo, script, state: join(repo, ".git", "valence-loop-stall") };
   }
 
+  /**
+   * ロックを握らせたまま本体を走らせる bash。**時間はどこにも要らない。**
+   *
+   * **保持側は自分のプロセスグループで起こし、標準出力を切り離す。**
+   *   - **切り離す理由**: 継承したままだと、外側の bash が殺されても
+   *     **`spawnSync` がパイプの終わりを待ち続ける**（返ってこない）
+   *   - **グループにする理由**: `timeout` が届くのは**直下の bash だけ**なので、
+   *     **背後の保持側が生き残る**。グループごと終えられる形にしておく
+   *   - **`trap` を張る理由**: 上限で殺されたときにも後始末を通すため。
+   *     **`EXIT` だけでは、シグナルで死んだときに走らない**
+   *
+   * **`setsid` と `trap` のどちらか一方では足りない。** 前者だけだと後始末を
+   * 呼ぶ者がおらず、後者だけだと**送る先が直下の 1 つ**になる。
+   */
+  function holdingScript(paths: { repo: string; script: string; state: string }): string {
+    const { repo, script, state } = paths;
+    return `mkfifo '${repo}/held' '${repo}/release'
+      setsid flock '${state}.lock' -c 'echo x > "${repo}/held"; read -r _ < "${repo}/release"' \
+        </dev/null >/dev/null 2>&1 &
+      holder=$!
+      trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
+      read -r _ < '${repo}/held'
+      '${script}' no-work
+      echo "stall_exit=$?"
+      echo x > '${repo}/release'
+      wait "$holder" 2>/dev/null`;
+  }
+
   it("ロックが取られている間は待ち、解放されてから数える", () => {
     // **カウンタは master と worker が同じ周期で書きうる。** 読んでから書くまでを
     // 排他しないと、後から書いた側が相手の増分を消す（記録が増えないまま周回が進み、
@@ -407,19 +435,34 @@ describe("共有カウンタの排他", () => {
     spawnSync(script, ["no-work"], { cwd: repo, encoding: "utf8" });
     // 外から 1 秒ロックを保持し、**待たされた時間**を見る。
     // 「結果が正しい」だけでは、ロックを取らない実装でも通ってしまう
+    // **握ったことを事象で待つ。** `sleep` で待つと、**負荷が高い日に「まだ握って
+    // いない」まま本体が走る**（#141）。**保持している長さはここでの測定対象**なので
+    // 残すが、**待つのは時間ではなく「握った」という知らせ**である
     const holder = spawnSync(
       "/usr/bin/bash",
       [
         "-c",
-        `flock '${state}.lock' -c 'sleep 1' &
-         sleep 0.2
+        `mkfifo '${repo}/held'
+         setsid flock '${state}.lock' -c 'echo x > "${repo}/held"; sleep 1' \
+           </dev/null >/dev/null 2>&1 &
+         holder=$!
+         trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
+         read -r _ < '${repo}/held'
          start=$(date +%s%N)
          '${script}' no-work
          end=$(date +%s%N)
          echo "elapsed_ms=$(( (end - start) / 1000000 ))"
          wait`,
       ],
-      { cwd: repo, encoding: "utf8", env: { ...process.env, LOOP_MAX_STALL_REPEATS: "99" } },
+      {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, LOOP_MAX_STALL_REPEATS: "99" },
+        // **知らせ合いが噛み合わないと、どちらも相手を待って固まる。**
+        // `spawnSync` は vitest の枠では中断できないので、**外側に上限を置く**——
+        // **判定には使わない**（合否は下の表明が決める）。固まったら落ちる
+        timeout: 30_000,
+      },
     );
     const elapsed = Number(/elapsed_ms=(\d+)/.exec(holder.stdout)?.[1] ?? "0");
     const counted = readFileSync(state, "utf8");
@@ -435,22 +478,17 @@ describe("共有カウンタの排他", () => {
     // **取れないまま数えると、記録が飛んだことに誰も気づけない。**
     const { repo, script, state } = makeRepo();
     spawnSync(script, ["no-work"], { cwd: repo, encoding: "utf8" });
-    const result = spawnSync(
-      "/usr/bin/bash",
-      [
-        "-c",
-        `flock '${state}.lock' -c 'sleep 2' &
-         sleep 0.2
-         '${script}' no-work
-         echo "stall_exit=$?"
-         wait`,
-      ],
-      {
-        cwd: repo,
-        encoding: "utf8",
-        env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
-      },
-    );
+    // **保持の長さを仮定しない。** 以前は `sleep 2` で保持していたが、
+    // **負荷が高いと本体の起動と待ちの合計が 2 秒を超え、先に放してしまう**——
+    // すると本体はロックを取れてしまい、`count=2` になる（#141 の実際の壊れ方）。
+    // **握ったことを知らせ合い、本体が終わってから放す**——時間はどこにも要らない
+    const result = spawnSync("/usr/bin/bash", ["-c", holdingScript({ repo, script, state })], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
+      // **知らせ合いが噛み合わなければ固まらずに落ちる**（下の試験で確かめている）
+      timeout: 30_000,
+    });
     const counted = readFileSync(state, "utf8");
     rmSync(repo, { recursive: true, force: true });
 
@@ -459,6 +497,62 @@ describe("共有カウンタの排他", () => {
     expect(result.stderr).toContain("ロック");
     // 数えていないこと（1 のまま）
     expect(counted).toContain("1\tno-work");
+  });
+});
+
+describe("握り合わせが噛み合わなかったとき", () => {
+  // **安全網そのものを試す。** 前の版は「上限を置いた」と書いてあるだけで、
+  // **上限が届くのは直下の bash だけ**だった——**背後の保持側は標準出力を継承したまま
+  // 生き残る**ので、**`spawnSync` はパイプの終わりを待ち続ける**。
+  //
+  // **「今回は落ちた」を根拠にしない。** 変異で赤が出たことは**そのとき返っただけ**で、
+  // **必ず返る保証**ではない。**保持側が残っていないことを直接見る。**
+
+  it("上限で打ち切られても、保持側を残さない", () => {
+    const repo = mkdtempSync(join(tmpdir(), "loop-stall-orphan-"));
+    spawnSync("git", ["init", "--quiet", repo]);
+    const lock = join(repo, "held.lock");
+    writeFileSync(lock, "");
+
+    // **握らせてから、噛み合わない状態にする。**
+    //
+    // **「握った」を先に確かめないと、確認そのものが空振りする**——保持側が
+    // **1 度も走らなかった**場合（起動に失敗した／上限までにスケジュールされなかった）、
+    // **ロックはそもそも取られていない**ので、下の `flock -n` は**当然成功**する。
+    // **後始末が 1 度も走っていないのに、表明は 2 つとも通る。**
+    //
+    // **握れなかったら、そこで落ちる**（`read` が失敗する）。**「保持していなかった」を
+    // 緑にしない**——それが**この試験が見たかったものの逆**である。
+    const stuck = spawnSync(
+      "/usr/bin/bash",
+      [
+        "-c",
+        `mkfifo '${repo}/held' '${repo}/never'
+         setsid flock '${lock}' -c 'echo x > "${repo}/held"; read -r _ < "${repo}/never"' \
+           </dev/null >/dev/null 2>&1 &
+         holder=$!
+         trap 'kill -TERM -"$holder" 2>/dev/null; exit 1' EXIT TERM INT
+         read -r _ < '${repo}/held' || exit 3
+         echo "holder_has_lock"
+         read -r _ < '${repo}/never'`,
+      ],
+      // **起動待ちと停止待ちで分け合っている。** 起動が遅い日にここが尽きても、
+      // 下の「握った」の表明が落ちるので**空振りは緑にならない**。
+      // 起動は実測で 1 秒未満なので、10 秒あれば停止待ちに十分残る
+      { cwd: repo, encoding: "utf8", timeout: 10_000 },
+    );
+
+    // **ロックが空いていれば、保持側は残っていない。** 「返ってきた」だけでは、
+    // 背後に居座っているかどうかが分からない
+    const free = spawnSync("/usr/bin/flock", ["-n", lock, "-c", "true"], { encoding: "utf8" });
+    rmSync(repo, { recursive: true, force: true });
+
+    // **まず「握っていた」ことを確かめる。** ここが通らない限り、下の 2 つには意味が無い
+    expect(stuck.stdout, "保持側がロックを握っていない（確認が空振りしている）").toContain(
+      "holder_has_lock",
+    );
+    expect(stuck.status, "上限で打ち切られていない").not.toBe(0);
+    expect(free.status, "ロックが解放されていない（保持側が残っている）").toBe(0);
   });
 });
 
