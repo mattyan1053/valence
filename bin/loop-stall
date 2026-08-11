@@ -321,9 +321,13 @@ done
 # **最初に見た周回は数えない。** 数えたいのは「**1 周終えても変わらなかった**」なので、
 # **始まったばかりの周回を 1 と数えると、上限に達するのが 1 周早くなる**——
 # **worker が上限ぶんの周回を試せる**ようにする。
+#
+# **印が無ければ数える。** 書けなかったとき (bin/loop-lease は印を書けなくても lease は
+# 渡す) や、**この仕組みが入った直後**——活動の記録はあるのに印はまだ無い——に
+# 数えないほうへ倒すと、**第 4 層が黙って死ぬ**。「分からない」は「数える」へ倒す。
 counted="yes"
-if ((worker_alive == 1 && worker_fixes_this == 1)); then
-  if [[ -z $worker_epoch || $worker_epoch == "$prev_epoch" ]]; then
+if ((worker_alive == 1 && worker_fixes_this == 1)) && [[ -n $worker_epoch ]]; then
+  if [[ $worker_epoch == "$prev_epoch" ]]; then
     counted="no"
   elif [[ -z $prev_epoch ]]; then
     # この識別子を、この周回で初めて見た。**印だけ覚えて数えない。**

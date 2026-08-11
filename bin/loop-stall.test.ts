@@ -662,6 +662,18 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(third.status).toBe(1);
   });
 
+  it("周回の印が無ければ、これまでどおり数える", () => {
+    // **「分からない」は「数える」へ倒す。** 印を書けなかったとき（bin/loop-lease は
+    // 書けなくても lease は渡す）や、**この仕組みが入った直後**——活動の記録はあるのに
+    // 印はまだ無い——に、**数えないほうへ倒すと第 4 層が黙って死ぬ**
+    workerState({ activityAgo: 10 });
+
+    expect(stall().stdout).toContain("count=1");
+    expect(stall().stdout).toContain("count=2");
+
+    expect(stall().stdout).toContain("[STOP]");
+  });
+
   it("worker の記録が無ければ、これまでどおり数える", () => {
     // **知らない状態を「作業中」に倒さない。** 倒すと、記録が消えただけで
     // 第 4 層が止まる
