@@ -10,6 +10,10 @@ const SCRIPT = fileURLToPath(new URL("./loop-fixup-lines", import.meta.url));
 const PR = "124";
 const REVIEWED = "a".repeat(40);
 const HEAD = "b".repeat(40);
+/** 前の周期のレビューが付いた commit（**測る窓の外**）。 */
+const OLDER = "c".repeat(40);
+/** 窓の中の commit（レビュー後に worker が積んだもの）。 */
+const INNER = "d".repeat(40);
 
 /** gh の `--jq` の `@base64` と同じ符号化。**復号はどこでもしない。** */
 function b64(value: string): string {
@@ -40,12 +44,14 @@ function run(args: string[]): Run {
 }
 
 type Fake = {
-  /** compare が返す行（`T\t<型>` と `F\t…`）。 */
+  /** compare が返す行（`T\t<型>`、`C\t<窓の中の commit>`、`F\t…`）。 */
   files: string[];
   /** レビュースレッドの取得が返す行（`T\t<型>` と `P\t…`）。 */
   threads?: string[];
   compareExit?: number;
   threadsExit?: number;
+  /** 最後にレビューされた commit。短縮形も来る。 */
+  reviewed?: string;
 };
 
 /**
@@ -86,7 +92,7 @@ function runWithLines(fake: Fake): Run {
       // **レビュースレッドの取得。** 何を「要求された変更」と見なすかを決める問い合わせで、
       // **パスは符号化したまま**受け取る（復号すると、区切りを含む名前で数が狂う）
       '  "api graphql"*)',
-      '    require "--jq" "reviewThreads" ".path" "@base64" "pageInfo"',
+      '    require "--jq" "reviewThreads" ".path" "@base64" "pageInfo" "originalCommit"',
       ...emit(fake.threads ?? ["T\\tarray"]).map((line) => `    ${line}`),
       `    exit ${fake.threadsExit ?? 0}`,
       "    ;;",
@@ -95,7 +101,7 @@ function runWithLines(fake: Fake): Run {
       // ここを見ないと **@base64 を外しても緑のまま**になる
       // **判定の式まで見る。** テストかどうかを決めているのは gh 側の --jq なので、
       // ここを見ないと **判定を外しても緑のまま**になる
-      '    require "--jq" ".filename" \'endswith(".test.ts")\' "@base64" ".additions" ".deletions"',
+      '    require "--jq" ".filename" \'endswith(".test.ts")\' "@base64" ".additions" ".deletions" ".commits"',
       ...emit(fake.files).map((line) => `    ${line}`),
       `    exit ${fake.compareExit ?? 0}`,
       "    ;;",
@@ -105,7 +111,7 @@ function runWithLines(fake: Fake): Run {
     { mode: 0o755 },
   );
 
-  const result = spawnSync(SCRIPT, [PR, REVIEWED, HEAD], {
+  const result = spawnSync(SCRIPT, [PR, fake.reviewed ?? REVIEWED, HEAD], {
     encoding: "utf8",
     env: { ...process.env, PATH: dir },
   });
@@ -125,15 +131,20 @@ function row(path: string, isTest: boolean, additions: number, deletions: number
   return `F\t${isTest}\t${b64(path)}\t${additions}\t${deletions}`;
 }
 
-/** レビュースレッドが 1 件以上あるパスを表す行。 */
-function thread(path: string): string {
-  return `P\t${b64(path)}`;
+/**
+ * レビュースレッドの 1 行。
+ *
+ * **どの commit に対して付いた指摘か**を持つ。これが無いと、**前の周期のスレッドが
+ * 残っているだけでそのファイルが永久に除外される**（実際に指摘された）。
+ */
+function thread(path: string, onCommit: string = REVIEWED): string {
+  return `P\t${onCommit}\t${b64(path)}`;
 }
 
 /** files が配列だったとき（正常）の出力を作る。 */
-function runWithFiles(rows: string[], threads: string[] = []): Run {
+function runWithFiles(rows: string[], threads: string[] = [], commits: string[] = []): Run {
   return runWithLines({
-    files: ["T\tarray", ...rows],
+    files: ["T\tarray", ...commits.map((sha) => `C\t${sha}`), ...rows],
     threads: ["T\tarray", ...threads],
   });
 }
@@ -325,7 +336,82 @@ describe("bin/loop-fixup-lines はレビューが要求した変更を数えな�
   it("スレッドの行が読めなければ失敗する", () => {
     const result = runWithLines({
       files: ["T\tarray"],
-      threads: ["T\tarray", "P\tbin/loop-claim"],
+      threads: ["T\tarray", `P\t${REVIEWED}\tbin/loop-claim`],
+    });
+
+    expect(result.status).toBe(1);
+  });
+});
+
+describe("bin/loop-fixup-lines は前の周期のスレッドを除外に使わない", () => {
+  // **「そのファイルに指摘が付いたことがある」では緩すぎる。** 第 1 回で指摘され、
+  // 解決したファイルを、**第 2 回のレビュー後に大幅に書き換える**と、その変更は
+  // 誰も見ていないのに 0 行として扱われ、上限到達後のゲートを素通りする。
+  //
+  // **除外してよいのは、いま測っている窓の中で要求されたものだけ**である。
+  // 窓は「最後にレビューされた commit から head まで」で、そこへ付いた指摘は
+  // **その commit（またはその後に積んだ commit）に対して**書かれている。
+
+  it("窓の外の commit へ付いたスレッドは、除外に使わない", () => {
+    const result = runWithFiles(
+      [row("bin/loop-claim", false, 60, 29)],
+      [thread("bin/loop-claim", OLDER)],
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("89\t0\t0");
+  });
+
+  it("同じファイルに新旧のスレッドがあれば、新しいほうで除外する", () => {
+    // **古いのが残っていても、今回も指摘されているなら要求である**
+    const result = runWithFiles(
+      [row("bin/loop-claim", false, 60, 29)],
+      [thread("bin/loop-claim", OLDER), thread("bin/loop-claim", REVIEWED)],
+    );
+
+    expect(result.stdout.trim()).toBe("0\t0\t89");
+  });
+
+  it("窓の中で積んだ commit へ付いたスレッドも除外する", () => {
+    // 直している途中の commit へ指摘が付くことがある。**それも要求である**
+    const result = runWithFiles(
+      [row("bin/loop-claim", false, 40, 0)],
+      [thread("bin/loop-claim", INNER)],
+      [INNER],
+    );
+
+    expect(result.stdout.trim()).toBe("0\t0\t40");
+  });
+
+  it("レビューされた commit が短縮形でも突き合わせられる", () => {
+    // **会話コメント由来の SHA は短縮形**（bin/loop-review-commits が返す）。
+    // 完全一致で見ると、そこだけ除外が効かなくなる
+    const result = runWithLines({
+      files: ["T\tarray", row("bin/loop-claim", false, 40, 0)],
+      threads: ["T\tarray", thread("bin/loop-claim", REVIEWED)],
+      reviewed: REVIEWED.slice(0, 7),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("0\t0\t40");
+  });
+
+  it("どの commit へ付いたか分からないスレッドは、除外に使わない", () => {
+    // 消えた commit を指すスレッドは originalCommit が空で返る。
+    // **分からないものを「要求された」に倒さない**
+    const result = runWithFiles(
+      [row("bin/loop-claim", false, 40, 0)],
+      ["P\t-\t" + b64("bin/loop-claim")],
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("40\t0\t0");
+  });
+
+  it("窓の commit 一覧が読めなければ失敗する", () => {
+    // **一覧が壊れているのに続けると、除外の範囲が黙って狭まる**
+    const result = runWithLines({
+      files: ["T\tarray", "C\tnot-a-sha", row("bin/loop-claim", false, 40, 0)],
     });
 
     expect(result.status).toBe(1);
@@ -347,10 +433,10 @@ describe("bin/loop-fixup-lines が gh に渡す判定式", () => {
    * 代わりに、**式を書き換えたら必ずこのテストの更新が要る**形にしてある。
    * 「気づかないうちに反転していた」は起きない。
    */
-  const EXPECTED_FILES_JQ = `"T\\t\\(.files | type)", (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)")`;
+  const EXPECTED_FILES_JQ = `"T\\t\\(.files | type)", (.commits[]? | "C\\t\\(.sha)"), (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)")`;
 
   /** レビュースレッドの側も同じ理由で固定する。 */
-  const EXPECTED_THREADS_JQ = `"T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\(.path | @base64)")`;
+  const EXPECTED_THREADS_JQ = `"T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\((.comments.nodes[0].originalCommit.oid) // "-")\\t\\(.path | @base64)")`;
 
   it("判定式が想定どおりであること", () => {
     const script = readFileSync(SCRIPT, "utf8");
