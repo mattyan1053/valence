@@ -249,7 +249,6 @@ cmd_loop_resume() {
   ((found == 1)) || echo "==> STOP は無い（停止していない）"
 }
 
-# ループの現在地を表示する (open PR / Issue / STOP)
 # **入口を飛ばした周回の記録を見せる。** `bin/loop-handoff` が積む
 # （出口で lease を持っていなかった周回。#143）。
 #
@@ -270,6 +269,7 @@ show_missing_lease() {
   tail -3 "$record" | sed 's/^/  /'
 }
 
+# ループの現在地を表示する (open PR / Issue / STOP)
 cmd_loop_status() {
   show_missing_lease
   if [[ -f loop/STOP ]]; then

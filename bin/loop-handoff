@@ -98,11 +98,24 @@ done
 # **止めない。** 飛ばしたことは記録するが、**この周回の結論は変えない**——
 # 変えると、**入口の見落としが出口の沈黙になる**（#92 が消した形が戻る）。
 note_missing_lease() {
-  local role="$1" common="$2"
+  local role="$1" common="$2" status=0
   local lease="${BASH_SOURCE[0]%/*}/loop-lease"
   # **判定できないときは黙る。** lease を読めないことと、持っていないことは別である
   [[ -x $lease ]] || return 0
-  "$lease" held "$role" >/dev/null 2>&1 && return 0
+  # **標準エラーは通す。** 捨てると、**直すべき当のもの（設定の誤り・記録の破損）が
+  # 人からも記録からも消える**。
+  "$lease" held "$role" >/dev/null || status=$?
+  ((status == 0)) && return 0
+
+  # **exit 1（持っていない）だけを記録する。** 判定不能（exit 2）まで数えると、
+  # **設定を間違えている間ずっと 1 件ずつ積む**ことになり、**本物の飛ばしと混ざって
+  # 記録が読めなくなる**——この記録は**「同じ癖が続いていること」を読むためのもの**なので、
+  # **誤警告より記録が汚れるほうが痛い**。
+  if ((status != 1)); then
+    echo "[WARN] $role の lease を持っているか判定できません（bin/loop-lease held → exit $status）" >&2
+    echo "       入口を飛ばしたかどうかは、この周回については分かりません" >&2
+    return 0
+  fi
 
   echo "[WARN] この周回は $role の lease を持っていません（入口の acquire を飛ばした可能性）" >&2
   echo "       並行していた場合、直列化は働いていません。次の周回は冒頭で取ること" >&2

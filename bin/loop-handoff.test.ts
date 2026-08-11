@@ -176,11 +176,11 @@ describe("bin/loop-handoff", () => {
     );
   }
 
-  function run(...args: string[]): Run {
-    const result = spawnSync(SCRIPT, args, {
+  function run(role: string, env: Record<string, string> = {}): Run {
+    const result = spawnSync(SCRIPT, role === "" ? [] : [role], {
       cwd: repo,
       encoding: "utf8",
-      env: { ...process.env, PATH: path },
+      env: { ...process.env, PATH: path, ...env },
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
@@ -280,6 +280,22 @@ describe("bin/loop-handoff", () => {
 
       expect(handoff.status).toBe(0);
       expect(handoff.stdout).toMatch(/^worker\t/);
+    });
+
+    it("判定できないときは、飛ばした扱いにしない", () => {
+      // **「読めない」と「持っていない」は別である。** 設定を間違えている間ずっと
+      // 1 件ずつ積むと、**本物の飛ばしと混ざって記録が読めなくなる**——
+      // この記録は**「同じ癖が続いていること」を読むためのもの**なので、
+      // **誤警告より記録が汚れるほうが痛い**。
+      //
+      // **標準エラーも捨てない。** 捨てると、**直すべき当のもの（設定の誤り）が
+      // 人からも記録からも消える**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      const handoff = run("master", { LOOP_LEASE_TTL_SEC: "abc" });
+
+      expect(missingRecord(), "判定できない周回を飛ばしとして記録している").toBe("");
+      expect(handoff.stderr, "設定の誤りが握り潰されている").toContain("LOOP_LEASE_TTL_SEC");
     });
 
     it("記録は積み上がる", () => {
@@ -389,7 +405,7 @@ describe("bin/loop-handoff", () => {
     withState({});
 
     expect(run("workers").status).toBe(2);
-    expect(run().status).toBe(2);
+    expect(run("").status).toBe(2);
   });
 
   it("途中で自己宛てになっても、戻ったらまた送る", () => {
