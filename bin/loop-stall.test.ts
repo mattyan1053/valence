@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { MODELLED_SPAWNS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-stall", import.meta.url));
@@ -508,5 +508,135 @@ describe("ドキュメントに書かれた停止識別子", () => {
 
     expect(users).toContain(".claude/commands/loop-master.md");
     expect(users).not.toContain(".claude/commands/loop-worker.md");
+  });
+});
+
+describe("worker が作業しているあいだは数えない", () => {
+  // **第 4 層は master の周回で数えるが、前へ進めるのは worker の周回**である。
+  // master は 7〜10 分ごと、worker の 1 周は 40〜60 分。**同じ状態を 3 回見るのに
+  // 21〜30 分しかかからない**ので、**指摘の修正に master 3 周ぶんかかる作業は
+  // 必ず止められる**（実測で 5 回）。**難しい指摘ほど踏む**——#126 と同じ逆相関である。
+  //
+  // **心拍は「前へ進んだ」ではない**ので、生きているだけでは永久に猶予しない。
+  // **数える単位を worker の周回に変える**——worker が 1 周を始めるたびに 1 回だけ数え、
+  // **worker が黙ったら（活動が期限切れ）これまでどおり master の周回で数える**。
+
+  let repo: string;
+
+  function setup(): void {
+    repo = mkdtempSync(join(tmpdir(), "loop-stall-rounds-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    mkdirSync(join(repo, "bin"));
+    for (const name of ["loop-stall", "loop-lease"]) {
+      copyFileSync(join(REPO_ROOT, "bin", name), join(repo, "bin", name));
+      chmodSync(join(repo, "bin", name), 0o755);
+    }
+    // 呼ばれたことだけを残す task（本物のように loop/STOP は配らない）
+    writeFileSync(join(repo, "task"), `#!/usr/bin/env bash\ntouch '${repo}/ran'\n`, {
+      mode: 0o755,
+    });
+  }
+
+  /** worker の活動と、走っている周回（lease）を作る。**worker 自身が書く形と同じ。** */
+  function workerState(options: { activityAgo: number; acquiredAt?: number }): void {
+    const now = Math.floor(Date.now() / 1000);
+    const scope = `worker${repo.replace(/\//g, "_")}`;
+    writeFileSync(
+      join(repo, ".git", `valence-loop-activity-${scope}`),
+      `${now - options.activityAgo}\n`,
+    );
+    const lease = join(repo, ".git", `valence-loop-lease-${scope}`);
+    if (options.acquiredAt === undefined) {
+      rmSync(lease, { force: true });
+    } else {
+      writeFileSync(lease, `deadbeefdeadbeef\t${options.acquiredAt}\n`);
+    }
+  }
+
+  function stall(id = "no-work"): Run {
+    const result = spawnSync(join(repo, "bin", "loop-stall"), [id], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  beforeEach(setup);
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("worker が 1 周しかしていなければ、master が何周しても止めない", () => {
+    // **実測で 5 回とも、worker は 1 周も終えていなかった。**
+    workerState({ activityAgo: 10, acquiredAt: Math.floor(Date.now() / 1000) - 600 });
+
+    const results = [stall(), stall(), stall(), stall(), stall()];
+
+    expect(results.map((result) => result.status)).toEqual([0, 0, 0, 0, 0]);
+    expect(results.at(-1)?.stdout).toContain("count=1");
+  });
+
+  it("worker が周回を重ねても状態が変わらなければ、これまでどおり止める", () => {
+    // **ただ猶予を増やすだけにしない。** 心拍が出ていても、**worker が 3 周まわして
+    // 変わらないなら**止める（`./task` を叩き続けているだけ、の形を通さない）
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, acquiredAt: now - 600 });
+    expect(stall().stdout).toContain("count=1");
+    workerState({ activityAgo: 10, acquiredAt: now - 400 });
+    expect(stall().stdout).toContain("count=2");
+    workerState({ activityAgo: 10, acquiredAt: now - 200 });
+    const third = stall();
+
+    expect(third.stdout).toContain("[STOP]");
+    expect(third.status).toBe(1);
+  });
+
+  it("worker が黙ったら、これまでどおり master の周回で数えて止める", () => {
+    // **worker が死んだときにカウンタが進まなくなってはいけない**（危険側の穴）。
+    // 期限は bin/loop-lease が持つ値を使う（書き写さない）
+    const ttl = Number(
+      spawnSync(join(repo, "bin", "loop-lease"), ["ttl"], {
+        cwd: repo,
+        encoding: "utf8",
+      }).stdout.trim(),
+    );
+    workerState({ activityAgo: ttl + 60 });
+
+    expect(stall().stdout).toContain("count=1");
+    expect(stall().stdout).toContain("count=2");
+    const third = stall();
+
+    expect(third.stdout).toContain("[STOP]");
+    expect(third.status).toBe(1);
+  });
+
+  it("worker の記録が無ければ、これまでどおり数える", () => {
+    // **知らない状態を「作業中」に倒さない。** 倒すと、記録が消えただけで
+    // 第 4 層が止まる
+    expect(stall().stdout).toContain("count=1");
+    expect(stall().stdout).toContain("count=2");
+
+    expect(stall().stdout).toContain("[STOP]");
+  });
+
+  it("--reset は数を消すが、worker が黙っている事実は消さない", () => {
+    // **人が再開しても、固まったままなら再び止まる。** 活動の記録は毎回読み直すので、
+    // --reset で消えるのは数だけである
+    const ttl = Number(
+      spawnSync(join(repo, "bin", "loop-lease"), ["ttl"], {
+        cwd: repo,
+        encoding: "utf8",
+      }).stdout.trim(),
+    );
+    workerState({ activityAgo: ttl + 60 });
+    stall();
+    stall();
+    expect(stall().stdout).toContain("[STOP]");
+
+    expect(stall("--reset").status).toBe(0);
+    stall();
+    stall();
+
+    expect(stall().stdout).toContain("[STOP]");
   });
 });

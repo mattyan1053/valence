@@ -44,6 +44,7 @@ usage() {
   echo "使い方: bin/loop-lease acquire <役>" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
+  echo "        bin/loop-lease ttl              期限（秒）を出す" >&2
   echo "        役: ${ROLES[*]}" >&2
   echo "        master は役ごとに 1 つ（判定を並列にしない）" >&2
   echo "        worker は作業場ごとに 1 つ（作業場が増えたぶん並列になる）" >&2
@@ -66,6 +67,18 @@ activity_age() {
     printf '最後の活動 %s 秒前' "$((now - last_activity))"
   fi
 }
+
+# **期限の値をここ 1 箇所に持つ。** 他のスクリプトが「相手が生きているか」を判断するのに
+# 使うので、**書き写させない**（2 箇所に持つと片方だけ直して食い違う）。
+if [[ ${1-} == "ttl" ]]; then
+  [[ $# -eq 1 ]] || usage
+  if ! [[ $TTL_SEC =~ ^[0-9]+$ ]]; then
+    echo "[FAIL] 設定: LOOP_LEASE_TTL_SEC は 0 以上の整数（秒）で指定してください" >&2
+    exit 2
+  fi
+  printf '%s\n' "$TTL_SEC"
+  exit 0
+fi
 
 [[ $# -ge 2 ]] || usage
 readonly ACTION="$1"

@@ -229,26 +229,88 @@ fi
 #   <回数><TAB><識別子>  を 1 行ずつ
 #
 # 書式に合わない行は捨てる (壊れた記録・古い書式で数えない)。
+#   <回数><TAB><識別子><TAB><数えたときの worker の周回>  を 1 行ずつ
 count=0
 others=()
+prev_epoch=""
 if [[ -f $STATE ]]; then
-  while IFS=$'\t' read -r prev_count prev_id; do
+  while IFS=$'\t' read -r prev_count prev_id prev_id_epoch; do
     [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
     if [[ $prev_id == "$ID" ]]; then
       count="$prev_count"
+      prev_epoch="$prev_id_epoch"
     else
-      others+=("$prev_count"$'\t'"$prev_id")
+      others+=("$prev_count"$'\t'"$prev_id"$'\t'"$prev_id_epoch")
     fi
   done < "$STATE"
 fi
-count=$((count + 1))
 
-printf '%s\n' "${others[@]}" "$count"$'\t'"$ID" > "$STATE" || {
+# **数える単位を「相手の周回」にする。**
+#
+# 第 4 層は master の周回で数えるが、**前へ進めるのは worker の周回**である。
+# master は 7〜10 分ごと、**worker の 1 周は 40〜60 分**。同じ状態を 3 回見るのに
+# 21〜30 分しかかからないので、**指摘の修正に master 3 周ぶんかかる作業は必ず止まる**
+# (実測で 5 回。5 回とも worker は 1 周も終えておらず、5 回とも人が手で再開した)。
+# **難しい指摘ほど踏む**——レビューが良い仕事をするほど罰される (#126 と同じ逆相関)。
+#
+# **worker が生きているあいだは、worker が 1 周を始めるたびに 1 回だけ数える。**
+#
+#   worker が生きている … 活動の記録が期限内 (bin/loop-lease が持つ値。書き写さない)
+#   worker の周回       … lease の取得時刻。**取り直すたびに変わる**
+#
+# **心拍を「前へ進んだ」と読まない。** 生きているだけで永久に猶予すると、
+# `./task` を叩き続けるだけの周回が通ってしまう。**3 周まわしても変わらなければ止める。**
+#
+# **黙ったらこれまでどおり数える。** worker が死んだときにカウンタが進まなくなるのは
+# 危険側の穴なので、**活動が期限切れなら master の周回で数える**。
+# **記録が無い場合も同じ**——知らない状態を「作業中」に倒さない。
+#
+# **worker の作業ツリーは読まない。** 見るのは worker 自身が git の共通ディレクトリへ
+# 書いた記録だけである。master が相手の作業場を覗く形にすると、
+# 「GitHub を唯一の正とする」という設計に穴が開く。
+worker_epoch=""
+worker_alive=0
+if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
+  && lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" \
+  && [[ $lease_ttl =~ ^[0-9]+$ ]]; then
+  newest_activity=0
+  for activity in "$common_dir"/valence-loop-activity-worker*; do
+    [[ -f $activity ]] || continue
+    read -r seen <"$activity" 2>/dev/null || continue
+    [[ $seen =~ ^[0-9]+$ ]] || continue
+    ((seen > newest_activity)) && newest_activity="$seen"
+  done
+  if ((newest_activity > 0)) && (($(date +%s) - newest_activity < lease_ttl)); then
+    worker_alive=1
+    # **走っている周回の合図。** 持っていなければ空 (周回と周回の間)。
+    for lease in "$common_dir"/valence-loop-lease-worker*; do
+      [[ -f $lease ]] || continue
+      IFS=$'\t' read -r _token since <"$lease" 2>/dev/null || continue
+      [[ $since =~ ^[0-9]+$ ]] || continue
+      [[ -z $worker_epoch ]] || ((since > worker_epoch)) && worker_epoch="$since"
+    done
+  fi
+fi
+
+counted="yes"
+if ((worker_alive == 1)) && [[ -z $worker_epoch || $worker_epoch == "$prev_epoch" ]]; then
+  # **同じ周回の中で 2 回数えない。** 周回の間 (lease を持っていない) も数えない
+  counted="no"
+else
+  count=$((count + 1))
+  [[ -n $worker_epoch ]] && prev_epoch="$worker_epoch"
+fi
+
+printf '%s\n' "${others[@]}" "$count"$'\t'"$ID"$'\t'"$prev_epoch" > "$STATE" || {
   echo "[FAIL] 停止カウンタを書き込めません: $STATE" >&2
   exit 2
 }
 
-echo "stall id=$ID count=$count max=$MAX_REPEATS"
+if [[ $counted == "no" ]]; then
+  echo "stall id=$ID count=$count max=$MAX_REPEATS (worker が同じ周回の中なので数えない)"
+else
+  echo "stall id=$ID count=$count max=$MAX_REPEATS"
+fi
 
 if ((count >= MAX_REPEATS)); then
   echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める"
