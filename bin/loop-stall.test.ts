@@ -818,6 +818,29 @@ describe("人が再開したことを受け取る", () => {
     expect(stall("no-work").stdout).toMatch(/2 回目/);
   });
 
+  it("カウンタを消せなければ、成功を返さない", () => {
+    // **`task` は終了コードで「消せたか」を判断し、消せなければ STOP を残す。**
+    // ここで握りつぶすと、**約束した側が、約束を測る値を返していない**ことになる。
+    // 倒れる向きも悪い——**カウンタが残ったまま STOP が消える**ので、
+    // **再開直後に 1 周で止まり直す**（#127 の症状が、#127 を直す経路の中に残る）
+    stall("no-work");
+    const gitDir = join(repo, ".git");
+    chmodSync(gitDir, 0o555);
+    const resumed = stall("--resumed");
+    chmodSync(gitDir, 0o755);
+
+    expect(resumed.status).not.toBe(0);
+    expect(resumed.stderr).toContain("消せません");
+  });
+
+  it("カウンタが無ければ、成功する", () => {
+    // **`rm -f` は「ファイルが無い」では失敗しない。** ここを止めると
+    // **初回の resume が通らなくなる**（まだ 1 度も記録していない状態）
+    const resumed = stall("--resumed");
+
+    expect(resumed.status).toBe(0);
+  });
+
   it("止まっていない識別子は、繰り返しに数えない", () => {
     // **上限に達したものだけが「人を呼んだ」状態である**
     stall("no-work");
