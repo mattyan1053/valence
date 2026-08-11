@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -87,6 +88,35 @@ describe("入口を飛ばした記録", () => {
     );
 
     expect(help).toMatch(/^\s+loop:status\s+\S/m);
+  });
+
+  it("記録が読めなければ、黙って 0 件にしない", () => {
+    // **「1 度も飛ばしていない」と「読めない」を同じ静けさにしない。**
+    //
+    // **書けなかった場合は、ここでは分からない**——**分かるのは書こうとした瞬間だけ**
+    // なので、そこで言う（`bin/loop-handoff`）。**2 箇所で同じことを見張らない。**
+    // ここで分かるのは**「ファイルはあるのに読めない」**までで、それは言う
+    const workspace = mkdtempSync(join(tmpdir(), "lease-missing-"));
+    try {
+      expect(spawnSync("git", ["init", "--quiet", workspace]).status).toBe(0);
+      const record = join(workspace, ".git", "valence-loop-lease-missing");
+      appendFileSync(record, "2026-08-11T20:00:00Z\tworker\t/somewhere\n");
+      chmodSync(record, 0o000);
+
+      const shown = execFileSync(
+        "bash",
+        [
+          "-c",
+          `source ${JSON.stringify(join(REPO_ROOT, "task"))} >/dev/null 2>&1; ` +
+            `cd ${JSON.stringify(workspace)}; show_missing_lease`,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(shown, "読めないのに何も言わない").not.toBe("");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   it("記録が無ければ、何も言わない", () => {

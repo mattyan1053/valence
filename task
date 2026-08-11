@@ -263,7 +263,15 @@ show_missing_lease() {
   [[ -n $common ]] || return 0
   record="$common/valence-loop-lease-missing"
   [[ -f $record ]] || return 0
-  count="$(wc -l <"$record" 2>/dev/null || echo 0)"
+  # **「1 度も飛ばしていない」と「読めない」を同じ静けさにしない。**
+  #
+  # **書けなかった場合は、ここでは分からない**——**分かるのは書こうとした瞬間だけ**
+  # なので、そこで言う（`bin/loop-handoff`）。**2 箇所で同じことを見張らない。**
+  # ここで分かるのは**「ファイルはあるのに読めない」**までである。
+  if ! count="$(wc -l <"$record" 2>/dev/null)"; then
+    echo "入口を飛ばした周回の記録を読めません: $record"
+    return 0
+  fi
   ((count > 0)) || return 0
   echo "入口を飛ばした周回 (lease 無しで出口へ来た): ${count} 件"
   tail -3 "$record" | sed 's/^/  /'

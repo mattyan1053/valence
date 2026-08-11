@@ -298,6 +298,31 @@ describe("bin/loop-handoff", () => {
       expect(handoff.stderr, "設定の誤りが握り潰されている").toContain("LOOP_LEASE_TTL_SEC");
     });
 
+    it("記録を残せなければ、そう言う", () => {
+      // **書けなければ、探し方を知っていても分からない。** `loop:status` は
+      // **「0 件」と「書けなかった」を区別しない**ので、**壊れた環境で静かに無効**になる——
+      // **気づけることを作る仕組みの中で、気づけなくなる形**である。
+      //
+      // **`|| true` は「失敗してよい」ではなく「失敗しても続ける」の意味**だった。
+      // **続けることと黙ることは別**なので、**続けたまま言う**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      const record = join(repo, ".git", "valence-loop-lease-missing");
+      writeFileSync(record, "");
+      chmodSync(record, 0o444);
+
+      const handoff = run("master");
+
+      // **シェルの失敗メッセージに相乗りしない。** `>>file 2>/dev/null` は
+      // **開くのに失敗した時点ではまだ標準エラーを捨てていない**ので、
+      // **たまたま bash の 1 行が出る**——**並びを変えれば消える**し、
+      // **それが何を意味するか（記録が残らない）は誰も言っていない**
+      expect(handoff.stderr, "書けなかったことに気づいていない").toMatch(/記録を残せません/);
+      expect(handoff.stderr, "何が失われるのかが書かれていない").toMatch(/loop:status/);
+      // **止めない。** 記録できないことと、持ち手が決まらないことは別である
+      expect(handoff.status).toBe(0);
+      expect(handoff.stdout).toMatch(/^worker\t/);
+    });
+
     it("記録は積み上がる", () => {
       // **1 回で止めない。** 同じ癖が続いていることは、**回数でしか分からない**
       withState({});
