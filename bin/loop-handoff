@@ -49,6 +49,19 @@ readonly ROLES=(master worker)
 # 自動レビューの bot。**この人が最後なら、まだ誰も答えていない。**
 readonly REVIEW_BOT="chatgpt-codex-connector"
 
+# 列の区切り。**タブを使わない。**
+#
+# **タブは IFS の空白なので、連続すると 1 区切りに畳まれる。** label が 1 つも無い PR
+# （外した直後など）で列が左へずれ、**時刻の欄に PR 本文が入る**。数字は英字より前に
+# 並ぶので時刻の比較は**必ず偽**になり、**「判断済み」の枝 → worker 宛 → 自分宛て →
+# 沈黙**——**この仕組みが消しに来た沈黙が、直したはずの経路の中に戻る。**
+# **空の列があっても畳まれない文字**にすれば、`read` の並びがずれない。
+#
+# **同じ穴を `bin/loop-merge` が踏んでいる**（`mergedAt` が空のとき `headRefName` が
+# そこへ入り、**未マージを「マージ済み」と誤判定**した）。**あちらは 1 行 1 値で受ける**。
+# ここは 1 行が 1 件（PR・スレッド）なので、**区切りのほうを変える**。
+readonly FIELD=$'\037'
+
 usage() {
   echo "使い方: bin/loop-handoff <役>   役: ${ROLES[*]}" >&2
   exit 2
@@ -93,9 +106,9 @@ prs="$(gh api graphql --paginate \
           timelineItems(itemTypes:LABELED_EVENT, last:50){
             nodes{... on LabeledEvent{createdAt label{name}}}}}}}}' \
   --jq '.data.repository.pullRequests.nodes[]
-    | "\(.number)\t\([.labels.nodes[].name] | join(","))\t\(.headRefOid)\t\(
+    | "\(.number)\u001f\([.labels.nodes[].name] | join(","))\u001f\(.headRefOid)\u001f\(
         [.timelineItems.nodes[] | select(.label.name == "changes-requested") | .createdAt] | max // ""
-      )\t\((.body // "") | gsub("\\s+"; " "))"')" ||
+      )\u001f\((.body // "") | gsub("\\s+"; " "))"')" ||
   fail_unknown "open PR"
 
 # **未解決スレッドを、ゲートと同じ読み方で取る。**
@@ -128,7 +141,7 @@ declare -A last_author_of=()
 # そこへ寄せると、**worker の返信を master の判断として読む**。
 declare -A untriaged_of=()
 declare -A requested_of=()
-while IFS=$'\t' read -r number _labels _head labeled_at _body; do
+while IFS="$FIELD" read -r number _labels _head labeled_at _body; do
   [[ -n $number ]] || continue
   threads="$(gh api graphql --paginate \
     -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" -F number="$number" \
@@ -141,12 +154,12 @@ while IFS=$'\t' read -r number _labels _head labeled_at _body; do
               opened: comments(first:1){nodes{createdAt}}
               comments(last:1){nodes{databaseId author{login}}}}}}}}' \
     --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)
-      | "\(.comments.nodes[0].databaseId)\t\(.comments.nodes[0].author.login)\t\(.opened.nodes[0].createdAt)"')" ||
+      | "\(.comments.nodes[0].databaseId)\u001f\(.comments.nodes[0].author.login)\u001f\(.opened.nodes[0].createdAt)"')" ||
     fail_unknown "未解決スレッド (#$number)"
   count=0
   untriaged=0
   requested=0
-  while IFS=$'\t' read -r comment_id author opened_at; do
+  while IFS="$FIELD" read -r comment_id author opened_at; do
     [[ -n $comment_id ]] || continue
     ((count++))
     # **スレッドごとに数える。** PR ごとに「いちばん新しい発言」だけで決めると、
@@ -186,9 +199,9 @@ counts="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}
       ready: issues(states:OPEN, labels:["ready"]){totalCount}
       inProgress: issues(states:OPEN, labels:["in-progress"]){totalCount}
       backlog: issues(states:OPEN, labels:["backlog"]){totalCount}}}' \
-  --jq '.data.repository | "\(.ready.totalCount)\t\(.inProgress.totalCount)\t\(.backlog.totalCount)"')" ||
+  --jq '.data.repository | "\(.ready.totalCount)\u001f\(.inProgress.totalCount)\u001f\(.backlog.totalCount)"')" ||
   fail_unknown "Issue の件数"
-IFS=$'\t' read -r ready in_progress backlog <<<"$counts"
+IFS="$FIELD" read -r ready in_progress backlog <<<"$counts"
 
 for count in "$ready" "$in_progress" "$backlog"; do
   [[ $count =~ ^[0-9]+$ ]] || fail_unknown "件数が数値ではありません: $count"
@@ -208,7 +221,7 @@ done
 # **読めなかったときの受け皿は上にある**（`$prs` の取得が失敗すれば `fail_unknown`）。
 # ここは**取れている本文から数えるだけ**なので、失敗しうる操作を挟まない。
 declare -A parked_seen=()
-while IFS=$'\t' read -r _number labels _head _labeled_at body; do
+while IFS="$FIELD" read -r _number labels _head _labeled_at body; do
   [[ ",$labels," == *",parked,"* ]] || continue
   rest="$body"
   while [[ $rest =~ Closes[[:space:]]+#([0-9]+) ]]; do
@@ -267,7 +280,7 @@ mismatched=""
 answered=""
 # **当否がまだ判断されていない指摘がある** PR。**動けるのは master だけ**である。
 untriaged=""
-while IFS=$'\t' read -r number labels _head _labeled_at _body; do
+while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
   [[ -n $number ]] || continue
   unresolved="${unresolved_of[$number]-0}"
   [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"

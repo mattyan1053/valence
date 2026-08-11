@@ -9,6 +9,14 @@ const SCRIPT = fileURLToPath(new URL("./loop-handoff", import.meta.url));
 
 type Run = { status: number; stdout: string; stderr: string };
 
+/**
+ * 列の区切り。**スクリプトと同じ US を使う**（タブは連続すると畳まれる）。
+ *
+ * **`printf '%b'` が読む形で書く。** ここに実物の制御文字を置くと、
+ * 偽の `gh` を書き出すときにエスケープされ、**`%b` が戻せない形**になる。
+ */
+const FIELD = "\\0037";
+
 /** スレッドが立った既定の時刻。**label より前**（master が見てから付けた形）。 */
 const THREAD_AT = "2026-01-01T00:00:00Z";
 /** `changes-requested` を付けた既定の時刻。**スレッドより後**。 */
@@ -34,7 +42,9 @@ type State = {
     /**
      * `changes-requested` を最後に付けた時刻。
      *
-     * **既定はスレッドより後**（master が指摘を見てから付けた、いつもの順序）。
+     * **既定は label の有無から決まる**——付いていればスレッドより後（master が
+     * 指摘を見てから付けた、いつもの順序）、付いていなければ**記録なし**。
+     * **外したあとも記録は残る**ので、その形を作るときはここへ明示する。
      */
     labeledAt?: string;
     /** 最後の発言の ID。**返信だけでも動く値**である。 */
@@ -86,12 +96,26 @@ describe("bin/loop-handoff", () => {
     ];
   }
 
+  /**
+   * `changes-requested` を付けた時刻。**付いていない PR には記録が無い**のが既定である。
+   *
+   * **一律に時刻を返さない。** label の無い PR にまで「付けた記録」を与えると、
+   * **付けたことが 1 度も無い PR を「判断済み」に見せる**——**試験のほうが
+   * 起こりえない状態を作って、実装の誤りを隠す**ことになる。
+   */
+  function labeledAtOf(pr: NonNullable<State["prs"]>[number]): string {
+    if (pr.labeledAt !== undefined) {
+      return pr.labeledAt;
+    }
+    return (pr.labels ?? []).includes("changes-requested") ? LABELED_AT : "";
+  }
+
   function withState(state: State): void {
     // **本文は最後に置く。** 途中に置くと、本文に混じった空白で列がずれる
     const prs = (state.prs ?? [])
       .map(
         (pr) =>
-          `${pr.number}\t${(pr.labels ?? []).join(",")}\t${pr.head ?? "a".repeat(40)}\t${pr.labeledAt ?? LABELED_AT}\t${pr.body ?? ""}`,
+          `${pr.number}${FIELD}${(pr.labels ?? []).join(",")}${FIELD}${pr.head ?? "a".repeat(40)}${FIELD}${labeledAtOf(pr)}${FIELD}${pr.body ?? ""}`,
       )
       .join("\n");
     // **一覧（検索）は古い値を返しうる。** ここでは**わざと古い値**を返させ、
@@ -103,7 +127,7 @@ describe("bin/loop-handoff", () => {
       .flatMap((pr) =>
         (pr.unresolvedBy ?? []).map(
           (who, index) =>
-            `${pr.lastComment ?? 100 + index}\t${who === "bot" ? "chatgpt-codex-connector" : "mattyan1053"}\t${pr.threadsAt?.[index] ?? THREAD_AT}`,
+            `${pr.lastComment ?? 100 + index}${FIELD}${who === "bot" ? "chatgpt-codex-connector" : "mattyan1053"}${FIELD}${pr.threadsAt?.[index] ?? THREAD_AT}`,
         ),
       )
       .join("\n");
@@ -118,7 +142,7 @@ describe("bin/loop-handoff", () => {
         // ここを見ていなければ「ready が 1 件ある」に到達しない
         ...answerLines(
           "totalCount",
-          `${state.ready ?? 0}\t${state.inProgress ?? 0}\t${state.backlog ?? 0}`,
+          `${state.ready ?? 0}${FIELD}${state.inProgress ?? 0}${FIELD}${state.backlog ?? 0}`,
         ),
         // **PR 一覧も検索を通さない口から取る。** label を付けた直後は一覧が古い
         ...answerLines("pullRequests(states:OPEN", prs),
@@ -544,6 +568,35 @@ describe("bin/loop-handoff", () => {
       });
 
       expect(run("master").stdout).toMatch(/^worker\t/);
+    });
+
+    it("label が 1 つも無い PR でも、列がずれない", () => {
+      // **タブは IFS の空白なので、連続すると 1 区切りに畳まれる。**
+      // label を外した PR——`LABELED_EVENT` は残る——でここを踏むと**列が左へずれ**、
+      // **`labeled_at` に PR 本文が入る**。数字は英字より前に並ぶので時刻の比較は
+      // **必ず偽**になり、**「判断済み」の枝 → worker 宛 → 自分宛て → 沈黙**。
+      // しかも食い違いの記録は untriaged の枝でしか立たないので、**記録も残らない**。
+      //
+      // **本文を空にしない。** 空だと**ずれた先も空**になって、
+      // **畳まれたままでも同じ答えが出る**——**確認そのものが空振りする**
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: [],
+            body: "本文がある",
+            labeledAt: "2026-08-01T00:00:00Z",
+            unresolvedBy: ["bot"],
+            threadsAt: ["2026-08-02T00:00:00Z"],
+          },
+        ],
+      });
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout).toMatch(/^master\t/);
+      // label が 1 つも無いまま答えの無い指摘が残る形は、これまでどおり記録される
+      expect(handoff.status).toBe(3);
     });
 
     it("すべて答えてあれば、これまでどおり復路になる", () => {
