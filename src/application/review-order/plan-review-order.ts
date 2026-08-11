@@ -36,6 +36,18 @@ export type ReviewOrderSources = {
   readonly changes: ChangeSummarySource;
 };
 
+export type ReviewOrderOptions = {
+  /**
+   * 材料の取得を打ち切る合図。
+   *
+   * **期限の決め方は持たない。** どれだけ待つかは**表示の段取り**であって、
+   * ユースケースの判断ではない——ここに時計を置くと、`application` が
+   * **Node 標準ライブラリ以外を持つ**か、**試験が時間に依存する**かのどちらかになる。
+   * **合図を受け取る形なら、どちらも要らない。**
+   */
+  readonly changesDeadline?: AbortSignal;
+};
+
 /**
  * 一覧を取り、依存グラフと順序を組み立てる。
  *
@@ -43,11 +55,14 @@ export type ReviewOrderSources = {
  * **「取得できなかった」が「PR が 0 件」に化ける**。呼び出し側は例外の有無で
  * 区別できる。
  */
-export async function planReviewOrder(sources: ReviewOrderSources): Promise<ReviewOrderPlan> {
+export async function planReviewOrder(
+  sources: ReviewOrderSources,
+  options: ReviewOrderOptions = {},
+): Promise<ReviewOrderPlan> {
   const { pullRequests, invalid } = await sources.pullRequests.listPullRequests();
   const edges = buildDependencyEdges(pullRequests);
   const numbers = pullRequests.map((pullRequest) => pullRequest.number);
-  const changes = await collectChanges(sources.changes, numbers);
+  const changes = await collectChanges(sources.changes, numbers, options.changesDeadline);
 
   return {
     pullRequests,
@@ -69,19 +84,67 @@ export async function planReviewOrder(sources: ReviewOrderSources): Promise<Revi
  *
  * **黙って捨てもしない。** 空の地図だけだと、**1 件も材料が無いのか、口が壊れているのか**
  * が区別できない。**丸ごと落ちたときは、全 PR を理由つきで `unavailable` に載せる。**
+ *
+ * **遅いときも縮退する。** 落ちるなら上の経路へ入るが、**遅い場合はどこにも入らず、
+ * 呼び出し側の時間切れで画面ごと落ちる**（#119 のレビュー指摘 / #120）。
+ * **合図を受けたら、依存グラフだけ先に返す。**
+ *
+ * **口の行儀に頼らない。** 合図を渡しても、**受け取らない実装・無視する実装**はありうる。
+ * **待つのをやめる側と、取り消しを伝える側の両方**が要る——**片方だけだと、
+ * 「縮退したのは呼んだ側だけ」か「止まらない」のどちらかになる。**
  */
 async function collectChanges(
   source: ChangeSummarySource,
   numbers: readonly number[],
+  deadline: AbortSignal | undefined,
 ): Promise<Pick<ReviewOrderPlan, "changes" | "changesUnavailable">> {
+  // **切れているなら呼ばない。** 呼べば往復が始まるので、
+  // **打ち切ったのに要求だけ飛ぶ**ことになる
+  if (deadline?.aborted === true) {
+    return timedOut(numbers);
+  }
   try {
-    const listing = await source.listChangeSummaries(numbers);
+    const listing = await Promise.race([
+      source.listChangeSummaries(numbers, { signal: deadline }),
+      abortion(deadline),
+    ]);
+    if (listing === TIMED_OUT) {
+      return timedOut(numbers);
+    }
     return { changes: listing.summaries, changesUnavailable: listing.unavailable };
   } catch (error) {
     const reason = error instanceof Error ? error.message : "材料を取得できませんでした";
     return {
       changes: new Map(),
-      changesUnavailable: numbers.map((pullRequestNumber) => ({ pullRequestNumber, reason })),
+      changesUnavailable: numbers.map((pullRequestNumber) => ({
+        pullRequestNumber,
+        kind: "unreadable" as const,
+        reason,
+      })),
     };
   }
+}
+
+/** 打ち切りの印。**「材料が空だった」と区別できる値**にする。 */
+const TIMED_OUT = Symbol("timed-out");
+
+/** 合図が鳴るまで返らない約束。**合図が無ければ永久に返らない**（競争しても影響しない）。 */
+function abortion(deadline: AbortSignal | undefined): Promise<typeof TIMED_OUT> {
+  return new Promise((resolve) => {
+    deadline?.addEventListener("abort", () => resolve(TIMED_OUT), { once: true });
+  });
+}
+
+/** 打ち切ったぶん。**「読めなかった」と同じ場所に出るが、同じものではない。** */
+function timedOut(
+  numbers: readonly number[],
+): Pick<ReviewOrderPlan, "changes" | "changesUnavailable"> {
+  return {
+    changes: new Map(),
+    changesUnavailable: numbers.map((pullRequestNumber) => ({
+      pullRequestNumber,
+      kind: "timedout" as const,
+      reason: "期限までに材料が返りませんでした",
+    })),
+  };
 }

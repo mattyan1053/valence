@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
-import type { ChangeSummarySource } from "../ports/change-summary-source";
+import type { ChangeSummarySource, UnavailableChangeSummary } from "../ports/change-summary-source";
 import type { PullRequestListing, PullRequestSource } from "../ports/pull-request-source";
 import { planReviewOrder } from "./plan-review-order";
 
@@ -23,7 +23,7 @@ const SUMMARY: ChangeSummary = {
 /** 材料の口。**渡さなければ「1 件も取れなかった」ものとして扱う。** */
 function changesReturning(
   summaries: ReadonlyMap<number, ChangeSummary>,
-  unavailable: { pullRequestNumber: number; reason: string }[] = [],
+  unavailable: UnavailableChangeSummary[] = [],
 ): ChangeSummarySource {
   return { listChangeSummaries: () => Promise.resolve({ summaries, unavailable }) };
 }
@@ -125,13 +125,13 @@ describe("レビュー順序を組み立てる", () => {
       const plan = await planReviewOrder({
         pullRequests: sourceReturning(stacked),
         changes: changesReturning(new Map([[8, SUMMARY]]), [
-          { pullRequestNumber: 9, reason: "取れませんでした" },
+          { pullRequestNumber: 9, kind: "unreadable", reason: "取れませんでした" },
         ]),
       });
 
       expect(plan.changes.has(9)).toBe(false);
       expect(plan.changesUnavailable).toEqual([
-        { pullRequestNumber: 9, reason: "取れませんでした" },
+        { pullRequestNumber: 9, kind: "unreadable", reason: "取れませんでした" },
       ]);
       expect(plan.pullRequests).toHaveLength(2);
     });
@@ -159,6 +159,128 @@ describe("レビュー順序を組み立てる", () => {
 
       expect(plan.changesUnavailable.map((entry) => entry.pullRequestNumber)).toEqual([8, 9]);
       expect(plan.changesUnavailable[0]?.reason).toContain("GitHub から取得できませんでした");
+    });
+
+    describe("材料が遅いとき", () => {
+      /**
+       * **本当に応答しない口。** resolve も reject もしない。
+       *
+       * **即座に resolve / reject する偽物では確かめられない**（Issue #120 の完了条件）——
+       * それは**遅い口ではなく、落ちる口**である。**起こりえない状態を作る偽物**では、
+       * **実装が待ち続けていても緑になる**。
+       */
+      function silentChanges(): {
+        source: ChangeSummarySource;
+        asked: number[][];
+        /** 口が呼ばれたら解決する。**呼ばれてから打ち切る**ために使う。 */
+        called: Promise<AbortSignal | undefined>;
+      } {
+        const asked: number[][] = [];
+        let announce: (signal: AbortSignal | undefined) => void = () => {
+          // 呼ばれる前に置き換わる
+        };
+        const called = new Promise<AbortSignal | undefined>((resolve) => {
+          announce = resolve;
+        });
+        return {
+          asked,
+          called,
+          source: {
+            listChangeSummaries: (numbers, request) => {
+              asked.push([...numbers]);
+              announce(request?.signal);
+              return new Promise<never>(() => {
+                // わざと何も起こさない
+              });
+            },
+          },
+        };
+      }
+
+      it("打ち切れば、応答しない口でも依存グラフが返る", async () => {
+        // **「壊れたときに縮退する」と「遅いときに縮退する」は別である**（#119 / #120）。
+        // 落ちるなら縮退するが、**遅い場合はそこへ入らず、呼び出し側の時間切れで
+        // 画面ごと落ちる**
+        const deadline = new AbortController();
+        const { source, called } = silentChanges();
+
+        const planned = planReviewOrder(
+          { pullRequests: sourceReturning(stacked), changes: source },
+          { changesDeadline: deadline.signal },
+        );
+        // **呼ばれてから打ち切る。** 先に切ると「呼ばない」経路へ入り、
+        // **待つのをやめる側**を試せない（時間では待たない）
+        await called;
+        deadline.abort();
+        const plan = await planned;
+
+        expect(plan.order).toEqual({ ordered: [8, 9], cyclic: [] });
+        expect(plan.changes.size).toBe(0);
+      });
+
+      it("打ち切ったことが、材料が無いことと混ざらない", async () => {
+        // **打ち切りを入れる側が、打ち切りを見えなくしてはいけない。**
+        // **「読めなかった」と「間に合わなかった」は別**で、
+        // **文言で見分けさせない**（読む側が文字列を解釈することになる）
+        const deadline = new AbortController();
+        const { source, called } = silentChanges();
+
+        const planned = planReviewOrder(
+          { pullRequests: sourceReturning(stacked), changes: source },
+          { changesDeadline: deadline.signal },
+        );
+        await called;
+        deadline.abort();
+        const plan = await planned;
+
+        expect(plan.changesUnavailable.map((entry) => entry.pullRequestNumber)).toEqual([8, 9]);
+        expect(plan.changesUnavailable.every((entry) => entry.kind === "timedout")).toBe(true);
+      });
+
+      it("落ちた場合は、打ち切りとは別の種別になる", async () => {
+        // **同じ場所に出るが、同じものではない。** ここが 1 つに潰れると、
+        // **#112 以降ずっと分けてきた区別（読めなかった / 無かった）が、
+        // 縮退の実装そのものによって潰れる**
+        const plan = await planReviewOrder({
+          pullRequests: sourceReturning(stacked),
+          changes: failingChanges(new Error("GitHub から取得できませんでした")),
+        });
+
+        expect(plan.changesUnavailable.every((entry) => entry.kind === "unreadable")).toBe(true);
+      });
+
+      it("打ち切りは、口にも伝える", async () => {
+        // **先に返すだけでは、走っている要求は走り続ける**（master の指摘）。
+        // **取り消しを口まで通さないと、縮退したのは呼んだ側だけ**になる
+        const deadline = new AbortController();
+        const { source, called } = silentChanges();
+
+        const planned = planReviewOrder(
+          { pullRequests: sourceReturning(stacked), changes: source },
+          { changesDeadline: deadline.signal },
+        );
+        const seen = await called;
+        deadline.abort();
+        await planned;
+
+        expect(seen, "口に合図が渡っていない").toBe(deadline.signal);
+      });
+
+      it("先に期限が切れていれば、口を呼ばない", async () => {
+        // **呼んでから打ち切らない。** 呼べば往復が始まるので、
+        // **打ち切ったのに要求だけ飛ぶ**ことになる
+        const deadline = new AbortController();
+        deadline.abort();
+        const { source, asked } = silentChanges();
+
+        const plan = await planReviewOrder(
+          { pullRequests: sourceReturning(stacked), changes: source },
+          { changesDeadline: deadline.signal },
+        );
+
+        expect(asked).toEqual([]);
+        expect(plan.changesUnavailable).toHaveLength(2);
+      });
     });
 
     it("材料は、読めた PR の分だけ問い合わせる", async () => {
