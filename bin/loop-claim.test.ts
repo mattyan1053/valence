@@ -157,8 +157,13 @@ describe("bin/loop-claim", () => {
       "date",
       "sleep",
       "rm",
+      "mv",
+      "cp",
       "grep",
       "printf",
+      "kill",
+      "setsid",
+      "touch",
     ]) {
       const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
       if (found !== "") {
@@ -315,22 +320,36 @@ describe("bin/loop-claim", () => {
     /** open PR の本文と、Issue ごとの label を返す偽の `gh`。 */
     function withAudit(options: {
       /** **本文は渡さない。** `Closes` の書き方を自分で解析しない（GitHub に訊く）。 */
-      prs?: { number: number; closes: number[] }[];
+      prs?: { number: number; closes: number[]; repo?: string }[];
       labelsOf?: Record<number, string[]>;
       /** label の付け替えが失敗する。**部分的に成功した状態を作らせない**ための試験。 */
       editFails?: boolean;
+      /** 付け替えが**成功を返すのに何も変わらない**。`gh` は通らなくても 0 を返しうる。 */
+      editIsNoop?: boolean;
     }): void {
       const prs = (options.prs ?? []).map((pr) => String(pr.number)).join("\n");
       const closesOf = (options.prs ?? [])
         .map(
           (pr) =>
-            `    ${pr.number}) printf '%b' ${JSON.stringify(pr.closes.join("\n"))}; echo; exit 0 ;;`,
+            `    ${pr.number}) printf '%b' ${JSON.stringify(
+              pr.closes.map((n) => `${pr.repo ?? "owner/repo"}\t${n}`).join("\n"),
+            )}; echo; exit 0 ;;`,
         )
         .join("\n");
+
+      // **label は状態として持つ。** 付け替えたら見えるようにしないと、
+      // **「書いたら読み直す」を試験できない**（読み直しても同じ値が返ってしまう）
+      const labelsDir = join(repo, "labels");
+      mkdirSync(labelsDir, { recursive: true });
+      for (const [number, labels] of Object.entries(options.labelsOf ?? {})) {
+        writeFileSync(join(labelsDir, number), `${labels.join("\n")}\n`);
+      }
+
       writeFileSync(
         join(path, "gh"),
         [
           "#!/usr/bin/env bash",
+          `labels_dir=${JSON.stringify(labelsDir)}`,
           'if [[ $* == *"api graphql"* ]]; then',
           `  printf '%b' ${JSON.stringify(prs)}`,
           `  [[ -n ${JSON.stringify(prs)} ]] && echo`,
@@ -350,18 +369,31 @@ describe("bin/loop-claim", () => {
           "  done",
           "  exit 0",
           "fi",
-          // label の付け替えを記録する（**書いたら読み直す**の確認に使う）
           'if [[ $* == *"issue edit"* ]]; then',
           `  echo "$*" >>${JSON.stringify(join(repo, "edits.log"))}`,
-          `  exit ${options.editFails === true ? 1 : 0}`,
+          ...(options.editFails === true ? ["  exit 1"] : []),
+          ...(options.editIsNoop === true
+            ? ["  exit 0"]
+            : [
+                "  number=$3",
+                '  file="$labels_dir/$number"',
+                '  tmp="$file.tmp"',
+                '  cp "$file" "$tmp" 2>/dev/null || : >"$tmp"',
+                "  while (($# > 0)); do",
+                '    if [[ $1 == "--remove-label" ]]; then',
+                '      grep -vx "$2" "$tmp" >"$tmp.2" || true',
+                '      mv "$tmp.2" "$tmp"',
+                "    fi",
+                '    [[ $1 == "--add-label" ]] && echo "$2" >>"$tmp"',
+                "    shift",
+                "  done",
+                '  mv "$tmp" "$file"',
+                "  exit 0",
+              ]),
           "fi",
           'if [[ $* == *"issue view"* ]]; then',
           "  for word in $*; do",
-          "    case $word in",
-          ...Object.entries(options.labelsOf ?? {}).flatMap(([number, labels]) => [
-            `    ${number}) printf '%b' ${JSON.stringify(labels.join("\n"))}; echo; exit 0 ;;`,
-          ]),
-          "    esac",
+          '    if [[ -f "$labels_dir/$word" ]]; then cat "$labels_dir/$word"; exit 0; fi',
           "  done",
           "  exit 0",
           "fi",
@@ -482,6 +514,56 @@ describe("bin/loop-claim", () => {
         prs: [{ number: 12, closes: [73] }],
         labelsOf: { 73: ["ready"] },
         editFails: true,
+      });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(2);
+      expect(audited.stdout).not.toContain("blocked へ移しました");
+    });
+
+    it("別のリポジトリの Issue には触らない", () => {
+      // **closing keyword は `Fixes owner/other#73` のような別リポジトリ参照も扱える。**
+      // 番号だけに潰すと、**こちらの無関係な #73 を blocked にする**
+      withAudit({
+        prs: [{ number: 12, closes: [73], repo: "owner/other" }],
+        labelsOf: { 73: ["ready"] },
+      });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(0);
+      expect(existsSync(join(repo, "edits.log"))).toBe(false);
+    });
+
+    it("in-progress と ready が併存していたら、正常扱いしない", () => {
+      // **`take` は `ready` の有無だけを見る**ので、併存したまま通すと
+      // **別の作業場が取れる**——`in-progress` があるだけでは足りない
+      withAudit({
+        prs: [{ number: 12, closes: [73] }],
+        labelsOf: { 73: ["in-progress", "ready"] },
+      });
+
+      expect(run(["audit"]).status).toBe(1);
+    });
+
+    it("backlog も同じ 1 回で外す", () => {
+      // **残すと、master のステップ 6 が `ready` へ昇格させうる**——
+      // 「その 1 件だけを止める」が成立しない
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["backlog"] } });
+
+      run(["audit"]);
+
+      expect(readFileSync(join(repo, "edits.log"), "utf8")).toMatch(/--remove-label backlog/);
+    });
+
+    it("付け替えが成功を返しても、変わっていなければ止まる", () => {
+      // **`gh` は通らなくても 0 を返しうる**（`take` が同じ理由で読み直している）。
+      // 変わっていないのに「移しました」と言うと、**ロックを離した後で取られる**
+      withAudit({
+        prs: [{ number: 12, closes: [73] }],
+        labelsOf: { 73: ["ready"] },
+        editIsNoop: true,
       });
 
       const audited = run(["audit"]);

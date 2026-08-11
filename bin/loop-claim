@@ -162,28 +162,50 @@ if [[ $ACTION == "audit" ]]; then
     # **写した規則は必ず本家からずれる**（#122 で `i` を落として踏んだ形）。
     # **人が手で作った PR は `Fixes #N` と書く**ので、
     # **この検査がいちばん必要な場面**で黙ることになる。
+    # **リポジトリも一緒に取る。** closing keyword は `Fixes owner/other#73` のような
+    # **別リポジトリ参照**も扱えるので、番号だけに潰すと**こちらの無関係な #73** を
+    # 止めることになる。
     if ! closes="$(gh pr view "$pr" --json closingIssuesReferences \
-      --jq '.closingIssuesReferences[].number')"; then
+      --jq '.closingIssuesReferences[] | "\(.repository.nameWithOwner)\t\(.number)"')"; then
       echo "[FAIL] PR #$pr が閉じる Issue を読めません" >&2
       exit 2
     fi
-    while read -r closed; do
+    while IFS=$'\t' read -r closed_repo closed; do
       [[ -n $closed ]] || continue
+      # **このリポジトリのものだけを見る。** 他所の Issue は触れないし、触ってはいけない
+      [[ $closed_repo == "${repo_parts[0]-}/${repo_parts[1]-}" ]] || continue
       if ! labels="$(gh issue view "$closed" --json labels --jq '.labels[].name')"; then
         echo "[FAIL] #$closed の label を読めません" >&2
         exit 2
       fi
-      has_label "in-progress" "$labels" && continue
+      # **`in-progress` があるだけでは足りない。** `take` は **`ready` の有無だけ**を
+      # 見るので、併存したまま通すと**別の作業場が取れる**。
+      has_label "in-progress" "$labels" && ! has_label "ready" "$labels" && continue
       # **記録するだけでは防止にならない。** 次の周回で `take` できてしまい、
       # **進捗が出るとカウンタが消える**——**止めたかった当の出来事が記録を消す**。
       # **その 1 件だけを止める**（全ループは進める。#109 と同じ整理）。
       # **足し引きを 1 回で行う。** 分けると、**付いたのに外れていない**状態が作れる——
       # `take` は `ready` だけを見る（`blocked` は見ない）ので、
       # **止めたつもりで取られる**。1 回にまとめれば、その状態がそもそも作れない。
+      # **`backlog` も外す。** 残すと master のステップ 6 が `ready` へ昇格させうる——
+      # 「その 1 件だけを止める」が成立しない。
       edit_args=(--add-label blocked)
       has_label "ready" "$labels" && edit_args+=(--remove-label ready)
+      has_label "backlog" "$labels" && edit_args+=(--remove-label backlog)
       if ! gh issue edit "$closed" "${edit_args[@]}" >/dev/null; then
         echo "[FAIL] #$closed を blocked へ移せません" >&2
+        exit 2
+      fi
+      # **書いたら読み直す。** `gh` は**通らなくても成功を返しうる**（`take` が同じ理由で
+      # 読み直している）。変わっていないのに「移しました」と言うと、
+      # **ロックを離した後で取られる**。
+      if ! moved="$(gh issue view "$closed" --json labels --jq '.labels[].name')"; then
+        echo "[FAIL] #$closed の label を読み直せません" >&2
+        exit 2
+      fi
+      if ! has_label "blocked" "$moved" || has_label "ready" "$moved" \
+        || has_label "backlog" "$moved"; then
+        echo "[FAIL] #$closed の label が変わっていません（止められていません）" >&2
         exit 2
       fi
       echo "[NG] PR #${pr} は #${closed} を閉じようとしていますが、着手中ではありません（blocked へ移しました）"
