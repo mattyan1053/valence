@@ -133,16 +133,25 @@ while IFS=$'\t' read -r at login body; do
   lowered="${body,,}"
   if [[ $login != "$REVIEW_BOT" ]] && [[ $lowered =~ @codex[[:space:]]+review ]]; then
     requests+=("$at")
-  elif [[ $login == "$REVIEW_BOT" ]] && [[ $lowered == *"create an environment"* ]]; then
+  elif [[ $login == "$REVIEW_BOT" ]]; then
+    # **文言で見分けない。** 以前は「環境が無い」旨だけを応答として数えていたので、
+    # **一覧に無い文言（`Something went wrong`）が「応答なし」に落ちて**、
+    # `pending` が減らず**再要求が永久に禁じられた**——**Codex 自身が
+    # 「`@codex review` で再試行しろ」と書いているのに、その経路が塞がる**。
+    # 実際に**全ループが約 2 時間止まり、人が外から解くまで戻らなかった**。
+    #
+    # **一覧を足す形にしない**（#90 と同じ形——**並べ忘れた値がどの分岐にも入らない**）。
+    # **bot が何か言った＝要求には応答した**、とだけ読む。**レビューしたかどうかは
+    # 別の軸**で、そちらは `bin/loop-review-commits` が `Reviewed commit:` で見る。
     ((notice++))
     [[ $at > $notice_at ]] && notice_at="$at"
   fi
 done <<<"$comments"
 
 # **直近のレビューより後の要求だけが「未応答」である。**
-# 「環境が無い」通知は SHA を持たないのでレビュー扱いにはできないが、要求に対する
-# 応答ではある。これを消化しないと、元の要求が永久に未応答として残り、原因を直しても
-# 再要求できなくなる。**通知より前の要求は応答済みとみなす。**
+# bot の応答は SHA を持たないことがある（環境が無い・エラー・その他）ので**レビュー扱いには
+# できない**が、**要求に対する応答ではある**。これを消化しないと、元の要求が永久に未応答と
+# して残り、原因を直しても再要求できなくなる。**応答より前の要求は応答済みとみなす。**
 answered_at="$last_at"
 if [[ -n $notice_at && ( -z $answered_at || $notice_at > $answered_at ) ]]; then
   answered_at="$notice_at"

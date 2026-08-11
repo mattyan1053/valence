@@ -75,6 +75,33 @@ REVIEW_BOT="chatgpt-codex-connector[bot]"
 export REVIEW_BOT
 readonly REVIEW_BOT
 
+# **本物のレビューの印。** これだけが「レビューした」を表す。
+#
+# **文言を列挙しない。** 以前は「レビューでない応答」の文言を並べていて、
+# **一覧から漏れたものが「応答が無かった」に落ちた**——`Something went wrong` がそれで、
+# **`pending` が減らず再要求が永久に禁じられた**（実際に全ループが約 2 時間止まった）。
+# **並べ忘れた値がどの分岐にも入らない**のは #90 と同じ形である。
+#
+# **反転させる。** bot の投稿は**すべて応答**として数え、**この印を持つものだけがレビュー**。
+# そうすれば、**Codex が何を言っても応答は消費される**。
+readonly REVIEWED_MARK='[Rr]eviewed [Cc]ommit:\*{0,2}[[:space:]]*`([0-9a-f]{7,40})`'
+
+# **判定は bash に置く。** `gh --jq` の中に書くと、**gh を差し替えた試験からは
+# 1 度も通らない**——スタブが「絞り込んだ後」を返すので、**判定を書き換えても緑のまま**になる
+# （実際にそうなっていた）。
+is_review() {
+  [[ $1 =~ $REVIEWED_MARK ]]
+}
+
+# レビューの SHA。**印が無ければ「応答したがレビューではない」**（印 -）。
+reviewed_sha() {
+  if [[ $1 =~ $REVIEWED_MARK ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    printf '%s' "-"
+  fi
+}
+
 usage() {
   echo "使い方: bin/loop-review-commits [--all] <PR番号>" >&2
   echo "  --all  落とさずに出し、第 3 列へ live / stale を添える" >&2
@@ -114,14 +141,17 @@ readonly PR="$1"
 # 本物のレビューには必ず「Reviewed commit: `<SHA>`」の印がある (実データで確認)。
 # 印が無いものは **要求への応答ではあるがレビューではない** ので、SHA を持たない
 # 応答として印 - で返す。数から落とすと記録が消費されず行き止まりを作る。
-if ! reviews="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" \
+if ! reviews_raw="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/reviews" \
   --jq 'map(select(.user.login == env.REVIEW_BOT and (.commit_id // "") != ""))
-        | map("\(.submitted_at)\t" +
-              (if ((.body // "") | test("Reviewed commit:"; "i")) then .commit_id else "-" end))
+        | map("\(.submitted_at)\t\(.commit_id)\t" + ((.body // "") | gsub("\\s+"; " ")))
         | .[]' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のレビューを取得できません" >&2
   exit 2
 fi
+reviews="$(while IFS=$'\t' read -r at commit body; do
+  [[ -n $at ]] || continue
+  if is_review "$body"; then printf '%s\t%s\n' "$at" "$commit"; else printf '%s\t-\n' "$at"; fi
+done <<<"$reviews_raw")"
 
 # 会話コメントは 2 種類ある。どちらも **要求に対する応答** なので数に入れる。
 #
@@ -131,16 +161,17 @@ fi
 # 後者を落とすと、その応答が記録を消費しないまま残り、あとから来た 👍 が
 # そこへ吸われて **現 head が永久にレビュー済みにならない**。
 # bin/loop-review-budget は前から通知を応答として扱っており、定義を揃える。
-if ! comments="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" \
+if ! comments_raw="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" \
   --jq 'map(select(.user.login == env.REVIEW_BOT))
-        | map(. as $c
-              | (($c.body | capture("Reviewed commit:\\*{0,2}\\s*`(?<sha>[0-9a-f]{7,40})`"; "i").sha?)
-                 // (if ($c.body | test("create an environment"; "i")) then "-" else empty end))
-              | "\($c.created_at)\t\(.)")
+        | map("\(.created_at)\t" + ((.body // "") | gsub("\\s+"; " ")))
         | .[]' 2>/dev/null)"; then
   echo "[FAIL] PR #$PR のコメントを取得できません" >&2
   exit 2
 fi
+comments="$(while IFS=$'\t' read -r at body; do
+  [[ -n $at ]] || continue
+  printf '%s\t%s\n' "$at" "$(reviewed_sha "$body")"
+done <<<"$comments_raw")"
 
 # 👍 リアクション。SHA を持たないので、時刻だけを取って空の SHA 欄で流す。
 if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" \

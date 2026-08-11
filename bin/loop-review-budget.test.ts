@@ -273,6 +273,79 @@ describe("bin/loop-review-budget", () => {
     });
   });
 
+  describe("Codex が何を言っても、応答は応答として数える", () => {
+    /**
+     * **実データを写す**（#158 に残っていたもの）。
+     *
+     * **実在の PR を見に行かない。** PR は消えうるし、**見に行く試験は、
+     * その PR が消えた日に「通っているのに何も試していない」**になる（#105 で踏んだ形）。
+     */
+    const WENT_WRONG = [
+      "Codex Review: Something went wrong. Try again later by commenting “@codex review”.",
+      "",
+      "```",
+      "An unknown error occurred",
+      "```",
+    ].join("\n");
+
+    it("エラー応答で、未応答が解ける", () => {
+      // **文言の一覧に無いものを「応答なし」に落としていた。** そのせいで
+      // `pending` が減らず、**再要求が永久に禁じられる**——
+      // **Codex 自身が「`@codex review` で再試行しろ」と書いているのに、その経路が塞がる**。
+      // **昨夜、全ループが約 2 時間止まった**（人が外から解くまで戻らなかった）
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [
+            request(minutesAgo(200)),
+            { at: minutesAgo(100), login: BOT, body: WENT_WRONG },
+          ],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.stdout, "未応答のまま数えている").toContain("pending=0");
+      expect(budget.status, "再要求できない").toBe(0);
+    });
+
+    it("エラー応答を、レビュー済みにはしない", () => {
+      // **ここを取り違えると、未レビューの head がマージ可能になる**——
+      // **この仕組みが最初に塞いだ穴**である
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [
+            request(minutesAgo(200)),
+            { at: minutesAgo(100), login: BOT, body: WENT_WRONG },
+          ],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.stdout).toContain("reviewed_head=no");
+    });
+
+    it("知らない文言でも同じように解ける", () => {
+      // **列挙に戻さない。** 一覧を足す形だと、**次の新しい文言でまた塞がる**——
+      // **並べ忘れた値がどの分岐にも入らない**（#90 と同じ形）
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [
+            request(minutesAgo(200)),
+            { at: minutesAgo(100), login: BOT, body: "まだ誰も見たことのない断り文句" },
+          ],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.status).toBe(0);
+    });
+  });
+
   it("応答不能の通知より後の要求だけを未応答として数える", () => {
     // **通知を消化しないと、元の要求が永久に未応答として残る**（復旧しても再要求できない）
     const budget = run(
