@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { holdLock } from "../test/held-lock";
 import { MODELLED_HOOK_SPAWNS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-claim", import.meta.url));
@@ -480,31 +481,18 @@ describe("bin/loop-claim", () => {
      * （手元で緑・CI で赤、を実際に踏んだ）。**握ったと相手が知らせてから**動かす。
      */
     function withHeldLock(body: () => void): void {
-      const lock = join(repo, ".git", "valence-loop-claim.lock");
-      const ready = join(repo, "lock.ready");
-      const release = join(repo, "lock.release");
-      const held = spawnSync(
-        "bash",
-        [
-          "-c",
-          `setsid flock -x ${JSON.stringify(lock)} -c ${JSON.stringify(
-            `touch ${ready}; while [ ! -e ${release} ]; do sleep 0.02; done`,
-          )} </dev/null >/dev/null 2>&1 & echo $!`,
-        ],
-        { encoding: "utf8" },
-      ).stdout.trim();
+      // **仕掛けは `test/held-lock.ts` が持つ。** ここに同じものを書くと、
+      // **片方だけ直して漏れる側が残る**——実際に `bin/loop-stall.test.ts` と並んでいて、
+      // **41 本が最大 19 時間**生き残った（#153）。
+      //
+      // **`finally` に頼らない。** 打ち切られた経路では走らないので、
+      // **待機側が自分の上限で消える**ようにしてある
+      const held = holdLock({ dir: repo, lock: join(repo, ".git", "valence-loop-claim.lock") });
 
       try {
-        const deadline = Date.now() + 20_000;
-        while (!existsSync(ready) && Date.now() < deadline) {
-          spawnSync("sleep", ["0.02"]);
-        }
-        expect(existsSync(ready), "ロックを握れていない").toBe(true);
-
         body();
       } finally {
-        writeFileSync(release, "");
-        spawnSync("kill", [held]);
+        held.release();
       }
     }
 
