@@ -65,6 +65,20 @@ readonly STOP_IDS=(
   "claim-mismatch:<Issue番号>|master: 着手中でない Issue を閉じる open PR がある"
 )
 
+# **worker が動いて解く状態。** 第 4 層の数え方をここだけ変える (下の counted を参照)。
+#
+# **識別子ごとに主体が違う。** たとえば review-unanswered は「Codex が返さない」ので、
+# **worker が元気に別の周回をまわしていても解けない**。「worker が動いているから待つ」と
+# 読むのは主体が違うので、**worker が主体のものだけに効かせる**。
+#
+# **STOP_IDS とは別の軸**なので別に持つ (あちらは「誰が記録するか」で、これは
+# 「誰が解くか」)。**綴りがずれると黙って効かなくなる**ので、
+# 一覧に無い綴りが混ざっていないことを試験で押さえてある。
+readonly WORKER_FIXES=(
+  "blocking-findings"
+  "changes-requested"
+)
+
 usage() {
   echo "使い方: bin/loop-stall <停止識別子>" >&2
   echo "       bin/loop-stall --reset        周回が前へ進んだときに呼ぶ" >&2
@@ -282,23 +296,45 @@ if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
   done
   if ((newest_activity > 0)) && (($(date +%s) - newest_activity < lease_ttl)); then
     worker_alive=1
-    # **走っている周回の合図。** 持っていなければ空 (周回と周回の間)。
-    for lease in "$common_dir"/valence-loop-lease-worker*; do
-      [[ -f $lease ]] || continue
-      IFS=$'\t' read -r _token since <"$lease" 2>/dev/null || continue
-      [[ $since =~ ^[0-9]+$ ]] || continue
-      [[ -z $worker_epoch ]] || ((since > worker_epoch)) && worker_epoch="$since"
+    # **始めた周回の印。** lease と違って返しても消えないので、
+    # **周回と周回の間でも「どの周回まで始めたか」が読める**。
+    for rounds in "$common_dir"/valence-loop-rounds-worker*; do
+      [[ -f $rounds ]] || continue
+      read -r started <"$rounds" 2>/dev/null || continue
+      [[ $started =~ ^[0-9]+$ ]] || continue
+      [[ -z $worker_epoch ]] || ((started > worker_epoch)) && worker_epoch="$started"
     done
   fi
 fi
 
+# **worker が解く状態か。** 主体が違うものに worker の生死を効かせない。
+worker_fixes_this=0
+for kind in "${WORKER_FIXES[@]}"; do
+  [[ ${ID%%:*} == "$kind" ]] && worker_fixes_this=1
+done
+
+# **数えるのは「周回が変わったか」であって「いま持っているか」ではない。**
+# lease は返すと消えるので、それを見ていると **周回と周回の間が「始めていない」と
+# 同じ見え方**になり、**何周まわしても数えられない**（実際にそう書いて指摘された）。
+# 印は返しても消えない (bin/loop-lease の ROUNDS)。
+#
+# **最初に見た周回は数えない。** 数えたいのは「**1 周終えても変わらなかった**」なので、
+# **始まったばかりの周回を 1 と数えると、上限に達するのが 1 周早くなる**——
+# **worker が上限ぶんの周回を試せる**ようにする。
 counted="yes"
-if ((worker_alive == 1)) && [[ -z $worker_epoch || $worker_epoch == "$prev_epoch" ]]; then
-  # **同じ周回の中で 2 回数えない。** 周回の間 (lease を持っていない) も数えない
-  counted="no"
+if ((worker_alive == 1 && worker_fixes_this == 1)); then
+  if [[ -z $worker_epoch || $worker_epoch == "$prev_epoch" ]]; then
+    counted="no"
+  elif [[ -z $prev_epoch ]]; then
+    # この識別子を、この周回で初めて見た。**印だけ覚えて数えない。**
+    counted="first"
+    prev_epoch="$worker_epoch"
+  else
+    count=$((count + 1))
+    prev_epoch="$worker_epoch"
+  fi
 else
   count=$((count + 1))
-  [[ -n $worker_epoch ]] && prev_epoch="$worker_epoch"
 fi
 
 printf '%s\n' "${others[@]}" "$count"$'\t'"$ID"$'\t'"$prev_epoch" > "$STATE" || {
@@ -308,6 +344,8 @@ printf '%s\n' "${others[@]}" "$count"$'\t'"$ID"$'\t'"$prev_epoch" > "$STATE" || 
 
 if [[ $counted == "no" ]]; then
   echo "stall id=$ID count=$count max=$MAX_REPEATS (worker が同じ周回の中なので数えない)"
+elif [[ $counted == "first" ]]; then
+  echo "stall id=$ID count=$count max=$MAX_REPEATS (worker はこの周回を始めたばかりなので数えない)"
 else
   echo "stall id=$ID count=$count max=$MAX_REPEATS"
 fi

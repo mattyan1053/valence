@@ -537,23 +537,32 @@ describe("worker が作業しているあいだは数えない", () => {
     });
   }
 
-  /** worker の活動と、走っている周回（lease）を作る。**worker 自身が書く形と同じ。** */
-  function workerState(options: { activityAgo: number; acquiredAt?: number }): void {
+  /**
+   * worker の活動と「始めた周回の印」を作る。**worker 自身が書く形と同じ。**
+   *
+   * **印は lease ではない。** lease は返すと消えるので、それを見ていると
+   * **周回と周回の間が「始めていない」と同じ見え方**になり、**何周まわしても
+   * 数えられない**（実際にそう書いて指摘された）。
+   */
+  function workerState(options: { activityAgo: number; startedAt?: number }): void {
     const now = Math.floor(Date.now() / 1000);
     const scope = `worker${repo.replace(/\//g, "_")}`;
     writeFileSync(
       join(repo, ".git", `valence-loop-activity-${scope}`),
       `${now - options.activityAgo}\n`,
     );
-    const lease = join(repo, ".git", `valence-loop-lease-${scope}`);
-    if (options.acquiredAt === undefined) {
-      rmSync(lease, { force: true });
+    const rounds = join(repo, ".git", `valence-loop-rounds-${scope}`);
+    if (options.startedAt === undefined) {
+      rmSync(rounds, { force: true });
     } else {
-      writeFileSync(lease, `deadbeefdeadbeef\t${options.acquiredAt}\n`);
+      writeFileSync(rounds, `${options.startedAt}\n`);
     }
   }
 
-  function stall(id = "no-work"): Run {
+  /** worker が解く状態の識別子（`bin/loop-stall` の `WORKER_FIXES` にあるもの）。 */
+  const WORKER_FIXES_ID = "blocking-findings:142@abc1234";
+
+  function stall(id = WORKER_FIXES_ID): Run {
     const result = spawnSync(join(repo, "bin", "loop-stall"), [id], {
       cwd: repo,
       encoding: "utf8",
@@ -568,27 +577,70 @@ describe("worker が作業しているあいだは数えない", () => {
 
   it("worker が 1 周しかしていなければ、master が何周しても止めない", () => {
     // **実測で 5 回とも、worker は 1 周も終えていなかった。**
-    workerState({ activityAgo: 10, acquiredAt: Math.floor(Date.now() / 1000) - 600 });
+    workerState({ activityAgo: 10, startedAt: Math.floor(Date.now() / 1000) - 600 });
 
     const results = [stall(), stall(), stall(), stall(), stall()];
 
     expect(results.map((result) => result.status)).toEqual([0, 0, 0, 0, 0]);
-    expect(results.at(-1)?.stdout).toContain("count=1");
+    expect(results.at(-1)?.stdout).toContain("count=0");
+  });
+
+  it("周回が 1 つ終われば、持っていなくても数える", () => {
+    // **ここが抜けていた。** 印を lease で見ていたので、**返した瞬間に「始めていない」**
+    // と同じ見え方になり、**何周まわしても数えられなかった**。
+    // **数えたいのは「1 周終えても変わらなかった」**である
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600 });
+    expect(stall().stdout).toContain("count=0");
+
+    // 周回が終わり、次の周回が始まった（印だけが進む。lease は持っていない）
+    workerState({ activityAgo: 10, startedAt: now - 300 });
+
+    expect(stall().stdout).toContain("count=1");
   });
 
   it("worker が周回を重ねても状態が変わらなければ、これまでどおり止める", () => {
-    // **ただ猶予を増やすだけにしない。** 心拍が出ていても、**worker が 3 周まわして
-    // 変わらないなら**止める（`./task` を叩き続けているだけ、の形を通さない）
+    // **ただ猶予を増やすだけにしない。** 心拍が出ていても、**上限ぶんの周回を
+    // まわして変わらないなら**止める（`./task` を叩き続けているだけ、の形を通さない）
     const now = Math.floor(Date.now() / 1000);
-    workerState({ activityAgo: 10, acquiredAt: now - 600 });
-    expect(stall().stdout).toContain("count=1");
-    workerState({ activityAgo: 10, acquiredAt: now - 400 });
-    expect(stall().stdout).toContain("count=2");
-    workerState({ activityAgo: 10, acquiredAt: now - 200 });
-    const third = stall();
+    for (const [index, ago] of [900, 700, 500, 300].entries()) {
+      workerState({ activityAgo: 10, startedAt: now - ago });
+      const result = stall();
+      if (index < 3) {
+        expect(result.status, `${index + 1} 周目で止まっている`).toBe(0);
+      } else {
+        expect(result.stdout).toContain("[STOP]");
+        expect(result.status).toBe(1);
+      }
+    }
+  });
 
-    expect(third.stdout).toContain("[STOP]");
-    expect(third.status).toBe(1);
+  it("worker が解くとした識別子は、すべて一覧にある", () => {
+    // **綴りがずれると黙って効かなくなる。** 主体の一覧（WORKER_FIXES）と
+    // 識別子の一覧（STOP_IDS）は別の軸なので別に持つが、**片方だけ直すと食い違う**
+    const script = readFileSync(SCRIPT, "utf8");
+    const fixes = (/readonly WORKER_FIXES=\(([^)]*)\)/.exec(script)?.[1] ?? "")
+      .split("\n")
+      .map((line) => line.trim().replace(/"/g, ""))
+      .filter((line) => line !== "");
+    const kinds = listedSpecs().map((spec) => spec.split(":")[0]);
+
+    expect(fixes.length).toBeGreaterThan(0);
+    for (const fix of fixes) {
+      expect(kinds, `${fix} が一覧に無い`).toContain(fix);
+    }
+  });
+
+  it("worker が主体でない識別子には、worker の生死を効かせない", () => {
+    // **主体が違う。** review-unanswered は「Codex が返さない」ので、
+    // **worker が元気に別の周回をまわしていても解けない**
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600 });
+
+    expect(stall("review-unanswered:142@abc1234").stdout).toContain("count=1");
+    expect(stall("review-unanswered:142@abc1234").stdout).toContain("count=2");
+
+    expect(stall("review-unanswered:142@abc1234").stdout).toContain("[STOP]");
   });
 
   it("worker が黙ったら、これまでどおり master の周回で数えて止める", () => {

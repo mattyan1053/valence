@@ -145,6 +145,11 @@ if [[ $ROLE == "worker" ]]; then
 fi
 readonly lease_scope SCOPE_LABEL
 readonly STATE="$common_dir/valence-loop-lease-$lease_scope"
+# **始めた周回の印。lease と違って、返しても消さない。**
+# 「いま持っているか」ではなく「**新しい周回を始めたか**」を外から見るためのもので、
+# 消してしまうと**周回と周回の間が「始めていない」と同じ見え方**になる
+# （bin/loop-stall がそれで数えられなくなった）。
+readonly ROUNDS="$common_dir/valence-loop-rounds-$lease_scope"
 # **活動は lease とは別のファイルに置く。** lease を持っていなくても記録できる
 # ようにするため (`./task` は周回の外でも走る)。
 readonly ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
@@ -230,6 +235,12 @@ acquire)
   printf '%s\t%s\n' "$token" "$now" >"$STATE" || {
     echo "[FAIL] lease を書き込めません: $STATE" >&2
     exit 2
+  }
+  # **周回を始めた印。** 失敗しても lease は取れているので止めない——
+  # 読む側 (bin/loop-stall) は印が無ければ「分からない」として、これまでどおり数える。
+  printf '%s\n' "$now" >"$ROUNDS.tmp" 2>/dev/null && mv -f "$ROUNDS.tmp" "$ROUNDS" 2>/dev/null || {
+    rm -f "$ROUNDS.tmp" 2>/dev/null || true
+    echo "[WARN] $SCOPE_LABEL の周回の印を書けません: $ROUNDS" >&2
   }
   echo "$token"
   ;;
