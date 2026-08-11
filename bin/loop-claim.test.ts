@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -156,8 +157,13 @@ describe("bin/loop-claim", () => {
       "date",
       "sleep",
       "rm",
+      "mv",
+      "cp",
       "grep",
       "printf",
+      "kill",
+      "setsid",
+      "touch",
     ]) {
       const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
       if (found !== "") {
@@ -307,6 +313,324 @@ describe("bin/loop-claim", () => {
 
       expect(overlapped()).toBe(true);
       expect(results.filter((result) => result.status === 0)).toHaveLength(1);
+    });
+  });
+
+  describe("audit — label と実態の食い違いを見つける", () => {
+    /** open PR の本文と、Issue ごとの label を返す偽の `gh`。 */
+    function withAudit(options: {
+      /** **本文は渡さない。** `Closes` の書き方を自分で解析しない（GitHub に訊く）。 */
+      prs?: { number: number; closes: number[]; repo?: string }[];
+      labelsOf?: Record<number, string[]>;
+      /** label の付け替えが失敗する。**部分的に成功した状態を作らせない**ための試験。 */
+      editFails?: boolean;
+      /** 付け替えが**成功を返すのに何も変わらない**。`gh` は通らなくても 0 を返しうる。 */
+      editIsNoop?: boolean;
+    }): void {
+      const prs = (options.prs ?? []).map((pr) => String(pr.number)).join("\n");
+      const closesOf = (options.prs ?? [])
+        .map(
+          (pr) =>
+            `    ${pr.number}) printf '%b' ${JSON.stringify(
+              pr.closes.map((n) => `${pr.repo ?? "owner/repo"}\t${n}`).join("\n"),
+            )}; echo; exit 0 ;;`,
+        )
+        .join("\n");
+
+      // **label は状態として持つ。** 付け替えたら見えるようにしないと、
+      // **「書いたら読み直す」を試験できない**（読み直しても同じ値が返ってしまう）
+      const labelsDir = join(repo, "labels");
+      mkdirSync(labelsDir, { recursive: true });
+      for (const [number, labels] of Object.entries(options.labelsOf ?? {})) {
+        writeFileSync(join(labelsDir, number), `${labels.join("\n")}\n`);
+      }
+
+      writeFileSync(
+        join(path, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          `labels_dir=${JSON.stringify(labelsDir)}`,
+          'if [[ $* == *"api graphql"* ]]; then',
+          `  printf '%b' ${JSON.stringify(prs)}`,
+          `  [[ -n ${JSON.stringify(prs)} ]] && echo`,
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"repo view"* ]]; then',
+          '  echo "owner"',
+          '  echo "repo"',
+          "  exit 0",
+          "fi",
+          // **閉じる Issue は GitHub に訊く。** 本文を自分で解析しない
+          'if [[ $* == *"closingIssuesReferences"* ]]; then',
+          "  for word in $*; do",
+          "    case $word in",
+          closesOf,
+          "    esac",
+          "  done",
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"issue edit"* ]]; then',
+          `  echo "$*" >>${JSON.stringify(join(repo, "edits.log"))}`,
+          ...(options.editFails === true ? ["  exit 1"] : []),
+          ...(options.editIsNoop === true
+            ? ["  exit 0"]
+            : [
+                "  number=$3",
+                '  file="$labels_dir/$number"',
+                '  tmp="$file.tmp"',
+                '  cp "$file" "$tmp" 2>/dev/null || : >"$tmp"',
+                "  while (($# > 0)); do",
+                '    if [[ $1 == "--remove-label" ]]; then',
+                '      grep -vx "$2" "$tmp" >"$tmp.2" || true',
+                '      mv "$tmp.2" "$tmp"',
+                "    fi",
+                '    [[ $1 == "--add-label" ]] && echo "$2" >>"$tmp"',
+                "    shift",
+                "  done",
+                '  mv "$tmp" "$file"',
+                "  exit 0",
+              ]),
+          "fi",
+          'if [[ $* == *"issue view"* ]]; then',
+          "  for word in $*; do",
+          '    if [[ -f "$labels_dir/$word" ]]; then cat "$labels_dir/$word"; exit 0; fi',
+          "  done",
+          "  exit 0",
+          "fi",
+          'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+          "exit 2",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+    }
+
+    /** claim の記録を作る。**実在の古い記録は使わない**（次の操作で消える）。 */
+    function writeRecord(number: number, owner = repo): void {
+      writeFileSync(join(repo, ".git", `valence-loop-claim-${number}`), `${owner}\t1000\n`);
+    }
+
+    it("in-progress でない Issue を閉じる open PR を見つける", () => {
+      // **`ready` は「まだ誰も着手していない」を意味する。** そのまま PR があると、
+      // **2 人目が同じ Issue を取れる**（#84 / #100 が防ごうとした形そのもの）
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(1);
+      expect(audited.stdout).toContain("73");
+    });
+
+    it("in-progress なら食い違いではない", () => {
+      withAudit({
+        prs: [{ number: 12, closes: [73] }],
+        labelsOf: { 73: ["in-progress"] },
+      });
+
+      expect(run(["audit"]).status).toBe(0);
+    });
+
+    it("着手中でない Issue の記録は、古いものとして解放する", () => {
+      // **記録が指す Issue が `in-progress` でないなら、その記録は古い**——
+      // **状態から機械的に分かる**ので、呼ぶ場所を散文で並べない（#92 と同じ理由）
+      withAudit({ labelsOf: { 82: ["backlog"] } });
+      writeRecord(82);
+
+      const audited = run(["audit"]);
+
+      expect(existsSync(join(repo, ".git", "valence-loop-claim-82"))).toBe(false);
+      expect(audited.stdout).toContain("82");
+    });
+
+    it("着手中の記録は残す", () => {
+      withAudit({ labelsOf: { 84: ["in-progress"] } });
+      writeRecord(84);
+
+      run(["audit"]);
+
+      expect(existsSync(join(repo, ".git", "valence-loop-claim-84"))).toBe(true);
+    });
+
+    it("古い記録があるだけでは止めない", () => {
+      // **自動で直せるものは直す。** 止めるのは人の判断が要るほうだけ
+      withAudit({ labelsOf: { 82: ["backlog"] } });
+      writeRecord(82);
+
+      expect(run(["audit"]).status).toBe(0);
+    });
+
+    /**
+     * ロックを握らせてから `body` を動かす。
+     *
+     * **待ち合わせを「速さ」ではなく「事実」で取る。** `sleep` で間を空ける形にすると、
+     * **遅い環境では握る前に本体が走って落ち**、**速い環境では永久に気づけない**
+     * （手元で緑・CI で赤、を実際に踏んだ）。**握ったと相手が知らせてから**動かす。
+     */
+    function withHeldLock(body: () => void): void {
+      const lock = join(repo, ".git", "valence-loop-claim.lock");
+      const ready = join(repo, "lock.ready");
+      const release = join(repo, "lock.release");
+      const held = spawnSync(
+        "bash",
+        [
+          "-c",
+          `setsid flock -x ${JSON.stringify(lock)} -c ${JSON.stringify(
+            `touch ${ready}; while [ ! -e ${release} ]; do sleep 0.02; done`,
+          )} </dev/null >/dev/null 2>&1 & echo $!`,
+        ],
+        { encoding: "utf8" },
+      ).stdout.trim();
+
+      try {
+        const deadline = Date.now() + 20_000;
+        while (!existsSync(ready) && Date.now() < deadline) {
+          spawnSync("sleep", ["0.02"]);
+        }
+        expect(existsSync(ready), "ロックを握れていない").toBe(true);
+
+        body();
+      } finally {
+        writeFileSync(release, "");
+        spawnSync("kill", [held]);
+      }
+    }
+
+    it("見つけたら、その Issue を blocked へ移す", () => {
+      // **記録するだけでは防止にならない。** 次の周回で `take` できてしまい、
+      // **進捗が出るとカウンタが消える**——**止めたかった当の出来事が記録を消す**。
+      // **その 1 件だけを止める**（全ループは進める）
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(1);
+      expect(readFileSync(join(repo, "edits.log"), "utf8")).toMatch(/issue edit 73.*blocked/);
+    });
+
+    it("label を付け替えられなければ、止めたことにしない", () => {
+      // **付けるほうだけ成功して外すほうが失敗すると、`ready` が残る**——
+      // `take` は `ready` だけを見るので、**止めたつもりで取られる**。
+      // **1 回の付け替えにまとめる**ので、部分的に成功した状態がそもそも作れない
+      withAudit({
+        prs: [{ number: 12, closes: [73] }],
+        labelsOf: { 73: ["ready"] },
+        editFails: true,
+      });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(2);
+      expect(audited.stdout).not.toContain("blocked へ移しました");
+    });
+
+    it("別のリポジトリの Issue には触らない", () => {
+      // **closing keyword は `Fixes owner/other#73` のような別リポジトリ参照も扱える。**
+      // 番号だけに潰すと、**こちらの無関係な #73 を blocked にする**
+      withAudit({
+        prs: [{ number: 12, closes: [73], repo: "owner/other" }],
+        labelsOf: { 73: ["ready"] },
+      });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(0);
+      expect(existsSync(join(repo, "edits.log"))).toBe(false);
+    });
+
+    it("in-progress と ready が併存していたら、正常扱いしない", () => {
+      // **`take` は `ready` の有無だけを見る**ので、併存したまま通すと
+      // **別の作業場が取れる**——`in-progress` があるだけでは足りない
+      withAudit({
+        prs: [{ number: 12, closes: [73] }],
+        labelsOf: { 73: ["in-progress", "ready"] },
+      });
+
+      expect(run(["audit"]).status).toBe(1);
+    });
+
+    it("backlog も同じ 1 回で外す", () => {
+      // **残すと、master のステップ 6 が `ready` へ昇格させうる**——
+      // 「その 1 件だけを止める」が成立しない
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["backlog"] } });
+
+      run(["audit"]);
+
+      expect(readFileSync(join(repo, "edits.log"), "utf8")).toMatch(/--remove-label backlog/);
+    });
+
+    it("付け替えが成功を返しても、変わっていなければ止まる", () => {
+      // **`gh` は通らなくても 0 を返しうる**（`take` が同じ理由で読み直している）。
+      // 変わっていないのに「移しました」と言うと、**ロックを離した後で取られる**
+      withAudit({
+        prs: [{ number: 12, closes: [73] }],
+        labelsOf: { 73: ["ready"] },
+        editIsNoop: true,
+      });
+
+      const audited = run(["audit"]);
+
+      expect(audited.status).toBe(2);
+      expect(audited.stdout).not.toContain("blocked へ移しました");
+    });
+
+    it("ready が付いていれば、同じ 1 回で外す", () => {
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
+
+      run(["audit"]);
+
+      const edits = readFileSync(join(repo, "edits.log"), "utf8").trim().split("\n");
+      expect(edits).toHaveLength(1);
+      expect(edits[0]).toMatch(/--add-label blocked.*--remove-label ready/);
+    });
+
+    it("ロックを取れないなら、label にも触らない", () => {
+      // **移す前に `take` される窓**を作らない（P1 で直したのと同じ理由）
+      withAudit({ prs: [{ number: 12, closes: [73] }], labelsOf: { 73: ["ready"] } });
+      withHeldLock(() => {
+        expect(run(["audit"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } }).status).toBe(2);
+        expect(existsSync(join(repo, "edits.log"))).toBe(false);
+      });
+    });
+
+    it("読めなければ 2 で落ちる", () => {
+      writeFileSync(join(path, "gh"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+
+      expect(run(["audit"]).status).toBe(2);
+    });
+
+    it("消せなかったら、消したことにしない", () => {
+      // **失敗を黙って成功にしない。** 消えていない記録は残り続け、
+      // **別の作業場の再開を妨げ続ける**（手順書 3.1 の掃除と同じ扱い）
+      withAudit({ labelsOf: { 82: ["backlog"] } });
+      writeRecord(82);
+      // **ロックのファイルは先に作っておく。** 作れないところで止まると、
+      // **消せなかった場合まで辿れない**（緑になっても理由が違う）
+      writeFileSync(join(repo, ".git", "valence-loop-claim.lock"), "");
+      const holder = join(repo, ".git");
+      chmodSync(holder, 0o555);
+
+      try {
+        const audited = run(["audit"]);
+
+        expect(audited.status).toBe(2);
+        expect(audited.stdout).not.toContain("解放しました");
+      } finally {
+        chmodSync(holder, 0o755);
+      }
+    });
+
+    it("記録の確認と削除は、take と同じロックの中で行う", () => {
+      // **ロックの外で読んだ値を中で使わない。** 読んでから消すまでに `take` が
+      // 入ると、**いま書かれた記録を消す**——`take` が塞いだのと同じ形が、
+      // **塞ぐ側に開く**（#124 のレビュー指摘）
+      withAudit({ labelsOf: { 82: ["backlog"] } });
+      writeRecord(82);
+      withHeldLock(() => {
+        // **ロックを取れないうちは、記録に触らない。**
+        const audited = run(["audit"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } });
+
+        expect(audited.status).toBe(2);
+        expect(existsSync(join(repo, ".git", "valence-loop-claim-82"))).toBe(true);
+      });
     });
   });
 

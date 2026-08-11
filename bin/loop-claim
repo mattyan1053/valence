@@ -49,15 +49,22 @@ readonly TTL_SEC="${LOOP_CLAIM_TTL_SEC:-1800}"
 usage() {
   echo "使い方: bin/loop-claim take <Issue番号>     ready の Issue を取る" >&2
   echo "        bin/loop-claim resume <Issue番号>   着手中の Issue を続けてよいか尋ねる" >&2
+  echo "        bin/loop-claim audit                label と実態の食い違いを見つける" >&2
   echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
   exit 2
 }
 
-[[ $# -eq 2 ]] || usage
-readonly ACTION="$1"
-readonly ISSUE="$2"
-[[ $ACTION == "take" || $ACTION == "resume" ]] || usage
-[[ $ISSUE =~ ^[0-9]+$ ]] || usage
+readonly ACTION="${1-}"
+if [[ $ACTION == "audit" ]]; then
+  [[ $# -eq 1 ]] || usage
+  ISSUE=""
+else
+  [[ $# -eq 2 ]] || usage
+  ISSUE="$2"
+  [[ $ACTION == "take" || $ACTION == "resume" ]] || usage
+  [[ $ISSUE =~ ^[0-9]+$ ]] || usage
+fi
+readonly ISSUE
 
 for setting in LOCK_WAIT_SEC TTL_SEC; do
   if ! [[ ${!setting} =~ ^[0-9]+$ ]]; then
@@ -106,6 +113,130 @@ write_record() {
     exit 2
   }
 }
+
+# --- audit ---------------------------------------------------------------------
+# **label と実態の食い違いを、状態から見つける。**
+#
+# **呼ぶ場所を散文で並べない。** `bin/loop-claim release` を足して「マージしたとき」
+# 「blocked へ落としたとき」…と列挙すると、**経路が増えたときに漏れる**
+# （#92 で「通知を送る場面」の列挙が漏れたのと同じ形）。
+# **どちらの食い違いも状態から機械的に決まる**ので、そちらを見る。
+#
+#   open PR が閉じる Issue が着手中でない … **人の判断が要る**（誰が持つべきか決められない）
+#   記録が指す Issue が着手中でない       … **古い記録**。自動で解放してよい
+if [[ $ACTION == "audit" ]]; then
+  # **確認も付け替えも、`take` / `resume` と同じロックの中で行う。**
+  # 外でやると、**移す前に `take` される**（読んでから書くまでの窓が、塞ぐ側に開く）。
+  exec 9>"$common_dir/valence-loop-claim.lock" || {
+    echo "[FAIL] 取り合いのロックを作成できません" >&2
+    exit 2
+  }
+  if ! flock -w "$LOCK_WAIT_SEC" 9; then
+    echo "[FAIL] 取り合いのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+    exit 2
+  fi
+
+  # **一覧（検索）を通さない。** 付け替えた直後は古い値が返る（#101 で実測）。
+  repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || {
+    echo "[FAIL] リポジトリを特定できません" >&2
+    exit 2
+  }
+  mapfile -t repo_parts <<<"$repo_ref"
+  open_prs="$(gh api graphql --paginate \
+    -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+    -f query='query($owner:String!,$repo:String!,$endCursor:String){
+      repository(owner:$owner,name:$repo){
+        pullRequests(states:OPEN,first:50,after:$endCursor){
+          pageInfo{hasNextPage endCursor}
+          nodes{number}}}}' \
+    --jq '.data.repository.pullRequests.nodes[].number')" || {
+    echo "[FAIL] open PR を取得できません" >&2
+    exit 2
+  }
+
+  mismatched=0
+  while read -r pr; do
+    [[ -n $pr ]] || continue
+    # **閉じる Issue は GitHub に訊く。** 本文を自分で解析すると、
+    # `close` / `fixes` / `resolved` … と**大文字小文字**まで写し取ることになり、
+    # **写した規則は必ず本家からずれる**（#122 で `i` を落として踏んだ形）。
+    # **人が手で作った PR は `Fixes #N` と書く**ので、
+    # **この検査がいちばん必要な場面**で黙ることになる。
+    # **リポジトリも一緒に取る。** closing keyword は `Fixes owner/other#73` のような
+    # **別リポジトリ参照**も扱えるので、番号だけに潰すと**こちらの無関係な #73** を
+    # 止めることになる。
+    if ! closes="$(gh pr view "$pr" --json closingIssuesReferences \
+      --jq '.closingIssuesReferences[] | "\(.repository.nameWithOwner)\t\(.number)"')"; then
+      echo "[FAIL] PR #$pr が閉じる Issue を読めません" >&2
+      exit 2
+    fi
+    while IFS=$'\t' read -r closed_repo closed; do
+      [[ -n $closed ]] || continue
+      # **このリポジトリのものだけを見る。** 他所の Issue は触れないし、触ってはいけない
+      [[ $closed_repo == "${repo_parts[0]-}/${repo_parts[1]-}" ]] || continue
+      if ! labels="$(gh issue view "$closed" --json labels --jq '.labels[].name')"; then
+        echo "[FAIL] #$closed の label を読めません" >&2
+        exit 2
+      fi
+      # **`in-progress` があるだけでは足りない。** `take` は **`ready` の有無だけ**を
+      # 見るので、併存したまま通すと**別の作業場が取れる**。
+      has_label "in-progress" "$labels" && ! has_label "ready" "$labels" && continue
+      # **記録するだけでは防止にならない。** 次の周回で `take` できてしまい、
+      # **進捗が出るとカウンタが消える**——**止めたかった当の出来事が記録を消す**。
+      # **その 1 件だけを止める**（全ループは進める。#109 と同じ整理）。
+      # **足し引きを 1 回で行う。** 分けると、**付いたのに外れていない**状態が作れる——
+      # `take` は `ready` だけを見る（`blocked` は見ない）ので、
+      # **止めたつもりで取られる**。1 回にまとめれば、その状態がそもそも作れない。
+      # **`backlog` も外す。** 残すと master のステップ 6 が `ready` へ昇格させうる——
+      # 「その 1 件だけを止める」が成立しない。
+      edit_args=(--add-label blocked)
+      has_label "ready" "$labels" && edit_args+=(--remove-label ready)
+      has_label "backlog" "$labels" && edit_args+=(--remove-label backlog)
+      if ! gh issue edit "$closed" "${edit_args[@]}" >/dev/null; then
+        echo "[FAIL] #$closed を blocked へ移せません" >&2
+        exit 2
+      fi
+      # **書いたら読み直す。** `gh` は**通らなくても成功を返しうる**（`take` が同じ理由で
+      # 読み直している）。変わっていないのに「移しました」と言うと、
+      # **ロックを離した後で取られる**。
+      if ! moved="$(gh issue view "$closed" --json labels --jq '.labels[].name')"; then
+        echo "[FAIL] #$closed の label を読み直せません" >&2
+        exit 2
+      fi
+      if ! has_label "blocked" "$moved" || has_label "ready" "$moved" \
+        || has_label "backlog" "$moved"; then
+        echo "[FAIL] #$closed の label が変わっていません（止められていません）" >&2
+        exit 2
+      fi
+      echo "[NG] PR #${pr} は #${closed} を閉じようとしていますが、着手中ではありません（blocked へ移しました）"
+      mismatched=1
+    done <<<"$closes"
+  done <<<"$open_prs"
+
+  # **古い記録は、その場で解放する。** 「誰も作業していないのに持ち主が居る」記録は、
+  # 作業場が増えた瞬間に**再開を止める**（#82 の前に消しておきたい）。
+  for record in "$common_dir"/valence-loop-claim-[0-9]*; do
+    [[ -f $record ]] || continue
+    number="${record##*valence-loop-claim-}"
+    [[ $number =~ ^[0-9]+$ ]] || continue
+    if ! labels="$(gh issue view "$number" --json labels --jq '.labels[].name')"; then
+      echo "[FAIL] #$number の label を読めません" >&2
+      exit 2
+    fi
+    if ! has_label "in-progress" "$labels"; then
+      # **失敗を黙って成功にしない。** 消えていない記録は残り続け、
+      # **別の作業場の再開を妨げる**（手順書 3.1 の掃除と同じ扱い）
+      if ! rm -f "$record"; then
+        echo "[FAIL] 古い記録を消せません: $record" >&2
+        exit 2
+      fi
+      echo "[INFO] #${number} は着手中ではないので、古い記録を解放しました"
+    fi
+  done
+
+  ((mismatched == 0)) || exit 1
+  exit 0
+fi
 
 exec 9>"$common_dir/valence-loop-claim.lock" || {
   echo "[FAIL] 取り合いのロックを作成できません" >&2
