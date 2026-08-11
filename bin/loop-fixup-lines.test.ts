@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,18 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-fixup-lines", import.meta.url));
+
+/**
+ * レビュー用の bot。**値はここに書き写さない**——`bin/loop-review-commits` が正で、
+ * このスクリプトもそこから取る（書き写すと、片方だけ直したときに食い違う）。
+ */
+const BOT = execFileSync(fileURLToPath(new URL("./loop-review-commits", import.meta.url)), [
+  "--bot",
+])
+  .toString()
+  .trim();
+/** GraphQL は `[bot]` を付けずに返す（REST は付ける）。 */
+const BOT_GRAPHQL = BOT.replace(/\[bot\]$/, "");
 
 const PR = "124";
 const REVIEWED = "a".repeat(40);
@@ -92,7 +104,7 @@ function runWithLines(fake: Fake): Run {
       // **レビュースレッドの取得。** 何を「要求された変更」と見なすかを決める問い合わせで、
       // **パスは符号化したまま**受け取る（復号すると、区切りを含む名前で数が狂う）
       '  "api graphql"*)',
-      '    require "--jq" "reviewThreads" ".path" "@base64" "pageInfo" "originalCommit"',
+      '    require "--jq" "reviewThreads" ".path" "@base64" "pageInfo" "originalCommit" "author"',
       ...emit(fake.threads ?? ["T\\tarray"]).map((line) => `    ${line}`),
       `    exit ${fake.threadsExit ?? 0}`,
       "    ;;",
@@ -134,11 +146,12 @@ function row(path: string, isTest: boolean, additions: number, deletions: number
 /**
  * レビュースレッドの 1 行。
  *
- * **どの commit に対して付いた指摘か**を持つ。これが無いと、**前の周期のスレッドが
- * 残っているだけでそのファイルが永久に除外される**（実際に指摘された）。
+ * **どの commit に対して付いた指摘か**と**誰が付けたか**を持つ。前者が無いと
+ * **前の周期のスレッドが残っているだけでそのファイルが永久に除外され**、後者が無いと
+ * **PR の作成者が自分でコメントを付けて除外できる**（どちらも実際に指摘された）。
  */
-function thread(path: string, onCommit: string = REVIEWED): string {
-  return `P\t${onCommit}\t${b64(path)}`;
+function thread(path: string, onCommit: string = REVIEWED, author: string = BOT_GRAPHQL): string {
+  return `P\t${onCommit}\t${author}\t${b64(path)}`;
 }
 
 /** files が配列だったとき（正常）の出力を作る。 */
@@ -336,7 +349,7 @@ describe("bin/loop-fixup-lines はレビューが要求した変更を数えな�
   it("スレッドの行が読めなければ失敗する", () => {
     const result = runWithLines({
       files: ["T\tarray"],
-      threads: ["T\tarray", `P\t${REVIEWED}\tbin/loop-claim`],
+      threads: ["T\tarray", `P\t${REVIEWED}\t${BOT_GRAPHQL}\tbin/loop-claim`],
     });
 
     expect(result.status).toBe(1);
@@ -401,7 +414,7 @@ describe("bin/loop-fixup-lines は前の周期のスレッドを除外に使わ�
     // **分からないものを「要求された」に倒さない**
     const result = runWithFiles(
       [row("bin/loop-claim", false, 40, 0)],
-      ["P\t-\t" + b64("bin/loop-claim")],
+      [thread("bin/loop-claim", "-")],
     );
 
     expect(result.status).toBe(0);
@@ -412,6 +425,69 @@ describe("bin/loop-fixup-lines は前の周期のスレッドを除外に使わ�
     // **一覧が壊れているのに続けると、除外の範囲が黙って狭まる**
     const result = runWithLines({
       files: ["T\tarray", "C\tnot-a-sha", row("bin/loop-claim", false, 40, 0)],
+    });
+
+    expect(result.status).toBe(1);
+  });
+});
+
+describe("bin/loop-fixup-lines は自分で付けた指摘を要求と見なさない", () => {
+  // **「レビューが要求した変更は数えない」が「自分で要求すれば数えない」になっていた。**
+  // PR の作成者が自分の変更ファイルへインラインコメントを付けて resolve すれば、
+  // そのファイルは丸ごと除外される。**未解決スレッド 0 件の条件と併せると、
+  // 誰も見ていない大きな変更がゲートを通る。**
+  //
+  // bin/loop-review-commits と bin/loop-gate は「誰のレビューか」を固定しているのに、
+  // **ここだけ全投稿者を信用していた**。
+
+  it("PR の作成者が付けたインラインコメントでは除外されない", () => {
+    const result = runWithFiles(
+      [row("bin/loop-claim", false, 89, 0)],
+      [thread("bin/loop-claim", REVIEWED, "mattyan1053")],
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("89\t0\t0");
+  });
+
+  it("固定したレビュー用の bot のスレッドだけを除外に使う", () => {
+    // **値は bin/loop-review-commits から取る**（書き写すと片方だけ直して食い違う）
+    const result = runWithFiles(
+      [row("bin/loop-claim", false, 89, 0)],
+      [thread("bin/loop-claim", REVIEWED, BOT_GRAPHQL)],
+    );
+
+    expect(result.stdout.trim()).toBe("0\t0\t89");
+  });
+
+  it("REST の形（末尾に [bot] が付く）でも同じ bot として扱う", () => {
+    // **GraphQL は `[bot]` を付けずに返すが、付く形で来ても取り違えない。**
+    // 付いた形は GitHub のログイン名として作れないので、なりすましにはならない
+    const result = runWithFiles(
+      [row("bin/loop-claim", false, 89, 0)],
+      [thread("bin/loop-claim", REVIEWED, BOT)],
+    );
+
+    expect(result.stdout.trim()).toBe("0\t0\t89");
+  });
+
+  it("投稿者が読めないスレッドは除外に使わない", () => {
+    // 消えたアカウントは author が空で返る。**分からないものを「要求された」に倒さない**
+    // （originalCommit が無い場合と同じ判断）
+    const result = runWithFiles(
+      [row("bin/loop-claim", false, 40, 0)],
+      [thread("bin/loop-claim", REVIEWED, "-")],
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("40\t0\t0");
+  });
+
+  it("投稿者の欄が形として読めなければ失敗する", () => {
+    // 列がずれたまま数えると、**除外の範囲が黙って変わる**
+    const result = runWithLines({
+      files: ["T\tarray"],
+      threads: ["T\tarray", `P\t${REVIEWED}\tbad login!\t${b64("bin/loop-claim")}`],
     });
 
     expect(result.status).toBe(1);
@@ -436,7 +512,7 @@ describe("bin/loop-fixup-lines が gh に渡す判定式", () => {
   const EXPECTED_FILES_JQ = `"T\\t\\(.files | type)", (.commits[]? | "C\\t\\(.sha)"), (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)")`;
 
   /** レビュースレッドの側も同じ理由で固定する。 */
-  const EXPECTED_THREADS_JQ = `"T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\((.comments.nodes[0].originalCommit.oid) // "-")\\t\\(.path | @base64)")`;
+  const EXPECTED_THREADS_JQ = `"T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\((.comments.nodes[0].originalCommit.oid) // "-")\\t\\((.comments.nodes[0].author.login) // "-")\\t\\(.path | @base64)")`;
 
   it("判定式が想定どおりであること", () => {
     const script = readFileSync(SCRIPT, "utf8");

@@ -49,6 +49,12 @@
 # **どの commit に付いたか分からないスレッドは除外に使わない** (印 -)。消えた commit を
 # 指すものなどで、**分からないものを「要求された」へ倒さない**。
 #
+# **誰が付けた指摘かも見る。** 投稿者を見ないと、**PR の作成者が自分の変更ファイルへ
+# インラインコメントを付けて resolve するだけで、そのファイルが丸ごと除外される**。
+# 「レビューが要求した変更は数えない」が「**自分で要求すれば数えない**」に変わる。
+# bin/loop-review-commits と bin/loop-gate が「誰のレビューか」を固定しているのと同じ理由で、
+# ここでも固定する。**投稿者が読めないスレッドは除外に使わない** (印 - と同じ扱い)。
+#
 # ---- この判断の弱点 --------------------------------------------------------
 #
 # **見た側とマージを決める側が近づく。** 「レビューが要求したから数えない」を認めると、
@@ -112,6 +118,23 @@ for sha in "$REVIEWED" "$HEAD_SHA"; do
 done
 
 # --- 要求された変更の範囲 -----------------------------------------------------
+# **レビュー用の bot の名前は書き写さない。** bin/loop-review-commits が正で、
+# そこから取る (2 箇所に持つと、片方だけ直したときに違う相手を信用する)。
+#
+# 隣を引くのに `dirname` を使わない。**外部コマンドを足すと、テストが PATH を絞れなくなり**
+# 「gh を呼ぶ前に落ちること」のような確認が書けなくなる (集計を bash だけで行うのと同じ理由)。
+script_dir="${BASH_SOURCE[0]%/*}"
+[[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir="."
+readonly script_dir
+if ! REVIEW_BOT="$("$script_dir/loop-review-commits" --bot)" || [[ -z $REVIEW_BOT ]]; then
+  echo "[FAIL] レビュー用の bot の名前を取得できません" >&2
+  exit 1
+fi
+# GraphQL の author.login には `[bot]` が付かない。REST の形で来ても取り違えないよう
+# **両方を同じ相手として扱う** (`[` はログイン名に使えないので、なりすませない)。
+readonly REVIEW_BOT
+readonly REVIEW_BOT_GRAPHQL="${REVIEW_BOT%\[bot\]}"
+
 # レビュースレッドの付いたファイルを集める。**パスは @base64 のまま扱い、復号しない。**
 # git のパスにはタブも改行も入り、**名前は PR 側で決められる**。生のまま並べると
 # 1 件が複数行に割れて数が狂う (実測: 区切りを含む名前 1 件が 3 行に割れた)。
@@ -131,12 +154,12 @@ query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
     pullRequest(number: $pr) {
       reviewThreads(first: 100, after: $endCursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { comments(first: 1) { nodes { originalCommit { oid } } } path }
+        nodes { comments(first: 1) { nodes { author { login } originalCommit { oid } } } path }
       }
     }
   }
 }' -F owner='{owner}' -F repo='{repo}' -F pr="$PR" \
-  --jq '"T\t\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\t\((.comments.nodes[0].originalCommit.oid) // "-")\t\(.path | @base64)")' \
+  --jq '"T\t\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\t\((.comments.nodes[0].originalCommit.oid) // "-")\t\((.comments.nodes[0].author.login) // "-")\t\(.path | @base64)")' \
   2>/dev/null)"; then
   echo "[FAIL] PR #$PR のレビュースレッドを取得できません" >&2
   exit 1
@@ -145,8 +168,12 @@ fi
 # スレッドは (付いた commit, 符号化したパス) の対で持つ。**窓の commit 一覧は差分の
 # 取得で分かる**ので、どれを除外に使うかはそちらを読んでから決める。
 thread_commits=()
+thread_authors=()
 thread_paths=()
 seen_threads=0
+# ログイン名は英数字とハイフン (と bot の `[bot]`) しか取れない。**タブや改行は入らない**
+# ので、パスと違って符号化せずに列へ出せる。形が違うものは弾く。
+readonly LOGIN_PATTERN='([A-Za-z0-9._-]+(\[bot\])?|-)'
 while IFS= read -r row; do
   [[ -n $row ]] || continue
   if [[ $row == T$'\t'* ]]; then
@@ -158,12 +185,13 @@ while IFS= read -r row; do
     continue
   fi
   # 符号化されていれば [A-Za-z0-9+/=] しか来ない。形で弾く。
-  [[ $row =~ ^P$'\t'([0-9a-f]{7,40}|-)$'\t'([A-Za-z0-9+/=]+)$ ]] || {
+  [[ $row =~ ^P$'\t'([0-9a-f]{7,40}|-)$'\t'${LOGIN_PATTERN}$'\t'([A-Za-z0-9+/=]+)$ ]] || {
     echo "[FAIL] レビュースレッドのパスを読めません" >&2
     exit 1
   }
   thread_commits+=("${BASH_REMATCH[1]}")
-  thread_paths+=("${BASH_REMATCH[2]}")
+  thread_authors+=("${BASH_REMATCH[2]}")
+  thread_paths+=("${BASH_REMATCH[4]}")
 done <<<"$threads_out"
 
 if ((seen_threads == 0)); then
@@ -218,7 +246,9 @@ done <<<"$out"
 declare -A requested=()
 for i in "${!thread_paths[@]}"; do
   on="${thread_commits[$i]}"
+  by="${thread_authors[$i]}"
   [[ $on != "-" ]] || continue
+  [[ $by == "$REVIEW_BOT" || $by == "$REVIEW_BOT_GRAPHQL" ]] || continue
   if [[ $on == "$REVIEWED"* || -n ${window[$on]-} ]]; then
     requested["${thread_paths[$i]}"]=1
   fi
