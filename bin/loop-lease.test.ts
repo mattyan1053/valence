@@ -80,10 +80,13 @@ describe("bin/loop-lease", () => {
       const now = Math.floor(Date.now() / 1000);
       writeFileSync(
         join(sandbox, ".git", "valence-loop-lease-worker_somewhere_else"),
-        `deadbeef\t${now}\np:1:1\n`,
+        `deadbeef\t${now}\np:1:1\n/somewhere/else\n`,
       );
 
-      expect(run(["busy", "worker"]).status).toBe(0);
+      const busy = run(["busy", "worker"]);
+
+      expect(busy.status).toBe(0);
+      expect(busy.stdout, "どの作業場かが出ていない").toContain("/somewhere/else");
     });
 
     it("期限切れの lease は、走っているとは言わない", () => {
@@ -108,6 +111,22 @@ describe("bin/loop-lease", () => {
 
       expect(busy.status).toBe(0);
       expect(busy.stdout.trim(), "作業場が出ていない").toBe(sandbox);
+    });
+
+    it("作業場の入っていない lease は、走っているとも言わない", () => {
+      // **「走っている」と答えながら内訳を出さないのは、契約の外**である（#148 のレビュー）。
+      // **呼ぶ側は空行を飛ばす**ので、**「走っているが抑えるものは無い」と読み**、
+      // **走っている worker のブランチを「宙に浮いている」と誤報する**。
+      //
+      // **前の版が書いた lease（3 行）で必ず踏む**——**lease のファイルは版をまたいで
+      // 共有される**（2 行 → 3 行のときに実際に踏ませた）。**同じところで 2 度落ちない**
+      const now = Math.floor(Date.now() / 1000);
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-lease-worker_old_version"),
+        `deadbeef\t${now}\np:1:1\n`,
+      );
+
+      expect(run(["busy", "worker"]).status).toBe(2);
     });
 
     it("読めなければ、走っていないとは言わない", () => {
