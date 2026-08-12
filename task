@@ -282,8 +282,17 @@ show_missing_lease() {
 # （#109。`.claude/commands/loop-master.md` の「human — 人を呼ぶ」で付く）。
 show_awaiting_human() {
   local rows
-  rows="$(gh pr list --state open --limit 200 --label awaiting-human \
-    --json number,title --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null)" || return 0
+  # **label 検索を使わない。** 索引は遅れる（実測：**付けた直後は 0 件、外した直後は 1 件**）——
+  # **人待ちにした直後に見ると、その PR が出ない**。**忘れられない側を担う唯一の経路**が、
+  # **いちばん見たい瞬間に黙る**ことになる。**全件を取ってから絞る**
+  # （master のステップ 6 が `parked` を数えるときと同じ形）。
+  #
+  # **読めなければ、そう言う。** 失敗を「0 件」に倒すと、**唯一の経路が黙って消える**
+  if ! rows="$(gh pr list --state open --limit 200 --json number,title,labels \
+    --jq '.[] | select(.labels | map(.name) | index("awaiting-human")) | "  #\(.number) \(.title)"')"; then
+    echo "人の判断待ちを読めません（GitHub の一覧を取得できませんでした）"
+    return 0
+  fi
   [[ -n $rows ]] || return 0
   echo "人の判断待ち (parked。人が awaiting-human と parked を外すと再開する):"
   printf '%s\n' "$rows"

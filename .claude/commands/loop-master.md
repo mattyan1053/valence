@@ -558,8 +558,21 @@ resolve しない。何を直すかと、なぜそれが必要かを返信し、
 resolve しない。**何が決まれば進むのか**を PR に書き、**その PR を保留にする。**
 
 ```bash
-gh pr edit <PR番号> --add-label parked --add-label awaiting-human
-gh pr comment <PR番号> --body-file <file>   # 何が決まれば進むのか / 人が何をすれば再開するのか
+# **label が無い作業場がある。** `./task loop:setup` は 1 度しか走らず、
+# **既に動いている作業場はマージしても label が増えない**（ステップ 1.1 は
+# worktree を切り替えるだけ）。**存在しない label は黙って落ちる**ので、先に用意する
+gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
+
+# **付いたことを確かめてから進む**（`changes-requested` と同じ順序）。
+# **付いていないのに保留したつもりになると、`ready` は上がらないまま
+# 「進めるようにした」と思い込む**——**いちばん危ない**
+if gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+  gh pr comment <PR番号> --body-file <file>   # 何が決まれば進むのか / 人が何をすれば再開するのか
+else
+  # **保留にできなかった。** ループは止まる側にあるので、**これまでどおり数える**——
+  # 3 周で人を呼ぶ（`review-exhausted:<PR番号>@<SHA>` の場合も同じ）
+  bin/loop-stall "blocking-findings:<PR番号>@<SHA>"
+fi
 ```
 
 **保留にしないと、ループ全体が止まる。** 同時に open な PR は 1 本で worker も 1 人なので、

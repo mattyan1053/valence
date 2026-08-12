@@ -58,6 +58,24 @@ describe("人の判断待ち", () => {
     expect(humanBranch()).toMatch(/何が決まれば/);
   });
 
+  it("label が無い環境でも、保留にできる", () => {
+    // **`./task loop:setup` は 1 度しか走らない。** 既に動いている作業場は
+    // **マージしても label が増えない**（ステップ 1.1 は worktree を切り替えるだけ）——
+    // **この PR が作ろうとしている経路そのものが動かない**。
+    // **存在しない label を書いても GitHub は黙って落とす**、と `task` 自身が警告している
+    expect(humanBranch()).toContain("gh label create");
+  });
+
+  it("保留に失敗したら、これまでどおり停止を数える", () => {
+    // **付いていないのに保留したつもりになると、`ready` は上がらないまま
+    // 「進めるようにした」と思い込む**——**いちばん危ない**。
+    // **label を先に付け、成功を確認してから**（`changes-requested` と同じ順序）
+    const branch = humanBranch();
+
+    expect(branch, "失敗を見ていない").toMatch(/失敗|\|\|/);
+    expect(branch, "落ちたときの受け皿が無い").toContain("bin/loop-stall");
+  });
+
   it("./task loop:status が、人待ちの PR を見せる", () => {
     // **止まっている理由が読めること**（#157 と同じ）。
     // **人待ちのまま忘れられる経路を作らない**ための、唯一の見える場所である
@@ -97,5 +115,54 @@ describe("人の判断待ち", () => {
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
+  });
+
+  /** `show_awaiting_human` だけを、偽の `gh` で走らせる。 */
+  function awaitingHumanWith(ghScript: string[]): string {
+    const workspace = mkdtempSync(join(tmpdir(), "awaiting-human-"));
+    try {
+      const stub = join(workspace, "stub");
+      mkdirSync(stub, { recursive: true });
+      writeFileSync(join(stub, "gh"), ["#!/usr/bin/env bash", ...ghScript, ""].join("\n"), {
+        mode: 0o755,
+      });
+      return execFileSync(
+        "bash",
+        [
+          "-c",
+          `source ${JSON.stringify(join(REPO_ROOT, "task"))} >/dev/null 2>&1; ` +
+            `PATH=${JSON.stringify(stub)}:$PATH show_awaiting_human`,
+        ],
+        { encoding: "utf8" },
+      );
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+
+  it("label 検索を使わず、取ってきた一覧から絞る", () => {
+    // **索引は遅れる**（実測：付けた直後は 0 件、外した直後は 1 件）。
+    // **人待ちにした直後に `loop:status` を見ると、その PR が出ない**——
+    // **忘れられない側を担う唯一の経路**が、いちばん見たい瞬間に黙る。
+    // **ステップ 6 が `parked` を数えるときに既にこの形**（全件から絞る）である
+    const shown = awaitingHumanWith([
+      // **`--label` で絞りに行ったら落とす。** 「使っていない」を出力で確かめる
+      'if [[ $* == *"--label"* ]]; then echo "索引を使っている" >&2; exit 9; fi',
+      'if [[ $* == *"pr list"* ]]; then',
+      '  echo "  #158 材料が遅いときも縮退する"',
+      "  exit 0",
+      "fi",
+      "exit 0",
+    ]);
+
+    expect(shown, "索引に頼っている").toContain("158");
+  });
+
+  it("読めなければ、黙って 0 件にしない", () => {
+    // **取得に失敗しても「0 件」と同じ見た目**になると、**唯一の経路が黙って消える**。
+    // `show_missing_lease` は既に「読めません」と言う形なので、揃える
+    const shown = awaitingHumanWith(["exit 1"]);
+
+    expect(shown, "読めないのに何も言わない").not.toBe("");
   });
 });
