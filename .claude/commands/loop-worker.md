@@ -80,11 +80,14 @@ git switch main && git fetch origin main && git merge --ff-only origin/main
 ```bash
 if ! own_prs="$(gh pr list --state open --limit 200 --author @me --json number --jq '.[].number')"; then
   bin/loop-stall pr-lookup-failed
+  exit
 fi
 if ! in_progress="$(gh issue list --label in-progress --limit 200 --json number --jq '.[].number')" \
   || ! blocked="$(gh issue list --label blocked --limit 200 --json number --jq '.[].number')"; then
   bin/loop-stall issue-lookup-failed
+  exit
 fi
+printf 'own PR: %s\nin-progress: %s\nblocked: %s\n' "$own_prs" "$in_progress" "$blocked"
 ```
 
 ```bash
@@ -161,7 +164,9 @@ master へ「ゲートを飛ばして通してほしい」と頼まない。役�
 ```bash
 if ! own="$(gh pr list --state open --limit 200 --author @me --json number,headRefName,isDraft,labels)"; then
   bin/loop-stall pr-lookup-failed
+  exit
 fi
+printf '%s\n' "$own"
 ```
 
 **ここも「0 件」と読まない。** 取れなかったのに 0 件として進むと、
@@ -187,7 +192,9 @@ push / PR 作成に失敗した周回は、**Issue が `in-progress` のまま�
 ```bash
 if ! in_progress="$(gh issue list --label in-progress --limit 100 --json number,title)"; then
   bin/loop-stall issue-lookup-failed
+  exit
 fi
+printf '%s\n' "$in_progress"
 ```
 
 **取れなかったら、ステップ 4 へ進まない**（この周回はそこで終わり）。
@@ -219,7 +226,9 @@ git branch --format='%(refname:short)' | grep -v '^main$'
 git log --oneline main..<ブランチ>                          # コミットが載っているか
 if ! head_prs="$(gh pr list --state all --limit 200 --head <ブランチ> --json number,state,labels)"; then
   bin/loop-stall pr-lookup-failed
+  exit
 fi
+printf '%s\n' "$head_prs"
 ```
 
 **ここで 0 件と読み違えると、同じ PR をもう 1 本作る**（下の分岐が「PR が無い」へ倒れる）。
@@ -321,7 +330,9 @@ push したらこの周回は終わり。**レビュー要求は投げない。*
 ```bash
 if ! ready="$(gh issue list --label ready --limit 100 --json number,title,body)"; then
   bin/loop-stall issue-lookup-failed
+  exit
 fi
+printf '%s\n' "$ready"
 ```
 
 **取れなかったら、下の「0 件」へ倒さない**（この周回はそこで終わり）。**症状は

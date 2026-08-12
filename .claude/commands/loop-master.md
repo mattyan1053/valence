@@ -145,7 +145,9 @@ bin/loop-lease release master "<token>"
 if ! prs="$(gh pr list --state open --limit 200 \
   --json number,headRefOid,title,isDraft,baseRefName,mergeable,labels)"; then
   bin/loop-stall pr-lookup-failed
+  exit
 fi
+printf '%s\n' "$prs"
 ```
 
 `--limit` を明示する。既定 30 件では、それを超えたときに古い PR を取りこぼす。
@@ -819,7 +821,9 @@ if ! ready="$(gh issue list --label ready --limit 200 --json number,title)" \
   || ! in_progress="$(gh issue list --label in-progress --limit 200 --json number,title)" \
   || ! backlog="$(gh issue list --label backlog --limit 200 --search "sort:created-asc" --json number,title,body)"; then
   bin/loop-stall issue-lookup-failed
+  exit
 fi
+printf 'ready: %s\nin-progress: %s\nbacklog: %s\n' "$ready" "$in_progress" "$backlog"
 ```
 
 **3 つとも取得できたことを確認してから label を触る。** `gh` は失敗時に exit 1、
@@ -846,6 +850,7 @@ worker は PR-B を作れない**（worker 側で 2.2 を抜けても、`ready` 
 if ! parked="$(gh pr list --state open --limit 200 --json number,labels,body \
   --jq '.[] | select([.labels[].name] | index("parked")) | .body')"; then
   bin/loop-stall pr-lookup-failed
+  exit
 fi
 printf '%s' "$parked" | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+'
 ```

@@ -99,7 +99,10 @@ describe("一覧の取得に失敗した周回", () => {
   });
 
   /** `gh` を差し替えてブロックを走らせ、`bin/loop-stall` に何が渡ったかを返す。 */
-  function runBlock(body: string, gh: string[]): { status: number; stalled: string } {
+  function runBlock(
+    body: string,
+    gh: string[],
+  ): { status: number; stdout: string; stalled: string } {
     const stub = join(workspace, "stub");
     mkdirSync(stub, { recursive: true });
     writeFileSync(join(stub, "gh"), ["#!/usr/bin/env bash", ...gh, ""].join("\n"), { mode: 0o755 });
@@ -111,6 +114,7 @@ describe("一覧の取得に失敗した周回", () => {
     const record = join(workspace, "stalled");
     return {
       status: result.status ?? -1,
+      stdout: result.stdout,
       stalled: existsSync(record) ? readFileSync(record, "utf8") : "",
     };
   }
@@ -156,10 +160,27 @@ describe("一覧の取得に失敗した周回", () => {
         expect(result.stalled, `${block.section}: 取得の失敗を受けていない`).toMatch(
           /(issue|pr)-lookup-failed/,
         );
+        // **記録したら、そこで終える。** **続けると、失敗した周回が先へ進む**——
+        // **取れなかった値を、取れたかのように使う**ことになる
+        expect(result.stdout, `${block.section}: 失敗したのに先へ進んでいる`).toBe("");
       } else {
         // **続ける側は、言うことだけを見る**（記録は積まない）
         expect(result.stalled, `${block.section}: 続ける側で止めている`).toBe("");
       }
+    }
+  });
+
+  it("gh が成功したら、読めるところへ出す", () => {
+    // **失敗を直して、成功を壊さない**（master の指摘）。**受けただけで使わないと、
+    // 成功した周回で何も出ない**——**0 件かどうかも、どれを選ぶかも、出力を見て決める**。
+    //
+    // **失敗は障害のときだけだが、成功は毎周回**である——**同じ穴の、もっと広い側**。
+    for (const block of runnable()) {
+      const result = runBlock(block.body, ["printf '%s\\n' 'MARK Closes #42'", "exit 0"]);
+
+      // **「出す」には「使った結果を出す」も含む**（掃除のブロックは番号を消費して
+      // 件数を出す）。**見たいのは、取ったものが表に出ること**である
+      expect(result.stdout.trim(), `${block.section}: 取ったものが表に出ていない`).not.toBe("");
     }
   });
 
