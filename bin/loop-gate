@@ -255,9 +255,17 @@ readonly MAX_ROUNDS_GATE="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 # **次に測り直すとき**（錨がまた外れたとき）は、下をそのまま走らせる。**手で集めた表を
 # 残さない**——**同じ手順で数え直せること**が、この値を動かす条件である。
 #
-# **件数の上限を置かない。** **取ってから絞ると、上限で古いほうから黙って落ちる**——
+# **こちらで数字を選ばない。** **取ってから絞ると、上限で古いほうから黙って落ちる**——
 # **上側の錨を探しているのに、錨に近い実例から消える**（#180 で `--limit` を判定から
-# 外したのと同じ理由）。**日時は検索側へ渡し、ページングで全件取る。**
+# 外したのと同じ理由）。**日時は検索側へ渡す。**
+#
+# **1 検索あたり 1000 件は GitHub の上限である**（`--paginate` でも越えない）。
+# **超えたら、日時で期間を割って複数回に分ける**——**いまは 26 件なので分けていない。**
+#
+# **1 件でも取れなければ、表を作らない。** **`printf` は中が落ちても成功する**ので、
+# **空欄のまま並んだ不完全な表が「正常な測り直し」として通る**——**落ちた PR が
+# ちょうど大きい側だった可能性を、その表は否定しない**（#181 のレビュー 2 周目）。
+# **この表はこの値を動かす唯一の根拠**なので、**欠けたまま出さない**。
 #
 # ---8<--- 測り直しの手順 ---
 #   repo="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
@@ -265,10 +273,13 @@ readonly MAX_ROUNDS_GATE="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 #   gh api --paginate -X GET search/issues \
 #     -f q="repo:$repo is:pr is:merged merged:>$since" --jq '.items[].number' |
 #     sort -n | while read -r pr; do
-#       printf '%s\t%s\n' "$pr" "$(bin/loop-fixup-lines "$pr" \
-#         "$(bin/loop-review-commits "$pr" | tail -1 | cut -f2)" \
-#         "$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')")"
-#     done
+#       # **パイプに繋いだまま受けない。** `$?` が `cut` のものになり、取得の失敗が消える
+#       reviewed_rows="$(bin/loop-review-commits "$pr")" || exit 1
+#       reviewed="$(printf '%s\n' "$reviewed_rows" | tail -1 | cut -f2)"
+#       head_sha="$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')" || exit 1
+#       measured="$(bin/loop-fixup-lines "$pr" "$reviewed" "$head_sha")" || exit 1
+#       printf '%s\t%s\n' "$pr" "$measured"
+#     done || { echo "測れなかった PR がある。表は不完全なので使わない" >&2; exit 1; }
 # ---8<--- ここまで ---
 #
 # **上側の錨に使えるのは、人が「これは通すべきでなかった」と結論した実例だけ**である。

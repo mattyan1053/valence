@@ -86,6 +86,97 @@ describe("手直しの上限の根拠", () => {
     expect(section, "独立した検証でないことが書かれていない").toMatch(/独立した検証/);
   });
 
+  /**
+   * 手順を、偽の `gh` と偽の数える側で走らせる。
+   *
+   * `failing` を渡すと、**その名前のスクリプトだけが落ちる**——
+   * **落ちたときに表を作らないこと**を見るためである。
+   */
+  function runProcedure(failing?: "loop-review-commits" | "loop-fixup-lines" | "gh") {
+    const workspace = mkdtempSync(join(tmpdir(), "fixup-basis-"));
+    try {
+      const stub = join(workspace, "stub");
+      mkdirSync(stub, { recursive: true });
+      mkdirSync(join(workspace, "bin"), { recursive: true });
+      writeFileSync(
+        join(stub, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          `[[ $* == *"nameWithOwner"* ]] && { printf 'someone/valence\\n'; exit 0; }`,
+          `[[ $* == *"mergedAt"* ]] && { printf '2026-08-11T04:01:16Z\\n'; exit 0; }`,
+          ...(failing === "gh" ? ['[[ $* == *"headRefOid"* ]] && exit 1'] : []),
+          `[[ $* == *"headRefOid"* ]] && { printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n'; exit 0; }`,
+          // **日時は検索側へ渡す**（絞ってから取る）。**渡していなければ、ここで落ちる**
+          'if [[ $* == *"search/issues"* ]]; then',
+          '  [[ $* == *"merged:>2026-08-11T04:01:16Z"* ]] || { echo "スタブ: 日時で絞っていない: $*" >&2; exit 1; }',
+          '  [[ $* == *"--paginate"* ]] || { echo "スタブ: ページングしていない: $*" >&2; exit 1; }',
+          `  printf '%s\\n' 171 137`,
+          "  exit 0",
+          "fi",
+          'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+          "exit 1",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      for (const name of ["loop-fixup-lines", "loop-review-commits"]) {
+        writeFileSync(
+          join(workspace, "bin", name),
+          [
+            "#!/usr/bin/env bash",
+            `printf '%s\\n' "${name} $*" >> ${JSON.stringify(join(workspace, "calls"))}`,
+            // **1 件目だけ落とす。** 全部落ちる形だと、**表が空になるだけ**で
+            // **「欠けた行が混ざる」経路を通らない**
+            ...(failing === name ? ['[[ " $* " == *" 137 "* ]] && exit 1'] : []),
+            `printf '0\\t0\\t0\\n'`,
+            "exit 0",
+            "",
+          ].join("\n"),
+          { mode: 0o755 },
+        );
+      }
+
+      const result = spawnSync("bash", ["-c", procedure()], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+      });
+      const calls = existsSync(join(workspace, "calls"))
+        ? readFileSync(join(workspace, "calls"), "utf8")
+        : "";
+      return { ...result, status: result.status ?? -1, calls };
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+
+  it.each(["loop-review-commits", "loop-fixup-lines", "gh"] as const)(
+    "%s が落ちたら、表を作らない",
+    (failing) => {
+      // **`printf` は中が落ちても成功する。** **空欄のまま並んだ不完全な表が、
+      // 正常な測り直しとして通る**——**落ちた PR がちょうど大きい側だった可能性を、
+      // その表は否定しない**（#181 のレビュー 2 周目）。
+      // **この表はこの値を動かす唯一の根拠**なので、**欠けたまま出さない**
+      const result = runProcedure(failing);
+
+      expect(result.status, "落ちたのに成功している").not.toBe(0);
+      expect(result.stdout, "空欄の行が表に混ざっている").not.toMatch(/^137\t$/m);
+    },
+  );
+
+  it("全件取れなくなる条件と、そのときどうするかが書いてある", () => {
+    // **`search/issues` は 1 検索 1000 件が GitHub の上限**（`--paginate` でも越えない）。
+    // **消すと「全件取る」が嘘になり、超えた日から母集団が黙って欠ける**——
+    // **この Issue が塞ぎに来た形そのもの**である（#181 のレビュー 2 周目）。
+    //
+    // **数字の出どころが違う。** `--limit 100` は**こちらが選んだ数字で根拠が無かった**が、
+    // **1000 は外から与えられた事実**なので、**書いておくことが根拠になる**
+    const section = limitSection();
+
+    expect(section, "検索の上限に触れていない").toMatch(/1000 件/);
+    expect(section, "超えたときどうするかが書かれていない").toMatch(/期間を割/);
+  });
+
   it("測り直しの手順が、そのまま走る", () => {
     // **「書いてある」ではなく「走る」を見る**（#181 のレビュー）。
     // **並べるコマンドと測るコマンドが散文でつながっている**と、
