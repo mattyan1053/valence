@@ -336,11 +336,35 @@ show_silent_park() {
   printf '%s\n' "$parks" | sed 's/^/  #/'
 }
 
+# 宙に浮いたブランチを見せる (push されたのに PR が無い / 終わった PR の消し残り)
+#
+# **判定はここに書かない。** master の周回の出口も同じことを見るので、
+# **2 箇所に置くと片方だけ直して食い違う** (#159 で踏んだ形)。
+#
+# **人が読む場所にも出す。** **master が止まっていると、出口は回らない**——
+# **どちらか片方では届かない** (#163 / #167 と同じ判断)。
+show_stray_branches() {
+  local strays status=0
+  strays="$(bin/loop-stray-branches 2>/dev/null)" || status=$?
+  case $status in
+    0) return 0 ;;
+    1) ;;
+    *)
+      # **「0 件」と「読めなかった」を同じ静けさにしない**
+      echo "宙に浮いたブランチがあるかどうかを読めません (remote / PR の一覧を取得できませんでした)"
+      return 0
+      ;;
+  esac
+  echo "PR の無いブランチ / 消し残り (no-pr は人の判断待ち。merged-leftover は消してよい):"
+  printf '%s\n' "$strays" | sed 's/^/  /'
+}
+
 # ループの現在地を表示する (open PR / Issue / STOP)
 cmd_loop_status() {
   show_missing_lease
   show_awaiting_human
   show_silent_park
+  show_stray_branches
   if [[ -f loop/STOP ]]; then
     echo "STOP: あり"
     sed 's/^/  /' loop/STOP
