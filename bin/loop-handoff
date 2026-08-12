@@ -139,12 +139,13 @@ prs="$(gh api graphql --paginate \
       pullRequests(states:OPEN,first:50,after:$endCursor){
         pageInfo{hasNextPage endCursor}
         nodes{number headRefOid body labels(first:50){nodes{name}}
+          commits(last:1){nodes{commit{statusCheckRollup{state}}}}
           timelineItems(itemTypes:LABELED_EVENT, last:50){
             nodes{... on LabeledEvent{createdAt label{name}}}}}}}}' \
   --jq '.data.repository.pullRequests.nodes[]
     | "\(.number)\u001f\([.labels.nodes[].name] | join(","))\u001f\(.headRefOid)\u001f\(
         [.timelineItems.nodes[] | select(.label.name == "changes-requested") | .createdAt] | max // ""
-      )\u001f\((.body // "") | gsub("\\s+"; " "))"')" ||
+      )\u001f\(.commits.nodes[0].commit.statusCheckRollup.state // "none")\u001f\((.body // "") | gsub("\\s+"; " "))"')" ||
   fail_unknown "open PR"
 
 # **未解決スレッドを、ゲートと同じ読み方で取る。**
@@ -177,7 +178,7 @@ declare -A last_author_of=()
 # そこへ寄せると、**worker の返信を master の判断として読む**。
 declare -A untriaged_of=()
 declare -A requested_of=()
-while IFS="$FIELD" read -r number _labels _head labeled_at _body; do
+while IFS="$FIELD" read -r number _labels _head labeled_at _ci _body; do
   [[ -n $number ]] || continue
   threads="$(gh api graphql --paginate \
     -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" -F number="$number" \
@@ -277,7 +278,7 @@ done
 # **読めなかったときの受け皿は上にある**（`$prs` の取得が失敗すれば `fail_unknown`）。
 # ここは**取れている本文から数えるだけ**なので、失敗しうる操作を挟まない。
 declare -A parked_seen=()
-while IFS="$FIELD" read -r _number labels _head _labeled_at body; do
+while IFS="$FIELD" read -r _number labels _head _labeled_at _ci body; do
   [[ ",$labels," == *",parked,"* ]] || continue
   rest="$body"
   while [[ $rest =~ Closes[[:space:]]+#([0-9]+) ]]; do
@@ -303,9 +304,28 @@ parked_issues=${#parked_seen[@]}
 # **「同じ状態では 2 通目を送らない」を壊す側**に倒れる。
 readonly STATE="prs=${prs}|detail=${details}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}|silent-park=${silent_park}"
 
-# **状態を求めたら、いちばん最初にすべての役の記録を更新する。分岐はそのあと。**
-# 分岐ごとに更新すると、**通らなかった分岐の記録が古いまま残り**、
-# 行き先が戻ったときに「送信済み」と誤読する。**分岐が増えても同じ穴が開かない形にする。**
+# **「送った」と「見た」を分ける** (#125)。
+#
+# **記録が「送った」を意味していないのに、「送った」として使われていた。**
+# すべての役の記録を分岐の前に更新していたので、**送らずに終わった周回でも
+# 「この状態は配った」ことになる**——
+#
+#   worker  push → 自分宛て → exit 1（送らない）→ **両方の記録に状態を書く**
+#   master  CI の失敗を見つける → 記録と同じ → exit 1（送信済みとして抑止）
+#
+# **どちらも送っていないのに、2 通目として弾かれる** (#124)。**倒れる向きが悪い**——
+# **同じ状態が続く限りずっと届かず**、**正常に周回しているので停止としても数えられない**。
+#
+# **かといって、受け手のぶんだけを送ったときに書く形にはできない。** それだと
+# **A→B→A と戻ったときの 3 通目が出ない**（記録が A のままで「送信済み」と読む）。
+#
+# **記録に「どちらか」を書く。**
+#
+#   observed … その状態を**誰かが見た**（**送ってはいない**）
+#   informed … その役へ**実際に送った**
+#
+# **抑止に使うのは `informed` だけ**で、**`observed` は「前の `informed` を古くする」
+# ためだけに置く**（状態が動いたことを覚えておく場所）。
 exec 9>"$common_dir/valence-loop-handoff.lock" || {
   echo "[FAIL] 送信記録のロックを作成できません" >&2
   exit 2
@@ -315,11 +335,25 @@ if ! flock -w "${LOOP_HANDOFF_LOCK_WAIT_SEC:-10}" 9; then
   exit 2
 fi
 
-declare -A previous=()
+readonly INFORMED="informed"
+readonly OBSERVED="observed"
+
+declare -A informed=()
 for role in "${ROLES[@]}"; do
   record="$common_dir/valence-loop-handoff-$role"
-  previous[$role]="$(cat "$record" 2>/dev/null || true)"
-  printf '%s' "$STATE" >"$record" || {
+  stored="$(cat "$record" 2>/dev/null || true)"
+  # **印は 1 列目**。状態そのものにも `$FIELD` が入るので、**最初の 1 つだけ**を剥がす。
+  # **前の版が書いた記録には印が無い**（状態がそのまま入っている）。その場合は
+  # 印が一致しないので「見ただけ」に落ちる——**多く送る側へ倒れる**ので害が無い
+  # （`bin/loop-lease` の 1 行目と同じで、**記録は版をまたいで共有される**）。
+  if [[ ${stored%%"$FIELD"*} == "$INFORMED" && ${stored#*"$FIELD"} == "$STATE" ]]; then
+    # **送った記録は、上書きしない。** 上書きすると、**受け取った側が自分の周回を
+    # 回しただけで「まだ送っていない」に戻り**、**送り合いになる**。
+    informed[$role]=1
+    continue
+  fi
+  informed[$role]=""
+  printf '%s' "${OBSERVED}${FIELD}${STATE}" >"$record" || {
     echo "[FAIL] 送信記録を書き込めません: $record" >&2
     exit 2
   }
@@ -334,7 +368,7 @@ mismatched=""
 answered=""
 # **当否がまだ判断されていない指摘がある** PR。**動けるのは master だけ**である。
 untriaged=""
-while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
+while IFS="$FIELD" read -r number labels _head _labeled_at _ci _body; do
   [[ -n $number ]] || continue
   unresolved="${unresolved_of[$number]-0}"
   [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
@@ -423,10 +457,17 @@ fi
 # （自己通知で新しい手順書に載れる保証も無い）。
 # **同じ状態で 2 通目を送らない。** 相手はもう知っている。
 # どちらの場合も**記録は通す**——その状態が続いていること自体が、記録したい事実である。
-if [[ $to == "$ROLE" || "${previous[$to]}" == "$STATE" ]]; then
+if [[ $to == "$ROLE" || -n ${informed[$to]-} ]]; then
   ((mismatch_exit == 3)) && exit 3
   exit 1
 fi
+
+# **送ると決めたときだけ「送った」と書く。** ここより前に書くと、
+# **送らずに終わった周回が「送信済み」を作る** (#125)。
+printf '%s' "${INFORMED}${FIELD}${STATE}" >"$common_dir/valence-loop-handoff-$to" || {
+  echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$to" >&2
+  exit 2
+}
 
 printf '%s\t%s\n' "$to" "$reason"
 exit "$mismatch_exit"

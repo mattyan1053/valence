@@ -73,6 +73,13 @@ type State = {
     /** 最後の発言の ID。**返信だけでも動く値**である。 */
     lastComment?: number;
     head?: string;
+    /**
+     * CI の状態（`statusCheckRollup`）。
+     *
+     * **ゲートはここで落とすのに、handoff からは見えていなかった** (#125)。
+     * **変われば前へ進んだ**ことを表すので、指紋に入れてよい値である。
+     */
+    ci?: string;
   }[];
   /**
    * 理由の無い保留（人待ちにしたが、理由を投稿できていない PR）。
@@ -144,7 +151,7 @@ describe("bin/loop-handoff", () => {
     const prs = (state.prs ?? [])
       .map(
         (pr) =>
-          `${pr.number}${FIELD}${(pr.labels ?? []).join(",")}${FIELD}${pr.head ?? "a".repeat(40)}${FIELD}${labeledAtOf(pr)}${FIELD}${pr.body ?? ""}`,
+          `${pr.number}${FIELD}${(pr.labels ?? []).join(",")}${FIELD}${pr.head ?? "a".repeat(40)}${FIELD}${labeledAtOf(pr)}${FIELD}${pr.ci ?? "SUCCESS"}${FIELD}${pr.body ?? ""}`,
       )
       .join("\n");
     // **一覧（検索）は古い値を返しうる。** ここでは**わざと古い値**を返させ、
@@ -184,6 +191,25 @@ describe("bin/loop-handoff", () => {
           "totalCount",
           `${state.ready ?? 0}${FIELD}${state.inProgress ?? 0}${FIELD}${state.backlog ?? 0}`,
         ),
+        // **CI の状態を、問い合わせて・取り出しているか。**
+        //
+        // **スタブは何を訊かれても同じ列を返す**ので、ここで確かめないと
+        // **GitHub へ尋ねていない実装でも緑**になる（**試験が実装の中を 1 度も
+        // 通らない**形。#159 で踏んだ）。
+        //
+        // **2 つに分けて見る。** 問い合わせだけを見ると、**`--jq` に文字列が
+        // 残っているだけで満たされる**——**実際にそれで変異が生き残った**。
+        // **問い合わせ（`{state}`）と取り出し（`.state`）は別の綴り**である。
+        'if [[ $* == *"pullRequests(states:OPEN"* ]]; then',
+        '  if [[ $* != *"statusCheckRollup{state}"* ]]; then',
+        '    echo "スタブ: CI の状態を問い合わせていない" >&2',
+        "    exit 1",
+        "  fi",
+        '  if [[ $* != *"statusCheckRollup.state"* ]]; then',
+        '    echo "スタブ: 問い合わせた CI の状態を取り出していない" >&2',
+        "    exit 1",
+        "  fi",
+        "fi",
         // **PR 一覧も検索を通さない口から取る。** label を付けた直後は一覧が古い
         ...answerLines("pullRequests(states:OPEN", prs),
         // **ゲートと同じ読み方をしているか。** スレッド自体をページングしていないと、
@@ -554,6 +580,80 @@ describe("bin/loop-handoff", () => {
     withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker（戻る）
 
     expect(run("master").status).toBe(0);
+  });
+
+  describe("送っていない周回", () => {
+    /**
+     * **記録が「送った」を意味していないのに、「送った」として使われていた**（#125）。
+     *
+     * `bin/loop-handoff` は**分岐の前に両方の記録を更新する**ので、
+     * **送らずに終わった周回でも「この状態は配った」ことになる**。
+     *
+     * ```
+     * worker  push → 自分宛て → exit 1（送らない）→ **両方の記録に状態を書く**
+     * master  CI の失敗を見つける → 記録と同じ状態 → exit 1（送信済みとして抑止）
+     * ```
+     *
+     * **倒れる向きが悪い。** **送っていないのに「送信済み」**なので、
+     * **同じ状態が続く限りずっと届かない**。**正常に周回しているので、
+     * 停止として数える経路にも乗らない**（#124 で実際に起きた）。
+     */
+    it("自分宛てで終わった周回は、「送信済み」を作らない", () => {
+      // **実際に 2 回呼んで見る。** 記録を読むだけの検査にしない（master の指摘）
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
+      expect(run("worker").status, "自分宛てなのに送っている").toBe(1);
+
+      const second = run("master");
+
+      expect(second.status, "誰も送っていないのに 2 通目として弾かれた").toBe(0);
+      expect(second.stdout, "持ち手が変わっている").toMatch(/^worker\t/);
+    });
+
+    it("逆向きも同じ（master の自分宛て周回が、worker を黙らせない）", () => {
+      // **記録は受け手ごとにある**ので、**自分宛てで終わった周回は 2 つとも汚す**——
+      // **自分の記録**（次に自分が受け取れなくなる）と**相手の記録**の両方。
+      // **片側だけ直すと、向きを変えただけで同じ沈黙が残る**
+      withState({ prs: [{ number: 12 }] }); // → master（ゲートを回せる）
+      expect(run("master").status, "自分宛てなのに送っている").toBe(1);
+
+      const second = run("worker");
+
+      expect(second.status, "誰も送っていないのに 2 通目として弾かれた").toBe(0);
+      expect(second.stdout, "持ち手が変わっている").toMatch(/^master\t/);
+    });
+
+    it("送ったあとは、受け取った側が回しても送り直さない", () => {
+      // **「送信済み」を消してしまうと、逆向きの壊れ方（送り合い）になる。**
+      // **受け取った側が自分の周回で同じ状態を見ても、記録は informed のまま**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
+      expect(run("master").status).toBe(0);
+      expect(run("worker").status, "worker から送っている").toBe(1);
+
+      expect(run("master").status, "同じ状態で 2 通目を送っている").toBe(1);
+    });
+  });
+
+  describe("CI の状態", () => {
+    // **ゲートは CI で落とすのに、handoff からは同じ状態に見えていた**（#125）。
+    // **#115 で head SHA と未解決スレッドを足したときと同じ形が、CI に残っていた**。
+    it("pass から fail に変われば、また送る", () => {
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], ci: "SUCCESS" }] });
+      expect(run("master").status).toBe(0);
+
+      // **label も head も未解決スレッドも動かない。** 動いたのは CI だけである
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], ci: "FAILURE" }] });
+
+      expect(run("master").status, "ゲートが落とす条件が指紋に入っていない").toBe(0);
+    });
+
+    it("CI が同じままなら、2 通目を送らない", () => {
+      // **毎回変わる値を入れない**（`bin/loop-stall` の識別子と同じ制約）。
+      // **CI の状態は「変われば前へ進んだ」を表す**ので、その条件を満たす
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], ci: "PENDING" }] });
+      expect(run("master").status).toBe(0);
+
+      expect(run("master").status, "同じ CI で送っている").toBe(1);
+    });
   });
 
   it("parked の PR に紐づく Issue は着手中に数えない", () => {
