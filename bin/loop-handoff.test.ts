@@ -61,6 +61,12 @@ type State = {
     lastComment?: number;
     head?: string;
   }[];
+  /**
+   * 理由の無い保留（人待ちにしたが、理由を投稿できていない PR）。
+   *
+   * **`bin/loop-silent-park` が挙げるもの**を、そのまま並べる。
+   */
+  silentPark?: number[];
   ready?: number;
   inProgress?: number;
   backlog?: number;
@@ -148,6 +154,17 @@ describe("bin/loop-handoff", () => {
         "#!/usr/bin/env bash",
         ...failureLines(state),
         ...answerLines("repo view", "owner\nrepo"),
+        // **理由の無い保留の問い合わせ**（`bin/loop-silent-park`）。**PR 一覧より先に置く**——
+        // どちらも `pullRequests(states:OPEN` を含むので、後ろだと一覧の行を渡してしまう
+        ...answerLines(
+          "awaiting-human",
+          (state.silentPark ?? [])
+            .map(
+              (number) =>
+                `${number}${FIELD}parked,awaiting-human${FIELD}2026-08-12T04:00:00Z${FIELD}`,
+            )
+            .join("\n"),
+        ),
         // **件数は検索を通さない口から取る。** 一覧側（下）はわざと 0 を返すので、
         // ここを見ていなければ「ready が 1 件ある」に到達しない
         ...answerLines(
@@ -214,6 +231,67 @@ describe("bin/loop-handoff", () => {
 
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true });
+  });
+
+  describe("理由の無い保留", () => {
+    // **二重に落ちたときだけ静かに残る**（#163）。`gh pr comment` が落ちて label を
+    // 戻そうとしたら、**戻す側も同じ API 障害で落ちる**——**label は残り、
+    // 理由はどこにも無い**。**ステップ 2 は `parked` を選ばない**ので、
+    // **次の周回はその PR を見ず、停止も 1 回しか積まれない**（3 周に届かない）。
+    //
+    // **拾い手は 1 つに決まらない**（#161 と同じ判断）ので、**毎周回通るここ**と
+    // **人が読む `./task loop:status`** の両方から、同じ判定を呼ぶ。
+    it("持ち物より先に、master へ渡す", () => {
+      withState({
+        prs: [{ number: 42, labels: ["parked", "awaiting-human"] }],
+        silentPark: [42],
+        ready: 1,
+      });
+
+      const handoff = run("worker");
+
+      expect(handoff.status).toBe(0);
+      expect(handoff.stdout, "master へ渡していない").toMatch(/^master\t/);
+      expect(handoff.stdout, "どの PR かが出ていない").toContain("42");
+    });
+
+    it("理由を投稿し直したら、次の周回は送れる", () => {
+      // **「直したら止まる」がいちばん悪い形**である。**理由を投稿し直しても
+      // `prs` にも `details` にも現れない**（issue コメントはどちらにも入らない）ので、
+      // **指紋に入れないと「送信済み」のまま**になる——**その PR の話だけでなく、
+      // `ready` を worker へ渡す通知も同じ指紋で止まる**（master の指摘）。
+      withState({
+        prs: [{ number: 42, labels: ["parked", "awaiting-human"] }],
+        silentPark: [42],
+        ready: 1,
+      });
+      expect(run("worker").status, "1 周目で渡せていない").toBe(0);
+
+      // 理由を投稿し直した（**label も PR の中身も変わらない**）
+      withState({
+        prs: [{ number: 42, labels: ["parked", "awaiting-human"] }],
+        silentPark: [],
+        ready: 1,
+      });
+
+      const second = run("master");
+
+      expect(second.status, "指紋が変わらず、直したのに黙っている").toBe(0);
+      expect(second.stdout).toMatch(/^worker\t/);
+    });
+
+    it("理由が投稿されている保留では、何も言わない", () => {
+      // **うるさくしない。** 正常な人待ちは**そのままにしておくもの**である
+      withState({
+        prs: [{ number: 42, labels: ["parked", "awaiting-human"] }],
+        silentPark: [],
+        ready: 1,
+      });
+
+      const handoff = run("master");
+
+      expect(handoff.stdout, "正常な保留を持ち物にしている").not.toContain("42");
+    });
   });
 
   describe("入口を飛ばした周回を、出口で見つける", () => {

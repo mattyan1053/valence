@@ -213,6 +213,7 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 要求だけが残って label が付かない）。外れないまま 3 周続いたら第 4 層が人を呼ぶ。
 
 **Issue テンプレートからの起票も `backlog` に入る**（`.github/ISSUE_TEMPLATE/`）。
+ここが抜けると、人が立てた Issue が master のどの一覧にも現れない。
 
 ### 人の判断待ち（`awaiting-human`）
 
@@ -242,7 +243,12 @@ gh pr edit <PR番号> --remove-label awaiting-human --remove-label parked
 
 **外した次の master の周回で、普通の PR としてゲートに乗る。** master が外す形にすると、
 **master が忘れたときに永久に止まる**ので、**判断した人がその場で戻せる**ようにしてある。
-ここが抜けると、人が立てた Issue が master のどの一覧にも現れない。
+
+**理由を投稿できないまま保留になった PR は、別に見える。** 人待ちにするときは
+**label を付けてから理由を投稿する**が、**投稿が落ちて、label を戻すのも同じ API 障害で
+落ちる**ことがある——**残るのは理由の無い保留**で、**ステップ 2 は `parked` を選ばない**ので
+**次の周回は誰も見ない**。`./task loop:status` と `bin/loop-handoff` が
+**`bin/loop-silent-park` で拾う**（判定は 1 箇所、呼ぶ場所は 2 つ）。
 
 **着手順は master が決める。** worker は `ready` の 1 件を取るだけで、順序を判断しない。
 `gh issue list` は新しい順に返すため、worker に選ばせると実質 LIFO になり、

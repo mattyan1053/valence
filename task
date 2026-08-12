@@ -298,10 +298,34 @@ show_awaiting_human() {
   printf '%s\n' "$rows"
 }
 
+# 理由の無い保留を見せる (人待ちにしたが、理由を投稿できていない PR)
+#
+# **判定はここに書かない。** `bin/loop-handoff` も同じことを見るので、
+# **2 箇所に置くと片方だけ直して食い違う** (#159 で踏んだ形)。
+#
+# **人待ちの一覧とは別に出す。** 一覧に混ぜると **「人待ちが 1 件ある」と読まれて終わる**——
+# **中身が空だとは思わない**。**理由が無いこと**まで言って初めて拾える。
+show_silent_park() {
+  local parks status=0
+  parks="$(bin/loop-silent-park 2>/dev/null)" || status=$?
+  case $status in
+    0) return 0 ;;
+    1) ;;
+    *)
+      # **「0 件」と「読めなかった」を同じ静けさにしない** (`show_missing_lease` と同じ)
+      echo "理由の無い保留があるかどうかを読めません (GitHub の状態を取得できませんでした)"
+      return 0
+      ;;
+  esac
+  echo "理由の無い保留 (人待ちにしたが、理由が投稿されていない。投稿し直すか、保留を戻すこと):"
+  printf '%s\n' "$parks" | sed 's/^/  #/'
+}
+
 # ループの現在地を表示する (open PR / Issue / STOP)
 cmd_loop_status() {
   show_missing_lease
   show_awaiting_human
+  show_silent_park
   if [[ -f loop/STOP ]]; then
     echo "STOP: あり"
     sed 's/^/  /' loop/STOP

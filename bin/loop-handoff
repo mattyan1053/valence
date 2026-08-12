@@ -212,6 +212,26 @@ details=""
 for number in "${!unresolved_of[@]}"; do
   details+="${number}:${unresolved_of[$number]}:${last_comment_of[$number]-} "
 done
+# **理由の無い保留を探す** (#163)。**判定はここに書かない**——`./task loop:status` も
+# 同じことを見るので、**2 箇所に置くと片方だけ直して食い違う**。
+#
+# **読めなくても止めない。** ここは持ち手を決めるのが仕事で、
+# **付け足しの診断で本業を落とさない**。**ただし黙らない** (#161 と同じ判断)。
+silent_park=""
+if parks="$("${BASH_SOURCE[0]%/*}/loop-silent-park")"; then
+  : # 無い
+else
+  case $? in
+    1)
+      # **番号だけを取り出す。** 1 行目で足りる (複数あっても、渡す相手は同じ)
+      IFS=$'\t' read -r silent_park _parked_at <<<"$parks"
+      ;;
+    *)
+      echo "[WARN] 理由の無い保留があるかどうかを読めません（bin/loop-silent-park）" >&2
+      ;;
+  esac
+fi
+
 # **件数も検索を通さない。** ここが遅れると `ready` の昇格が伝わらない。
 counts="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
   -f query='query($owner:String!,$repo:String!){
@@ -258,7 +278,14 @@ parked_issues=${#parked_seen[@]}
 # **head SHA は「変われば前へ進んだ」を表す値**なので、時刻のように毎回変わる値を
 # 入れるのとは違う（`bin/loop-stall` の識別子と同じ制約を満たす）。
 # **未解決スレッド数も要る。** push が無くても master が指摘を返せば状態は動く。
-readonly STATE="prs=${prs}|detail=${details}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
+# **理由の無い保留も指紋に入れる。** **理由を投稿し直しても `prs` にも `details` にも
+# 現れない**（issue コメントはどちらにも入らない）ので、**入れないと「送信済み」のまま**
+# になる——**その PR の話だけでなく、`ready` を worker へ渡す通知も同じ指紋で止まる**。
+# **「直したら止まる」がいちばん悪い形**である (#163)。
+#
+# **番号だけを入れる。** 時刻を入れると**変わらないはずのもので指紋が動く**ので、
+# **「同じ状態では 2 通目を送らない」を壊す側**に倒れる。
+readonly STATE="prs=${prs}|detail=${details}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}|silent-park=${silent_park}"
 
 # **状態を求めたら、いちばん最初にすべての役の記録を更新する。分岐はそのあと。**
 # 分岐ごとに更新すると、**通らなかった分岐の記録が古いまま残り**、
@@ -327,7 +354,13 @@ while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
 done <<<"$prs"
 
 # 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
-if [[ -n $untriaged ]]; then
+if [[ -n $silent_park ]]; then
+  # **忘れられる側にある**ので、いちばん先に見る (#163)。**ステップ 2 は `parked` を
+  # 選ばない**ので、**ここで渡さないと誰もその PR を見ない**。
+  # **直せるのは master** である (理由を投稿し直すか、保留を戻す)。
+  to="master"
+  reason="PR #${silent_park} が理由の無い保留になっている（理由を投稿し直すか、保留を戻す）"
+elif [[ -n $untriaged ]]; then
   # **当否を判断できるのは master だけ**である。**放っておくとループが止まる側**なので、
   # 他の持ち物より先に見る。
   to="master"
