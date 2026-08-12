@@ -426,6 +426,26 @@ heartbeat() {
   ./bin/loop-lease heartbeat worker >/dev/null || true
 }
 
+# **main の上での commit を止める hook を有効にする** (#68)。
+#
+# **git の hook は、リポジトリに置いただけでは走らない。** `core.hooksPath` を
+# 向けるまで `.git/hooks` (追跡されない) を見るので、**clone した先では無効**である。
+#
+# **人の手順にしない。** 「最初に 1 回これを打つ」は忘れられるし、
+# **忘れたことは main へ commit が通ってから分かる**——止めたい事故そのものである。
+# **`./task` は必ず通る**ので、ここで毎回揃えておく。
+#
+# **コマンドは止めない。** hook を有効にできないことと、いま打とうとしている
+# コマンドが実行できないことは別である。**ただし黙らない**——
+# **黙ると、止まっているつもりで何も止まっていない状態**になる。
+ensure_commit_guard() {
+  local current
+  current="$(git config --get core.hooksPath 2>/dev/null || true)"
+  [[ $current != ".githooks" ]] || return 0
+  git config core.hooksPath .githooks 2>/dev/null \
+    || echo "[WARN] core.hooksPath を設定できません (main の上での commit を止められません)" >&2
+}
+
 main() {
   local raw="${1:-help}"
   shift || true
@@ -441,6 +461,7 @@ main() {
   fi
 
   heartbeat
+  ensure_commit_guard
   "$fn" "$@"
 }
 

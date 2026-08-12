@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# git の pre-commit hook。**判定は持たない**——`bin/loop-commit-guard` が持つ。
+#
+# **有効にするのは `./task` である** (`ensure_commit_guard`)。git は
+# `core.hooksPath` を向けるまで `.git/hooks` を見るので、
+# **リポジトリに置いただけの hook は走らない**。
+#
+# **この hook に実行ビットが要る。** 立っていないと git は hint を 1 行出して
+# **飛ばし、そのまま commit する**——**止めているつもりで、何も止まらない**。
+exec "${BASH_SOURCE[0]%/*}/../bin/loop-commit-guard"

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# いま commit してよい場所に居るかを見る。
+#
+#   exit 0 = ブランチの上に居る (commit してよい)
+#   exit 1 = main の上に居る (止める)
+#   exit 2 = 読めない (止める側へ倒す)
+#
+# **`main` の上で commit されたことが 2 回ある** (#68)。どちらも
+# **ブランチは切られており、その後 `main` へ戻されて**、そのまま commit された。
+#
+#   15:08:23 checkout: moving from main to feat/…   ← ブランチは作られた
+#   15:09:53 checkout: moving from feat/… to main   ← 戻された
+#   15:13:52 commit:   ✨ feat: …                   ← main の上で commit
+#   15:15:59 reset:    moving to origin/main        ← 気づいて修復
+#
+# **2 回とも、止めたのは仕組みではなく人である。** ループは何も知らないまま先へ進んだ。
+# **気づかなければ、`git push` 1 回ぶんの距離で絶対ルールを破る。**
+#
+# **原因ではなく結果を止める。** 誰が `main` へ戻したかは特定できていないので、
+# **commit しようとした時点で `main` に居るか**だけを見る——
+# **「ブランチ作成の抜け」に寄せた検査は、実際に起きた経路を素通りする。**
+#
+# **判定はここだけが持つ。** hook (`.githooks/pre-commit`) は呼ぶだけである。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **既定ブランチを remote に尋ねない。** `origin/HEAD` は fetch の状態しだいで
+# 解決できず、**そのたびに「読めない」へ倒れて commit が止まる**。
+# このリポジトリの既定は `main` で固定である (AGENTS.md)。
+readonly PROTECTED="main"
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "[FAIL] git の作業ツリーの中に居るかどうかを読み取れません" >&2
+  echo "       commit してよい場所かどうかが分からないので、止めます" >&2
+  exit 2
+fi
+
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)"
+status=$?
+case "$status" in
+  0) ;;
+  # **detached HEAD。`main` ではないので、この検査の対象ではない。**
+  # **rebase は detached のまま commit する**ので、ここで止めると
+  # **手順書の `git rebase origin/main` が落ちる** (塞ぐ側が、通る道を塞ぐ)。
+  1) exit 0 ;;
+  *)
+    echo "[FAIL] いま居るブランチを読み取れません (git symbolic-ref が $status)" >&2
+    echo "       commit してよい場所かどうかが分からないので、止めます" >&2
+    exit 2
+    ;;
+esac
+
+[[ $branch == "$PROTECTED" ]] || exit 0
+
+# **止めるだけでは、止まった側は次に何をすればよいか分からない。**
+echo "[FAIL] $PROTECTED の上で commit しようとしています" >&2
+echo "       このリポジトリは $PROTECTED へ直接 commit / push しません (AGENTS.md)" >&2
+echo >&2
+echo "       ブランチを切り直してから、もう一度 commit してください:" >&2
+echo >&2
+echo "         git switch -c <feat|fix|chore|refactor|docs>/<名前>" >&2
+echo "         git commit ..." >&2
+echo >&2
+echo "       staged にあるものは、そのまま新しいブランチへ移ります" >&2
+exit 1
