@@ -323,6 +323,72 @@ describe("bin/loop-review-commits", () => {
       expect(answers.trim(), "レビューを応答不能の通知として数えている").toBe("");
     });
 
+    /**
+     * **結び付かなかった 👍** を `--all` に通し、第 3 列ごとの行を返す。
+     *
+     * **記録が `--unknown` だけの PR**（ループの外で作られた PR の初回自動レビュー）で
+     * 起きる。**SHA を持たないので `rows` に残らず、`answers` にも入らない**ので、
+     * **どこにも出てこない**——**待つ側は応答が届いているのに上限まで待つ** (#179)。
+     */
+    function ackOf(pr: number): string {
+      // **SHA の分からない実行**（ループの外で走った初回レビュー）を記録しておく
+      spawnSync(
+        fileURLToPath(new URL("./loop-review-head", import.meta.url)),
+        ["--unknown", String(pr), "2026-08-08T12:00:00Z"],
+        { cwd: repo, encoding: "utf8" },
+      );
+
+      const dir = mkdtempSync(join(tmpdir(), "loop-review-commits-gh-"));
+      symlinkSync("/usr/bin/bash", join(dir, "bash"));
+      writeFileSync(
+        join(dir, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          // 👍 リアクションだけが返る（**SHA を持たない**）
+          `if [[ $* == *"/issues/${pr}/reactions"* ]]; then`,
+          `  printf '%s\t\n' "${laterThanNow(60)}"`,
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"pr view"* ]]; then',
+          "  cat <<'PRVIEW'",
+          `${HEAD}\t本文`,
+          "PRVIEW",
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"/compare/"* ]]; then echo ahead; exit 0; fi',
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const result = spawnSync(SCRIPT, ["--all", String(pr)], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      });
+      rmSync(dir, { recursive: true, force: true });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout;
+    }
+
+    it("結び付かなかった応答も、応答として返す", () => {
+      // **落とすと、待つ側は応答が届いているのに上限（既定 480 秒）まで待つ**——
+      // **当たるのは外の人の PR** なので、**外の人ほど待たされる** (#179)
+      const rows = ackOf(70);
+
+      expect(rows.trim(), "応答が返ったことを落としている").not.toBe("");
+    });
+
+    it("結び付かなかった応答を、レビューできなかった応答と混ぜない", () => {
+      // **`answer` は「レビューできなかった」**（環境が無い等）で、
+      // **`bin/loop-review-budget` が通知として数える**。**👍 はそれではない**ので、
+      // **混ぜると判定が変わる**（#78 の完了条件 3 に触る）
+      const rows = ackOf(71);
+
+      expect(rows, "応答不能の通知として数えている").not.toContain("\tanswer");
+      expect(rows, "何を見たか分からない応答であることが出ていない").toContain("\tack");
+    });
+
     it("知らない断り文句でも、応答として数える", () => {
       // **文言の列挙へ戻さない**（#159）。**列挙から漏れたものが「応答なし」に落ちると、
       // `pending` が減らず再要求が永久に禁じられる**——昨夜これで 2 時間止まった
