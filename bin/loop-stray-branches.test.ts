@@ -10,7 +10,13 @@ const SCRIPT = fileURLToPath(new URL("./loop-stray-branches", import.meta.url));
 /** remote のブランチ。`git ls-remote --heads` の形。 */
 type Branch = { name: string; sha?: string };
 /** その head を持つ PR。 */
-type Pr = { head: string; number: number; state: "OPEN" | "MERGED" | "CLOSED" };
+type Pr = {
+  head: string;
+  number: number;
+  state: "OPEN" | "MERGED" | "CLOSED";
+  /** **fork から出た PR。** origin の同名ブランチとは**別物**である。 */
+  crossRepo?: boolean;
+};
 
 /**
  * push されたのに PR が無いブランチを、誰かが見る（#148）。
@@ -45,8 +51,15 @@ describe("bin/loop-stray-branches", () => {
   function run(options: {
     branches: Branch[];
     prs: Pr[];
-    /** worker の周回が走っているか（**push から PR 作成までの窓**）。 */
-    busy?: boolean;
+    /**
+     * **いま作業中のブランチ**（走っている worker の作業場で checkout されているもの）。
+     *
+     * **「どこかで走っているか」ではない。** どこか 1 つでも走っていれば全部隠すと、
+     * **worker が途切れず動く環境では紛失作業が永久に見つからない**。
+     */
+    busyBranches?: string[];
+    /** 走っているかどうかを読めない（`bin/loop-lease busy` が exit 2）。 */
+    busyUnreadable?: boolean;
     gitFails?: boolean;
     ghFails?: boolean;
   }): { status: number; stdout: string; stderr: string } {
@@ -54,6 +67,7 @@ describe("bin/loop-stray-branches", () => {
     mkdirSync(stub, { recursive: true });
     mkdirSync(join(sandbox, "bin"), { recursive: true });
 
+    const busyBranches = options.busyBranches ?? [];
     writeFileSync(
       join(stub, "git"),
       [
@@ -66,6 +80,18 @@ describe("bin/loop-stray-branches", () => {
         ),
         "  exit 0",
         "fi",
+        // **走っている作業場で、いま checkout されているブランチ**を答える
+        'if [[ $* == *"symbolic-ref"* ]]; then',
+        // **空のものは答えない**（＝そのブランチを読めない状態を作る）
+        ...busyBranches.flatMap((branch, index) =>
+          branch === ""
+            ? []
+            : [
+                `  [[ $* == *"/workspace-${index}"* ]] && { printf '%s\\n' ${JSON.stringify(branch)}; exit 0; }`,
+              ],
+        ),
+        "  exit 1",
+        "fi",
         "exit 0",
         "",
       ].join("\n"),
@@ -76,20 +102,28 @@ describe("bin/loop-stray-branches", () => {
       [
         "#!/usr/bin/env bash",
         ...(options.ghFails === true ? ['echo "gh が落ちた" >&2', "exit 1"] : []),
+        // **ブランチごとに引く。** **一括で取ると、上限を超えた古い PR が「無い」に化ける**
+        // （この repo は既に PR が 171 件）。**fork の PR は別物**なので、
+        // **同じリポジトリのものだけ**を返す（`isCrossRepository` で絞るのは呼ぶ側）
         ...options.prs.map(
-          // **区切りは US。** タブは `IFS` の空白として畳まれる（スクリプトと同じ形）
           (pr) =>
-            `printf '%s\\u001f%s\\u001f%s\\n' ${JSON.stringify(pr.head)} ${pr.number} ${pr.state}`,
+            `if [[ $* == *"--head ${pr.head}"* ]]; then printf '%s\\u001f%s\\u001f%s\\n' ${pr.number} ${pr.state} ${pr.crossRepo === true ? "true" : "false"}; exit 0; fi`,
         ),
         "exit 0",
         "",
       ].join("\n"),
       { mode: 0o755 },
     );
-    // **周回が走っているかは lease が持つ。** ここでは答えだけを差し替える
+    // **走っている作業場は lease が持つ。** ここでは答えだけを差し替える
     writeFileSync(
       join(sandbox, "bin", "loop-lease"),
-      ["#!/usr/bin/env bash", `exit ${options.busy === true ? 0 : 1}`, ""].join("\n"),
+      [
+        "#!/usr/bin/env bash",
+        ...(options.busyUnreadable === true ? ["exit 2"] : []),
+        ...busyBranches.map((_branch, index) => `printf '%s\\n' "/workspace-${index}"`),
+        `exit ${busyBranches.length > 0 ? 0 : 1}`,
+        "",
+      ].join("\n"),
       { mode: 0o755 },
     );
 
@@ -142,14 +176,43 @@ describe("bin/loop-stray-branches", () => {
     expect(run({ branches: [{ name: "main" }], prs: [] }).status).toBe(0);
   });
 
-  it("周回が走っている間は、PR が無いブランチを挙げない", () => {
+  it("いま作業中のブランチは、挙げない", () => {
     // **push から PR 作成までの間に、必ず窓が開く**（master が実測。#148 のコメント）。
-    // **時間で切らない**——**遅い周回と落ちた周回は、経過時間では分けられない**（#129）。
-    // **着手の記録が生きているか**を見る（動いている worker だけが更新する）
-    const result = run({ branches: [{ name: "feat/just-pushed" }], prs: [], busy: true });
+    // **時間で切らない**——**遅い周回と落ちた周回は、経過時間では分けられない**（#129）
+    const result = run({
+      branches: [{ name: "feat/just-pushed" }],
+      prs: [],
+      busyBranches: ["feat/just-pushed"],
+    });
 
     expect(result.status, "健全な周回の途中で鳴っている").toBe(0);
     expect(result.stdout).toBe("");
+  });
+
+  it("走っている周回と無関係なブランチは、隠さない", () => {
+    // **ここが本命である。** **どこか 1 つでも走っていれば全部隠す**と、
+    // **worker が途切れず動く環境では紛失作業が永久に見つからない**——
+    // **動いているほど見つからない**という、**向きが逆**の壊れ方になる（#148 のレビュー）
+    const result = run({
+      branches: [{ name: "feat/just-pushed" }, { name: "feat/lost-long-ago" }],
+      prs: [],
+      busyBranches: ["feat/just-pushed"],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "無関係なブランチまで隠している").toContain("feat/lost-long-ago");
+    expect(result.stdout, "作業中のブランチを挙げている").not.toContain("feat/just-pushed");
+  });
+
+  it("走っているか読めなければ、0 件とも「宙に浮いている」とも言わない", () => {
+    // **契約は `exit 2 = 読めない`。** **どちらかへ倒すと、片方の誤りをそのまま作る**
+    const result = run({
+      branches: [{ name: "feat/x" }],
+      prs: [],
+      busyUnreadable: true,
+    });
+
+    expect(result.status).toBe(2);
   });
 
   it("周回が走っていても、消し残りは挙げる", () => {
@@ -158,11 +221,39 @@ describe("bin/loop-stray-branches", () => {
     const result = run({
       branches: [{ name: "feat/done" }],
       prs: [{ head: "feat/done", number: 76, state: "MERGED" }],
-      busy: true,
+      busyBranches: ["feat/done"],
     });
 
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("merged-leftover");
+  });
+
+  it("fork の PR は、origin の同名ブランチと同一視しない", () => {
+    // **`headRefName` だけをキーにすると、fork の PR が origin の無関係なブランチに
+    // 対応付けられる**——**終わっていれば「消してよい」と表示され、
+    // 手順どおり消すと PR に残っていない作業が消える**（#148 が塞ごうとした穴を、
+    // 塞ぐ側が広げる形）。**同じリポジトリの PR だけを見る**
+    const result = run({
+      branches: [{ name: "feat/same-name" }],
+      prs: [{ head: "feat/same-name", number: 200, state: "MERGED", crossRepo: true }],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "fork の PR を自分のものとして数えている").toContain("no-pr");
+    expect(result.stdout).not.toContain("merged-leftover");
+  });
+
+  it("ブランチごとに引く（一括の上限に依らない）", () => {
+    // **一括で取ると、上限を超えた古い PR が「無い」に化ける**——
+    // **この repo は既に PR が 171 件**で、**古いマージ済みの消し残りが
+    // 人の判断待ちとしてループを止める**
+    const result = run({
+      branches: [{ name: "feat/ancient" }],
+      prs: [{ head: "feat/ancient", number: 3, state: "MERGED" }],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "ブランチごとに引けていない").toContain("merged-leftover");
   });
 
   it("平常時は、何も出さない", () => {
@@ -174,6 +265,19 @@ describe("bin/loop-stray-branches", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("");
+  });
+
+  it("走っている作業場のブランチを読めなければ、判定しない", () => {
+    // **走っているのに、どのブランチを触っているか分からない**——
+    // **抑えるべきかどうかが決められない**ので、**どちらへも倒さない**
+    const result = run({
+      branches: [{ name: "feat/x" }],
+      prs: [],
+      // **走ってはいるが、どのブランチを触っているか読めない**
+      busyBranches: [""],
+    });
+
+    expect(result.status).toBe(2);
   });
 
   it("読めなければ、0 件と同じ顔をしない", () => {

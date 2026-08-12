@@ -60,9 +60,11 @@ describe("宙に浮いたブランチ", () => {
     expect(section, "消し残りの扱いが無い").toContain("merged-leftover");
     expect(section, "宙に浮いたものの扱いが無い").toContain("no-pr");
     expect(section, "人へ渡す経路が無い").toContain('bin/loop-stall "stray-branch:<ブランチ>"');
-    expect(section, "自動で消す形になっている").not.toMatch(
-      /no-pr[^\n]*\n[^\n]*git push origin --delete/,
-    );
+    // **master は push しない**（絶対ルール）。**「掃除してよい」と分類することと、
+    // 「master が掃除する」ことは別**である——**master の手順書に、master が
+    // やってはいけないことを書かない**（master の指摘）
+    expect(section, "master に push させている").not.toContain("git push origin --delete");
+    expect(exitCommands(), "master に push させている").not.toContain("git push");
   });
 
   it("その識別子が、一覧にある", () => {
@@ -80,10 +82,15 @@ describe("宙に浮いたブランチ", () => {
     try {
       const stub = join(workspace, "stub");
       mkdirSync(stub, { recursive: true });
+      mkdirSync(join(workspace, ".git"), { recursive: true });
       writeFileSync(
         join(stub, "git"),
         [
           "#!/usr/bin/env bash",
+          // **lease が使う問い合わせにも答える**（実物の `bin/loop-lease busy` が走る）。
+          // **実リポジトリを見せない**——**そこの lease の有無で結果が変わってしまう**
+          `if [[ $* == *"--git-common-dir"* ]]; then printf '%s\\n' ${JSON.stringify(join(workspace, ".git"))}; exit 0; fi`,
+          `if [[ $* == *"--show-toplevel"* ]]; then printf '%s\\n' ${JSON.stringify(workspace)}; exit 0; fi`,
           'if [[ $* == *"ls-remote"* ]]; then',
           "  printf '%s\\t%s\\n' aaaaaaaa refs/heads/feat/lost",
           "  exit 0",
@@ -134,10 +141,15 @@ describe("宙に浮いたブランチ", () => {
     try {
       const stub = join(workspace, "stub");
       mkdirSync(stub, { recursive: true });
+      mkdirSync(join(workspace, ".git"), { recursive: true });
       writeFileSync(
         join(stub, "git"),
         [
           "#!/usr/bin/env bash",
+          // **lease が使う問い合わせにも答える**（実物の `bin/loop-lease busy` が走る）。
+          // **実リポジトリを見せない**——**そこの lease の有無で結果が変わってしまう**
+          `if [[ $* == *"--git-common-dir"* ]]; then printf '%s\\n' ${JSON.stringify(join(workspace, ".git"))}; exit 0; fi`,
+          `if [[ $* == *"--show-toplevel"* ]]; then printf '%s\\n' ${JSON.stringify(workspace)}; exit 0; fi`,
           'if [[ $* == *"ls-remote"* ]]; then',
           "  printf '%s\\t%s\\n' aaaaaaaa refs/heads/main",
           "  exit 0",
@@ -170,6 +182,7 @@ describe("宙に浮いたブランチ", () => {
     try {
       const stub = join(workspace, "stub");
       mkdirSync(stub, { recursive: true });
+      mkdirSync(join(workspace, ".git"), { recursive: true });
       writeFileSync(join(stub, "git"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
       writeFileSync(join(stub, "gh"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
 

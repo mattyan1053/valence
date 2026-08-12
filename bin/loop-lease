@@ -303,6 +303,7 @@ read_lease() {
   held_token=""
   held_since=""
   held_owner=""
+  held_workspace=""
   [[ -f $STATE ]] || return 0
 
   # **1 行目は「前の版が読める形」のまま**（token と時刻の 2 列）。**印は 2 行目**である。
@@ -315,6 +316,7 @@ read_lease() {
   {
     IFS=$'\t' read -r held_token held_since
     read -r held_owner || held_owner=""
+    read -r held_workspace || held_workspace=""
   } <"$STATE"
   if ! [[ $held_since =~ ^[0-9]+$ ]]; then
     echo "[FAIL] lease の記録を読めません: $STATE" >&2
@@ -409,6 +411,7 @@ if [[ $ACTION == "busy" ]]; then
   # **役ごとに置き場所が違う。** master は 1 つ、worker は作業場ごとに増える——
   # **その役のものだけを見る**（`valence-loop-lease-master` と
   # `valence-loop-lease-worker<作業場>` は前方一致で分けられる）。
+  running=0
   for state in "$common_dir/valence-loop-lease-$ROLE"*; do
     [[ -f $state ]] || continue
     [[ $state != *.lock ]] || continue
@@ -417,15 +420,21 @@ if [[ $ACTION == "busy" ]]; then
     SCOPE_LABEL="$lease_scope"
     STATE="$state"
     ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
-    lock_state >/dev/null 2>&1 || continue
+    # **読めなかったら「走っていない」に倒さない。** 倒すと、**作業中のブランチを
+    # 「宙に浮いている」と誤報する**——**契約どおり「読めない」を返す** (#148 のレビュー)。
+    lock_state || exit 2
     read_lease quiet || {
       exec 9>&-
-      continue
+      exit 2
     }
     exec 9>&-
-    [[ -z $held_token ]] || exit 0
+    [[ -n $held_token ]] || continue
+    running=1
+    # **走っている作業場を出す。** 呼ぶ側は**そこで触っているブランチだけ**を抑える
+    [[ -z $held_workspace ]] || printf '%s\n' "$held_workspace"
   done
-  exit 1
+  ((running == 1)) || exit 1
+  exit 0
 fi
 
 if [[ $ACTION == "check" ]]; then
@@ -533,7 +542,12 @@ acquire)
   # 言えず、**別の周回が持っているときに黙る**（#161 で直した向きの誤り）。
   # **作れなければ空のまま**——`check` はそれを「分からない」として扱う。
   owner="$(round_owner)" || owner=""
-  printf '%s\t%s\n%s\n' "$token" "$now" "$owner" >"$STATE" || {
+  # **作業場も残す（3 行目）。** **抑止をブランチ単位にするのに要る** (#148)——
+  # **どこか 1 つでも走っていれば全部隠す**と、**動いているほど紛失作業が見つからない**。
+  # **scope から復元しない**（`/` を `_` に畳んであるので、元のパスへ戻せない）。
+  workspace=""
+  [[ $ROLE != "worker" ]] || workspace="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  printf '%s\t%s\n%s\n%s\n' "$token" "$now" "$owner" "$workspace" >"$STATE" || {
     echo "[FAIL] lease を書き込めません: $STATE" >&2
     exit 2
   }

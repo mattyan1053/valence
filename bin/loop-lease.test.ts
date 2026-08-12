@@ -98,6 +98,26 @@ describe("bin/loop-lease", () => {
       expect(run(["busy", "worker"], { LOOP_LEASE_TTL_SEC: "60" }).status).toBe(1);
     });
 
+    it("走っている作業場を出す", () => {
+      // **「走っているか」だけでは、抑止をブランチ単位にできない**（#148 のレビュー）。
+      // **どこか 1 つでも走っていれば全部隠す**と、**worker が途切れず動く環境では
+      // 紛失した作業が永久に見つからない**——**動いているほど見つからない**。
+      expect(acquire().status).toBe(0);
+
+      const busy = run(["busy", "worker"]);
+
+      expect(busy.status).toBe(0);
+      expect(busy.stdout.trim(), "作業場が出ていない").toBe(sandbox);
+    });
+
+    it("読めなければ、走っていないとは言わない", () => {
+      // **契約に `exit 2 = 読めない` と書いてある**（**書いた意図と実装を食い違わせない**）。
+      // **「走っていない」に倒すと、作業中のブランチを宙に浮いていると誤報する**
+      writeFileSync(join(sandbox, ".git", "valence-loop-lease-worker_broken"), "こわれている\n");
+
+      expect(run(["busy", "worker"]).status).toBe(2);
+    });
+
     it("master は役のまま 1 つなので、そちらも見られる", () => {
       expect(acquire("master").status).toBe(0);
 
