@@ -168,7 +168,7 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
 # **1 度きりの組み立てにしない。** `check` は**役をまたいで**見るので、
 # **同じ組み立てを 2 度使う**——書き写すと、片方だけ直して食い違う（#159 で踏んだ）。
 set_role_paths() {
-  local role="$1" toplevel
+  local role="$1" toplevel digest
   lease_scope="$role"
   SCOPE_LABEL="$role"
   if [[ $role == "worker" ]]; then
@@ -180,9 +180,21 @@ set_role_paths() {
       echo "[FAIL] 作業場の根へ移動できません" >&2
       return 2
     }
-    # ファイル名にできる形へ畳む。**元のパスが読めるままにする**（どのセッションが
-    # 握っているのかを、記録を見るだけで分かるようにする）。
-    lease_scope="worker${toplevel//\//_}"
+    # **ファイル名の長さを、作業場のパスの長さから切り離す** (#99)。
+    #
+    # **パス全体を 1 つの成分へ畳んでいた。** 深い checkout では
+    # `$STATE.lock` が NAME_MAX (一般に 255 バイト) を超え、**acquire が常に exit 2**
+    # になる——**worker がまったく動けなくなる** (約 350 文字のパスで再現済み。#98)。
+    #
+    # **元のパスは記録の中身に残す** (lease の 3 行目)。**名前に入れていたのは
+    # 「どのセッションが握っているか」を読めるようにするため**で、そこは
+    # `busy` が既に中身から読んでいる (#148)。**衝突すれば直列になる**という性質も
+    # そのまま——**同じパスは同じ digest** である。
+    if ! digest="$(printf '%s' "$toplevel" | sha256sum)" || [[ -z ${digest%% *} ]]; then
+      echo "[FAIL] 作業場の識別子を作れません: $toplevel" >&2
+      return 2
+    fi
+    lease_scope="worker-${digest%% *}"
     # **どの単位で弾かれたのかを、出力だけで分かるようにする。** 「worker の周回が
     # 走っています」だと、別の作業場の worker まで止まっているように読める
     SCOPE_LABEL="この作業場（$toplevel）の worker"
@@ -418,7 +430,7 @@ if [[ $ACTION == "busy" ]]; then
   [[ $# -eq 2 ]] || usage
   # **役ごとに置き場所が違う。** master は 1 つ、worker は作業場ごとに増える——
   # **その役のものだけを見る**（`valence-loop-lease-master` と
-  # `valence-loop-lease-worker<作業場>` は前方一致で分けられる）。
+  # `valence-loop-lease-worker-<digest>` は前方一致で分けられる）。
   running=0
   for state in "$common_dir/valence-loop-lease-$ROLE"*; do
     [[ -f $state ]] || continue
@@ -566,7 +578,7 @@ acquire)
   owner="$(round_owner)" || owner=""
   # **作業場も残す（3 行目）。** **抑止をブランチ単位にするのに要る** (#148)——
   # **どこか 1 つでも走っていれば全部隠す**と、**動いているほど紛失作業が見つからない**。
-  # **scope から復元しない**（`/` を `_` に畳んであるので、元のパスへ戻せない）。
+  # **scope から復元しない**（digest なので、元のパスへ戻せない）。
   workspace=""
   [[ $ROLE != "worker" ]] || workspace="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   printf '%s\t%s\n%s\n%s\n' "$token" "$now" "$owner" "$workspace" >"$STATE" || {

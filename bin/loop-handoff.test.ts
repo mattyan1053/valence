@@ -280,6 +280,10 @@ describe("bin/loop-handoff", () => {
       // **必須チェック名を `@base64` と同じ形に揃える**のに使う（`bin/loop-gate` と同じ）
       "base64",
       "tr",
+      // **作業場ぶんの識別子を固定長にするのに使う**（`bin/loop-lease`。#99）。
+      // **無いと `bin/loop-lease check` が「読めない」へ倒れ、飛ばした周回を記録しない**
+      // ——**この一覧は本物の依存そのもの**なので、増えたら足す
+      "sha256sum",
     ]) {
       const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
       if (found !== "") {
