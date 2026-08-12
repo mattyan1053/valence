@@ -199,7 +199,11 @@ for pr in $parked_prs; do
   bin/loop-head same "$pr" "$parked_head" || moved=$?
   # **0 = 同じ / 2 = 読めない → どちらも触らない。** **動いたときだけ外す**
   ((moved == 1)) || continue
-  gh pr edit "$pr" --remove-label parked --remove-label awaiting-human || true
+  if gh pr edit "$pr" --remove-label parked --remove-label awaiting-human; then
+    # **外せたときだけ消す。** **消すのは戻せない**——**外せなかった周回で消すと、
+    # 保留は残るのに記録が無い**（＝**誰も外せない保留**）になる (#176 のレビュー)
+    bin/loop-parked-head clear "$pr" || true
+  fi
 done
 ```
 
@@ -772,10 +776,17 @@ resolve しない。**何が決まれば進むのか**を PR に書き、**そ�
 bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら保留にしない
 gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
 
+# **同じ label が 2 つの意味を持つ。** こちらは**人が外すまで待つ**保留で、
+# **ステップ 2 が自動で外す保留**（ループの外の著者。#70）とは違う。**見分けは記録の
+# 有無**なので、**残っていたら消してから付ける**——**古い記録が残っていると、
+# 次の周回で「著者が対応した」と読まれ、人の判断待ちが消える** (#176 のレビュー)。
+# **消せないなら保留にしない**（**保留の条件が 1 つでも欠けたら保留にしない**）
+if ! bin/loop-parked-head clear <PR番号>; then
+  bin/loop-stall "review-exhausted:<PR番号>@<SHA>"
 # **付いたことを確かめてから進む**（`changes-requested` と同じ順序）。
 # **付いていないのに保留したつもりになると、`ready` は上がらないまま
 # 「進めるようにした」と思い込む**——**いちばん危ない**
-if gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+elif gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
   # 本文には **何が決まれば進むのか**と、**人が何をすれば再開するのか**を書く——
   # **そのまま通すなら人がスレッドを resolve、直させるならスレッドへ書いて
   # `changes-requested`**。**label を外すのは最後**である（`loop/README.md` と同じ）

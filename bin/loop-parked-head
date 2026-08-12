@@ -3,8 +3,9 @@
 #
 #   bin/loop-parked-head record <PR番号> <head SHA>   記録する (上書き)
 #   bin/loop-parked-head get <PR番号>                 記録を出す
+#   bin/loop-parked-head clear <PR番号>               記録を消す (無くてもよい)
 #
-#   exit 0 = 記録した / 出した
+#   exit 0 = 記録した / 出した / 消した
 #   exit 1 = 記録が無い (get のみ)
 #   exit 2 = 使い方の誤り / 読み書きできない
 #
@@ -28,6 +29,7 @@ set -uo pipefail
 usage() {
   echo "使い方: bin/loop-parked-head record <PR番号> <head SHA>   記録する" >&2
   echo "       bin/loop-parked-head get <PR番号>                 記録を出す" >&2
+  echo "       bin/loop-parked-head clear <PR番号>               記録を消す" >&2
   echo "       exit 0 = 記録した / 出した / exit 1 = 記録が無い / exit 2 = 誤り" >&2
   exit 2
 }
@@ -87,6 +89,19 @@ get)
     exit 2
   }
   printf '%s\n' "$sha"
+  ;;
+clear)
+  [[ $# -eq 2 ]] || usage
+  # **保留を外したら消す。** 残すと、**後日その PR が別の理由（レビュー上限など）で
+  # 保留になったとき、古い head との差を「著者が対応した」と読んで即座に外す**——
+  # **人の判断待ちが、次の周回で消える** (#176 のレビュー 2 周目)。
+  #
+  # **記録が無くても成功にする。** **呼ぶ側は「外せたときだけ」呼ぶ**が、
+  # **前の周回で消えている**ことがある——**そこで落とすと、呼ぶ側が分岐を増やす**。
+  rm -f "$FILE" 2>/dev/null || {
+    echo "[FAIL] 記録を消せません: $FILE" >&2
+    exit 2
+  }
   ;;
 *)
   usage

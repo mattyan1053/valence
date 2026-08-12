@@ -56,6 +56,7 @@ describe("ループの外の著者", () => {
     editFails?: boolean;
     commentFails?: boolean;
     recordFails?: boolean;
+    clearFails?: boolean;
     /** 保留にした head の記録（未指定なら「記録が無い」）。 */
     parkedHead?: string;
     /** `bin/loop-head same` の終了コード（0 = 同じ / 1 = 動いた / 2 = 読めない）。 */
@@ -93,6 +94,7 @@ describe("ループの外の著者", () => {
           "#!/usr/bin/env bash",
           record("parked-head"),
           ...(stubs.recordFails === true ? ["[[ $1 == record ]] && exit 2"] : []),
+          ...(stubs.clearFails === true ? ["[[ $1 == clear ]] && exit 2"] : []),
           stubs.parkedHead === undefined
             ? "[[ $1 == get ]] && exit 1"
             : `[[ $1 == get ]] && { printf '%s\\n' ${JSON.stringify(stubs.parkedHead)}; exit 0; }`,
@@ -299,11 +301,61 @@ describe("ループの外の著者", () => {
       expect(result.gh, "人待ちの保留まで外している").not.toContain("--remove-label parked");
     });
 
+    it("外せたら、記録も消す", () => {
+      // **残すと、後日その PR が別の理由（レビュー上限など）で保留になったとき、
+      // 古い head との差を「著者が対応した」と読んで即座に外す**——
+      // **人の判断待ちが、次の周回で消える**（#176 のレビュー 2 周目）
+      const result = runBlock(unparkBlock(), 0, { parkedHead: "a".repeat(40), headExit: 1 });
+
+      expect(result.parkedHead, "外したのに記録が残る").toContain("clear");
+    });
+
+    it("外せなかったら、記録を消さない", () => {
+      // **消すのは戻せない。** **保留は残るのに記録が無い**＝**誰も外せない保留**——
+      // **さっき塞いだのと同じ形**である
+      const result = runBlock(unparkBlock(), 0, {
+        parkedHead: "a".repeat(40),
+        headExit: 1,
+        editFails: true,
+      });
+
+      expect(result.parkedHead, "外せていないのに記録を消している").not.toContain("clear");
+    });
+
     it("ループの中の著者なら、触らない", () => {
       // **中の保留は、これまでどおり人が外す**（`awaiting-human` の規定）
       const result = runBlock(unparkBlock(), 1, { parkedHead: "a".repeat(40), headExit: 1 });
 
       expect(result.gh, "中の保留まで外している").not.toContain("--remove-label parked");
+    });
+  });
+
+  describe("人待ちの保留と、同じ記録を共有する", () => {
+    // **同じ label が 2 つの意味を持つ**（**人が外すまで待つ保留**と、
+    // **ループの外の著者が push したら外れる保留**）。**見分けは記録の有無**なので、
+    // **両方を一緒に見ないと食い違いが出る**——ここに置くのはそのためである。
+    function humanBlock(): string {
+      const found = blocks().find((block) => block.section.includes("human — 人を呼ぶ"));
+      expect(found, "人待ちの節が無い").toBeDefined();
+      return found?.body ?? "";
+    }
+
+    it("記録を消してから、人待ちの保留にする", () => {
+      // **古い記録が残っていると、次の周回で「著者が対応した」と読まれ、
+      // 人の判断待ちが消える**（#176 のレビュー 2 周目）
+      const result = runBlock(humanBlock(), 1);
+
+      expect(result.parkedHead, "記録を消していない").toContain("clear");
+      expect(result.gh, "保留にしていない").toContain("--add-label parked");
+    });
+
+    it("記録を消せなければ、人待ちの保留にしない", () => {
+      // **保留の条件が 1 つでも欠けたら、保留にしない**（この PR で 3 回同じ形にした）。
+      // **人待ちの名前で数える**——`awaiting-worker` は worker には解けない状態である
+      const result = runBlock(humanBlock(), 1, { clearFails: true });
+
+      expect(result.gh, "記録が残ったまま保留にしている").not.toContain("--add-label parked");
+      expect(result.stalled, "保留にできなかったのに数えていない").toContain("review-exhausted");
     });
   });
 
@@ -325,6 +377,17 @@ describe("ループの外の著者", () => {
     expect(body, "状態の正が Issue だと書かれていない").toContain("Issue");
     expect(body, "急ぐときの伝え方が書かれていない").toContain("通知");
     expect(body, "外から出した PR の扱いが書かれていない").toContain("parked");
-    expect(body, "label を外すのが著者だと書かれていない").toMatch(/外す/);
+    // **実装と食い違わせない**（#176 のレビュー 2 周目）。**実装は「push したら
+    // master が外す」なのに、案内が「著者が自分で外す」**だと、**fork の著者は
+    // 「対応しても再開できない」と読んで離れる**——**何も壊れていないのに使われなくなる**。
+    //
+    // **語ではなく、主張を見る。** 「push」「triage」があるかだけでは、
+    // **食い違う案内が残っていても緑になる**——**書き換えた 1 行を元へ戻す変異で、
+    // 実際にすり抜けた**（今日 3 度目の形）
+    expect(body, "master が外すと書かれていない").toMatch(/master の周回が保留を外す/);
+    expect(body, "実装と食い違う案内が残っている").not.toContain("master は外さない");
+    expect(body, "triage 権限が無い人のことが書かれていない").toContain("triage");
+    // **同じ label が 2 つの意味を持つ**ので、**README でも区別が付く形にする**
+    expect(body, "人の判断待ちの保留と区別が付かない").toContain("人の判断待ち");
   });
 });

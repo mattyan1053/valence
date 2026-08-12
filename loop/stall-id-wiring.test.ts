@@ -135,6 +135,10 @@ describe("停止識別子", () => {
       // 「**主体が違うものに worker の周回を効かせない**」と書いている
       // （`awaiting-worker` は `WORKER_FIXES` に入るので、**worker の周回が動いている
       // 間ずっと数えられない**）。**2 つあるのは、保留の失敗と投稿の失敗で経路が違う**ため
+      // **3 つあるのは、経路が 3 つあるため**——**記録を消せなかった**（#70 の保留と
+      // 同じ label を使うので、**古い記録が残ると人待ちが自動で外れる**）・
+      // **保留の失敗**・**理由の投稿の失敗**
+      ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### defer — Issue へ外出ししてマージする", "deferred-overflow"],

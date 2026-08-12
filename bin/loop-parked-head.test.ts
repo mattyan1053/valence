@@ -70,6 +70,32 @@ describe("bin/loop-parked-head", () => {
     expect(run(["get", "13"]).stdout.trim()).toBe("b".repeat(40));
   });
 
+  it("消したら、記録は無くなる", () => {
+    // **保留を外したら消す** (#176 のレビュー 2 周目)。**残すと、後日
+    // 別の理由（レビュー上限など）で保留になったとき、古い head との差を
+    // 「著者が対応した」と読んで即座に外す**——**人の判断待ちが消える**
+    run(["record", "12", HEAD]);
+
+    expect(run(["clear", "12"]).status).toBe(0);
+
+    expect(run(["get", "12"]).status, "消えていない").toBe(1);
+  });
+
+  it("記録が無くても、消せたことにする", () => {
+    // **消す側は何度呼ばれてもよい**（**外せたときだけ呼ぶ**が、
+    // **前の周回で消えている**ことがある）
+    expect(run(["clear", "12"]).status).toBe(0);
+  });
+
+  it("消しても、他の PR は残る", () => {
+    run(["record", "12", HEAD]);
+    run(["record", "13", "b".repeat(40)]);
+
+    run(["clear", "12"]);
+
+    expect(run(["get", "13"]).stdout.trim()).toBe("b".repeat(40));
+  });
+
   it("head SHA として読めないものは記録しない", () => {
     // **ブランチ名や短すぎる値を入れると、前方一致が誤爆する**
     // （`bin/loop-review-head` と同じ判断）
