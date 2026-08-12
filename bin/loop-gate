@@ -230,7 +230,9 @@ readonly MAX_ROUNDS_GATE="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 #
 # **既定値 60 の根拠**（#134 で測り直した。**#126 の数え方に対する実測**である）。
 #
-# **#126 のマージ後にマージされた 26 件を、いまの数え方で測った。**
+# **数え方を変えたのは PR #132**（Issue #126 はその契機で、**Issue はマージ時刻を
+# 持たない**——**開始点を特定できないと、同じ母集団を作れない**）。
+# **その後にマージされた 26 件を、いまの数え方で測った。**
 #
 #   手直しが 0 行 … 11 件      いちばん多い（レビュー後に本体を触らずマージ）
 #   1〜20 行      … 13 件
@@ -250,15 +252,24 @@ readonly MAX_ROUNDS_GATE="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 # （観測の最大 33 行に対して 1.8 倍だが、**その比に意味は無い**）。
 # **根拠の無い閾値を、別の根拠の無い閾値で置き換えても何も良くならない。**
 #
-# **次に測り直すとき**（錨がまた外れたとき）は、次を走らせる。**手で集めた表を
+# **次に測り直すとき**（錨がまた外れたとき）は、下をそのまま走らせる。**手で集めた表を
 # 残さない**——**同じ手順で数え直せること**が、この値を動かす条件である。
 #
-#   gh pr list --state merged --limit 100 --json number,mergedAt \
-#     --jq '.[] | select(.mergedAt > "<数え方を変えた PR のマージ時刻>") | .number'
-#   # 各 PR について
-#   bin/loop-fixup-lines "$pr" \
-#     "$(bin/loop-review-commits "$pr" | tail -1 | cut -f2)" \
-#     "$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')"
+# **件数の上限を置かない。** **取ってから絞ると、上限で古いほうから黙って落ちる**——
+# **上側の錨を探しているのに、錨に近い実例から消える**（#180 で `--limit` を判定から
+# 外したのと同じ理由）。**日時は検索側へ渡し、ページングで全件取る。**
+#
+# ---8<--- 測り直しの手順 ---
+#   repo="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
+#   since="$(gh pr view 132 --json mergedAt --jq '.mergedAt')"
+#   gh api --paginate -X GET search/issues \
+#     -f q="repo:$repo is:pr is:merged merged:>$since" --jq '.items[].number' |
+#     sort -n | while read -r pr; do
+#       printf '%s\t%s\n' "$pr" "$(bin/loop-fixup-lines "$pr" \
+#         "$(bin/loop-review-commits "$pr" | tail -1 | cut -f2)" \
+#         "$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')")"
+#     done
+# ---8<--- ここまで ---
 #
 # **上側の錨に使えるのは、人が「これは通すべきでなかった」と結論した実例だけ**である。
 # **それが 1 件も無い間は、この値に上側の根拠は無い**——**そう書いてあること自体が、

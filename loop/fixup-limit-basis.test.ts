@@ -1,9 +1,30 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/**
+ * コメントに置いた**測り直しの手順**を、そのまま取り出す。
+ *
+ * **「書いてある」ではなく「走る」を見る**（#181 のレビュー）。前の版は
+ * **番号を並べるだけのコマンドと、測るコマンドが散文でつながっていた**——
+ * **`$pr` はどこでも束縛されておらず、そのまま走らせると空の番号で落ちる**のに、
+ * **主張を見る試験 5 本は全部緑**だった。
+ */
+function procedure(): string {
+  const gate = readFileSync(join(REPO_ROOT, "bin/loop-gate"), "utf8");
+  const body =
+    gate.split("---8<--- 測り直しの手順 ---")[1]?.split("---8<--- ここまで ---")[0] ?? "";
+  return body
+    .split("\n")
+    .filter((line) => line.startsWith("#"))
+    .map((line) => line.replace(/^#\s?/, ""))
+    .join("\n");
+}
 
 /** 手直しの上限が決まっている場所（値のすぐ上に根拠を置く）。 */
 function limitSection(): string {
@@ -35,6 +56,18 @@ describe("手直しの上限の根拠", () => {
     );
   });
 
+  it("測り直しの開始点が、マージ時刻を持つ PR で書いてある", () => {
+    // **Issue はマージ時刻を持たない**（#181 のレビュー）。**#126 は契機で、
+    // 数え方を変えたのは PR #132**——**開始点を特定できないと、同じ母集団を作れない**
+    const section = limitSection();
+
+    expect(section, "数え方を変えた PR が書かれていない").toMatch(/数え方を変えたのは PR #\d+/);
+    // **手順もその PR から時刻を取る**（散文と手順が別のものを指さない）
+    expect(procedure(), "手順が開始点を自分で取っていない").toMatch(
+      /gh pr view \d+ --json mergedAt/,
+    );
+  });
+
   it("いまの数え方で測った実測が、根拠として書いてある", () => {
     // **#126 で数え方が変わっている**ので、**その前の実例は比較に使えない**
     // （89 行が同じ PR で 37 行になった）。**測り直した結果**が要る
@@ -53,14 +86,72 @@ describe("手直しの上限の根拠", () => {
     expect(section, "独立した検証でないことが書かれていない").toMatch(/独立した検証/);
   });
 
-  it("測り直しの手順が、そのまま走る形で残っている", () => {
-    // **手で集めた表を残さない。** **同じ手順で数え直せること**が、この値を動かす条件。
-    // **打つものが書いてあるか**を見る（散文で「測り直す」と書いてあるだけにしない）
-    const section = limitSection();
+  it("測り直しの手順が、そのまま走る", () => {
+    // **「書いてある」ではなく「走る」を見る**（#181 のレビュー）。
+    // **並べるコマンドと測るコマンドが散文でつながっている**と、
+    // **`$pr` が束縛されないまま空の番号で落ちる**——**それでも「手順が書いてある」
+    // 側の試験は緑**だった。**縛る先を「文があること」から「文が言っていることが
+    // 成り立つこと」へ寄せる。**
+    //
+    // **`gh` と数える側は偽物**にして、**どの PR 番号で呼ばれたか**だけを見る
+    const workspace = mkdtempSync(join(tmpdir(), "fixup-basis-"));
+    try {
+      const stub = join(workspace, "stub");
+      mkdirSync(stub, { recursive: true });
+      mkdirSync(join(workspace, "bin"), { recursive: true });
+      writeFileSync(
+        join(stub, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          `[[ $* == *"nameWithOwner"* ]] && { printf 'someone/valence\\n'; exit 0; }`,
+          `[[ $* == *"mergedAt"* ]] && { printf '2026-08-11T04:01:16Z\\n'; exit 0; }`,
+          `[[ $* == *"headRefOid"* ]] && { printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n'; exit 0; }`,
+          // **日時は検索側へ渡す**（絞ってから取る）。**渡していなければ、ここで落ちる**
+          'if [[ $* == *"search/issues"* ]]; then',
+          '  [[ $* == *"merged:>2026-08-11T04:01:16Z"* ]] || { echo "スタブ: 日時で絞っていない: $*" >&2; exit 1; }',
+          '  [[ $* == *"--paginate"* ]] || { echo "スタブ: ページングしていない: $*" >&2; exit 1; }',
+          `  printf '%s\\n' 171 137`,
+          "  exit 0",
+          "fi",
+          'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+          "exit 1",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      for (const name of ["loop-fixup-lines", "loop-review-commits"]) {
+        writeFileSync(
+          join(workspace, "bin", name),
+          [
+            "#!/usr/bin/env bash",
+            `printf '%s\\n' "${name} $*" >> ${JSON.stringify(join(workspace, "calls"))}`,
+            `printf '0\\t0\\t0\\n'`,
+            "exit 0",
+            "",
+          ].join("\n"),
+          { mode: 0o755 },
+        );
+      }
 
-    expect(section, "PR の並べ方が無い").toContain("gh pr list --state merged");
-    expect(section, "数え方が無い").toContain("bin/loop-fixup-lines");
-    expect(section, "レビュー済み head の取り方が無い").toContain("bin/loop-review-commits");
+      const result = spawnSync("bash", ["-c", procedure()], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+      });
+
+      expect(result.status, `手順が走らない: ${result.stderr}`).toBe(0);
+      const calls = existsSync(join(workspace, "calls"))
+        ? readFileSync(join(workspace, "calls"), "utf8")
+        : "";
+      // **番号が渡っていること**（空の番号で測っていない）
+      expect(calls, "測る側に PR 番号が渡っていない").toMatch(/loop-fixup-lines 137 /);
+      expect(calls, "1 件しか測っていない").toMatch(/loop-fixup-lines 171 /);
+      expect(calls, "レビュー済み head を取っていない").toMatch(/loop-review-commits 137/);
+      // **測った値が出ること**（走っただけで何も出ないなら、表は作れない）
+      expect(result.stdout, "測った結果が出ていない").toMatch(/^137\t/m);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   it("上側の錨に何が要るかが書いてある", () => {
