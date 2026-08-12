@@ -138,27 +138,47 @@ describe("bin/loop-stall の停止識別子", () => {
 
 describe("上限に達したときに止める対象", () => {
   /**
-   * スクリプトのコピーと偽の `task` を使い、上限まで走らせる。
+   * スクリプトのコピーと**本物の `task`** を使い、使い捨てのリポジトリで上限まで走らせる。
    * **本物の bin/loop-stall をそのまま上限まで走らせない。** それをやると実際に
    * 実リポジトリの両 worktree が停止する（この Issue の事故そのもの）。
    *
-   * 偽の `task` は「呼ばれた印」を残すだけ。**呼ばれてはいけない側にも置く**ので、
-   * 実行されたかどうかがそのまま判定になる。
+   * **実リポジトリは見ない**（#186 のレビュー）。`loop/STOP` は**人ともう一方のループが
+   * 正当に作り消しするファイル**なので、**そこを観測すると、副作用の主体を判別できない**
+   * ——**`./task loop:resume` が試験の最中に走っただけで落ちる**（`existsSync` と
+   * `statSync` の間なら `ENOENT` で落ちる）。**合否が他人の持ち物で決まる**という、
+   * **#184 が消しに来た形そのもの**である。**`scriptRepo` を身代わりにする。**
+   *
+   * **測るものは 2 つある。**
+   *
+   * - **そのリポジトリのコードが動いたか**（`ran`）——`-x` は「Valence のタスクランナー
+   *   である」ことを保証しないので、**動くこと自体が事故**である
+   * - **そのリポジトリが止まったか**（`loop/STOP`）——**`task` を通らずに止める**形は
+   *   `ran` では捕まらない。**仕組みではなく結果を見る**
+   *
+   * **印だけの偽物にしない。** 「呼ばれた」しか分からないと**配る側が壊れても気づけない**
+   * （`describe("作業が尽きた周回の数え方")` と同じ理由・同じ作り）。
+   * **本物へ渡す前に印を残すだけ**にして、**振る舞いは写さない。**
    */
   function runToLimit(options: { cwd: "same-repo" | "other-repo" }): {
     status: number;
     stderr: string;
     ranScriptRepoTask: boolean;
     ranCwdRepoTask: boolean;
+    stoppedScriptRepo: boolean;
+    stoppedCwdRepo: boolean;
   } {
     const scriptRepo = mkdtempSync(join(tmpdir(), "loop-stall-script-"));
     const otherRepo = mkdtempSync(join(tmpdir(), "loop-stall-cwd-"));
     for (const repo of [scriptRepo, otherRepo]) {
       spawnSync("git", ["init", "--quiet", repo]);
-      // 呼ばれたことだけを残す task。本物のように loop/STOP は配らない
-      writeFileSync(join(repo, "task"), `#!/usr/bin/env bash\ntouch '${repo}/ran'\n`, {
-        mode: 0o755,
-      });
+      // **呼ばれてはいけない側にも置く**ので、動いたかどうかがそのまま判定になる
+      copyFileSync(join(REPO_ROOT, "task"), join(repo, "real-task"));
+      chmodSync(join(repo, "real-task"), 0o755);
+      writeFileSync(
+        join(repo, "task"),
+        `#!/usr/bin/env bash\ntouch '${repo}/ran'\nexec '${repo}/real-task' "$@"\n`,
+        { mode: 0o755 },
+      );
     }
     mkdirSync(join(scriptRepo, "bin"));
     const script = join(scriptRepo, "bin", "loop-stall");
@@ -175,6 +195,8 @@ describe("上限に達したときに止める対象", () => {
       stderr: result.stderr,
       ranScriptRepoTask: existsSync(join(scriptRepo, "ran")),
       ranCwdRepoTask: existsSync(join(otherRepo, "ran")),
+      stoppedScriptRepo: existsSync(join(scriptRepo, "loop", "STOP")),
+      stoppedCwdRepo: existsSync(join(otherRepo, "loop", "STOP")),
     };
     rmSync(scriptRepo, { recursive: true, force: true });
     rmSync(otherRepo, { recursive: true, force: true });
@@ -188,6 +210,19 @@ describe("上限に達したときに止める対象", () => {
 
     expect(result.ranCwdRepoTask).toBe(false);
     expect(result.ranScriptRepoTask).toBe(false);
+  });
+
+  it("cwd が別のリポジトリなら、どちらのリポジトリも止まらない", () => {
+    // **仕組みではなく結果を見る**（#186 のレビュー）。**`task` を通らずに止める**形は
+    // 上の「実行しない」では捕まらない——**止まったかどうかは `loop/STOP` にしか出ない**。
+    //
+    // **身代わりは `scriptRepo` である。** 事故の形は
+    // **「cwd が別なのに、スクリプトが自分の住んでいるリポジトリを止める」**なので、
+    // **その役をここで演じさせる**——**実リポジトリを観測しなくても、同じ主張が押さえられる**
+    const result = runToLimit({ cwd: "other-repo" });
+
+    expect(result.stoppedScriptRepo, "スクリプトの住むリポジトリが止まっている").toBe(false);
+    expect(result.stoppedCwdRepo, "cwd のリポジトリが止まっている").toBe(false);
   });
 
   it("cwd が別のリポジトリなら、止めなかった理由を出す", () => {
@@ -279,16 +314,13 @@ describe("上限に達したときに止める対象", () => {
   });
 
   it("cwd がスクリプトと同じリポジトリなら止める", () => {
+    // **「呼んだ」ではなく「止まった」まで見る**（#186 のレビュー）。**呼ぶところまでしか
+    // 見ないと、配る側が壊れても気づけない**——**止める側の試験なので、止まることを見る**
     const result = runToLimit({ cwd: "same-repo" });
 
     expect(result.status).toBe(1);
     expect(result.ranScriptRepoTask).toBe(true);
-  });
-
-  it("実リポジトリの loop/STOP は作られない", () => {
-    runToLimit({ cwd: "other-repo" });
-
-    expect(existsSync(join(REPO_ROOT, "loop", "STOP"))).toBe(false);
+    expect(result.stoppedScriptRepo, "止めると言いながら止まっていない").toBe(true);
   });
 });
 
