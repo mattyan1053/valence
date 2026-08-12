@@ -29,7 +29,18 @@ set -uo pipefail
 # 自動レビューを行う bot のログイン名。環境変数で差し替えられないようにする。
 # 差し替えられると、自分のアカウントでレビューを 1 つ出すだけで
 # 「現 head はレビュー済み」を捏造でき、レビュー要件が無意味になる。
-readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
+# **レビュー用の bot の名前は書き写さない。** `bin/loop-review-commits` が正で、
+# そこから取る (2 箇所に持つと、片方だけ直したときに違う相手を信用する)。
+# **食い違ったときの症状は「正しい PR がまた止まる」だけ**なので、誰も気づけない (#135)。
+#
+# 隣を引くのに `dirname` を使わない。**外部コマンドを足すと、テストが PATH を絞れなくなる**。
+bot_script_dir="${BASH_SOURCE[0]%/*}"
+[[ $bot_script_dir != "${BASH_SOURCE[0]}" ]] || bot_script_dir="."
+if ! REVIEW_BOT="$("$bot_script_dir/loop-review-commits" --bot)" || [[ -z $REVIEW_BOT ]]; then
+  echo "[FAIL] レビュー用の bot の名前を取得できません" >&2
+  exit 2
+fi
+readonly REVIEW_BOT
 
 # 1 つの PR に対して許すレビューの回数。
 # 上限に達したら、未解決が残っていても追加のレビューは要求しない。

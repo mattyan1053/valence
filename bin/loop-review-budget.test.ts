@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -58,6 +58,8 @@ function fakeReviewCommits(state: State, callLog: string): string {
   return [
     "#!/usr/bin/env bash",
     `echo "$*" >> ${JSON.stringify(callLog)}`,
+    // **名前の出所も本物と同じ形にする**（#135）。呼ぶ側は起動時にここから取る
+    `if [[ $1 == --bot ]]; then printf '%s\\n' ${JSON.stringify(BOT)}; exit 0; fi`,
     `printf '%b' ${JSON.stringify(rows)}`,
     `[[ -n ${JSON.stringify(rows)} ]] && echo`,
     `exit ${state.reviewsExit ?? 0}`,
@@ -139,7 +141,15 @@ function minutesAgo(minutes: number): string {
   return new Date(Date.now() - minutes * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
-const BOT = "chatgpt-codex-connector[bot]";
+/**
+ * レビュー用の bot。**値をここに書き写さない**——`bin/loop-review-commits` が正で、
+ * **写しを持つと、出所を変えても緑のまま**になり、**追随を確かめられない**（#135）。
+ */
+const BOT = execFileSync(fileURLToPath(new URL("./loop-review-commits", import.meta.url)), [
+  "--bot",
+])
+  .toString()
+  .trim();
 const US = "mattyan1053";
 
 function request(at: string): Comment {
@@ -304,7 +314,11 @@ describe("bin/loop-review-budget", () => {
         { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
       );
 
-      expect(budget.calls, "2 回取っている（間に着いた応答で食い違う）").toHaveLength(1);
+      // **名前の引き（`--bot`）は数えない。** ここで見たいのは**レビューの取得**が
+      // 1 回であること——**名前は判定に使う値ではなく、判定する相手**である（#135）
+      const fetches = budget.calls.filter((call) => call !== "--bot");
+
+      expect(fetches, "2 回取っている（間に着いた応答で食い違う）").toHaveLength(1);
     });
 
     it("応答があれば、未応答が解ける", () => {

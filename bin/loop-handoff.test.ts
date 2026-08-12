@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -16,6 +16,19 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-handoff", import.meta.url));
 const LEASE = fileURLToPath(new URL("./loop-lease", import.meta.url));
+
+/**
+ * レビュー用の bot（**GraphQL の形**。`author.login` に `[bot]` は付かない）。
+ *
+ * **値をここに書き写さない**——`bin/loop-review-commits` が正で、**写しを持つと
+ * 出所を変えても緑のまま**になり、**追随を確かめられない**（#135）。
+ */
+const BOT_GRAPHQL = execFileSync(fileURLToPath(new URL("./loop-review-commits", import.meta.url)), [
+  "--bot",
+])
+  .toString()
+  .trim()
+  .replace(/\[bot\]$/, "");
 
 type Run = { status: number; stdout: string; stderr: string };
 
@@ -143,7 +156,7 @@ describe("bin/loop-handoff", () => {
       .flatMap((pr) =>
         (pr.unresolvedBy ?? []).map(
           (who, index) =>
-            `${pr.lastComment ?? 100 + index}${FIELD}${who === "bot" ? "chatgpt-codex-connector" : "mattyan1053"}${FIELD}${pr.threadsAt?.[index] ?? THREAD_AT}`,
+            `${pr.lastComment ?? 100 + index}${FIELD}${who === "bot" ? BOT_GRAPHQL : "mattyan1053"}${FIELD}${pr.threadsAt?.[index] ?? THREAD_AT}`,
         ),
       )
       .join("\n");

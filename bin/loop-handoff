@@ -47,7 +47,23 @@ set -uo pipefail
 readonly ROLES=(master worker)
 
 # 自動レビューの bot。**この人が最後なら、まだ誰も答えていない。**
-readonly REVIEW_BOT="chatgpt-codex-connector"
+#
+# **名前は書き写さない。** `bin/loop-review-commits` が正で、そこから取る——
+# **ここだけ `[bot]` 無しだったのは偶然ではない**（**GraphQL の `author.login` は
+# 付けず、REST は付ける**）。**同じ相手を API ごとに別の文字列で持っていた** (#135)。
+# **食い違うとそのレビューを数えないので、症状は「正しい PR がまた止まる」だけ**である。
+#
+# 隣を引くのに `dirname` を使わない。**外部コマンドを足すと、テストが PATH を絞れなくなる**。
+bot_script_dir="${BASH_SOURCE[0]%/*}"
+[[ $bot_script_dir != "${BASH_SOURCE[0]}" ]] || bot_script_dir="."
+if ! REVIEW_BOT_REST="$("$bot_script_dir/loop-review-commits" --bot)" || [[ -z $REVIEW_BOT_REST ]]; then
+  echo "[FAIL] レビュー用の bot の名前を取得できません" >&2
+  exit 2
+fi
+readonly REVIEW_BOT_REST
+# **ここが読むのは GraphQL の `author.login`** なので、`[bot]` を**取り除いて**持つ。
+# **足す側で書かない**——出所が `[bot]` 無しに変わったときに二重に付く。
+readonly REVIEW_BOT="${REVIEW_BOT_REST%\[bot\]}"
 
 # 列の区切り。**タブを使わない。**
 #
