@@ -44,6 +44,14 @@ MISSING_KEEP="${LOOP_LEASE_MISSING_KEEP:-$MISSING_KEEP_DEFAULT}"
 # 読み書きのロックを待つ時間。ここは一瞬で終わる操作なので短くてよい。
 readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
 
+# 周回の長さを何回ぶん覚えておくか（窓の材料。詳しくは release のところ）。
+#
+# **1 つの Issue は 3〜4 周**かかる（実装 → PR → レビュー対応 → 確認。#68 は 3 周、
+# #125 は 4 周）。**いま取り組んでいる作業の中でいちばん長かった周回は残り、
+# 前の Issue の重さは落ちる**——という境目に置いてある。
+# **設定で変えられるようにしない**（変える理由が出てから考える）。
+readonly RECENT_ROUNDS=5
+
 usage() {
   echo "使い方: bin/loop-lease acquire <役>" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
@@ -587,16 +595,44 @@ release)
   fi
   # **周回の長さを残す。** 「印が古い＝周回が動いていない」の境目を、
   # **この機械で実際にかかった時間から**決めるためのもの（bin/loop-stall）。
-  # **いちばん長かったものだけを残す**——短い周回で上書きすると、
-  # 長い周回の途中で「止まっている」と読まれる。
+  #
+  # **いちばん長かったものだけを残していた**（短い周回で上書きすると、長い周回の
+  # 途中で「止まっている」と読まれるため）。**その値は下がらない**ので、
+  # **詰まった 1 回・異常に長引いた `./task check`・人が止めて放置した 1 回**で
+  # **窓が広がり、二度と戻らない**——**死んだ worker の検出が永久に遅れる** (#146)。
+  # **実測で 4239 秒（70.7 分）が残っていた**（その日の周回はどれも数分である）。
+  #
+  # **直近 $RECENT_ROUNDS 回の中の最大**にする。**古い記録が落ちる**のが本体で、
+  # **上限は置かない**——**根拠の無い閾値を足さない** (#134)。
+  #
+  # **回数の根拠。** **1 つの Issue は実装 → PR → レビュー対応 → 確認で 3〜4 周**
+  # かかる（#68 は 3 周、#125 は 4 周）。**いま取り組んでいる作業の中でいちばん長かった
+  # 周回**は残り、**前の Issue の重さは落ちる**——という境目に合わせてある。
+  #
+  # **忘れる以上、忘れたあとの 1 回は既定へ戻る。** これは避けられない
+  # （**忘れないことと、異常値を引きずらないことは両立しない**）。
+  # **下限は `bin/loop-stall` が lease の期限で置く**ので、そこまでしか縮まない。
   round_len=$((now - held_since))
-  previous_len=0
-  if [[ -f $ROUND_LEN ]]; then
-    read -r previous_len <"$ROUND_LEN" 2>/dev/null || previous_len=0
-    [[ $previous_len =~ ^[0-9]+$ ]] || previous_len=0
+  # **1 行目は「窓に使う値」（＝残しているものの最大）にする。**
+  # **記録は版をまたいで共有される**（lease ファイルで 2 度踏んだ）——
+  # **古い読み手は 1 行目しか読まない**ので、履歴を先頭に置くと
+  # **直近 1 回だけで窓を作ってしまう**。2 行目からが直近の実測（新しい順）である。
+  round_history=()
+  if [[ -f $ROUND_LEN ]] && mapfile -t stored_lens <"$ROUND_LEN" 2>/dev/null; then
+    # **前の版の記録は 1 行だけ**（＝そのときの最大）。履歴が無いので落ちる——
+    # **忘れたい値そのもの**なので、移行の一度きりとして受け入れる。
+    for line in "${stored_lens[@]:1}"; do
+      [[ $line =~ ^[0-9]+$ ]] || continue
+      round_history+=("$line")
+    done
   fi
-  ((round_len > previous_len)) || round_len="$previous_len"
-  printf '%s\n' "$round_len" >"$ROUND_LEN.tmp" 2>/dev/null \
+  round_history=("$round_len" "${round_history[@]}")
+  round_history=("${round_history[@]:0:$RECENT_ROUNDS}")
+  longest_round=0
+  for line in "${round_history[@]}"; do
+    ((line > longest_round)) && longest_round="$line"
+  done
+  printf '%s\n' "$longest_round" "${round_history[@]}" >"$ROUND_LEN.tmp" 2>/dev/null \
     && mv -f "$ROUND_LEN.tmp" "$ROUND_LEN" 2>/dev/null || {
     rm -f "$ROUND_LEN.tmp" 2>/dev/null || true
     echo "[WARN] $SCOPE_LABEL の周回の長さを記録できません: $ROUND_LEN" >&2

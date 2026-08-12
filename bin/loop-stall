@@ -413,15 +413,51 @@ if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
     [[ -z $worker_epoch ]] || ((started > worker_epoch)) && worker_epoch="$started"
   done
   # 窓 = いちばん長かった周回 × 2。**実測が無ければ lease の期限で代用する。**
+  #
+  # **生きている作業場のものだけを見る** (#175 のレビュー)。記録は**作業場ごと**にあり
+  # (scope はパスから作る)、**書き換えるのはその作業場の周回だけ**である——
+  # **長い周回を記録した作業場が使われなくなると、その値は誰も更新しない**ので、
+  # **別の作業場で何周しても落ちず、窓は永久に広いまま**になる。
+  # **この機械には既に worker 役の scope が 2 つある**ので、**#82 を待たずに踏む。**
+  #
+  # **1 つに絞らない**（いちばん新しい周回の作業場だけ、にはしない）。
+  # **軽い Issue の作業場が新しく、重い Issue の作業場が少し古い**とき、
+  # **重いほうが窓の外へ出る**——**長い周回の途中で止めない**という性質を壊す。
+  #
+  # **生死は「周回の印」で見る。活動の記録は使えない**（このすぐ上に書いてある）——
+  # **`./task` は lease の有無に関係なく毎回 heartbeat を打つ**ので、
+  # **使われなくなった作業場で人が 1 回叩けば、長い実測が窓へ戻る**。
+  # **周回の開始でしか動かない印**だけが、周回が生きていることを表す。
+  #
+  # **期限は「その作業場自身の窓」で測る。** lease の期限で一律に切ると、
+  # **30 分を超える周回の途中にある作業場が「死んだ」に落ちる**——
+  # **いちばん守りたい場面で窓が縮む**という、向きが逆の壊れ方になる。
+  # **新しい閾値は作っていない**（**下と同じ式・同じ既定**を、作業場ごとに当てるだけ）。
+  #
+  # **消さない**のも意図的である（**削除は戻せない**）。読むときに外すだけにする。
+  now_epoch="$(date +%s)"
   longest_round=0
   for len in "$common_dir"/valence-loop-roundlen-worker*; do
     [[ -f $len ]] || continue
     read -r seconds <"$len" 2>/dev/null || continue
     [[ $seconds =~ ^[0-9]+$ ]] || continue
+    scope="${len##*/valence-loop-roundlen-}"
+    scope_rounds="$common_dir/valence-loop-rounds-$scope"
+    [[ -f $scope_rounds ]] || continue
+    read -r scope_started <"$scope_rounds" 2>/dev/null || continue
+    [[ $scope_started =~ ^[0-9]+$ ]] || continue
+    scope_window=$((seconds * 2))
+    ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
+    ((now_epoch - scope_started < scope_window)) || continue
     ((seconds > longest_round)) && longest_round="$seconds"
   done
   ((longest_round > 0)) && worker_round_window=$((longest_round * 2)) \
     || worker_round_window="$lease_ttl"
+  # **既定より狭くしない。** 記録は**直近 N 回ぶんしか残らない** (#146) ので、
+  # **短い周回が続いたあとは窓も縮む**——そこで**次の長い周回の途中に止められる**と、
+  # **#129 / #142 が入れた性質を、忘れる仕組みが壊す**ことになる。
+  # **下限は「記録が無いときと同じ既定」**（lease の期限）で、**新しい根拠を作っていない**。
+  ((worker_round_window >= lease_ttl)) || worker_round_window="$lease_ttl"
 fi
 
 # **worker が解く状態か。** 主体が違うものに worker の周回を効かせない
