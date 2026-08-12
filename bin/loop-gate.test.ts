@@ -181,6 +181,21 @@ describe("bin/loop-gate の合格", () => {
   });
 });
 
+describe("bin/loop-gate の不合格", () => {
+  it("落ちたときも、検証した head SHA を丸ごと出す", () => {
+    // **この値は記録へ写される**（`awaiting-worker:<PR番号>@<SHA>` など）。
+    // **縮めて出すと、写す側は縮んだ値しか持てない**——**合格の経路とは
+    // 別の長さになり、同じ head が別の識別子になる**（#145）。
+    //
+    // **`bin/loop-head same` に渡すのもこの値**である。**周回の途中で head が
+    // 動いたかを確かめる**ためには、**評価した head が全部読めること**が要る
+    const result = runGate({ FAKE_PR_STATE: "MERGED" });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(`GATE FAIL pr=12 head=${HEAD}`);
+  });
+});
+
 describe("bin/loop-gate は 1 条件でも欠ければ止める", () => {
   /** 条件ごとに「その条件だけを不成立にする」env と、落ちる行の目印。 */
   const cases: { name: string; env: Record<string, string>; marker: string }[] = [

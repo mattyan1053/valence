@@ -335,5 +335,8 @@ if ((ok == 1)); then
   exit 0
 fi
 echo
-echo "GATE FAIL pr=$PR head=${head_sha:0:8}"
+# **縮めて出さない。** この値は記録へ写される (`awaiting-worker:<PR番号>@<SHA>` など) ので、
+# **縮むと合格の経路と別の長さになり、同じ head が別の識別子になる** (#145)。
+# **`bin/loop-head same` に渡すのもこの値**である。
+echo "GATE FAIL pr=$PR head=$head_sha"
 exit 1

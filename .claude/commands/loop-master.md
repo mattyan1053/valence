@@ -205,6 +205,16 @@ bin/loop-gate <PR番号>
 
 **終了コードで分岐する。出力の文言で判断しない。**
 
+**ゲートが出した head を、この周回の head として持ち回る**（合格・不合格のどちらでも
+`head=` の行に出る）。**以後 `gh pr view` で読み直さない。**
+
+**停止識別子の `<SHA>` も、記録する SHA も、投稿に書く SHA もこれである。**
+読み直した瞬間に、それは**評価した head ではなくなる**——**評価していない head へ
+「指摘が残っている」と記録しかけた**のがこの穴で、実際に踏んでいる（#145）。
+
+**`bin/loop-head same` で、動いていないことを確かめてから記録・投稿する**（下記）。
+**worker はいつでも push できる**ので、**読んだ時点で正しくても、書く時点では違いうる**。
+
 ### exit 0 — マージする
 
 ゲートが出力した SHA をそのまま使う。
@@ -403,11 +413,22 @@ bin/loop-review-budget <PR番号>
 - exit 0 → **先に head を記録してから**要求を投げ、**返るまでこの周回の中で待つ**
 
 ```bash
-bin/loop-review-head <PR番号> "$(gh pr view <PR番号> --json headRefOid --jq '.headRefOid')"
+bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら投げない
+bin/loop-review-head <PR番号> <ゲートが出した head>
 gh pr comment <PR番号> --body "@codex review"
 
 bin/loop-await-review <PR番号> "$since"
+bin/loop-head same <PR番号> <ゲートが出した head>   # 待っている間に動いていないか
 ```
+
+**`bin/loop-head same` が exit 1（動いた）または exit 2（読めない）なら、
+`bin/loop-stall "head-unconfirmed:<PR番号>"` を通して、この PR の周回をそこで終える。**
+**その周回の判断は記録も投稿もしない**——**評価したのは、もう head ではない commit** である。
+
+**枠は戻らない。** 投げたあとに動いた場合、**消費した 1 回は返ってこない**——
+だから**確かめるのは投げる前**にも置いてある。**返ってきたレビュー自体は捨てない**
+（`bin/loop-review-head` の記録は SHA 付きで残り、**その SHA が現 head の祖先なら
+次の周回でも数えられる**）。**捨てるのは「いまの head への判断」だけ**である。
 
 **待機を呼ぶときは、`LOOP_AWAIT_REVIEW_MAX_SEC` より長い timeout を明示する。**
 **シェルの既定タイムアウトは待機の上限より短い**ので、指定を書き忘れると
@@ -421,8 +442,10 @@ bin/loop-await-review <PR番号> "$since"
 **Codex はループの外にいて通知を送ってこない。** 周回で確認すると、**すぐ返っても
 気づくのは次の周回**になる。**待っている間はトークンを使わない**ので、回して確認するより安い。
 
-- `bin/loop-await-review` が **exit 0** → 返った。**ステップ 3 の頭からゲートを回し直す**
-  （同じ周回の中で、指摘への対応かマージまで進める）
+- `bin/loop-await-review` が **exit 0** → 返った。**`bin/loop-head same` を通してから**
+  **ステップ 3 の頭からゲートを回し直す**（同じ周回の中で、指摘への対応かマージまで進める）。
+  **動いていたら回し直さない**（`head-unconfirmed`）——**返ってきた指摘は待つ前の head を
+  見たもの**で、**いまの head にも当てはまるかは誰も確かめていない**
 - **exit 1** → 上限まで返らなかった。**この周回はここで終わり。**
   **空転として数えない**（正常な待ちである）。次の周回で `bin/loop-review-budget` が
   判定する——猶予の内側なら exit 3、猶予を過ぎた未応答なら exit 1 になる。
@@ -546,8 +569,18 @@ bin/loop-triage --findings <残っている指摘の件数> \
 
 #### rework — worker へ差し戻す
 
+**返信する前に、head が動いていないか確かめる。**
+
+```bash
+bin/loop-head same <PR番号> <ゲートが出した head>
+```
+
+**exit 1 / 2 なら返信しない。** `bin/loop-stall "head-unconfirmed:<PR番号>"` を通して
+この PR の周回を終える——**古い head を読んで書いた指摘が、新しい head に対する指摘として
+並ぶ**（実際にそうなった。#145）。**次の周回で、新しい head を評価し直す。**
+
 resolve しない。何を直すかと、なぜそれが必要かを返信し、
-`bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"` を通す。
+`bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"` を通す（**`<SHA>` はゲートが出した head**）。
 
 **差し戻す側でも必ず記録する。** 記録しないと、**対応が来ないまま何周でも回る**
 （`changes-requested` で塞いだのと同じ穴が開く）。識別子に head SHA が入るので、

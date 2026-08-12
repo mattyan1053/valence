@@ -103,11 +103,16 @@ describe("停止識別子", () => {
       ["### exit 1 — 何が足りないかで分ける", "deferred-overflow"],
       ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
+      // **評価した head が動いたら、その周回の判断は記録も投稿もしない**（#145）。
+      // **worker の対応待ちではない**ので `awaiting-worker` とは別に数える——
+      // 待っているのは worker ではなく、**次の周回で自分が評価し直す**ことである
+      ["### 3.2 レビューを要求してよいか確かめる", "head-unconfirmed:<PR番号>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-unanswered:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### exit 2 — 設定か使い方の誤り", "gate-misconfigured:<PR番号>"],
+      ["#### rework — worker へ差し戻す", "head-unconfirmed:<PR番号>"],
       ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
       // **人を呼ぶ側は worker 待ちではない。** triage が `human` を返した状態で、
       // **worker には解けない**——`bin/loop-stall` 自身が「**主体が違うものに
