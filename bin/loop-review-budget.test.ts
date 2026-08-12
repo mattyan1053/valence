@@ -2,8 +2,10 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -24,6 +26,13 @@ type State = {
   /** `bin/loop-review-commits --all` が返す行（`<時刻>\t<SHA>\t<live|stale>`）。 */
   reviews?: string[];
   comments?: Comment[];
+  /**
+   * `bin/loop-review-commits --answers` が返す時刻。
+   *
+   * **どれが応答かの判定は、こちらでは持たない**——**1 箇所（`loop-review-commits`）に
+   * 置いた**ので、ここで真似ると**2 箇所に持つことになる**（今回それで両方壊れた）。
+   */
+  answers?: string[];
   createdAt?: string;
   headSha?: string;
   /** その取得だけが落ちる。**最初の 1 つだけ試すと、後ろの取得を試せない。** */
@@ -31,7 +40,29 @@ type State = {
   reviewsExit?: number;
 };
 
-type Run = { status: number; stdout: string; stderr: string };
+type Run = { status: number; stdout: string; stderr: string; calls: string[] };
+
+/**
+ * 偽の `bin/loop-review-commits`。
+ *
+ * **どれが応答かの判定は持たない。** 判定は本物が 1 箇所で持つので、
+ * ここは**試験が宣言した答え**をそのまま返す（真似ると 2 箇所に持つことになる）。
+ */
+function fakeReviewCommits(state: State, callLog: string): string {
+  // **応答も同じ出力に混ぜる**（SHA の欄が `-`）。**別々に取ると、その間に
+  // レビューが着いたときに「回数は古く、最後の応答時刻は新しい」状態になる**
+  const rows = [
+    ...(state.reviews ?? []),
+    ...(state.answers ?? []).map((at) => `${at}\t-\tanswer`),
+  ].join("\n");
+  return [
+    "#!/usr/bin/env bash",
+    `echo "$*" >> ${JSON.stringify(callLog)}`,
+    `printf '%b' ${JSON.stringify(rows)}`,
+    `[[ -n ${JSON.stringify(rows)} ]] && echo`,
+    `exit ${state.reviewsExit ?? 0}`,
+  ].join("\n");
+}
 
 /**
  * **本物の `gh` を呼ばない。** 見たいのは「状態から終了コードをどう決めるか」であって、
@@ -86,24 +117,21 @@ function run(state: State, env: Record<string, string> = {}): Run {
     { mode: 0o755 },
   );
 
-  writeFileSync(
-    join(bin, "loop-review-commits"),
-    [
-      "#!/usr/bin/env bash",
-      `printf '%b' ${JSON.stringify((state.reviews ?? []).join("\n"))}`,
-      `[[ -n ${JSON.stringify((state.reviews ?? []).join("\n"))} ]] && echo`,
-      `exit ${state.reviewsExit ?? 0}`,
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  const callLog = join(dir, "calls.log");
+  writeFileSync(join(bin, "loop-review-commits"), fakeReviewCommits(state, callLog), {
+    mode: 0o755,
+  });
 
   const result = spawnSync(script, ["12"], {
     encoding: "utf8",
     env: { ...process.env, PATH: path, ...env },
     timeout: 20_000,
   });
+  const calls = existsSync(callLog)
+    ? readFileSync(callLog, "utf8").split("\n").filter(Boolean)
+    : [];
   rmSync(dir, { recursive: true, force: true });
-  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr, calls };
 }
 
 /** いまから `minutes` 分前の時刻。**猶予の境目を跨がせるのに使う。** */
@@ -255,21 +283,78 @@ describe("bin/loop-review-budget", () => {
 
       expect(budget.status).toBe(3);
     });
+  });
 
-    it("応答不能の通知も、書き方が違っても数える", () => {
+  describe("応答があったかどうかは、1 箇所で決める", () => {
+    // **どれが応答かの判定は `bin/loop-review-commits` が持つ**（引き金との対応付けを含む）。
+    // ここで真似ると**同じ規則を 2 箇所に持つ**ことになり、**片方だけ直して食い違う**——
+    // 実際、**同じ文言の列挙を 2 箇所に持っていたので、両方直したら両方壊れた**。
+
+    it("回数と応答時刻を、1 回の取得から導く", () => {
+      // **別々に取ると、その間にレビューが着いたときに
+      // 「回数は古く、最後の応答時刻は新しい」**——**同じ head が既にレビュー済みでも
+      // `pending` が解け、要求を重ねられる**。**寄せ方ではなく取り方の問題**である
       const budget = run(
         {
           reviews: [],
           createdAt: minutesAgo(300),
-          comments: [
-            request(minutesAgo(200)),
-            { at: minutesAgo(100), login: BOT, body: "I need you to Create An Environment" },
-          ],
+          comments: [request(minutesAgo(200))],
+          answers: [minutesAgo(100)],
         },
         { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
       );
 
-      expect(budget.status).toBe(0);
+      expect(budget.calls, "2 回取っている（間に着いた応答で食い違う）").toHaveLength(1);
+    });
+
+    it("応答があれば、未応答が解ける", () => {
+      // **文言は見ない。** `Something went wrong` でも「環境が無い」でも、
+      // **応答として数えられていれば解ける**——**Codex 自身が「再試行しろ」と
+      // 書いているのに、その経路が塞がる**のを防ぐ（昨夜これで 2 時間止まった）
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [request(minutesAgo(200))],
+          answers: [minutesAgo(100)],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.stdout, "未応答のまま数えている").toContain("pending=0");
+      expect(budget.status, "再要求できない").toBe(0);
+    });
+
+    it("応答が無ければ、未応答のまま", () => {
+      // **レビュー以外の Codex タスクへの応答は、ここまで届かない**
+      // （`loop-review-commits` が引き金と対応させて落とす）。**届かない以上、解けない**
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [request(minutesAgo(200))],
+          answers: [],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.stdout, "無関係な応答で解けている").toContain("pending=1");
+      expect(budget.status, "重ねて要求できてしまう").toBe(1);
+    });
+
+    it("応答があっても、レビュー済みにはしない", () => {
+      // **ここを取り違えると、未レビューの head がマージ可能になる**
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [request(minutesAgo(200))],
+          answers: [minutesAgo(100)],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.stdout).toContain("reviewed_head=no");
     });
   });
 
@@ -283,6 +368,7 @@ describe("bin/loop-review-budget", () => {
           request(minutesAgo(200)),
           { at: minutesAgo(100), login: BOT, body: "I need you to create an environment" },
         ],
+        answers: [minutesAgo(100)],
       },
       { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
     );
