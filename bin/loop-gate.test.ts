@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -16,6 +16,16 @@ import { describe, expect, it } from "vitest";
 const SCRIPT = fileURLToPath(new URL("./loop-gate", import.meta.url));
 
 const HEAD = "a".repeat(40);
+
+/**
+ * レビュー用の bot。**値をここに書き写さない**——`bin/loop-review-commits` が正で、
+ * **写しを持つと、出所を変えても緑のまま**になる（#135）。
+ */
+const BOT = execFileSync(fileURLToPath(new URL("./loop-review-commits", import.meta.url)), [
+  "--bot",
+])
+  .toString()
+  .trim();
 
 /** gh の `--jq` の `@base64` と同じ符号化。 */
 function b64(value: string): string {
@@ -107,6 +117,8 @@ exit 0
   writeFileSync(
     join(bin, "loop-review-commits"),
     `#!/usr/bin/env bash
+# **名前の出所も本物と同じ形にする**（#135）。ゲートは起動時にここから取る
+if [[ $1 == --bot ]]; then printf '%s\\n' "${BOT}"; exit 0; fi
 printf '%s\\n' "\${FAKE_REVIEWED-2026-01-01T00:00:00Z$'\\t'${HEAD}}"
 exit \${FAKE_REVIEWED_EXIT:-0}
 `,

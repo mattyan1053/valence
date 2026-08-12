@@ -28,7 +28,18 @@ set -uo pipefail
 # 自動レビューを行う bot のログイン名。環境変数での差し替えを許さない。
 # 差し替えられると、自分のアカウントでレビューを 1 つ出すだけでゲートを通過でき、
 # レビュー要件が無意味になる。
-readonly REVIEW_BOT="chatgpt-codex-connector[bot]"
+# **レビュー用の bot の名前は書き写さない。** `bin/loop-review-commits` が正で、
+# そこから取る (2 箇所に持つと、片方だけ直したときに違う相手を信用する)。
+# **食い違ったときの症状は「正しい PR がまた止まる」だけ**なので、誰も気づけない (#135)。
+#
+# 隣を引くのに `dirname` を使わない。**外部コマンドを足すと、テストが PATH を絞れなくなる**。
+bot_script_dir="${BASH_SOURCE[0]%/*}"
+[[ $bot_script_dir != "${BASH_SOURCE[0]}" ]] || bot_script_dir="."
+if ! REVIEW_BOT="$("$bot_script_dir/loop-review-commits" --bot)" || [[ -z $REVIEW_BOT ]]; then
+  echo "[FAIL] レビュー用の bot の名前を取得できません" >&2
+  exit 2
+fi
+readonly REVIEW_BOT
 
 # .github/workflows/*.yml のジョブ名。これらが pass として存在することを個別に要求する。
 # 「全部 pass」だけでは、ワークフローが起動しなかった PR が 0 件で通ってしまう。

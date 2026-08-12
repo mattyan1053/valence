@@ -378,18 +378,23 @@ describe("bin/loop-review-commits --bot", () => {
     expect(runBot(["--bot", "12"]).status).toBe(2);
   });
 
-  it("同じ bot を固定している他のスクリプトと食い違わない", () => {
-    // **既に 4 箇所にある。** 一致していることを試験で押さえておかないと、
-    // 片方だけ直したときに **「誰のレビューか」の判定がスクリプトごとにずれる**
+  it("使う側は、書き写さずにここへ取りに来る", () => {
+    // **4 箇所に写っていたのをやめた**（#135）。**一致を試験で押さえる**のではなく、
+    // **写しを持たない**——**一致を見る形だと、両方を同時に変えれば通る**うえ、
+    // **`[bot]` の有無で 2 通りの表現を抱え続ける**ことになる。
     const bot = runBot(["--bot"]).stdout.trim();
     const read = (path: string): string =>
       readFileSync(fileURLToPath(new URL(`../${path}`, import.meta.url)), "utf8");
 
-    expect(read("bin/loop-gate")).toContain(`REVIEW_BOT="${bot}"`);
-    expect(read("bin/loop-review-budget")).toContain(`REVIEW_BOT="${bot}"`);
-    // **GraphQL は `[bot]` を付けずに返す**（REST は付ける）。bin/loop-handoff は
-    // GraphQL で読むので、意図的にそちらの形を持っている
+    for (const path of ["bin/loop-gate", "bin/loop-review-budget", "bin/loop-handoff"]) {
+      expect(read(path), `${path} が取りに来ていない`).toContain('loop-review-commits" --bot');
+      expect(read(path), `${path} が値を写している`).not.toContain(bot);
+    }
+    // **GraphQL は `[bot]` を付けずに返す**（REST は付ける）。**出所は REST の形**で、
+    // **取り除く側で作る**——足す側で書くと、出所が変わったときに二重に付く
     expect(bot).toMatch(/\[bot\]$/);
-    expect(read("bin/loop-handoff")).toContain(`REVIEW_BOT="${bot.replace(/\[bot\]$/, "")}"`);
+    expect(read("bin/loop-handoff"), "GraphQL の形を作っていない").toContain(
+      'REVIEW_BOT="${REVIEW_BOT_REST%\\[bot\\]}"',
+    );
   });
 });
