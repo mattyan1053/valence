@@ -517,13 +517,18 @@ fi
 **一覧は先に変数へ受ける。** パイプに繋ぐと終了コードは `cut` のものになり、
 **取得できなかった周回が「レビューが 1 件も無い」と見分けが付かなくなる**（掃除の段と同じ理由）。
 
+**基準は、待つ側と同じ口から取る。** `bin/loop-await-review` が見るのは
+**応答の一覧（`--all`）**である（#78。**SHA を持たない応答は既定の出力から落ちる**）——
+**別の口から取ると、両者が違うものを測る**ので、**古い応答が基準より新しい**状態で
+**何も届いていないのに「返った」**になる。
+
 ```bash
-if ! reviewed="$(bin/loop-review-commits <PR番号>)"; then
+if ! responses="$(bin/loop-review-commits --all <PR番号>)"; then
   # **判定不能なまま進めない。** 投げてから困る形にしない
   bin/loop-stall "review-budget-unknown:<PR番号>"
   exit
 fi
-since="$(printf '%s' "$reviewed" | tail -n 1 | cut -f1)"
+since="$(printf '%s' "$responses" | tail -n 1 | cut -f1)"
 
 bin/loop-review-budget <PR番号>
 ```

@@ -18,6 +18,18 @@
 # (指摘あり / 会話コメント / 👍 だけ)、SHA を持たないものもある**ので、
 # ここで数え方を作り直すと、きれいな PR ほど待ち続けることになる。
 #
+# **見るのは「応答が来たか」であって「レビューが成立したか」ではない** (#78)。
+# **レビューできなかった応答** (「環境が無い」通知や中身の無い review) は
+# **SHA を持たないので既定の出力から落ちる**——そちらを見ると、**応答が既に返って
+# いるのに上限まで待つ**ことになり、**同じ周回でゲートへ戻る**という目的 (#72) が
+# この経路では果たされない。**`--all` は応答の行 (印 `-`) も返す**ので、そこから取る。
+#
+# **口を増やさない。** `--all` は**回数と最後の応答時刻を 1 回の取得から導く**ために
+# 既にある形で、**待つ側が必要とするものはそこに揃っている**。
+#
+# **レビュー済みの判定は変えない。** 数えるのは `bin/loop-review-budget` の仕事で、
+# あちらは既定の出力を見る——**待つのをやめる条件を緩めても、レビューの回数は動かない**。
+#
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
 set -uo pipefail
 
@@ -48,13 +60,13 @@ if ! [[ $INTERVAL_SEC =~ ^[0-9]+$ ]] || ((INTERVAL_SEC < 1)); then
   exit 2
 fi
 
-# 最新のレビューの時刻を返す。無ければ空。
+# 最新の**応答**の時刻を返す。無ければ空。
 # **時刻は GitHub 側の値をそのまま使う。** こちらの時計と比べると、ずれた分だけ
 # 「返っていないのに返った」または「返ったのに待ち続ける」になる。
-latest_review_at() {
-  local reviewed
-  reviewed="$("$(dirname "$0")/loop-review-commits" "$PR")" || return 1
-  printf '%s' "$reviewed" | tail -n 1 | cut -f1
+latest_response_at() {
+  local responses
+  responses="$("$(dirname "$0")/loop-review-commits" --all "$PR")" || return 1
+  printf '%s' "$responses" | tail -n 1 | cut -f1
 }
 
 # **締切は開始時に 1 回決める。** `sleep` の秒数だけを足すと、**毎回の確認 (GitHub API)
@@ -63,8 +75,8 @@ latest_review_at() {
 readonly DEADLINE=$(($(date +%s) + MAX_SEC))
 
 while :; do
-  if ! latest="$(latest_review_at)"; then
-    echo "[FAIL] PR #$PR のレビューを読み取れません" >&2
+  if ! latest="$(latest_response_at)"; then
+    echo "[FAIL] PR #$PR の応答を読み取れません" >&2
     exit 2
   fi
   # ISO8601 (UTC, 固定長) なので文字列比較で時刻順になる。
