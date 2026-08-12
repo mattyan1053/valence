@@ -303,8 +303,13 @@ git branch --show-current      # PR の headRefName と一致することを確�
 gh pr checkout <PR番号>
 git fetch origin main
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
-./task check >check.log 2>&1; status=$?   # 合否はこの $status で決める
-tail -1 check.log                          # check-exit=<合否>（走り終えた印）
+./task check >check.log 2>&1; status=$?
+mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+if [[ $mark != "check-exit=$status" ]]; then
+  bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
+  exit
+fi
+((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
 git push --force-with-lease
 ```
 
@@ -318,8 +323,13 @@ push を消さないため。
 対応が終わったら:
 
 ```bash
-./task check >check.log 2>&1; status=$?   # 合否はこの $status で決める
-tail -1 check.log                          # check-exit=<合否>（走り終えた印）
+./task check >check.log 2>&1; status=$?
+mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+if [[ $mark != "check-exit=$status" ]]; then
+  bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
+  exit
+fi
+((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
 git push
 ```
 
@@ -426,6 +436,10 @@ grep -aE "error|×" check.log              # 絞るのはそのあと
 **3 周続くなら、この機械では `./task check` が実行制限に収まらない**ということで、
 **人の判断が要る**（避ける方向は #131 / #133 の担当で、ここではやらない）。
 
+**受けただけでは、誰も見ていない。** `tail` は必ず成功するので、**`status` を控えても
+分岐が無ければ、赤でも印が無くてもそのまま push へ進む**——**push の前に分岐を置く**
+（rebase・対応後・PR を作る前の 3 つ。**ここだけは読むだけで、次に push が無い**）。
+
 **master への報告にも、印を見たことを書く。** master は**手元で通っている前提で
 差し戻しの粒度を決めている**ので、**「殺されたのに緑に見えた」ものと区別が付かない**。
 
@@ -436,8 +450,13 @@ grep -aE "error|×" check.log              # 絞るのはそのあと
 ### PR を作る
 
 ```bash
-./task check >check.log 2>&1; status=$?   # 緑を確認してから push
-tail -1 check.log                          # check-exit=<合否>（走り終えた印）
+./task check >check.log 2>&1; status=$?
+mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+if [[ $mark != "check-exit=$status" ]]; then
+  bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
+  exit
+fi
+((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
 git push -u origin <ブランチ>
 gh pr create --base main --title "<日本語>" --body-file <file>
 bin/loop-review-head "<PR番号>" "$(git rev-parse HEAD)"

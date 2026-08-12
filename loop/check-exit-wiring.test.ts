@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -107,6 +108,91 @@ describe("./task check の終わりの印", () => {
     expect(result.status, "timeout に殺されていない").not.toBe(0);
   });
 
+  /** そのブロックが push するか。 */
+  function pushes(body: string): boolean {
+    return /git push/.test(body);
+  }
+
+  /**
+   * ブロックを走らせ、**`git push` が呼ばれたか**と**何を記録したか**を返す。
+   *
+   * **`./task check` を差し替える**（合否とログの中身を作る）。
+   * **`git` と `bin/loop-stall` は偽物**にして、**呼ばれたことだけ**を見る。
+   */
+  function runBlock(body: string, check: string): { pushed: boolean; stalled: string } {
+    const workspace = mkdtempSync(join(tmpdir(), "check-push-"));
+    try {
+      const stub = join(workspace, "stub");
+      mkdirSync(stub, { recursive: true });
+      mkdirSync(join(workspace, "bin"), { recursive: true });
+      writeFileSync(join(stub, "gh"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+      writeFileSync(
+        join(stub, "git"),
+        [
+          "#!/usr/bin/env bash",
+          `[[ $1 == push ]] && printf 'pushed\\n' >> ${JSON.stringify(join(workspace, "pushed"))}`,
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(workspace, "bin", "loop-stall"),
+        [
+          "#!/usr/bin/env bash",
+          `printf '%s\\n' "$*" >> ${JSON.stringify(join(workspace, "stalled"))}`,
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      spawnSync("bash", ["-c", body.replace(/<[^>]+>/g, "1").replaceAll("./task check", check)], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+      });
+
+      const readIf = (name: string) =>
+        existsSync(join(workspace, name)) ? readFileSync(join(workspace, name), "utf8") : "";
+      return { pushed: readIf("pushed") !== "", stalled: readIf("stalled") };
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+
+  it("赤のときは、push しない", () => {
+    // **`status` を受けただけでは、誰も見ていない**（`tail` は必ず成功する）——
+    // **赤でも印が無くても、そのまま push へ進む**。**足りないのは分岐だけ**である
+    for (const block of checkBlocks().filter((b) => pushes(b.body))) {
+      const result = runBlock(block.body, "bash -c 'echo check-exit=2; exit 2'");
+
+      expect(result.pushed, `${block.section}: 赤なのに push した`).toBe(false);
+    }
+  });
+
+  it("印が無いときは、push せず記録する", () => {
+    // **殺されると印が出ない**（この PR の本体）。**分からないものを緑と読まない**
+    for (const block of checkBlocks().filter((b) => pushes(b.body))) {
+      const result = runBlock(block.body, "bash -c 'echo 走っている途中; exit 137'");
+
+      expect(result.pushed, `${block.section}: 分からないのに push した`).toBe(false);
+      expect(result.stalled, `${block.section}: 押し通した記録が残らない`).toContain(
+        "local-ci-unknown",
+      );
+    }
+  });
+
+  it("緑のときは、push する", () => {
+    // **止める側だけを見ない**（#168 で踏んだ）。**通る周回で止めては、何も進まない**
+    for (const block of checkBlocks().filter((b) => pushes(b.body))) {
+      const result = runBlock(block.body, "bash -c 'echo check-exit=0'");
+
+      expect(result.pushed, `${block.section}: 緑なのに push していない`).toBe(true);
+      expect(result.stalled, `${block.section}: 緑なのに記録している`).toBe("");
+    }
+  });
+
   it("`./task check` を打つ節を、全部並べて突き合わせる", () => {
     // **絞ってから見ない。** **打つのに見ていない節**が 1 つでもあれば、
     // そこから「殺されたのに緑」が入る——**レビューの往復ごとに通る経路**もある
@@ -116,6 +202,15 @@ describe("./task check の終わりの印", () => {
       ["### 保留を解いた PR を rebase する", true],
       ["### 保留を解いた PR を rebase する", true],
       ["### 実装は必ずテストファースト", true],
+      ["### PR を作る", true],
+    ]);
+    // **push があるブロックは、分岐してから push する。** **「印を含むか」しか
+    // 見ていないと、含んでいるが使っていないが通る**（master の指摘）——
+    // **定義の外ではなく、定義の中で何を見るか**である
+    expect(checkBlocks().map((block) => [block.section, pushes(block.body)])).toEqual([
+      ["### 保留を解いた PR を rebase する", true],
+      ["### 保留を解いた PR を rebase する", true],
+      ["### 実装は必ずテストファースト", false],
       ["### PR を作る", true],
     ]);
   });
