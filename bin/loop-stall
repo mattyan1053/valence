@@ -422,6 +422,11 @@ if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
   done
   ((longest_round > 0)) && worker_round_window=$((longest_round * 2)) \
     || worker_round_window="$lease_ttl"
+  # **既定より狭くしない。** 記録は**直近 N 回ぶんしか残らない** (#146) ので、
+  # **短い周回が続いたあとは窓も縮む**——そこで**次の長い周回の途中に止められる**と、
+  # **#129 / #142 が入れた性質を、忘れる仕組みが壊す**ことになる。
+  # **下限は「記録が無いときと同じ既定」**（lease の期限）で、**新しい根拠を作っていない**。
+  ((worker_round_window >= lease_ttl)) || worker_round_window="$lease_ttl"
 fi
 
 # **worker が解く状態か。** 主体が違うものに worker の周回を効かせない

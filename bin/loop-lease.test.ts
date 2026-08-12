@@ -559,7 +559,10 @@ describe("bin/loop-lease", () => {
         entry.startsWith("valence-loop-roundlen-worker"),
       );
       expect(lengths).toHaveLength(1);
-      const seconds = Number(readFileSync(join(sandbox, ".git", lengths[0] ?? ""), "utf8").trim());
+      // **1 行目が窓に使う値**（2 行目からは直近の実測。#146）
+      const seconds = Number(
+        readFileSync(join(sandbox, ".git", lengths[0] ?? ""), "utf8").split("\n")[0],
+      );
 
       expect(seconds).toBeGreaterThanOrEqual(300);
     });
@@ -581,9 +584,104 @@ describe("bin/loop-lease", () => {
       const longest = readdirSync(join(sandbox, ".git")).find((entry) =>
         entry.startsWith("valence-loop-roundlen-worker"),
       );
-      const seconds = Number(readFileSync(join(sandbox, ".git", longest ?? ""), "utf8").trim());
+      const seconds = Number(
+        readFileSync(join(sandbox, ".git", longest ?? ""), "utf8").split("\n")[0],
+      );
 
       expect(seconds).toBeGreaterThanOrEqual(300);
+    });
+
+    /**
+     * `seconds` 秒かかった周回を 1 つ回す。**待たずに作る**——lease の取得時刻を
+     * 過去へずらす（他の試験と同じ手）。
+     */
+    function round(seconds: number): void {
+      const token = acquire().stdout.trim();
+      const rounds = readdirSync(join(sandbox, ".git")).find((entry) =>
+        entry.startsWith("valence-loop-rounds-worker"),
+      );
+      const lease = join(sandbox, ".git", (rounds ?? "").replace("rounds", "lease"));
+      const held = readFileSync(lease, "utf8").split("\n");
+      held[0] = `${token}\t${Math.floor(Date.now() / 1000) - seconds}`;
+      writeFileSync(lease, held.join("\n"));
+      expect(run(["release", "worker", token]).status).toBe(0);
+    }
+
+    /** 記録の中身（1 行目 = 窓に使う値、以降 = 直近の実測）。 */
+    function roundLenLines(): string[] {
+      const name = readdirSync(join(sandbox, ".git")).find((entry) =>
+        entry.startsWith("valence-loop-roundlen-worker"),
+      );
+      return readFileSync(join(sandbox, ".git", name ?? ""), "utf8")
+        .trim()
+        .split("\n");
+    }
+
+    /**
+     * 窓が、古い実測に引きずられ続けない（#146）。
+     *
+     * **最大値だけを残すと単調に増える。** 機械が詰まった・`./task check` が異常に
+     * 長引いた・人が止めて放置した——**どれか 1 回で窓が広がり、二度と戻らない**。
+     * **実測で 4239 秒（70.7 分）が残っていた**——**その日の周回はどれも数分**である。
+     *
+     * **「短いほうへ倒す」だけにはしない。** 短い周回で上書きすると、
+     * **長い周回の途中で「止まっている」と読まれる**（#129 / #142 が入れた性質）。
+     */
+    it("1 回だけ長い周回は、何周かしたら落ちる", () => {
+      // **lease の期限より短くしておく**（超えると release ではなく引き継ぎになる）
+      round(1500);
+      expect(Number(roundLenLines()[0])).toBeGreaterThanOrEqual(1500);
+
+      // **同じ機械で、ふだんの周回を続ける**
+      for (let index = 0; index < 10; index += 1) {
+        round(30);
+      }
+
+      expect(Number(roundLenLines()[0]), "古い異常値を引きずっている").toBeLessThan(1500);
+    });
+
+    it("直後の周回では、まだ落ちない", () => {
+      // **忘れるのが速すぎると、長い周回の途中で止められる**——
+      // **同じ Issue を続けている間は、その重さを覚えている**こと
+      round(1500);
+      round(30);
+
+      expect(Number(roundLenLines()[0]), "1 周で忘れている").toBeGreaterThanOrEqual(1500);
+    });
+
+    it("記録が伸び続けない", () => {
+      // **直近の分だけを残す。** 際限なく足すと、**読むたびに重くなる**
+      for (let index = 0; index < 20; index += 1) {
+        round(10);
+      }
+
+      expect(roundLenLines().length, "記録が周回のたびに伸びている").toBeLessThan(20);
+    });
+
+    it("1 行目は、窓に使う値である", () => {
+      // **記録は版をまたいで共有される**（`bin/loop-lease` の lease ファイルで踏んだ）。
+      // **古い読み手は 1 行目しか読まない**ので、**そこに窓の値を置く**——
+      // 履歴を 1 行目に置くと、**古い `bin/loop-stall` が直近 1 回だけで窓を作る**
+      round(1500);
+      round(30);
+
+      const lines = roundLenLines();
+      const history = lines.slice(1).map(Number);
+
+      expect(Number(lines[0]), "1 行目が最大になっていない").toBe(Math.max(...history));
+    });
+
+    it("前の版が書いた記録（1 行だけ）でも壊れない", () => {
+      // **1 行だけの記録が残っている機械で動く**こと（移行の一度きり）
+      round(30);
+      const name = readdirSync(join(sandbox, ".git")).find((entry) =>
+        entry.startsWith("valence-loop-roundlen-worker"),
+      );
+      writeFileSync(join(sandbox, ".git", name ?? ""), "4239\n");
+
+      round(60);
+
+      expect(Number(roundLenLines()[0])).toBeGreaterThanOrEqual(60);
     });
 
     it("書けなければ、黙って成功しない", () => {

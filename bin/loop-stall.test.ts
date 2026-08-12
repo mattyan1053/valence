@@ -869,6 +869,28 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(results.at(-1)?.stdout).toContain("count=0");
   });
 
+  it("実測が短くても、窓は既定より狭くしない", () => {
+    // **窓の材料は直近 N 回の最大になった** (#146)。**忘れる以上、忘れたあとの 1 回は
+    // 既定へ戻る**——**そこから下へは行かない**ようにする。**記録が無いときと同じ
+    // 既定（lease の期限）を下限**に置くので、**根拠を新しく作っていない**。
+    //
+    // **下限が無いと、短い周回が続いたあとの長い周回で止められる**——
+    // **#129 / #142 が入れた性質を、忘れる仕組みが壊す**形になる。
+    const ttl = Number(
+      spawnSync(join(repo, "bin", "loop-lease"), ["ttl"], {
+        cwd: repo,
+        encoding: "utf8",
+      }).stdout.trim(),
+    );
+    const now = Math.floor(Date.now() / 1000);
+    // **ふだんの周回は 5 秒**（窓にすると 10 秒）。いまの周回は既定の半分だけ経っている
+    workerState({ activityAgo: 10, startedAt: now - Math.floor(ttl / 2), longestRound: 5 });
+
+    const results = [stall(), stall(), stall()];
+
+    expect(results.at(-1)?.stdout, "既定より狭い窓で数えている").toContain("count=0");
+  });
+
   it("worker が黙ったら、これまでどおり master の周回で数えて止める", () => {
     // **worker が死んだときにカウンタが進まなくなってはいけない**（危険側の穴）。
     // 期限は bin/loop-lease が持つ値を使う（書き写さない）
