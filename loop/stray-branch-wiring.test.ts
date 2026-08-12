@@ -59,6 +59,9 @@ describe("宙に浮いたブランチ", () => {
 
     expect(section, "消し残りの扱いが無い").toContain("merged-leftover");
     expect(section, "宙に浮いたものの扱いが無い").toContain("no-pr");
+    // **PR の先に積まれたものは、消してよい側ではない**（#177）——
+    // **その commit はどの PR にも入っていない**
+    expect(section, "PR の先に積まれたものの扱いが無い").toContain("beyond-pr");
     expect(section, "人へ渡す経路が無い").toContain('bin/loop-stall "stray-branch:<ブランチ>"');
     // **master は push しない**（絶対ルール）。**「掃除してよい」と分類することと、
     // 「master が掃除する」ことは別**である——**master の手順書に、master が

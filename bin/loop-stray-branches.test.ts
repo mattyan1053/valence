@@ -7,6 +7,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-stray-branches", import.meta.url));
 
+/** `gh pr list --limit` の値。**スタブもここで切り詰める**（実物と同じ形にする）。 */
+const PR_LIST_LIMIT = 20;
+
 /** remote のブランチ。`git ls-remote --heads` の形。 */
 type Branch = { name: string; sha?: string };
 /** その head を持つ PR。 */
@@ -16,6 +19,13 @@ type Pr = {
   state: "OPEN" | "MERGED" | "CLOSED";
   /** **fork から出た PR。** origin の同名ブランチとは**別物**である。 */
   crossRepo?: boolean;
+  /**
+   * その PR の head SHA。**既定はブランチの先端と同じ**（＝中身は PR に入っている）。
+   *
+   * **マージのあとに積むと、ここがブランチの先端と食い違う**——**その commit は
+   * どの PR にも入っていない**ので、**消すと作業が消える**（#177）。
+   */
+  headOid?: string;
 };
 
 /**
@@ -102,13 +112,51 @@ describe("bin/loop-stray-branches", () => {
       [
         "#!/usr/bin/env bash",
         ...(options.ghFails === true ? ['echo "gh が落ちた" >&2', "exit 1"] : []),
+        // **PR の head を、問い合わせて・取り出しているか。** ここで確かめないと、
+        // **スタブが勝手に返した列**で判定が通り、**尋ねていない実装でも緑**になる
+        // （#178 で踏んだ形）。**2 つに分けて見る**——**`--json` から外しても
+        // `--jq` に語が残っていれば満たされる**（#173 でそれを踏んだ）
+        'if [[ $* == *"pr list"* ]]; then',
+        '  if [[ $* != *",headRefOid"* ]]; then',
+        '    echo "スタブ: PR の head を問い合わせていない: $*" >&2',
+        "    exit 1",
+        "  fi",
+        '  if [[ $* != *".headRefOid)"* ]]; then',
+        '    echo "スタブ: 問い合わせた head を取り出していない: $*" >&2',
+        "    exit 1",
+        "  fi",
+        "fi",
         // **ブランチごとに引く。** **一括で取ると、上限を超えた古い PR が「無い」に化ける**
         // （この repo は既に PR が 171 件）。**fork の PR は別物**なので、
-        // **同じリポジトリのものだけ**を返す（`isCrossRepository` で絞るのは呼ぶ側）
-        ...options.prs.map(
-          (pr) =>
-            `if [[ $* == *"--head ${pr.head}"* ]]; then printf '%s\\u001f%s\\u001f%s\\n' ${pr.number} ${pr.state} ${pr.crossRepo === true ? "true" : "false"}; exit 0; fi`,
-        ),
+        // **同じリポジトリのものだけ**を返す（`isCrossRepository` で絞るのは呼ぶ側）。
+        //
+        // **同じ head の PR は、まとめて返す。** 1 件ずつ `exit` すると
+        // **最初の 1 件しか返らず**、**「複数付きうる」経路を 1 度も通せない**
+        ...[...new Set(options.prs.map((pr) => pr.head))].map((head) => {
+          const rows = options.prs
+            .filter((pr) => pr.head === head)
+            // **上限で切り詰める。** 実物の `--limit` はここで効く——**切り詰めない
+            // スタブでは、上限より後ろに一致がある状態を 1 度も作れない**（#180 のレビュー）
+            .slice(0, PR_LIST_LIMIT)
+            .map(
+              (pr) =>
+                `${pr.number}\\u001f${pr.state}\\u001f${pr.crossRepo === true ? "true" : "false"}\\u001f${pr.headOid ?? "a".repeat(40)}`,
+            )
+            .join("\\n");
+          return `if [[ $* == *"--head ${head}"* ]]; then printf '%b\\n' ${JSON.stringify(rows)}; exit 0; fi`;
+        }),
+        // **先端を含む PR は、上限に依らない口で尋ねる**（#180 のレビュー）。
+        // **どの PR に入っているかは、その head の一覧の何番目にあるかと関係が無い**
+        ...[...new Set(options.prs.map((pr) => pr.headOid ?? "a".repeat(40)))].map((oid) => {
+          const rows = options.prs
+            .filter((pr) => (pr.headOid ?? "a".repeat(40)) === oid)
+            .map(
+              (pr) =>
+                `${pr.number}\\u001f${pr.state === "OPEN" ? "open" : "closed"}\\u001f${pr.crossRepo === true ? "someone/valence" : "mattyan1053/valence"}\\u001fmattyan1053/valence`,
+            )
+            .join("\\n");
+          return `if [[ $* == *"commits/${oid}/pulls"* ]]; then printf '%b\\n' ${JSON.stringify(rows)}; exit 0; fi`;
+        }),
         "exit 0",
         "",
       ].join("\n"),
@@ -159,6 +207,51 @@ describe("bin/loop-stray-branches", () => {
     expect(result.status).toBe(1);
     expect(result.stdout, "種類が出ていない").toContain("merged-leftover");
     expect(result.stdout, "どの PR かが出ていない").toContain("76");
+    // **既定では PR の head とブランチの先端が同じ**（＝中身は PR に入っている）
+  });
+
+  it("マージのあとに積まれた commit があるブランチは、消してよいと言わない", () => {
+    // **これが本体**（#177）。**`merged-leftover` は「作業は PR に残っているので
+    // 消してよい」を意味する**が、**マージのあとに積んだ commit はその PR に入っていない**——
+    // **消すと、その作業が消える**。**実物があった**（`feat/await-review` の `9f34c6e`、
+    // #78 の叩き台。master は 5 回「削除するだけでよい」と人へ伝えていた）。
+    //
+    // **倒れる向きがいちばん悪い。** `no-pr` は人を呼ぶ（安全側）が、
+    // **こちらは「消してよい」と言う**うえ、**消えたことは次に誰かが探すまで分からない**
+    const result = run({
+      branches: [{ name: "feat/kept-going", sha: "c".repeat(40) }],
+      prs: [{ head: "feat/kept-going", number: 76, state: "MERGED", headOid: "b".repeat(40) }],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "消してよいと言っている").not.toContain("merged-leftover");
+    expect(result.stdout, "人へ渡す側になっていない").toContain("beyond-pr");
+    // **人が判断できる材料を出す**（どの PR の先か / どこまで積まれているか）
+    expect(result.stdout, "どの PR かが出ていない").toContain("76");
+    expect(result.stdout, "先端が出ていない").toContain("cccccccc");
+  });
+
+  it("PR の head と先端が同じなら、これまでどおり消してよい", () => {
+    // **止める側だけを見ない**（#168 で踏んだ）。**全部を人へ渡す形でも
+    // 上の 1 本は緑になる**ので、**普通の消し残りが残ること**を別に見る
+    const result = run({
+      branches: [{ name: "feat/done", sha: "b".repeat(40) }],
+      prs: [{ head: "feat/done", number: 76, state: "MERGED", headOid: "b".repeat(40) }],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "普通の消し残りまで人へ渡している").toContain("merged-leftover");
+  });
+
+  it("PR の head を読めなければ、消してよいと言わない", () => {
+    // **判定不能を「消してよい」へ倒さない。** **迷ったら人へ渡す側**である
+    const result = run({
+      branches: [{ name: "feat/unknown-head", sha: "c".repeat(40) }],
+      prs: [{ head: "feat/unknown-head", number: 76, state: "MERGED", headOid: "" }],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "読めないのに消してよいと言っている").not.toContain("merged-leftover");
   });
 
   it("open な PR の head は、宙に浮いていない", () => {
@@ -241,6 +334,106 @@ describe("bin/loop-stray-branches", () => {
     expect(result.status).toBe(1);
     expect(result.stdout, "fork の PR を自分のものとして数えている").toContain("no-pr");
     expect(result.stdout).not.toContain("merged-leftover");
+  });
+
+  it("終わった PR が複数あっても、先端を含むものがあれば消してよい", () => {
+    // **`gh pr list` は並び順を保証しない**（`--limit` は「最大何件取るか」だけ）。
+    // **最後に読んだ 1 件で決めると、先に返ってきた一致が捨てられる**——
+    // **作業は PR に残っているのに、人待ちが毎周回積まれ、3 周ごとに `loop/STOP`**
+    // になる（#180 のレビュー）。**呼びすぎる側が積み上がる**形である。
+    //
+    // **一致するものを先に返す**（後ろが上書きする実装なら、ここで落ちる）
+    const result = run({
+      branches: [{ name: "feat/remade", sha: "b".repeat(40) }],
+      prs: [
+        { head: "feat/remade", number: 76, state: "MERGED", headOid: "b".repeat(40) },
+        { head: "feat/remade", number: 60, state: "CLOSED", headOid: "c".repeat(40) },
+      ],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "先端を含む PR があるのに人へ渡している").toContain("merged-leftover");
+  });
+
+  it("終わった PR が複数あっても、どれも先端を含まなければ人へ渡す", () => {
+    // **集約を「どれか 1 つでも終わっていれば消してよい」に広げない**——
+    // **それは先端を見ない形**（#177 の前）に戻ることである
+    const result = run({
+      branches: [{ name: "feat/remade", sha: "d".repeat(40) }],
+      prs: [
+        { head: "feat/remade", number: 76, state: "MERGED", headOid: "b".repeat(40) },
+        { head: "feat/remade", number: 60, state: "CLOSED", headOid: "c".repeat(40) },
+      ],
+    });
+
+    expect(result.stdout, "先端を含まないのに消してよいと言っている").toContain("beyond-pr");
+  });
+
+  it("先端を含む PR が取得上限より後ろにあっても、消してよいと分かる", () => {
+    // **`--limit` は「最大何件取るか」だけ**で、**並び順は保証されない**——
+    // **一致が上限より後ろにあると `tip_in_pr=0` のまま**になり、
+    // **安全に消せるブランチを人待ちにし続ける**（#180 のレビュー 2 周目）。
+    //
+    // **上限を上げない。** **根拠の無い数字は消すほうへ倒す**（#134 と同じ形）——
+    // **「先端を含む PR があるか」を、一覧の上限と独立に尋ねる**
+    const tip = "b".repeat(40);
+    const result = run({
+      branches: [{ name: "feat/remade-many", sha: tip }],
+      prs: [
+        // **上限のぶんだけ、一致しない PR を並べる**
+        ...Array.from({ length: PR_LIST_LIMIT }, (_unused, index) => ({
+          head: "feat/remade-many",
+          number: 100 + index,
+          state: "CLOSED" as const,
+          headOid: "c".repeat(40),
+        })),
+        // **一致するものは、上限より後ろにある**
+        { head: "feat/remade-many", number: 76, state: "MERGED" as const, headOid: tip },
+      ],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "上限より後ろの一致を見ていない").toContain("merged-leftover");
+  });
+
+  it("先端を含む open な PR があれば、消してよいと言わない", () => {
+    // **消すと open な PR が壊れる。** **`--head` の一覧は上限で切れる**ので、
+    // **先端を含む PR の state も、上限に依らない口から見る**
+    const tip = "b".repeat(40);
+    const result = run({
+      branches: [{ name: "feat/working-many", sha: tip }],
+      prs: [
+        ...Array.from({ length: PR_LIST_LIMIT }, (_unused, index) => ({
+          head: "feat/working-many",
+          number: 100 + index,
+          state: "CLOSED" as const,
+          headOid: "c".repeat(40),
+        })),
+        { head: "feat/working-many", number: 76, state: "OPEN" as const, headOid: tip },
+      ],
+    });
+
+    expect(result.status, "作業中の PR がある head を挙げている").toBe(0);
+    expect(result.stdout).toBe("");
+  });
+
+  it("fork の PR が先端を含んでいても、消してよいと言わない", () => {
+    // **fork の PR は別物である**（一覧側と同じ判断）。**origin のブランチを消しても
+    // fork には残る**が、**この repo の側から見ると作業は残っていない**——
+    // **迷ったら人へ渡す側**へ倒す
+    const tip = "b".repeat(40);
+    const result = run({
+      branches: [{ name: "feat/forked-tip", sha: tip }],
+      prs: [
+        // origin 側の終わった PR（**先端は含まない**）。表示に使われる
+        { head: "feat/forked-tip", number: 60, state: "CLOSED", headOid: "c".repeat(40) },
+        // fork の PR が先端を含んでいる
+        { head: "feat/forked-tip", number: 200, state: "MERGED", headOid: tip, crossRepo: true },
+      ],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "fork の PR を自分のものとして数えている").toContain("beyond-pr");
   });
 
   it("ブランチごとに引く（一括の上限に依らない）", () => {

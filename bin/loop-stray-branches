@@ -17,7 +17,10 @@
 #
 #   no-pr            … PR が 1 件も無い。**作業が宙に浮いている**ので**人へ渡す**
 #                      (救うか捨てるかは中身を見ないと決まらない。**自動で消さない**)
-#   merged-leftover  … 終わった PR の消し残り。**掃除してよい** (作業は PR に残っている)
+#   beyond-pr        … 終わった PR の**先に積まれている**。**その commit はどの PR にも
+#                      入っていない**ので、**人へ渡す** (#177)
+#   merged-leftover  … 終わった PR の消し残り。**掃除してよい**
+#                      (**先端がその PR の head である**ときだけ。作業は PR に残っている)
 #
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
 set -uo pipefail
@@ -85,9 +88,13 @@ while read -r sha ref; do
   # **fork の PR は別物である。** `headRefName` だけをキーにすると、**fork の PR が
   # origin の無関係なブランチに対応付けられ**、**終わっていれば「消してよい」と表示される**
   # ——**PR に残っていない作業を消すことになる** (#148 が塞ごうとした穴を、塞ぐ側が広げる)。
+  #
+  # **head も取る。** **「終わった PR がある」だけでは、その中身が PR に入っている
+  # ことにならない** (#177)。**マージのあとに積んだ commit は、どの PR にも入っていない**
+  # ——**消してよいと言うと、その作業が消える**（実物があった。#78 の叩き台）。
   if ! prs="$(gh pr list --head "$branch" --state all --limit 20 \
-    --json number,state,isCrossRepository \
-    --jq '.[] | "\(.number)\u001f\(.state)\u001f\(.isCrossRepository)"')"; then
+    --json number,state,isCrossRepository,headRefOid \
+    --jq '.[] | "\(.number)\u001f\(.state)\u001f\(.isCrossRepository)\u001f\(.headRefOid)"')"; then
     fail_unknown "PR の一覧 ($branch)"
   fi
 
@@ -95,16 +102,45 @@ while read -r sha ref; do
   # 無ければ終わったものとして扱う。
   state=""
   number=""
-  while IFS="$FIELD" read -r pr_number pr_state pr_cross; do
+  while IFS="$FIELD" read -r pr_number pr_state pr_cross _pr_oid; do
     [[ -n $pr_number ]] || continue
     # **絞り込みを jq の中に置かない。** **偽の `gh` から作れない形になり、
     # 試験がこの判定を 1 度も通らない** (#159 で踏んだ)。
     [[ $pr_cross != "true" ]] || continue
+    # **表示に使うのは 1 件だけ**（どの PR かが分かればよい）
     if [[ $state != "OPEN" ]]; then
       state="$pr_state"
       number="$pr_number"
     fi
   done <<<"$prs"
+
+  # **先端がどの PR に入っているかは、上限に依らない口で尋ねる** (#180 のレビュー 2 周目)。
+  #
+  # **一覧の `--limit` に根拠は無い。** **上げても、次の誰かが同じ問いを持つ** (#134 の形)
+  # ので、**数字を調整せず、判定から外す**——**「この commit を含む PR があるか」は、
+  # その head の一覧の何番目にあるかと関係が無い**。
+  #
+  # **open な PR が含んでいたら、消してはいけない**（PR が壊れる）。**一覧の上限では
+  # そこも取りこぼす**ので、**state もこちらから見る**。
+  if ! tip_prs="$(gh api --paginate "repos/{owner}/{repo}/commits/$sha/pulls" \
+    --jq '.[] | "\(.number)\u001f\(.state)\u001f\(.head.repo.full_name)\u001f\(.base.repo.full_name)"' 2>/dev/null)"; then
+    fail_unknown "先端を含む PR ($branch)"
+  fi
+  tip_in_pr=0
+  tip_open=0
+  while IFS="$FIELD" read -r tip_number tip_state tip_head_repo tip_base_repo; do
+    [[ -n $tip_number ]] || continue
+    # **fork の PR は別物である**（上と同じ判断。**絞り込みは jq に置かない**）
+    [[ $tip_head_repo == "$tip_base_repo" ]] || continue
+    if [[ $tip_state == "open" ]]; then
+      tip_open=1
+    else
+      tip_in_pr=1
+    fi
+  done <<<"$tip_prs"
+
+  # **作業中である。** 上の `state` は一覧の上限で取りこぼしうるので、こちらでも見る
+  ((tip_open == 0)) || continue
 
   case "$state" in
     OPEN)
@@ -118,8 +154,21 @@ while read -r sha ref; do
       found=1
       ;;
     *)
-      # MERGED / CLOSED。**どちらも PR に中身が残る**ので、消してよい
-      printf 'merged-leftover\t%s\t#%s (%s)\n' "$branch" "$number" "$state"
+      # MERGED / CLOSED。**中身が PR に残っているかは、先端がその PR の head かで決まる。**
+      #
+      # **祖先関係では見られない。** squash merge なので、**`main` に入った commit は
+      # ブランチ側の commit の祖先にならない**——**「main に入っているか」を尋ねると、
+      # 正しくマージされた消し残りまで「入っていない」になる**。
+      #
+      # **迷ったら人へ渡す側へ倒す。** 読めないとき（head が空）も消してよいと言わない
+      if ((tip_in_pr == 1)); then
+        printf 'merged-leftover\t%s\t#%s (%s)\n' "$branch" "$number" "$state"
+      else
+        # **PR の先に積まれている。** その commit は**どの PR にも入っていない**ので、
+        # **救うか捨てるかは中身を見ないと決まらない**——`no-pr` と同じ側（人へ渡す）
+        printf 'beyond-pr\t%s\t#%s (%s) の先に積まれている: %s\n' \
+          "$branch" "$number" "$state" "${sha:0:8}"
+      fi
       found=1
       ;;
   esac
