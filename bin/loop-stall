@@ -44,7 +44,7 @@ readonly STOP_IDS=(
   "gate-misconfigured:<PR番号>|master: bin/loop-gate が exit 2"
   "review-budget-unknown:<PR番号>|master: 3.2 でレビューの判定ができない (予算・一覧の取得)"
   "merge-failed:<PR番号>@<SHA>|master: マージに失敗"
-  "review-exhausted:<PR番号>@<SHA>|master: レビュー上限に達し、手直しも上限超え"
+  "review-exhausted:<PR番号>@<SHA>|master: 人の判断待ち (レビュー上限に達し手直しも上限超え / 保留にできなかった)"
   "review-unanswered:<PR番号>@<SHA>|master: レビューが返らず、マージも再要求もできない"
   # **1 つの状態に 1 つの名前。** 以前は「優先度 1 / 2 の指摘が残っている」と
   # 「出した要求が満たされていない」を別の名前で数えていたが、**どちらも

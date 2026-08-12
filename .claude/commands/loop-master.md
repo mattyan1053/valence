@@ -576,17 +576,21 @@ if gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
   # **そのまま通すなら人がスレッドを resolve、直させるならスレッドへ書いて
   # `changes-requested`**。**label を外すのは最後**である（`loop/README.md` と同じ）
   if ! gh pr comment <PR番号> --body-file <file>; then
+    # **打つのは人待ちの名前である。** triage が `human` を返した状態は
+    # **worker には解けない**——`awaiting-worker` は `WORKER_FIXES` に入るので、
+    # **worker の周回が動いている間ずっと数えられない**（主体が違う）。
+    #
     # **理由の無い保留を残さない。** 一覧には PR 番号が出るので、**見た人は
     # 「人待ちが 1 件ある」と読み、中身が空だとは思わない**——**停止も積まれない**ので
     # 3 周の経路にも乗らない。**動いているように見えるぶん、こちらのほうが危ない**。
     # **戻して数える**（`--add-label` が落ちた場合と同じ形に畳める）
     gh pr edit <PR番号> --remove-label parked --remove-label awaiting-human || true
-    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+    bin/loop-stall "review-exhausted:<PR番号>@<SHA>"
   fi
 else
   # **保留にできなかった。** ループは止まる側にあるので、**これまでどおり数える**——
-  # 3 周で人を呼ぶ（`review-exhausted:<PR番号>@<SHA>` の場合も同じ）
-  bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  # 3 周で人を呼ぶ。**人待ちの名前で打つ**（worker には解けない状態である）
+  bin/loop-stall "review-exhausted:<PR番号>@<SHA>"
 fi
 ```
 
