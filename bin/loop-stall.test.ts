@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -285,10 +286,30 @@ describe("上限に達したときに止める対象", () => {
     expect(result.ranScriptRepoTask).toBe(true);
   });
 
-  it("実リポジトリの loop/STOP は作られない", () => {
+  it("実リポジトリの loop/STOP は、この実行では触られない", () => {
+    // **「いま無い」ではなく「この実行が作っていない」を見る**（#184）。
+    //
+    // **在ることを失敗にすると、正当に停止しているあいだ `./task check` が必ず赤**になる。
+    // **worker は緑のときしか push しない**ので、**STOP の原因を直す PR すら出せない**——
+    // **止める仕組みが、止まった状態から出る道をふさぐ**。実際に 1 周止まった
+    // （2026-08-13 03:40、`stray-branch:feat/worker-workspaces`）。
+    //
+    // **止まっているときにしか現れず、止まっているときは誰も試験を走らせない**ので、
+    // **この不具合は自分を隠す。**
+    //
+    // **試験の前に消さない。** 消せば緑になるが、**それは「人が消すまで回復できない」を
+    // 試験の中で再演しているだけ**である。
+    //
+    // **こちらから置きもしない。** 置くと**消し損ねた回が、この Issue の状態そのものを作る**
+    // ——**両方のループが「正当な停止」と読んで止まる**。**読むだけにする。**
+    const stop = join(REPO_ROOT, "loop", "STOP");
+    const touched = () => (existsSync(stop) ? statSync(stop).mtimeMs : undefined);
+    const before = touched();
+
     runToLimit({ cwd: "other-repo" });
 
-    expect(existsSync(join(REPO_ROOT, "loop", "STOP"))).toBe(false);
+    // **作れば `undefined` → 数値**で、**書き換えれば mtime** で捕まる
+    expect(touched()).toBe(before);
   });
 });
 
