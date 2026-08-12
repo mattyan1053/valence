@@ -92,7 +92,19 @@ while IFS="$FIELD" read -r number labels parked_at last_comment_at; do
   [[ -n $parked_at ]] || continue
   # **保留にした後に何か書かれていれば、理由はそこにある。**
   # 時刻はどちらも GitHub が記録した ISO8601 (UTC, 固定長) なので文字列で比べられる。
-  [[ -n $last_comment_at && $last_comment_at > $parked_at ]] && continue
+  #
+  # **同じ秒も「後」に数える。** `createdAt` は秒までで、**label を付けてから理由を
+  # 投稿するまでは `gh` を 1 回挟むだけ** (この環境の実測で 0.2〜1 秒) なので、
+  # **同じ秒に収まりうる**——**厳密に比べると、正常な保留が偽物になる**。
+  #
+  # **倒す向きに理由がある。** **書いてある手順では、コメントは必ず label より後**
+  # (`--add-label` が成功してから `gh pr comment`) なので、**同じ秒ならそれは理由**である。
+  # 逆に倒すと、**起こる形が手順書に書かれていないほう** (label より前の同じ秒のコメント)
+  # **を守るために、書いてある形を壊す**。
+  #
+  # **落ちる先も悪い。** 手順書は exit 1 なら「理由を投稿し直す」なので、
+  # **既にある理由の隣に同じものをもう 1 つ貼る**ことになり、**持ち手の 1 番目**を占める。
+  [[ -n $last_comment_at && ! $last_comment_at < $parked_at ]] && continue
   printf '%s\t%s\n' "$number" "$parked_at"
   found=1
 done <<<"$rows"
