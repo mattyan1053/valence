@@ -37,13 +37,18 @@ readonly ROLES=(master worker)
 # 賭けているのは**周回の長さではなく、活動と活動の間隔**である。
 readonly TTL_SEC="${LOOP_LEASE_TTL_SEC:-1800}"
 
+# 飛ばした記録を何件残すか。**増え続けないための上限**であって、意味のある数ではない。
+readonly MISSING_KEEP_DEFAULT=20
+MISSING_KEEP="${LOOP_LEASE_MISSING_KEEP:-$MISSING_KEEP_DEFAULT}"
+
 # 読み書きのロックを待つ時間。ここは一瞬で終わる操作なので短くてよい。
 readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
 
 usage() {
   echo "使い方: bin/loop-lease acquire <役>" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
-  echo "        bin/loop-lease held <役>        その周回が lease を持っているか（読むだけ）" >&2
+  echo "        bin/loop-lease held <役>        その役を誰かが持っているか（読むだけ）" >&2
+  echo "        bin/loop-lease check            この周回が持っていなければ言って記録する（止めない）" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
   echo "        bin/loop-lease ttl              期限（秒）を出す" >&2
   echo "        役: ${ROLES[*]}" >&2
@@ -81,15 +86,25 @@ if [[ ${1-} == "ttl" ]]; then
   exit 0
 fi
 
-[[ $# -ge 2 ]] || usage
+[[ $# -ge 1 ]] || usage
 readonly ACTION="$1"
-readonly ROLE="$2"
 
-if ! role_is_known "$ROLE"; then
-  echo "[FAIL] 未知の役: $ROLE" >&2
-  echo "       使えるのは次のものだけ: ${ROLES[*]}" >&2
-  exit 2
+# **`check` は役を取らない。** 役を引数で固定すると、**`bin/loop-review-head` や
+# `bin/loop-claim` のように両方の役が使うもの**で必ずどちらかが偽になる——
+# **正常な master の周回のたびに「worker が飛ばした」と記録が 1 件増え、
+# 上限 20 件を偽物が埋める**（実測で確認した master の指摘）。
+# **見るのは「この周回が、どれかの役の lease を自分として持っているか」だけ**である。
+ROLE=""
+if [[ $ACTION != "check" ]]; then
+  [[ $# -ge 2 ]] || usage
+  ROLE="$2"
+  if ! role_is_known "$ROLE"; then
+    echo "[FAIL] 未知の役: $ROLE" >&2
+    echo "       使えるのは次のものだけ: ${ROLES[*]}" >&2
+    exit 2
+  fi
 fi
+readonly ROLE
 
 if ! [[ $TTL_SEC =~ ^[0-9]+$ ]]; then
   echo "[FAIL] 設定: LOOP_LEASE_TTL_SEC は 0 以上の整数（秒）で指定してください" >&2
@@ -99,6 +114,20 @@ if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
   echo "[FAIL] 設定: LOOP_LEASE_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
   exit 2
 fi
+# **ここだけ落とさずに既定へ戻す。** 上の 2 つは**直列化そのもの**を決めるので、
+# 誤っていれば止めるのが正しい。**こちらは記録を畳む件数**でしかなく、
+# **止めると診断のための設定 1 つで周回が動かなくなる**。
+#
+# **黙って「上限が効かない」へは倒さない。** `tail -n abc` は落ち、**`if` が偽になって
+# 畳む処理ごと飛ぶ**ので、**追記だけが毎回残る**——**この記録に上限を付けた理由
+# （際限なく積む記録は、読む気を失わせるぶん、無いのと同じ）に、設定 1 つで戻る**。
+# しかも**上限に達していないのか畳めていないのか、見分けが付かない**。
+if ! [[ $MISSING_KEEP =~ ^[1-9][0-9]*$ ]]; then
+  echo "[WARN] 設定: LOOP_LEASE_MISSING_KEEP は 1 以上の整数（件）で指定してください" >&2
+  echo "       ${MISSING_KEEP_DEFAULT} 件で畳みます（この設定は無視します）" >&2
+  MISSING_KEEP="$MISSING_KEEP_DEFAULT"
+fi
+readonly MISSING_KEEP
 
 # **git の共通ディレクトリに置く。** master は worktree で動くので、作業ツリーごとに
 # 置くと同じ役が 2 つ走っても気づけない。`bin/loop-stall` と同じ理由・同じ形。
@@ -126,37 +155,103 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
 #     checkout と commit が並行するので**直列でなければならない**。
 #     つまり**衝突が正しい答えになる**（人数は前提にしていない。作業場が増えれば
 #     そのぶん並列になる）
-lease_scope="$ROLE"
-SCOPE_LABEL="$ROLE"
-if [[ $ROLE == "worker" ]]; then
-  if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
-    echo "[FAIL] 作業場の根を特定できません" >&2
-    exit 2
+#
+# **1 度きりの組み立てにしない。** `check` は**役をまたいで**見るので、
+# **同じ組み立てを 2 度使う**——書き写すと、片方だけ直して食い違う（#159 で踏んだ）。
+set_role_paths() {
+  local role="$1" toplevel
+  lease_scope="$role"
+  SCOPE_LABEL="$role"
+  if [[ $role == "worker" ]]; then
+    if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
+      echo "[FAIL] 作業場の根を特定できません" >&2
+      return 2
+    fi
+    toplevel="$(cd "$toplevel" 2>/dev/null && pwd -P)" || {
+      echo "[FAIL] 作業場の根へ移動できません" >&2
+      return 2
+    }
+    # ファイル名にできる形へ畳む。**元のパスが読めるままにする**（どのセッションが
+    # 握っているのかを、記録を見るだけで分かるようにする）。
+    lease_scope="worker${toplevel//\//_}"
+    # **どの単位で弾かれたのかを、出力だけで分かるようにする。** 「worker の周回が
+    # 走っています」だと、別の作業場の worker まで止まっているように読める
+    SCOPE_LABEL="この作業場（$toplevel）の worker"
   fi
-  toplevel="$(cd "$toplevel" 2>/dev/null && pwd -P)" || {
-    echo "[FAIL] 作業場の根へ移動できません" >&2
-    exit 2
-  }
-  # ファイル名にできる形へ畳む。**元のパスが読めるままにする**（どのセッションが
-  # 握っているのかを、記録を見るだけで分かるようにする）。
-  lease_scope="worker${toplevel//\//_}"
-  # **どの単位で弾かれたのかを、出力だけで分かるようにする。** 「worker の周回が
-  # 走っています」だと、別の作業場の worker まで止まっているように読める
-  SCOPE_LABEL="この作業場（$toplevel）の worker"
-fi
-readonly lease_scope SCOPE_LABEL
-readonly STATE="$common_dir/valence-loop-lease-$lease_scope"
-# **始めた周回の印。lease と違って、返しても消さない。**
-# 「いま持っているか」ではなく「**新しい周回を始めたか**」を外から見るためのもので、
-# 消してしまうと**周回と周回の間が「始めていない」と同じ見え方**になる
-# （bin/loop-stall がそれで数えられなくなった）。
-readonly ROUNDS="$common_dir/valence-loop-rounds-$lease_scope"
-# **いちばん長かった周回の秒数。** 「周回が動いているか」を外から判断するのに使う
-# （bin/loop-stall）。**書き写した閾値を置かないため**に、実測を溜める形にしてある。
-readonly ROUND_LEN="$common_dir/valence-loop-roundlen-$lease_scope"
-# **活動は lease とは別のファイルに置く。** lease を持っていなくても記録できる
-# ようにするため (`./task` は周回の外でも走る)。
-readonly ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+  STATE="$common_dir/valence-loop-lease-$lease_scope"
+  # **始めた周回の印。lease と違って、返しても消さない。**
+  # 「いま持っているか」ではなく「**新しい周回を始めたか**」を外から見るためのもので、
+  # 消してしまうと**周回と周回の間が「始めていない」と同じ見え方**になる
+  # （bin/loop-stall がそれで数えられなくなった）。
+  ROUNDS="$common_dir/valence-loop-rounds-$lease_scope"
+  # **いちばん長かった周回の秒数。** 「周回が動いているか」を外から判断するのに使う
+  # （bin/loop-stall）。**書き写した閾値を置かないため**に、実測を溜める形にしてある。
+  ROUND_LEN="$common_dir/valence-loop-roundlen-$lease_scope"
+  # **活動は lease とは別のファイルに置く。** lease を持っていなくても記録できる
+  # ようにするため (`./task` は周回の外でも走る)。
+  ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+}
+
+# **この周回を表す印。**
+#
+# **「誰かが持っている」は「自分が持っている」ではない。** 前の版はそこを区別して
+# いなかったので、**別の周回が保持している状況——この仕組みが存在する理由そのもの——
+# でだけ黙った**（master の指摘）。
+#
+# **token を持ち回らない。** 環境変数は子プロセスにしか届かず、**手順書の各コマンドは
+# 別々に起動される**。ファイルへ置くと**同じ作業場の別周回と共有**されるので、
+# 同一性にならない。**残るのはプロセスの系譜**である。
+#
+# **自分のセッションの外に出た最初の親**を採る。手順書のコマンドは
+# `claude → bash → スクリプト → …` と起こされ、**bash 以下は同じセッション**なので、
+# ここで得られるのは**そのセッションを回している本体**になる。
+#
+# **PID の再利用に備えて起動時刻を添える**（`/proc/<pid>/stat` の 22 番目）。
+#
+# **限界を書いておく。** **同じセッションの中の別周回**（cron と通知が同じ本体から
+# 起きる形）は、この印では区別できない——**分からないものは飛ばしと呼ばない**方へ倒す。
+round_owner() {
+  local pid="$$" mysid ppid sid
+  proc_field "$pid" 4 || return 1
+  mysid="$PROC_FIELD"
+  while :; do
+    proc_field "$pid" 2 || break
+    ppid="$PROC_FIELD"
+    [[ $ppid =~ ^[0-9]+$ && $ppid != 0 && $ppid != 1 ]] || break
+    proc_field "$ppid" 4 || break
+    sid="$PROC_FIELD"
+    if [[ $sid != "$mysid" ]]; then
+      # 自分のセッションの外に出た。**そこがセッションを回している本体**である
+      proc_field "$ppid" 20 || return 1
+      printf 'p:%s:%s' "$ppid" "$PROC_FIELD"
+      return 0
+    fi
+    pid="$ppid"
+  done
+  # **外へ出られなかった**（コンテナの中など、全部が同じセッションにいる形）。
+  # **セッションそのものを印にする。** `setsid` で切り離した周回とは違う値になる。
+  #
+  # **種類を混ぜない。** `p:` と `s:` は**測っているものが違う**ので、
+  # **食い違ったら「別の周回」ではなく「分からない」**へ倒す（`check` を読むこと）。
+  proc_field "$mysid" 20 || return 1
+  printf 's:%s:%s' "$mysid" "$PROC_FIELD"
+}
+
+# `/proc/<pid>/stat` の値を 1 つ読む。**番号は comm の後ろから数える**
+# （**comm には空白も `)` も入りうる**ので、**最後の `) ` で切る**）。
+#   2=親 PID / 4=セッション / 20=起動時刻
+proc_field() {
+  local line rest
+  # shellcheck disable=SC2162
+  read -r line <"/proc/$1/stat" 2>/dev/null || return 1
+  rest="${line##*') '}"
+  [[ $rest != "$line" ]] || return 1
+  local -a fields
+  # shellcheck disable=SC2206
+  fields=($rest)
+  PROC_FIELD="${fields[$(($2 - 1))]-}"
+  [[ -n $PROC_FIELD ]] || return 1
+}
 
 # **活動の記録は lease を読まない。** ロックも要らない——ただし**置き換えは原子的に行う**。
 # `>` は切り詰めてから書くので、**その隙間を `acquire` が読むと空に見え**、
@@ -167,6 +262,7 @@ readonly ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
 # 呼ぶ側 (`./task`) が**コマンド自体は落とさない**のは別の判断で、そこは変えない。
 if [[ $ACTION == "heartbeat" ]]; then
   [[ $# -eq 2 ]] || usage
+  set_role_paths "$ROLE" || exit 2
   if ! date +%s >"$ACTIVITY.tmp" 2>/dev/null || ! mv -f "$ACTIVITY.tmp" "$ACTIVITY" 2>/dev/null; then
     rm -f "$ACTIVITY.tmp" 2>/dev/null || true
     echo "[WARN] $SCOPE_LABEL の活動を記録できません: $ACTIVITY" >&2
@@ -178,32 +274,50 @@ fi
 
 # 判定と書き込みの間に割り込まれると、**両方の周回が「空いている」と読む**。
 # ここを守らないと、直列化そのものが成立しない。
-exec 9>"$STATE.lock" || {
-  echo "[FAIL] lease のロックを作成できません: $STATE.lock" >&2
-  exit 2
+lock_state() {
+  exec 9>"$STATE.lock" || {
+    echo "[FAIL] lease のロックを作成できません: $STATE.lock" >&2
+    return 2
+  }
+  if ! flock -w "$LOCK_WAIT_SEC" 9; then
+    echo "[FAIL] lease のロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+    return 2
+  fi
 }
-if ! flock -w "$LOCK_WAIT_SEC" 9; then
-  echo "[FAIL] lease のロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
-  exit 2
-fi
-
-now="$(date +%s)"
 
 # 保持されている lease を読む。期限切れは「誰も持っていない」として扱う。
-# 最後の活動。**読めなければ「活動なし」として扱う**——推測で新しくしない。
-last_activity=""
-if [[ -f $ACTIVITY ]]; then
-  read -r last_activity <"$ACTIVITY" || last_activity=""
-  [[ $last_activity =~ ^[0-9]+$ ]] || last_activity=""
-fi
+# **前提: `set_role_paths` を通し、ロックを取っていること。**
+#
+# **読むところを 1 つにする。** `check` は役をまたいで 2 度読むので、
+# **同じ判定（期限・持ち主）を書き写すと片方だけ古くなる**。
+read_lease() {
+  local quiet="${1-}" alive_since
+  # 最後の活動。**読めなければ「活動なし」として扱う**——推測で新しくしない。
+  last_activity=""
+  if [[ -f $ACTIVITY ]]; then
+    read -r last_activity <"$ACTIVITY" || last_activity=""
+    [[ $last_activity =~ ^[0-9]+$ ]] || last_activity=""
+  fi
 
-held_token=""
-held_since=""
-if [[ -f $STATE ]]; then
-  IFS=$'\t' read -r held_token held_since <"$STATE"
+  held_token=""
+  held_since=""
+  held_owner=""
+  [[ -f $STATE ]] || return 0
+
+  # **1 行目は「前の版が読める形」のまま**（token と時刻の 2 列）。**印は 2 行目**である。
+  #
+  # **実際に踏んだ。** 3 列目に足したところ、**前の版が読めなくなった**——
+  # `read -r held_token held_since` は**残り全部を 2 つ目へ入れる**ので、
+  # **時刻が数値に見えなくなる**。**lease のファイルは版をまたいで共有される**
+  # （master は worktree で `origin/main` の版、worker はブランチの版を走らせる）ので、
+  # **マージされるまでの間、直列化そのものが働かなくなる**。
+  {
+    IFS=$'\t' read -r held_token held_since
+    read -r held_owner || held_owner=""
+  } <"$STATE"
   if ! [[ $held_since =~ ^[0-9]+$ ]]; then
     echo "[FAIL] lease の記録を読めません: $STATE" >&2
-    exit 2
+    return 2
   fi
   # **取得時刻と最後の活動の、新しいほうから測る。** 取得時刻だけで測ると、
   # **長い周回がそれだけで奪われる**。活動だけで測ると、**活動が 1 度も無い周回**
@@ -214,21 +328,152 @@ if [[ -f $STATE ]]; then
   fi
   if ((now - alive_since >= TTL_SEC)); then
     # **黙って上書きしない。** 期限切れの引き継ぎは、落ちた周回の跡である。
-    # **`held` は読むだけ**なので、引き継ぎの警告は出さない（誰も引き継がない）。
-    [[ $ACTION == "held" ]] ||
+    # **読むだけの action（`held` / `check`）では黙る**（誰も引き継がない）。
+    [[ -n $quiet ]] ||
       echo "[WARN] $SCOPE_LABEL の lease が期限切れでした（$((now - held_since)) 秒前に取得、$(activity_age) ）。引き継ぎます" >&2
     held_token=""
+    held_owner=""
   fi
+}
+
+# 飛ばした記録を 1 行足し、上限まで畳む。
+#
+# **この記録は役をまたいで共有される**（`$common_dir` に 1 つ）。**lease のロックは
+# 役ごと**なので互いを止めない——`追記 → tail → 置換` をそのまま並べると、
+# **片方の 1 行が黙って消える**（master の指摘）。**飛ばすのは並行しているときに
+# 起きやすい**ので、**いちばん起きてほしくないときに、いちばん起きやすい**。
+# **記録に付いたロックで、書き換えごと直列にする。**
+#
+# **取れなければ諦めて進む**（`check` は止めない）**が、黙らない**——
+# 黙って落とすと、`./task loop:status` から見て**「飛ばしていない」と同じ**になる。
+record_missing() {
+  local record="$common_dir/valence-loop-lease-missing" kept
+  exec 8>"$record.lock" || {
+    echo "[WARN] 飛ばした記録のロックを作れません: $record.lock" >&2
+    echo "       この周回のぶんは ./task loop:status に出ません（数え直せません）" >&2
+    return 0
+  }
+  if ! flock -w "$LOCK_WAIT_SEC" 8; then
+    echo "[WARN] 飛ばした記録のロックを取れません（${LOCK_WAIT_SEC} 秒待機）: $record.lock" >&2
+    echo "       この周回のぶんは ./task loop:status に出ません（数え直せません）" >&2
+    exec 8>&-
+    return 0
+  fi
+  if ! printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$PWD" >>"$record"; then
+    echo "[WARN] 飛ばした記録を残せません: $record" >&2
+    echo "       この周回のぶんは ./task loop:status に出ません（数え直せません）" >&2
+    exec 8>&-
+    return 0
+  fi
+  # **記録は増え続けない。** 読むのは `./task loop:status`、**古いものから畳むのはここ**——
+  # **際限なく積む記録は、読む気を失わせるぶん、無いのと同じ**になる。
+  #
+  # **畳めなかったら言う**（`2>/dev/null` を置かない）。**落ちる理由は設定だけではない**
+  # ——記録が読めない場合もここを通る。**黙ると「上限に達していない」と見分けが付かない**。
+  if ! kept="$(tail -n "$MISSING_KEEP" "$record")" \
+    || ! printf '%s\n' "$kept" >"$record.tmp.$$" \
+    || ! mv -f "$record.tmp.$$" "$record"; then
+    rm -f "$record.tmp.$$" 2>/dev/null
+    echo "[WARN] 飛ばした記録を畳めません: $record" >&2
+    echo "       この記録は ${MISSING_KEEP} 件を超えて増え続けます" >&2
+  fi
+  exec 8>&-
+}
+
+now="$(date +%s)"
+
+# **入口を飛ばした周回を、出口より前に捕まえる**（#161）。
+#
+# **書いてあっても踏む。** 両方の手順書が「冒頭で呼べ」と書いているのに、
+# **通知で始めた周回で 3 回飛ばされた**——踏んだのは **#157 を実装した本人**と
+# **#143 の完了条件を書いた本人**である。**通知の経路には「周回の開始」という
+# 区切りが無い**（メッセージを読むと、そのまま調査や実装へ入る）。
+#
+# **出口だけでは遅い。** 気づくのは終わったあとで、**その周回の直列化は既に効いていない**。
+#
+# **止めない。** #157 の判断を覆さない——**止めていたら #159 の特定が止まっていた**。
+if [[ $ACTION == "check" ]]; then
+  # **役を渡す形は残さない。** 黙って無視すると、**役を書き固めた古い呼び出しが
+  # 生き残っているのに、直したつもりになる**
+  [[ $# -eq 1 ]] || usage
+  owner="$(round_owner)" || owner=""
+  unknown=""
+  taken=""
+  for role in "${ROLES[@]}"; do
+    # **理由を捨てない。** **なぜ読めないのかは、これらのメッセージにしか書かれていない**
+    set_role_paths "$role" || {
+      unknown="$unknown $role"
+      continue
+    }
+    lock_state || {
+      unknown="$unknown $role"
+      continue
+    }
+    read_lease quiet || {
+      unknown="$unknown $role"
+      exec 9>&-
+      continue
+    }
+    exec 9>&-
+    [[ -n $held_token ]] || continue
+    taken="$SCOPE_LABEL"
+    # **印が片方でも無ければ、持ち主が自分かどうかは分からない。**
+    # **測っているものが違う**（`p:` と `s:`）ときも同じで、**分からない**である。
+    # **分からないものを飛ばしと呼ばない**——**偽の記録より取りこぼしのほうが安い**
+    # （この記録は「同じ癖が続いていること」を読むためのもので、汚れると読めなくなる）。
+    if [[ -z $owner || -z $held_owner || ${owner%%:*} != "${held_owner%%:*}" ]]; then
+      exit 0
+    fi
+    # **自分の周回が持っていた。** ここだけが黙ってよい場合である
+    [[ $held_owner != "$owner" ]] || exit 0
+  done
+  if [[ -n $unknown ]]; then
+    # **読めない役があった。「持っていない」と言い切らない**——**記録にも残さない**
+    # （**偽の記録より取りこぼしのほうが安い**）。**ただし黙らない。**
+    #
+    # **言っても記録は汚れない**（`./task loop:status` の件数は増えない）。
+    # **そして読めない状態は続く**——ロックが作れないのは**権限や置き場所の問題**で、
+    # **次の周回でも同じ**である。**黙ると、直すべきものが誰の目にも入らない**。
+    #
+    # **「飛ばした」と同じ文言にしない。** 言い切ると、**読めなかっただけの周回に
+    # 出したときに逆向きの誤解**になる。
+    echo "[WARN] lease を読めませんでした（役:${unknown}）。この周回が持っているかは判定できません" >&2
+    echo "       入口を飛ばしたかどうかは、この周回については分かりません（記録もしません）" >&2
+    exit 0
+  fi
+  # **どちらの場合も、言うことは 1 つである。**
+  #
+  # **「誰かが別に持っている」を、そのまま危険と読まない。** worker の周回から見れば
+  # **master の lease は普段から別の周回が持っている**（並行してよい相手である）——
+  # **役が分からないここでは、それが自分の相手かどうかを判断できない**。
+  #
+  # **判断を `acquire` に渡す。** 取れれば直列化がその場で回復し、
+  # **取れなければ「同じ役の周回が走っている」と、そこで正しく分かる**。
+  echo "[WARN] この周回は lease を持っていません（入口の acquire を飛ばした可能性）" >&2
+  echo "       いま取り直してください: bin/loop-lease acquire <役>" >&2
+  echo "       取れないなら、その役の周回が別に走っています——この周回は何もせずに終えること" >&2
+  if [[ -n $taken ]]; then
+    record_missing "別の周回が保持中: $taken"
+  else
+    record_missing "どの役も誰も持っていない"
+  fi
+  exit 0
+fi
+
+set_role_paths "$ROLE" || exit 2
+lock_state || exit 2
+if [[ $ACTION == "held" ]]; then
+  read_lease quiet || exit 2
+else
+  read_lease || exit 2
 fi
 
 case "$ACTION" in
 held)
   # **持っているかを読むだけ。** 書かない・奪わない・印も残さない。
   #
-  # **見るのは「その単位を誰かが持っているか」**であって、「呼んだ周回自身が
-  # 持っているか」ではない（token を渡さないため）。**入口を飛ばした周回と、
-  # 同じ単位で別の周回が走っている状態は区別できない**——後者は `acquire` が
-  # 弾く側なので、ここで見たいのは**誰も持っていないまま進んだ周回**である。
+  # **見るのは「その単位を誰かが持っているか」**である。**「呼んだ周回自身が
+  # 持っているか」を見たいなら `check`**（そちらは周回の印を突き合わせる）。
   [[ $# -eq 2 ]] || usage
   [[ -n $held_token ]] || exit 1
   ;;
@@ -248,7 +493,11 @@ acquire)
     echo "[FAIL] token を生成できません" >&2
     exit 2
   fi
-  printf '%s\t%s\n' "$token" "$now" >"$STATE" || {
+  # **持ち主の印を一緒に書く。** これが無いと、`check` は「誰かが持っている」までしか
+  # 言えず、**別の周回が持っているときに黙る**（#161 で直した向きの誤り）。
+  # **作れなければ空のまま**——`check` はそれを「分からない」として扱う。
+  owner="$(round_owner)" || owner=""
+  printf '%s\t%s\n%s\n' "$token" "$now" "$owner" >"$STATE" || {
     echo "[FAIL] lease を書き込めません: $STATE" >&2
     exit 2
   }

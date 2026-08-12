@@ -243,7 +243,10 @@ describe("bin/loop-handoff", () => {
       const handoff = run("master");
 
       expect(handoff.stderr, "飛ばしたことが出力に残らない").toContain("lease");
-      expect(missingRecord(), "飛ばしたことが記録に残らない").toContain("master");
+      // **役は記録しない。** ここは `$ROLE` を知っているが、**役を書き固めた記録は
+      // 両方の役が使うスクリプトで偽になる**ので、`bin/loop-lease` は
+      // **何が起きていたか**を書く（#161 の差し戻し）
+      expect(missingRecord(), "飛ばしたことが記録に残らない").toContain("誰も持っていない");
     });
 
     it("持っていれば、何も言わない", () => {
@@ -268,7 +271,7 @@ describe("bin/loop-handoff", () => {
       const handoff = run("master");
 
       expect(handoff.status, "持ち物が無い周回である").toBe(1);
-      expect(missingRecord()).toContain("master");
+      expect(missingRecord()).toContain("誰も持っていない");
     });
 
     it("持ち手を決める仕事は、これまでどおり行う", () => {
