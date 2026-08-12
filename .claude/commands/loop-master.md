@@ -480,8 +480,12 @@ elif outside="$(bin/loop-outside-author <PR番号>)"; then
   # **保留にした head を残す。** **著者は自分で label を外せない**ことがある
   # （fork には triage 権限が無い）ので、**動いたら master が外す**（ステップ 2）。
   # **master の記憶ではなく、状態から決まる。**
-  bin/loop-parked-head record <PR番号> <SHA> || true
-  if ! gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+  if ! bin/loop-parked-head record <PR番号> <SHA>; then
+    # **記録できないなら、保留にしない。** **記録の無い保留はステップ 2 が触らない**
+    # （**人が外すと決めた保留と区別が付かない**）ので、**そのまま永久に残る**——
+    # **この節が消しに来たものそのもの**である。**理由を投稿できなかったときと同じ**
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  elif ! gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
     # **保留にできなかった。** ループは止まる側にあるので、これまでどおり数える
     bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
   fi
@@ -732,8 +736,12 @@ elif outside="$(bin/loop-outside-author <PR番号>)"; then
   # **保留にした head を残す。** **著者は自分で label を外せない**ことがある
   # （fork には triage 権限が無い）ので、**動いたら master が外す**（ステップ 2）。
   # **master の記憶ではなく、状態から決まる。**
-  bin/loop-parked-head record <PR番号> <SHA> || true
-  if ! gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+  if ! bin/loop-parked-head record <PR番号> <SHA>; then
+    # **記録できないなら、保留にしない。** **記録の無い保留はステップ 2 が触らない**
+    # （**人が外すと決めた保留と区別が付かない**）ので、**そのまま永久に残る**——
+    # **この節が消しに来たものそのもの**である。**理由を投稿できなかったときと同じ**
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  elif ! gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
     # **保留にできなかった。** ループは止まる側にあるので、これまでどおり数える
     bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
   fi

@@ -49,68 +49,74 @@ function waitingBlocks(): { section: string; body: string }[] {
  * **そこへ倒す**——「次に動くのはループの外の誰か」という点で同じ状態である。
  */
 describe("ループの外の著者", () => {
+  /** 偽物に持たせる振る舞い。**呼ばれたことだけ**を見る。 */
+  type Stubs = {
+    /** `bin/loop-outside-author` の終了コード（0 = 外 / 1 = 中 / 2 = 読めない）。 */
+    outsideExit: number;
+    editFails?: boolean;
+    commentFails?: boolean;
+    recordFails?: boolean;
+    /** 保留にした head の記録（未指定なら「記録が無い」）。 */
+    parkedHead?: string;
+    /** `bin/loop-head same` の終了コード（0 = 同じ / 1 = 動いた / 2 = 読めない）。 */
+    headExit?: number;
+  };
+
+  /** 偽の `gh`。**呼ばれた引数を残す**。 */
+  function ghStub(workspace: string, stubs: Stubs): string[] {
+    return [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "$*" >> ${JSON.stringify(join(workspace, "gh-calls"))}`,
+      ...(stubs.editFails === true ? ['[[ $* == *"pr edit"* ]] && exit 1'] : []),
+      ...(stubs.commentFails === true ? ['[[ $* == *"pr comment"* ]] && exit 1'] : []),
+      // 保留の一覧（**外す経路**が引く）
+      `[[ $* == *"pr list"* ]] && { printf '%s\\n' 12; exit 0; }`,
+      "exit 0",
+      "",
+    ];
+  }
+
+  /** 隣のスクリプトの偽物。 */
+  function binStubs(workspace: string, stubs: Stubs): [string, string[]][] {
+    const record = (name: string) =>
+      `printf '%s\\n' "$*" >> ${JSON.stringify(join(workspace, name))}`;
+    return [
+      [
+        "loop-outside-author",
+        ["#!/usr/bin/env bash", 'printf "someone-else\\n"', `exit ${stubs.outsideExit}`, ""],
+      ],
+      ["loop-stall", ["#!/usr/bin/env bash", record("stalled"), "exit 0", ""]],
+      ["loop-head", ["#!/usr/bin/env bash", `exit ${stubs.headExit ?? 0}`, ""]],
+      [
+        "loop-parked-head",
+        [
+          "#!/usr/bin/env bash",
+          record("parked-head"),
+          ...(stubs.recordFails === true ? ["[[ $1 == record ]] && exit 2"] : []),
+          stubs.parkedHead === undefined
+            ? "[[ $1 == get ]] && exit 1"
+            : `[[ $1 == get ]] && { printf '%s\\n' ${JSON.stringify(stubs.parkedHead)}; exit 0; }`,
+          "exit 0",
+          "",
+        ],
+      ],
+    ];
+  }
+
   /**
    * そのブロックを走らせ、**何が呼ばれたか**を返す。
    *
    * **判定・`gh`・`bin/loop-stall` は偽物**にして、**呼ばれたことだけ**を見る。
    */
-  function runBlock(
-    body: string,
-    outsideExit: number,
-    options: {
-      editFails?: boolean;
-      commentFails?: boolean;
-      parkedHead?: string;
-      headExit?: number;
-    } = {},
-  ) {
+  function runBlock(body: string, outsideExit: number, options: Omit<Stubs, "outsideExit"> = {}) {
+    const stubs: Stubs = { outsideExit, ...options };
     const workspace = mkdtempSync(join(tmpdir(), "outside-author-"));
     try {
       const stub = join(workspace, "stub");
       mkdirSync(stub, { recursive: true });
       mkdirSync(join(workspace, "bin"), { recursive: true });
-      writeFileSync(
-        join(stub, "gh"),
-        [
-          "#!/usr/bin/env bash",
-          `printf '%s\\n' "$*" >> ${JSON.stringify(join(workspace, "gh-calls"))}`,
-          ...(options.editFails === true ? ['[[ $* == *"pr edit"* ]] && exit 1'] : []),
-          ...(options.commentFails === true ? ['[[ $* == *"pr comment"* ]] && exit 1'] : []),
-          // 保留の一覧（**外す経路**が引く）
-          `[[ $* == *"pr list"* ]] && { printf '%s\\n' 12; exit 0; }`,
-          "exit 0",
-          "",
-        ].join("\n"),
-        { mode: 0o755 },
-      );
-      for (const [name, script] of [
-        [
-          "loop-outside-author",
-          ["#!/usr/bin/env bash", 'printf "someone-else\\n"', `exit ${outsideExit}`, ""],
-        ],
-        [
-          "loop-stall",
-          [
-            "#!/usr/bin/env bash",
-            `printf '%s\\n' "$*" >> ${JSON.stringify(join(workspace, "stalled"))}`,
-            "exit 0",
-            "",
-          ],
-        ],
-        ["loop-head", ["#!/usr/bin/env bash", `exit ${options.headExit ?? 0}`, ""]],
-        [
-          "loop-parked-head",
-          [
-            "#!/usr/bin/env bash",
-            `printf '%s\\n' "$*" >> ${JSON.stringify(join(workspace, "parked-head"))}`,
-            options.parkedHead === undefined
-              ? "[[ $1 == get ]] && exit 1"
-              : `[[ $1 == get ]] && { printf '%s\\n' ${JSON.stringify(options.parkedHead)}; exit 0; }`,
-            "exit 0",
-            "",
-          ],
-        ],
-      ] as const) {
+      writeFileSync(join(stub, "gh"), ghStub(workspace, stubs).join("\n"), { mode: 0o755 });
+      for (const [name, script] of binStubs(workspace, stubs)) {
         writeFileSync(join(workspace, "bin", name), script.join("\n"), { mode: 0o755 });
       }
 
@@ -222,6 +228,22 @@ describe("ループの外の著者", () => {
         "--add-label parked",
       );
       expect(result.stalled, `${block.section}: 投稿に失敗したのに数えていない`).toContain(
+        "awaiting-worker",
+      );
+    }
+  });
+
+  it("保留にした head を記録できなければ、保留にしない", () => {
+    // **記録の無い保留は、ステップ 2 が触らない**（**人が外すと決めた保留と区別が
+    // 付かない**）ので、**そのまま永久に残る**——**この PR が消しに来たものそのもの**
+    // である（#176 のレビュー 2 周目）。**倒す先は既にある**——**保留にせず、数える**
+    for (const block of waitingBlocks()) {
+      const result = runBlock(block.body, 0, { recordFails: true });
+
+      expect(result.gh, `${block.section}: 記録が無いのに保留にしている`).not.toContain(
+        "--add-label parked",
+      );
+      expect(result.stalled, `${block.section}: 記録に失敗したのに数えていない`).toContain(
         "awaiting-worker",
       );
     }
