@@ -90,8 +90,18 @@ fi
 rounds=0
 reviewed_head="no"
 last_at=""
+notice=0
+notice_at=""
 while IFS=$'\t' read -r ts sha live; do
   [[ -n $sha ]] || continue
+  # **レビューではない応答**（第 3 列が `answer`）。**同じ取得に混ざって返る**ので、
+  # 「回数」と「最後の応答時刻」が食い違わない。**判定は `bin/loop-review-commits`
+  # が持つ**（引き金との対応付けを含む）——ここで真似ると 2 箇所に持つことになる。
+  if [[ $live == "answer" ]]; then
+    ((notice++))
+    [[ $ts > $notice_at ]] && notice_at="$ts"
+    continue
+  fi
   # 最後に応答があった時刻は **rebase で消えたものも含めて** 取る。
   # これを落とすと「応答済みの古い要求」まで未応答として数えてしまう。
   last_at="$ts"
@@ -122,8 +132,6 @@ fi
 # **時刻の比較は文字列で足りる**（ISO 8601 は辞書順と時刻順が一致する）。
 pending=0
 pending_at=""
-notice=0
-notice_at=""
 requests=()
 while IFS=$'\t' read -r at login body; do
   [[ -n $at ]] || continue
@@ -136,20 +144,7 @@ while IFS=$'\t' read -r at login body; do
   fi
 done <<<"$comments"
 
-# **「応答があったか」は 1 箇所で決める。**
-#
-# ここで独自に数えていたときは、**同じ文言の列挙を 2 箇所に持っていた**——
-# **片方だけ直すと食い違う**の裏返しで、**両方直したから両方壊れた**（#159 のレビュー）。
-# **判定は `bin/loop-review-commits` が持つ**（引き金との対応付けを含む）。
-if ! answers="$("$(dirname "$0")/loop-review-commits" --answers "$PR")"; then
-  echo "[FAIL] PR #$PR の応答を取得できません" >&2
-  exit 2
-fi
-while IFS= read -r at; do
-  [[ -n $at ]] || continue
-  ((notice++))
-  [[ $at > $notice_at ]] && notice_at="$at"
-done <<<"$answers"
+
 
 # **直近のレビューより後の要求だけが「未応答」である。**
 # bot の応答は SHA を持たないことがある（環境が無い・エラー・その他）ので**レビュー扱いには

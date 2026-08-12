@@ -203,8 +203,17 @@ describe("bin/loop-review-commits", () => {
       expect(listed.stdout, "エラー応答が落とされ、👍 が記録を吸っている").not.toContain(HEAD);
     });
 
-    /** `--answers` の出力（応答として数えた時刻）。 */
-    function answersOf(pr: number, comments: { login: string; body: string }[]): string {
+    /**
+     * `--all` が返す **`answer` の行**（レビューではない応答）。
+     *
+     * **`--all` から取る。** 「回数」と「最後の応答時刻」を**別々に取ると、
+     * その間に着いた応答で食い違う**ので、**1 回の取得から両方を導く**形にしてある
+     */
+    function answersOf(
+      pr: number,
+      comments: { login: string; body: string }[],
+      prBody = "本文",
+    ): string {
       const dir = mkdtempSync(join(tmpdir(), "loop-review-commits-gh-"));
       symlinkSync("/usr/bin/bash", join(dir, "bash"));
       const rows = comments
@@ -223,19 +232,29 @@ describe("bin/loop-review-commits", () => {
           "ROWS",
           "  exit 0",
           "fi",
+          'if [[ $* == *"pr view"* ]]; then',
+          "  cat <<'PRVIEW'",
+          `${HEAD}\t${prBody}`,
+          "PRVIEW",
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"/compare/"* ]]; then echo ahead; exit 0; fi',
           "exit 0",
           "",
         ].join("\n"),
         { mode: 0o755 },
       );
-      const result = spawnSync(SCRIPT, ["--answers", String(pr)], {
+      const result = spawnSync(SCRIPT, ["--all", String(pr)], {
         cwd: repo,
         encoding: "utf8",
         env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
       });
       rmSync(dir, { recursive: true, force: true });
       expect(result.status, result.stderr).toBe(0);
-      return result.stdout;
+      return result.stdout
+        .split("\n")
+        .filter((line) => line.endsWith("\tanswer"))
+        .join("\n");
     }
 
     it("知らない断り文句でも、応答として数える", () => {
@@ -257,6 +276,34 @@ describe("bin/loop-review-commits", () => {
       ]);
 
       expect(answers.trim(), "無関係な応答を数えている").toBe("");
+    });
+
+    it("地の文に混ざった要求は、引き金に数える", () => {
+      // **部分一致だと、説明文の中の `@codex review` まで「要求」になる**——
+      // 混入に数えられないので、**そこから起きたタスクの応答が記録を消費する**。
+      // **`AGENTS.md` が規則を持っている**——「**レビューを要求するときだけ、
+      // コメントに単独で書く**」。**規則と判定が同じものを指す**ようにする
+      const answers = answersOf(54, [
+        { login: "mattyan1053", body: "この場合は @codex review と投稿する" },
+        { login: BOT, body: "To use Codex here, create an environment" },
+      ]);
+
+      expect(answers.trim(), "地の文の要求を本物の要求として扱っている").toBe("");
+    });
+
+    it("PR 本文の混入も、引き金に数える", () => {
+      // **引き金は issue コメントだけではない。** PR 本文に `@codex` が混ざると、
+      // **作成の数秒後に bot がタスクとして答える**（この PR 自身で起きた）。
+      // **本文は `issues/$PR/comments` に現れない**ので、
+      // **引き金が見えず、応答だけが見える**——**必ず消費側へ倒れる**。
+      // **見えない引き金は、いちばん危ない向き**である
+      const answers = answersOf(
+        55,
+        [{ login: BOT, body: "To use Codex here, create an environment" }],
+        "この PR は @codex review の扱いを直す",
+      );
+
+      expect(answers.trim(), "本文の混入を見ていない").toBe("");
     });
 
     it("要求そのものは、引き金に数えない", () => {

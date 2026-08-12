@@ -2,8 +2,10 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -38,7 +40,7 @@ type State = {
   reviewsExit?: number;
 };
 
-type Run = { status: number; stdout: string; stderr: string };
+type Run = { status: number; stdout: string; stderr: string; calls: string[] };
 
 /**
  * 偽の `bin/loop-review-commits`。
@@ -46,18 +48,18 @@ type Run = { status: number; stdout: string; stderr: string };
  * **どれが応答かの判定は持たない。** 判定は本物が 1 箇所で持つので、
  * ここは**試験が宣言した答え**をそのまま返す（真似ると 2 箇所に持つことになる）。
  */
-function fakeReviewCommits(state: State): string {
-  const answers = (state.answers ?? []).join("\n");
-  const reviews = (state.reviews ?? []).join("\n");
+function fakeReviewCommits(state: State, callLog: string): string {
+  // **応答も同じ出力に混ぜる**（SHA の欄が `-`）。**別々に取ると、その間に
+  // レビューが着いたときに「回数は古く、最後の応答時刻は新しい」状態になる**
+  const rows = [
+    ...(state.reviews ?? []),
+    ...(state.answers ?? []).map((at) => `${at}\t-\tanswer`),
+  ].join("\n");
   return [
     "#!/usr/bin/env bash",
-    'if [[ $1 == "--answers" ]]; then',
-    `  printf '%b' ${JSON.stringify(answers)}`,
-    `  [[ -n ${JSON.stringify(answers)} ]] && echo`,
-    "  exit 0",
-    "fi",
-    `printf '%b' ${JSON.stringify(reviews)}`,
-    `[[ -n ${JSON.stringify(reviews)} ]] && echo`,
+    `echo "$*" >> ${JSON.stringify(callLog)}`,
+    `printf '%b' ${JSON.stringify(rows)}`,
+    `[[ -n ${JSON.stringify(rows)} ]] && echo`,
     `exit ${state.reviewsExit ?? 0}`,
   ].join("\n");
 }
@@ -115,15 +117,21 @@ function run(state: State, env: Record<string, string> = {}): Run {
     { mode: 0o755 },
   );
 
-  writeFileSync(join(bin, "loop-review-commits"), fakeReviewCommits(state), { mode: 0o755 });
+  const callLog = join(dir, "calls.log");
+  writeFileSync(join(bin, "loop-review-commits"), fakeReviewCommits(state, callLog), {
+    mode: 0o755,
+  });
 
   const result = spawnSync(script, ["12"], {
     encoding: "utf8",
     env: { ...process.env, PATH: path, ...env },
     timeout: 20_000,
   });
+  const calls = existsSync(callLog)
+    ? readFileSync(callLog, "utf8").split("\n").filter(Boolean)
+    : [];
   rmSync(dir, { recursive: true, force: true });
-  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr, calls };
 }
 
 /** いまから `minutes` 分前の時刻。**猶予の境目を跨がせるのに使う。** */
@@ -281,6 +289,23 @@ describe("bin/loop-review-budget", () => {
     // **どれが応答かの判定は `bin/loop-review-commits` が持つ**（引き金との対応付けを含む）。
     // ここで真似ると**同じ規則を 2 箇所に持つ**ことになり、**片方だけ直して食い違う**——
     // 実際、**同じ文言の列挙を 2 箇所に持っていたので、両方直したら両方壊れた**。
+
+    it("回数と応答時刻を、1 回の取得から導く", () => {
+      // **別々に取ると、その間にレビューが着いたときに
+      // 「回数は古く、最後の応答時刻は新しい」**——**同じ head が既にレビュー済みでも
+      // `pending` が解け、要求を重ねられる**。**寄せ方ではなく取り方の問題**である
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [request(minutesAgo(200))],
+          answers: [minutesAgo(100)],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.calls, "2 回取っている（間に着いた応答で食い違う）").toHaveLength(1);
+    });
 
     it("応答があれば、未応答が解ける", () => {
       // **文言は見ない。** `Something went wrong` でも「環境が無い」でも、

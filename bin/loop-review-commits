@@ -94,8 +94,22 @@ readonly REVIEW_BOT
 # **`review-unanswered` が 3 周で人を呼ぶ**。
 #
 # **文言の列挙へは戻さない**（#159）。**未知の断り文句でも、混入が無ければ解ける。**
-readonly REVIEW_REQUEST='@codex[[:space:]]+review'
+# **要求は「コメント全体がそれ」であること。** `AGENTS.md` が規則を持っている——
+# **「レビューを要求するときだけ、コメントに単独で書く」**。
+#
+# **部分一致にすると、説明文の中の `@codex review` まで「要求」になる**——混入に
+# 数えられないので、**そこから起きたタスクの応答が記録を消費する**（内側に同じ穴が残る）。
+# **規則と判定が同じものを指す**ようにしておく。
+readonly REVIEW_REQUEST='^@codex[[:space:]]+review$'
 readonly CODEX_MENTION='@codex'
+
+# コメント全体が要求そのものか。**本文は既に空白を 1 つへ畳んである**ので、
+# 前後の空白だけを落として比べる。
+is_request() {
+  local body="${1#"${1%%[![:space:]]*}"}"
+  body="${body%"${body##*[![:space:]]}"}"
+  [[ ${body,,} =~ $REVIEW_REQUEST ]]
+}
 
 # **本物のレビューの印。** これだけが「レビューした」を表す。
 #
@@ -126,8 +140,7 @@ reviewed_sha() {
 
 usage() {
   echo "使い方: bin/loop-review-commits [--all] <PR番号>" >&2
-  echo "  --all      落とさずに出し、第 3 列へ live / stale を添える" >&2
-  echo "  --answers  レビュー要求に応えた bot の投稿の時刻を出す" >&2
+  echo "  --all      落とさずに出し、第 3 列へ live / stale / answer を添える" >&2
   echo "  --bot      レビュー用の bot のログイン名を出す" >&2
   exit 2
 }
@@ -142,13 +155,6 @@ if [[ ${1-} == "--bot" ]]; then
   printf '%s\n' "$REVIEW_BOT"
   exit 0
 fi
-
-answers_only=0
-if [[ ${1-} == "--answers" ]]; then
-  answers_only=1
-  shift
-fi
-readonly answers_only
 
 include_stale=0
 if [[ ${1-} == "--all" ]]; then
@@ -191,6 +197,27 @@ done <<<"$reviews_raw")"
 # 後者を落とすと、その応答が記録を消費しないまま残り、あとから来た 👍 が
 # そこへ吸われて **現 head が永久にレビュー済みにならない**。
 # bin/loop-review-budget は前から通知を応答として扱っており、定義を揃える。
+# 現 head と PR 本文を **1 回で取る**。head は祖先の判定に、本文は引き金の判定に使う。
+#
+# **引き金は issue コメントだけではない。** **PR 本文に `@codex` が混ざると、
+# 作成の数秒後に bot がタスクとして答える**（この PR 自身で起きた）。
+# **本文は `issues/$PR/comments` に現れない**ので、**引き金が見えず、応答だけが見える**——
+# **必ず消費側へ倒れる**。**見えない引き金がいちばん危ない向き**である。
+#
+# **レビュースレッドは見ない。** そこへの `@codex` の混入は**応答もスレッドへの返信**として
+# 返るので、**引き金も応答も `issues/$PR/comments` には現れない**——**見えないもの同士**で、
+# ここの数え方を狂わせない（実測で確認）。
+if ! pr_view="$(gh pr view "$PR" --json headRefOid,body \
+  --jq '[.headRefOid, ((.body // "") | gsub("\\s+"; " "))] | @tsv' 2>/dev/null)"; then
+  echo "[FAIL] PR #$PR の head SHA を取得できません" >&2
+  exit 2
+fi
+IFS=$'\t' read -r head_sha pr_body <<<"$pr_view"
+if [[ -z $head_sha ]]; then
+  echo "[FAIL] PR #$PR の head SHA を取得できません" >&2
+  exit 2
+fi
+
 # **bot だけを取らない。** 引き金（`@codex` の混入）と対応させるので、
 # **誰が何を書いたか**を時刻順に見る必要がある。
 if ! comments_raw="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/comments" \
@@ -207,13 +234,17 @@ fi
 # **印を持つ投稿は、いつでもレビューである**（自分でそう名乗っている）。
 comments=""
 answers=""
+# **本文の混入は、いちばん古い引き金である**（PR を作った時点で置かれている）
 stray=0
+if [[ ${pr_body,,} =~ $CODEX_MENTION ]] && ! is_request "$pr_body"; then
+  ((stray++))
+fi
 while IFS=$'\t' read -r at login body; do
   [[ -n $at ]] || continue
   lowered="${body,,}"
   if [[ $login != "$REVIEW_BOT" ]]; then
     # **要求そのものは混入に数えない。** 数えると、要求のたびに応答が 1 つ食われる
-    if [[ $lowered =~ $CODEX_MENTION ]] && ! [[ $lowered =~ $REVIEW_REQUEST ]]; then
+    if [[ $lowered =~ $CODEX_MENTION ]] && ! is_request "$body"; then
       ((stray++))
     fi
     continue
@@ -230,12 +261,7 @@ done <<<"$comments_raw"
 comments="${comments%$'\n'}"
 answers="${answers%$'\n'}"
 
-# **応答の時刻だけを返す口。** `bin/loop-review-budget` が「未応答か」を判断するのに使う。
-# **判定を 2 箇所に置かない**——置くと、**片方だけ直して食い違う**（今回それで両方壊れた）。
-if ((answers_only == 1)); then
-  [[ -z $answers ]] || printf '%s\n' "$answers"
-  exit 0
-fi
+
 
 # 👍 リアクション。SHA を持たないので、時刻だけを取って空の SHA 欄で流す。
 if ! reactions="$(gh api --paginate "repos/{owner}/{repo}/issues/$PR/reactions" \
@@ -264,14 +290,8 @@ fi
 rows="$(printf '%s' "$paired" \
   | grep -E $'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\t]+\t[0-9a-f]{7,40}$' || (( $? == 1 )))"
 
-# 現 head の祖先でない commit へのレビューを落とす。head を取れないときは
-# 判定できないので失敗に倒す (数え落として「未レビュー」に見えるほうが安全)。
-if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
-  || [[ -z $head_sha ]]; then
-  echo "[FAIL] PR #$PR の head SHA を取得できません" >&2
-  exit 2
-fi
 
+out=""
 while IFS=$'\t' read -r ts sha; do
   [[ -n $sha ]] || continue
   if ! status="$(gh api "repos/{owner}/{repo}/compare/${sha}...${head_sha}" \
@@ -286,9 +306,23 @@ while IFS=$'\t' read -r ts sha; do
     live="stale"
   fi
   if ((include_stale == 1)); then
-    printf '%s\t%s\t%s\n' "$ts" "$sha" "$live"
+    out+="${ts}"$'\t'"${sha}"$'\t'"${live}"$'\n'
   elif [[ $live == "live" ]]; then
-    printf '%s\t%s\n' "$ts" "$sha"
+    out+="${ts}"$'\t'"${sha}"$'\n'
   fi
 done <<<"$rows"
+
+# **`--all` は応答も返す。** 呼ぶ側が「レビューの回数」と「最後の応答時刻」を
+# **2 回に分けて取ると、その間に着いた応答で「回数は古く、時刻は新しい」**になり、
+# **同じ head が既にレビュー済みでも `pending` が解ける**。
+# **両方を 1 回の取得から導けるようにしておく**（この仕組みの主題である）。
+if ((include_stale == 1)); then
+  while IFS= read -r at; do
+    [[ -n $at ]] || continue
+    out+="${at}"$'\t'"-"$'\t'"answer"$'\n'
+  done <<<"$answers"
+fi
+
+# 時刻順に並べ直す。**混ぜたぶんで順序が崩れない**ようにする
+[[ -z $out ]] || printf '%s' "$out" | sort -s -k1,1
 exit 0
