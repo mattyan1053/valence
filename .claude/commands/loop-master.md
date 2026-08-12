@@ -142,12 +142,15 @@ bin/loop-lease release master "<token>"
 ## 2. open PR を見て、見る順番を決める
 
 ```bash
-gh pr list --state open --limit 200 \
-  --json number,headRefOid,title,isDraft,baseRefName,mergeable,labels
+if ! prs="$(gh pr list --state open --limit 200 \
+  --json number,headRefOid,title,isDraft,baseRefName,mergeable,labels)"; then
+  bin/loop-stall pr-lookup-failed
+fi
 ```
 
 `--limit` を明示する。既定 30 件では、それを超えたときに古い PR を取りこぼす。
-取得に失敗したら `bin/loop-stall pr-lookup-failed` を通して停止する。
+**先に変数へ受ける。** 取得に失敗したのに「0 件」と読むと、**open PR があるのに
+起票の段へ進む**——`bin/loop-stall pr-lookup-failed` を通して停止する。
 
 0 件ならステップ 5（起票）へ。draft は worker が作業中なので触らない。
 **`parked` の PR も選ばない**（先行 PR を待って保留中。ゲートを回しても意味が無い）。
@@ -812,9 +815,11 @@ Issue には次を書く（`.github/ISSUE_TEMPLATE/task.yml` の形）。
 古い Issue が永久に後回しになるうえ、割り込みを伝える手段も無くなる。
 
 ```bash
-gh issue list --label ready --limit 200 --json number,title
-gh issue list --label in-progress --limit 200 --json number,title
-gh issue list --label backlog --limit 200 --search "sort:created-asc" --json number,title,body
+if ! ready="$(gh issue list --label ready --limit 200 --json number,title)" \
+  || ! in_progress="$(gh issue list --label in-progress --limit 200 --json number,title)" \
+  || ! backlog="$(gh issue list --label backlog --limit 200 --search "sort:created-asc" --json number,title,body)"; then
+  bin/loop-stall issue-lookup-failed
+fi
 ```
 
 **3 つとも取得できたことを確認してから label を触る。** `gh` は失敗時に exit 1、
@@ -836,10 +841,17 @@ worker は PR-B を作れない**（worker 側で 2.2 を抜けても、`ready` 
 
 ```bash
 # parked な PR が閉じる予定の Issue（PR 本文の Closes #N）
-gh pr list --state open --limit 200 --json number,labels,body \
-  --jq '.[] | select([.labels[].name] | index("parked")) | .body' \
-  | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+'
+# **先に変数へ受ける。** パイプで繋ぐと `$?` は `grep` のものになり、
+# **取得できなかった周回が「parked は 0 件」と見分けが付かない**
+if ! parked="$(gh pr list --state open --limit 200 --json number,labels,body \
+  --jq '.[] | select([.labels[].name] | index("parked")) | .body')"; then
+  bin/loop-stall pr-lookup-failed
+fi
+printf '%s' "$parked" | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+'
 ```
+
+**ここで 0 件と読み違えると、`in-progress` を引きすぎない**——**保留した PR の Issue が
+「着手中」に数え直され、次の 1 件を `ready` へ昇格させられない**（worker は止まる）。
 
 - **`ready` が 2 件以上** → 運用が壊れている。どれを次にするか決まらないので、
   `bin/loop-stall "too-many-ready:<件数>"` を通して停止する

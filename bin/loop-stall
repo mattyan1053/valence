@@ -39,8 +39,14 @@ readonly STOP_IDS=(
   "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
   "too-many-ready:<件数>|両方: ready の Issue が 2 件以上ある (着手順が一意に決まらない)"
   "wrong-worktree|master: worker の作業ツリーにいる"
-  "pr-lookup-failed|master: open PR の一覧を取得できない"
-  "issue-lookup-failed|master: Issue の一覧を取得できない (label を触らずに止める)"
+  # **どちらの役も打つ。** 「一覧の失敗を 0 件として読む」は master 側で 4 箇所直したが、
+  # **worker の手順には残っていた** (#136)。**同じ状態には同じ名前**なので分けない
+  # (#128)——**主体ではなく状態で名前を決める**。
+  #
+  # **両方が同時に失敗するのは、実際に GitHub が落ちているとき**である。
+  # そのとき**早く 3 周へ届く**のは正しい向きで、**どちらのループも進めない**。
+  "pr-lookup-failed|両方: open PR の一覧を取得できない"
+  "issue-lookup-failed|両方: Issue の一覧やコメントを読み取れない (label を触らずに止める)"
   "gate-misconfigured:<PR番号>|master: bin/loop-gate が exit 2"
   "review-budget-unknown:<PR番号>|master: 3.2 でレビューの判定ができない (予算・一覧の取得)"
   "merge-failed:<PR番号>@<SHA>|master: マージに失敗"

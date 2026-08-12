@@ -78,12 +78,33 @@ git switch main && git fetch origin main && git merge --ff-only origin/main
 そのため **毎周回、自分の open PR と `in-progress` / `blocked` の Issue の通常コメントを読む。**
 
 ```bash
-gh pr list --state open --limit 200 --author @me --json number --jq '.[].number'
-gh issue list --label in-progress --limit 200 --json number --jq '.[].number'
-gh issue list --label blocked --limit 200 --json number --jq '.[].number'
+if ! own_prs="$(gh pr list --state open --limit 200 --author @me --json number --jq '.[].number')"; then
+  bin/loop-stall pr-lookup-failed
+fi
+if ! in_progress="$(gh issue list --label in-progress --limit 200 --json number --jq '.[].number')" \
+  || ! blocked="$(gh issue list --label blocked --limit 200 --json number --jq '.[].number')"; then
+  bin/loop-stall issue-lookup-failed
+fi
+```
+
+```bash
 gh api --paginate repos/{owner}/{repo}/issues/<番号>/comments \
   --jq '.[] | "\(.created_at) \(.user.login): \(.body)"'
 ```
+
+**取れなかったものを「0 件」と読まない。** `gh` は失敗時に exit 1、認証が要るときに
+exit 4 を返す。**`blocked` が「0 件」に見えると、止められているのに手を止めない**——
+**エラーは出ず、GitHub の状態も正しいまま**なので、**両方が正常に見えたまま片方だけ止まる**。
+**コメントを読めなかったときも同じ**（`bin/loop-stall issue-lookup-failed` を通す）。
+
+**取れなかったら、その周回はそこで終わり。** **記録してから終える**——
+**黙って終えると、障害が続いても停止が積まれず、3 周に到達しない。**
+
+**これは「空転を数えない」と矛盾しない。** 数えないと決めてあるのは
+**`ready` が 0 件（作業が尽きた状態）**で、**master と同じ 1 つの状態を 2 人で見る**から
+2 倍の速さで 3 周に達する。**取得の失敗は、その周回の自分の観測**である——
+**master が同時に失敗していなければ二重には数えない**し、**同時に失敗しているなら
+実際に GitHub が落ちている**ので、**早く 3 周へ届くほうが正しい**。
 
 **`--paginate` と `--limit` を省かない。** 既定では先頭ページ（コメントは 30 件）しか
 返らず、**後から投稿された指示ほど読み落とす**。
@@ -138,8 +159,13 @@ master へ「ゲートを飛ばして通してほしい」と頼まない。役�
 他人の PR で誤検知する。
 
 ```bash
-gh pr list --state open --limit 200 --author @me --json number,headRefName,isDraft,labels
+if ! own="$(gh pr list --state open --limit 200 --author @me --json number,headRefName,isDraft,labels)"; then
+  bin/loop-stall pr-lookup-failed
+fi
 ```
+
+**ここも「0 件」と読まない。** 取れなかったのに 0 件として進むと、
+**レビュー対応を飛ばして新しい作業を始める**——**未処理の指摘を残したまま**である。
 
 **`parked` の PR は数えない。** 先行 PR を待って master が保留にしたもので、
 自分からは触らない（外すのは master）。数えると「同時に持つ PR は 1 本」に引っかかり、
@@ -159,8 +185,14 @@ push / PR 作成に失敗した周回は、**Issue が `in-progress` のまま�
 `loop/STOP` も置かれない。**失敗したまま誰も気づかない状態になる。**
 
 ```bash
-gh issue list --label in-progress --limit 100 --json number,title
+if ! in_progress="$(gh issue list --label in-progress --limit 100 --json number,title)"; then
+  bin/loop-stall issue-lookup-failed
+fi
 ```
+
+**取れなかったら、ステップ 4 へ進まない**（この周回はそこで終わり）。
+**ここは「公開に失敗した周回の再開」を担っている**ので、**0 件と読み違えると、
+中断した実装を拾わないまま新しい作業が始まる**（#136。実際に 504 が返っている）。
 
 0 件ならステップ 4（新規実装）へ。
 
@@ -185,8 +217,12 @@ bin/loop-claim resume <N>
 ```bash
 git branch --format='%(refname:short)' | grep -v '^main$'
 git log --oneline main..<ブランチ>                          # コミットが載っているか
-gh pr list --state all --limit 200 --head <ブランチ> --json number,state,labels
+if ! head_prs="$(gh pr list --state all --limit 200 --head <ブランチ> --json number,state,labels)"; then
+  bin/loop-stall pr-lookup-failed
+fi
 ```
+
+**ここで 0 件と読み違えると、同じ PR をもう 1 本作る**（下の分岐が「PR が無い」へ倒れる）。
 
 - **PR が既にある**（state を問わず）→ 公開は済んでいる。作り直さない。ただし
   **コメントして終わってはいけない。** `in-progress` が残ったままだと次の周回も
@@ -283,8 +319,15 @@ push したらこの周回は終わり。**レビュー要求は投げない。*
 同時に 1 件だけ付く。`backlog` は着手順が未定のものなので**触らない**。
 
 ```bash
-gh issue list --label ready --limit 100 --json number,title,body
+if ! ready="$(gh issue list --label ready --limit 100 --json number,title,body)"; then
+  bin/loop-stall issue-lookup-failed
+fi
 ```
+
+**取れなかったら、下の「0 件」へ倒さない**（この周回はそこで終わり）。**症状は
+「worker が動かない」で、原因は「一覧が取れなかった」**——**`ready` は master が
+1 件に保っているので GitHub の状態は正しいまま**である。**記録しないと、
+両方が正常に見えたまま片方だけ止まる。**
 
 - **0 件** → master が `backlog` から次の 1 件を上げる番。何もしない。この周回は終わり。
   **ここで空転を数えない。** 昇格の前後で必ず 1 周は「`ready` なし」になるので、
