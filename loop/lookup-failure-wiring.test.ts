@@ -31,7 +31,12 @@ function blocksIn(procedure: string): ReadBlock[] {
     }
     if (line.startsWith("```")) {
       const text = body?.join("\n");
-      if (text !== undefined && /gh (issue|pr) list/.test(text)) {
+      // **「一覧」を型で絞らない。** `gh issue list` / `gh pr list` だけを見ていたので、
+      // **`gh api … /comments` が最初から候補に入っていなかった**（#136 のレビュー 2 周目）。
+      // **#166 で「名指ししない」に直したが、今度は「型で絞った」**——
+      // **絞り方が変わっただけで、絞ったものが隠れるのは同じ**である。
+      // **GitHub から読むものは、すべて並べる。**
+      if (text !== undefined && /gh (issue list|pr list|api )/.test(text)) {
         blocks.push({ procedure, section, body: text });
       }
       body = line.startsWith("```bash") ? [] : undefined;
@@ -119,9 +124,15 @@ describe("一覧の取得に失敗した周回", () => {
     };
   }
 
-  /** 実際に走らせられるブロック（`<…>` の穴が無いもの）。 */
+  /**
+   * 走らせられる形にしたブロック。
+   *
+   * **穴があるものを外さない。** 外すと**そのブロックだけ実行の試験を通らない**——
+   * **`<番号>` があるという理由で、いちばん確かめたい経路が抜ける**。
+   * **穴は埋めて走らせる**（偽の `gh` は引数を見ない）。
+   */
   function runnable(): ReadBlock[] {
-    return readBlocks().filter((block) => !block.body.includes("<"));
+    return readBlocks().map((block) => ({ ...block, body: block.body.replace(/<[^>]+>/g, "1") }));
   }
 
   it("一覧を読む節を、全部並べて突き合わせる", () => {
@@ -139,6 +150,9 @@ describe("一覧の取得に失敗した周回", () => {
       ["master ## 6. 着手順を決める（`ready` を 1 件に保つ）", "止める"],
       ["master ## 6. 着手順を決める（`ready` を 1 件に保つ）", "止める"],
       ["worker ### 2.0 届いた指示を先に確認する", "止める"],
+      // **コメントも「読むもの」である。** ここで読むのは **`blocked` の指示と
+      // master からの割り込み**で、**0 件と読むと、止められているのに手を止めない**
+      ["worker ### 2.0 届いた指示を先に確認する", "止める"],
       ["worker ### 2.1 master へ知らせる", "止める"],
       ["worker ### 2.2 公開に失敗した周回を再開する", "止める"],
       ["worker ### 2.2 公開に失敗した周回を再開する", "止める"],
@@ -149,7 +163,9 @@ describe("一覧の取得に失敗した周回", () => {
   it("gh が落ちたら、0 件と別の道へ進む", () => {
     // **これが本命である。** **落ちる理由が狙ったものと一致すること**まで見る
     const blocks = runnable();
-    expect(blocks.length, "走らせられるブロックが無い").toBeGreaterThan(0);
+    // **1 つも外さない。** 外したブロックは**列挙にだけ載って、実行では確かめられない**——
+    // **`<番号>` があるという理由で、いちばん確かめたい経路が抜ける**
+    expect(blocks.length, "実行で確かめていないブロックがある").toBe(readBlocks().length);
 
     for (const block of blocks) {
       rmSync(join(workspace, "stalled"), { force: true });

@@ -91,8 +91,12 @@ printf 'own PR: %s\nin-progress: %s\nblocked: %s\n' "$own_prs" "$in_progress" "$
 ```
 
 ```bash
-gh api --paginate repos/{owner}/{repo}/issues/<番号>/comments \
-  --jq '.[] | "\(.created_at) \(.user.login): \(.body)"'
+if ! comments="$(gh api --paginate repos/{owner}/{repo}/issues/<番号>/comments \
+  --jq '.[] | "\(.created_at) \(.user.login): \(.body)"')"; then
+  bin/loop-stall issue-lookup-failed
+  exit
+fi
+printf '%s\n' "$comments"
 ```
 
 **取れなかったものを「0 件」と読まない。** `gh` は失敗時に exit 1、認証が要るときに
