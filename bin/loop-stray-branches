@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# push されたのに PR が無いブランチと、終わった PR の消し残りを挙げる。
+#
+#   exit 0 = 無い (何も出さない)
+#   exit 1 = ある (標準出力に `<種類>\t<ブランチ>\t<添える値>`)
+#   exit 2 = 読めない
+#
+# **master は open PR を見て、worker は label を見る。どちらも remote のブランチを見ない**
+# ので、**PR にならなかったものは、どちらの視界にも入らない** (#148)。
+# **実物が 1 日半、誰にも見られずに置かれていた** (365 行の実装と試験)。
+#
+# **倒れる向きが悪い。** 落ちた周回の残りなら **Issue は `backlog` へ戻っている**ので、
+# **次に取った worker はブランチの存在を知らないまま最初から作り直す**——
+# **気づく手立てが無いまま静かに捨てられる。**
+#
+# **2 つを混ぜない。** 拾い手も対処も違う。
+#
+#   no-pr            … PR が 1 件も無い。**作業が宙に浮いている**ので**人へ渡す**
+#                      (救うか捨てるかは中身を見ないと決まらない。**自動で消さない**)
+#   merged-leftover  … 終わった PR の消し残り。**掃除してよい** (作業は PR に残っている)
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# 列の区切り。**タブにしない**——`IFS` の空白として畳まれ、空の列があるとずれる
+# (`bin/loop-handoff` で実際に踏んだ)。
+readonly FIELD=$'\037'
+
+usage() {
+  echo "使い方: bin/loop-stray-branches" >&2
+  echo "        exit 0 = 無い / exit 1 = ある (標準出力) / exit 2 = 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || usage
+
+fail_unknown() {
+  echo "[FAIL] 読み取れません: $1" >&2
+  echo "       宙に浮いたブランチがあるかどうかは、この周回では分かりません" >&2
+  exit 2
+}
+
+# **remote を直接引く。** ローカルの追跡ブランチは `git fetch` の状態しだいで古い。
+if ! refs="$(git ls-remote --heads origin)"; then
+  fail_unknown "remote のブランチ"
+fi
+
+# **PR は state を問わず取る。** open だけを見ると、**マージ済みの消し残りが
+# 「PR が無い」に化ける**——**そちらは消してよいもの**なので、混ぜると対処を誤る。
+if ! prs="$(gh pr list --state all --limit 200 --json number,state,headRefName \
+  --jq '.[] | "\(.headRefName)\(.number)\(.state)"')"; then
+  fail_unknown "PR の一覧"
+fi
+
+# ブランチごとに「いちばん強い state」を持つ。**同じ head に複数の PR が付きうる**
+# (作り直した場合)。**OPEN があれば作業中**、無ければ終わったものとして扱う。
+declare -A pr_state=()
+declare -A pr_number=()
+while IFS="$FIELD" read -r head number state; do
+  [[ -n $head ]] || continue
+  if [[ ${pr_state[$head]-} != "OPEN" ]]; then
+    pr_state["$head"]="$state"
+    pr_number["$head"]="$number"
+  fi
+done <<<"$prs"
+
+# **周回が走っている間は、PR が無いブランチを挙げない。**
+#
+# **push から PR 作成までの間に、必ず窓が開く** (master が実測。#148)。
+# **時間で切らない**——**遅い周回と落ちた周回は、経過時間では分けられない** (#129)。
+# **着手の記録が生きているか**を見る (**動いている worker だけが更新する**)。
+#
+# **判定はここに書かない。** 生きているかどうかは `bin/loop-lease` が持つ
+# (**2 箇所に持つと、片方だけ直して食い違う**)。
+busy=0
+"${BASH_SOURCE[0]%/*}/loop-lease" busy worker >/dev/null 2>&1 && busy=1
+
+found=0
+while read -r sha ref; do
+  [[ -n $ref ]] || continue
+  branch="${ref#refs/heads/}"
+  # **main は見ない。**
+  [[ $branch != "main" ]] || continue
+  state="${pr_state[$branch]-}"
+  case "$state" in
+    OPEN)
+      # **作業中である。** 報告すると**毎周回出る警告**になり、読まれなくなる
+      # (`bin/loop-merge` の消し残り警告が実際にそうなった)
+      ;;
+    "")
+      # **PR がまだ無い。** 走っている周回のものかもしれない
+      ((busy == 1)) && continue
+      printf 'no-pr\t%s\t%s\n' "$branch" "${sha:0:8}"
+      found=1
+      ;;
+    *)
+      # MERGED / CLOSED。**どちらも PR に中身が残る**ので、消してよい
+      printf 'merged-leftover\t%s\t#%s (%s)\n' "$branch" "${pr_number[$branch]-?}" "$state"
+      found=1
+      ;;
+  esac
+done <<<"$refs"
+
+((found == 1)) || exit 0
+exit 1

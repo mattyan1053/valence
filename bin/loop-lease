@@ -49,6 +49,7 @@ usage() {
   echo "        bin/loop-lease release <役> <token>" >&2
   echo "        bin/loop-lease held <役>        その役を誰かが持っているか（読むだけ）" >&2
   echo "        bin/loop-lease check            この周回が持っていなければ言って記録する（止めない）" >&2
+  echo "        bin/loop-lease busy <役>        その役の周回がどこかで走っているか（読むだけ）" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
   echo "        bin/loop-lease ttl              期限（秒）を出す" >&2
   echo "        役: ${ROLES[*]}" >&2
@@ -392,6 +393,41 @@ now="$(date +%s)"
 # **出口だけでは遅い。** 気づくのは終わったあとで、**その周回の直列化は既に効いていない**。
 #
 # **止めない。** #157 の判断を覆さない——**止めていたら #159 の特定が止まっていた**。
+# **その役の周回が、どこかの作業場で走っているか。**
+#
+# **`held` では答えられない。** worker の単位は**作業場**なので、`held worker` は
+# **呼んだ場所の worker** しか見ない——**master の worktree から尋ねると、
+# worker の lease は別の scope になって見えない**。
+#
+# **使い道は「まだ PR が無いブランチ」の見分け**である (#148)。**push から PR 作成までの
+# 間に必ず窓が開く**ので、**走っている周回のものかどうか**を知りたい。**時間で切らない**
+# ——**遅い周回と落ちた周回は、経過時間では分けられない** (#129)。
+#
+#   exit 0 = 走っている / exit 1 = 走っていない / exit 2 = 読めない
+if [[ $ACTION == "busy" ]]; then
+  [[ $# -eq 2 ]] || usage
+  # **役ごとに置き場所が違う。** master は 1 つ、worker は作業場ごとに増える——
+  # **その役のものだけを見る**（`valence-loop-lease-master` と
+  # `valence-loop-lease-worker<作業場>` は前方一致で分けられる）。
+  for state in "$common_dir/valence-loop-lease-$ROLE"*; do
+    [[ -f $state ]] || continue
+    [[ $state != *.lock ]] || continue
+    # **期限の判定を書き写さない。** `read_lease` が 1 箇所で持っている
+    lease_scope="${state##*/valence-loop-lease-}"
+    SCOPE_LABEL="$lease_scope"
+    STATE="$state"
+    ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+    lock_state >/dev/null 2>&1 || continue
+    read_lease quiet || {
+      exec 9>&-
+      continue
+    }
+    exec 9>&-
+    [[ -z $held_token ]] || exit 0
+  done
+  exit 1
+fi
+
 if [[ $ACTION == "check" ]]; then
   # **役を渡す形は残さない。** 黙って無視すると、**役を書き固めた古い呼び出しが
   # 生き残っているのに、直したつもりになる**
