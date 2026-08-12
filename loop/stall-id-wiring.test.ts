@@ -97,6 +97,9 @@ describe("停止識別子", () => {
     expect(identifiersWithSection(".claude/commands/loop-master.md")).toEqual([
       ["### 1.0 同じ役の周回が走っていないか確かめる", "wrong-worktree"],
       ["### 1.1 手順とスクリプトを最新にする", "main-sync-failed"],
+      // **1 つは散文、1 つはブロックの中**（先に変数へ受ける形。#136）——
+      // **同じ状態を 2 度書いているのではなく、読む場所と打つ場所**である
+      ["## 2. open PR を見て、見る順番を決める", "pr-lookup-failed"],
       ["## 2. open PR を見て、見る順番を決める", "pr-lookup-failed"],
       // **ずれたときの行き先は、ここに 1 つだけ置く**（各所に書き写さない。#145）。
       // **主体が違うので名前も分ける**——動かすのは worker、読めない原因は
@@ -123,6 +126,10 @@ describe("停止識別子", () => {
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### defer — Issue へ外出ししてマージする", "deferred-overflow"],
       ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "issue-lookup-failed"],
+      ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "issue-lookup-failed"],
+      // **保留した PR の一覧も、落ちたら止める**——**0 件と読むと `in-progress` を
+      // 引きすぎず、次の 1 件を `ready` へ昇格させられない**（worker が止まる）
+      ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "pr-lookup-failed"],
       ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "too-many-ready:<件数>"],
       ["### 作業が尽きたとき", "no-work"],
       ["### 周回の出口", "claim-mismatch:<Issue番号>"],
