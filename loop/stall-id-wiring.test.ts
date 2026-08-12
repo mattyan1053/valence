@@ -109,6 +109,11 @@ describe("停止識別子", () => {
       ["### exit 0 — マージする", "merge-failed:<PR番号>@<SHA>"],
       ["### exit 0 — マージする", "merge-failed:<PR番号>@<SHA>"],
       ["### exit 1 — 何が足りないかで分ける", "deferred-overflow"],
+      // **3 つあるのは、経路が 3 つあるため**（#70）——**保留の失敗**・**理由を
+      // 投稿できなかった**・**ループのアカウント（または読めない）**。
+      // **ループの外の著者を待つ経路だけが、ここを通らない**
+      ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
+      ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
       ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
@@ -116,6 +121,9 @@ describe("停止識別子", () => {
       ["### 3.2 レビューを要求してよいか確かめる", "review-unanswered:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### exit 2 — 設定か使い方の誤り", "gate-misconfigured:<PR番号>"],
+      // 上と同じ 3 つの経路（#70）
+      ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
+      ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
       ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
       // **人を呼ぶ側は worker 待ちではない。** triage が `human` を返した状態は
       // **worker には解けない**——`bin/loop-stall` 自身が
