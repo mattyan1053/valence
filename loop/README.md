@@ -78,7 +78,10 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
   動かすのは worker、読めない原因は gh / 認証 / GitHub で、後者は worker では解けない）。
   **マージ側の `--match-head-commit` と同じ考え方**を、
   記録側にも置いている（#145）。
-- `main` へ直接 push しない。
+- `main` へ直接 push しない。**`main` の上での commit は `.githooks/pre-commit` が止める**
+  （判定は `bin/loop-commit-guard`、`core.hooksPath` を向けるのは `./task`）。
+  **2 回とも「ブランチを切ったあとに `main` へ戻された」形**だったので、
+  **ブランチを切ったかどうかではなく、commit の時点で見る**（#68）。
 - **同時に open にしてよい PR は 1 本**。並行させるとレビュー量が本数倍で増える。
 
 ## 止め方
