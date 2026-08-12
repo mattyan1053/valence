@@ -101,6 +101,8 @@ describe("停止識別子", () => {
       // **同じ状態を 2 度書いているのではなく、読む場所と打つ場所**である
       ["## 2. open PR を見て、見る順番を決める", "pr-lookup-failed"],
       ["## 2. open PR を見て、見る順番を決める", "pr-lookup-failed"],
+      // **保留の一覧**（#70。ここが 0 件に化けると、外の著者の保留が永久に残る）
+      ["## 2. open PR を見て、見る順番を決める", "pr-lookup-failed"],
       // **ずれたときの行き先は、ここに 1 つだけ置く**（各所に書き写さない。#145）。
       // **主体が違うので名前も分ける**——動かすのは worker、読めない原因は
       // gh / 認証 / GitHub で、**後者は worker が何周まわしても解けない**
@@ -109,6 +111,13 @@ describe("停止識別子", () => {
       ["### exit 0 — マージする", "merge-failed:<PR番号>@<SHA>"],
       ["### exit 0 — マージする", "merge-failed:<PR番号>@<SHA>"],
       ["### exit 1 — 何が足りないかで分ける", "deferred-overflow"],
+      // **4 つあるのは、経路が 4 つあるため**（#70）——**理由を投稿できなかった**・
+      // **保留にした head を記録できなかった**・**保留の失敗**・
+      // **ループのアカウント（または読めない）**。
+      // **ループの外の著者を待つ経路だけが、ここを通らない**
+      ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
+      ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
+      ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
       ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
@@ -116,12 +125,20 @@ describe("停止識別子", () => {
       ["### 3.2 レビューを要求してよいか確かめる", "review-unanswered:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### exit 2 — 設定か使い方の誤り", "gate-misconfigured:<PR番号>"],
+      // 上と同じ 4 つの経路（#70）
+      ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
+      ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
+      ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
       ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
       // **人を呼ぶ側は worker 待ちではない。** triage が `human` を返した状態は
       // **worker には解けない**——`bin/loop-stall` 自身が
       // 「**主体が違うものに worker の周回を効かせない**」と書いている
       // （`awaiting-worker` は `WORKER_FIXES` に入るので、**worker の周回が動いている
       // 間ずっと数えられない**）。**2 つあるのは、保留の失敗と投稿の失敗で経路が違う**ため
+      // **3 つあるのは、経路が 3 つあるため**——**記録を消せなかった**（#70 の保留と
+      // 同じ label を使うので、**古い記録が残ると人待ちが自動で外れる**）・
+      // **保留の失敗**・**理由の投稿の失敗**
+      ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### defer — Issue へ外出ししてマージする", "deferred-overflow"],

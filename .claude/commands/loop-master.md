@@ -173,6 +173,43 @@ bin/loop-silent-park        # exit 1 なら、その PR は理由が投稿され
   保留を戻す**（`--remove-label parked --remove-label awaiting-human`）
 - **exit 2** → 読めない。**この周回は普通に進んでよい**（次の周回で読み直す）
 
+**もう 1 つ例外がある。ループの外の著者が対応した保留である** (#70)。
+
+**fork から出す人に triage 権限は無い**ので、**自分では `parked` を外せない**——
+**push しても誰も見に来ない**。**理由は書いてあるので、上の `bin/loop-silent-park`
+にも出てこない**（あちらが見るのは「理由の無い保留」だけである）。
+
+**master の記憶には依存しない。** **保留にした時点の head を記録してある**ので、
+**動いていれば外す**——**毎周回、状態だけを見る**（`bin/loop-claim audit` と同じ形）。
+
+```bash
+if ! parked_prs="$(gh pr list --state open --limit 200 --json number,labels \
+  --jq '.[] | select([.labels[].name] | index("parked"))
+             | select([.labels[].name] | index("awaiting-human")) | .number')"; then
+  bin/loop-stall pr-lookup-failed
+  exit
+fi
+printf '%s\n' "$parked_prs"
+for pr in $parked_prs; do
+  # **記録が無い保留は触らない**（先行 PR 待ちなど、**人が外すと決めた保留**である）
+  parked_head="$(bin/loop-parked-head get "$pr")" || continue
+  # **ループの中の著者なら、これまでどおり**（外すのは人）
+  bin/loop-outside-author "$pr" >/dev/null || continue
+  moved=0
+  bin/loop-head same "$pr" "$parked_head" || moved=$?
+  # **0 = 同じ / 2 = 読めない → どちらも触らない。** **動いたときだけ外す**
+  ((moved == 1)) || continue
+  if gh pr edit "$pr" --remove-label parked --remove-label awaiting-human; then
+    # **外せたときだけ消す。** **消すのは戻せない**——**外せなかった周回で消すと、
+    # 保留は残るのに記録が無い**（＝**誰も外せない保留**）になる (#176 のレビュー)
+    bin/loop-parked-head clear "$pr" || true
+  fi
+done
+```
+
+**外したら、その周回から普通の PR としてゲートに乗る。** **指摘が残っていれば、また
+保留になる**（そのとき head を記録し直すので、**同じ head で外れ続けることはない**）。
+
 **`bin/loop-handoff` からも同じことが報される**が、**master が自分で見つけた周回では
 送られない**（**自分自身へは送らない**。#92）——**だからここでも見る。**
 
@@ -424,7 +461,44 @@ bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら�
 - **満たされている** → `gh pr edit <PR番号> --remove-label changes-requested` で外す。
   **前へ進んだので `bin/loop-stall --reset` を通す。** 次の周回でゲートを回し直す
 - **満たされていない** → 何が足りないかをコメントで返し（label は付けたまま）、
-  **`bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"` を通して停止する**
+  **対応待ちを記録して停止する**（下のブロック。**著者がループの外なら保留にして数えない**）
+
+```bash
+# **何が足りないかは、著者が誰であっても必ず投稿する。** 分けるのは保留だけである——
+# **外の枝にだけ置くと、通常の worker（＝ほぼ全部）が何を直せばよいか分からないまま
+# 3 周で `loop/STOP`** に達する（#176 のレビュー。**散文には書いてあるのに、
+# 実行されるブロックには無い**——**「入れたが誰も見ていない」の裏返し**）。
+#
+# **投稿してから保留にする。** **`parked` は錠ではない**（ゲートを止めるのではなく、
+# ステップ 2 で選ばれなくするだけ）ので、**理由が先にあるほうが穴が無い**——
+# **理由の無い保留が、そもそも作れない** (#163)。**`changes-requested` は逆**で、
+# **label が錠**なので**先に付ける**（投稿だけ残ると、次の周回でゲートが通る）。
+if ! gh pr comment <PR番号> --body-file <file>; then
+  # **理由を投稿できなかった。** 保留にしない（理由の無い保留を作らない）——数える
+  bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+# **著者がループの外にいるなら、待たない** (#70)。**次に動くのは人**なので、
+# **人待ちと同じ状態へ倒す**（`parked` + `awaiting-human`。**状態は増やさない**）。
+# **待つと、SHA が変わらないまま 3 周で `loop/STOP`**——**一人の不在が全体停止になる**。
+elif outside="$(bin/loop-outside-author <PR番号>)"; then
+  gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
+  # **保留にした head を残す。** **著者は自分で label を外せない**ことがある
+  # （fork には triage 権限が無い）ので、**動いたら master が外す**（ステップ 2）。
+  # **master の記憶ではなく、状態から決まる。**
+  if ! bin/loop-parked-head record <PR番号> <SHA>; then
+    # **記録できないなら、保留にしない。** **記録の無い保留はステップ 2 が触らない**
+    # （**人が外すと決めた保留と区別が付かない**）ので、**そのまま永久に残る**——
+    # **この節が消しに来たものそのもの**である。**理由を投稿できなかったときと同じ**
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  elif ! gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+    # **保留にできなかった。** ループは止まる側にあるので、これまでどおり数える
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  fi
+else
+  # **exit 1 = ループのアカウント / exit 2 = 読めない。どちらもこれまでどおり数える。**
+  # **判定不能を「外」に倒さない**——**worker の対応待ちが人待ちに化け、誰も直さない**
+  bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+fi
+```
 
 **満たされていない側でも必ず記録する。** ここは**新しく「通らない条件」を足した場所**で、
 第 3 層（手直しの範囲か）はレビューの上限にしか効かず、**label には関係しない**。
@@ -642,8 +716,45 @@ bin/loop-head same <PR番号> <ゲートが出した head>
 **古い head を読んで書いた指摘が、新しい head に対する指摘として並ぶ**
 （実際にそうなった。#145）。**次の周回で、新しい head を評価し直す。**
 
-resolve しない。何を直すかと、なぜそれが必要かを返信し、
-`bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"` を通す（**`<SHA>` はゲートが出した head**）。
+resolve しない。何を直すかと、なぜそれが必要かを返信し、**対応待ちを記録する**
+（**`<SHA>` はゲートが出した head**）。
+
+```bash
+# **何が足りないかは、著者が誰であっても必ず投稿する。** 分けるのは保留だけである——
+# **外の枝にだけ置くと、通常の worker（＝ほぼ全部）が何を直せばよいか分からないまま
+# 3 周で `loop/STOP`** に達する（#176 のレビュー。**散文には書いてあるのに、
+# 実行されるブロックには無い**——**「入れたが誰も見ていない」の裏返し**）。
+#
+# **投稿してから保留にする。** **`parked` は錠ではない**（ゲートを止めるのではなく、
+# ステップ 2 で選ばれなくするだけ）ので、**理由が先にあるほうが穴が無い**——
+# **理由の無い保留が、そもそも作れない** (#163)。**`changes-requested` は逆**で、
+# **label が錠**なので**先に付ける**（投稿だけ残ると、次の周回でゲートが通る）。
+if ! gh pr comment <PR番号> --body-file <file>; then
+  # **理由を投稿できなかった。** 保留にしない（理由の無い保留を作らない）——数える
+  bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+# **著者がループの外にいるなら、待たない** (#70)。**次に動くのは人**なので、
+# **人待ちと同じ状態へ倒す**（`parked` + `awaiting-human`。**状態は増やさない**）。
+# **待つと、SHA が変わらないまま 3 周で `loop/STOP`**——**一人の不在が全体停止になる**。
+elif outside="$(bin/loop-outside-author <PR番号>)"; then
+  gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
+  # **保留にした head を残す。** **著者は自分で label を外せない**ことがある
+  # （fork には triage 権限が無い）ので、**動いたら master が外す**（ステップ 2）。
+  # **master の記憶ではなく、状態から決まる。**
+  if ! bin/loop-parked-head record <PR番号> <SHA>; then
+    # **記録できないなら、保留にしない。** **記録の無い保留はステップ 2 が触らない**
+    # （**人が外すと決めた保留と区別が付かない**）ので、**そのまま永久に残る**——
+    # **この節が消しに来たものそのもの**である。**理由を投稿できなかったときと同じ**
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  elif ! gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+    # **保留にできなかった。** ループは止まる側にあるので、これまでどおり数える
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  fi
+else
+  # **exit 1 = ループのアカウント / exit 2 = 読めない。どちらもこれまでどおり数える。**
+  # **判定不能を「外」に倒さない**——**worker の対応待ちが人待ちに化け、誰も直さない**
+  bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+fi
+```
 
 **差し戻す側でも必ず記録する。** 記録しないと、**対応が来ないまま何周でも回る**
 （`changes-requested` で塞いだのと同じ穴が開く）。識別子に head SHA が入るので、
@@ -665,10 +776,17 @@ resolve しない。**何が決まれば進むのか**を PR に書き、**そ�
 bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら保留にしない
 gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
 
+# **同じ label が 2 つの意味を持つ。** こちらは**人が外すまで待つ**保留で、
+# **ステップ 2 が自動で外す保留**（ループの外の著者。#70）とは違う。**見分けは記録の
+# 有無**なので、**残っていたら消してから付ける**——**古い記録が残っていると、
+# 次の周回で「著者が対応した」と読まれ、人の判断待ちが消える** (#176 のレビュー)。
+# **消せないなら保留にしない**（**保留の条件が 1 つでも欠けたら保留にしない**）
+if ! bin/loop-parked-head clear <PR番号>; then
+  bin/loop-stall "review-exhausted:<PR番号>@<SHA>"
 # **付いたことを確かめてから進む**（`changes-requested` と同じ順序）。
 # **付いていないのに保留したつもりになると、`ready` は上がらないまま
 # 「進めるようにした」と思い込む**——**いちばん危ない**
-if gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+elif gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
   # 本文には **何が決まれば進むのか**と、**人が何をすれば再開するのか**を書く——
   # **そのまま通すなら人がスレッドを resolve、直させるならスレッドへ書いて
   # `changes-requested`**。**label を外すのは最後**である（`loop/README.md` と同じ）
