@@ -16,6 +16,13 @@ type Pr = {
   state: "OPEN" | "MERGED" | "CLOSED";
   /** **fork から出た PR。** origin の同名ブランチとは**別物**である。 */
   crossRepo?: boolean;
+  /**
+   * その PR の head SHA。**既定はブランチの先端と同じ**（＝中身は PR に入っている）。
+   *
+   * **マージのあとに積むと、ここがブランチの先端と食い違う**——**その commit は
+   * どの PR にも入っていない**ので、**消すと作業が消える**（#177）。
+   */
+  headOid?: string;
 };
 
 /**
@@ -102,12 +109,26 @@ describe("bin/loop-stray-branches", () => {
       [
         "#!/usr/bin/env bash",
         ...(options.ghFails === true ? ['echo "gh が落ちた" >&2', "exit 1"] : []),
+        // **PR の head を、問い合わせて・取り出しているか。** ここで確かめないと、
+        // **スタブが勝手に返した列**で判定が通り、**尋ねていない実装でも緑**になる
+        // （#178 で踏んだ形）。**2 つに分けて見る**——**`--json` から外しても
+        // `--jq` に語が残っていれば満たされる**（#173 でそれを踏んだ）
+        'if [[ $* == *"pr list"* ]]; then',
+        '  if [[ $* != *",headRefOid"* ]]; then',
+        '    echo "スタブ: PR の head を問い合わせていない: $*" >&2',
+        "    exit 1",
+        "  fi",
+        '  if [[ $* != *".headRefOid)"* ]]; then',
+        '    echo "スタブ: 問い合わせた head を取り出していない: $*" >&2',
+        "    exit 1",
+        "  fi",
+        "fi",
         // **ブランチごとに引く。** **一括で取ると、上限を超えた古い PR が「無い」に化ける**
         // （この repo は既に PR が 171 件）。**fork の PR は別物**なので、
         // **同じリポジトリのものだけ**を返す（`isCrossRepository` で絞るのは呼ぶ側）
         ...options.prs.map(
           (pr) =>
-            `if [[ $* == *"--head ${pr.head}"* ]]; then printf '%s\\u001f%s\\u001f%s\\n' ${pr.number} ${pr.state} ${pr.crossRepo === true ? "true" : "false"}; exit 0; fi`,
+            `if [[ $* == *"--head ${pr.head}"* ]]; then printf '%s\\u001f%s\\u001f%s\\u001f%s\\n' ${pr.number} ${pr.state} ${pr.crossRepo === true ? "true" : "false"} ${JSON.stringify(pr.headOid ?? "a".repeat(40))}; exit 0; fi`,
         ),
         "exit 0",
         "",
@@ -159,6 +180,51 @@ describe("bin/loop-stray-branches", () => {
     expect(result.status).toBe(1);
     expect(result.stdout, "種類が出ていない").toContain("merged-leftover");
     expect(result.stdout, "どの PR かが出ていない").toContain("76");
+    // **既定では PR の head とブランチの先端が同じ**（＝中身は PR に入っている）
+  });
+
+  it("マージのあとに積まれた commit があるブランチは、消してよいと言わない", () => {
+    // **これが本体**（#177）。**`merged-leftover` は「作業は PR に残っているので
+    // 消してよい」を意味する**が、**マージのあとに積んだ commit はその PR に入っていない**——
+    // **消すと、その作業が消える**。**実物があった**（`feat/await-review` の `9f34c6e`、
+    // #78 の叩き台。master は 5 回「削除するだけでよい」と人へ伝えていた）。
+    //
+    // **倒れる向きがいちばん悪い。** `no-pr` は人を呼ぶ（安全側）が、
+    // **こちらは「消してよい」と言う**うえ、**消えたことは次に誰かが探すまで分からない**
+    const result = run({
+      branches: [{ name: "feat/kept-going", sha: "c".repeat(40) }],
+      prs: [{ head: "feat/kept-going", number: 76, state: "MERGED", headOid: "b".repeat(40) }],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "消してよいと言っている").not.toContain("merged-leftover");
+    expect(result.stdout, "人へ渡す側になっていない").toContain("beyond-pr");
+    // **人が判断できる材料を出す**（どの PR の先か / どこまで積まれているか）
+    expect(result.stdout, "どの PR かが出ていない").toContain("76");
+    expect(result.stdout, "先端が出ていない").toContain("cccccccc");
+  });
+
+  it("PR の head と先端が同じなら、これまでどおり消してよい", () => {
+    // **止める側だけを見ない**（#168 で踏んだ）。**全部を人へ渡す形でも
+    // 上の 1 本は緑になる**ので、**普通の消し残りが残ること**を別に見る
+    const result = run({
+      branches: [{ name: "feat/done", sha: "b".repeat(40) }],
+      prs: [{ head: "feat/done", number: 76, state: "MERGED", headOid: "b".repeat(40) }],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "普通の消し残りまで人へ渡している").toContain("merged-leftover");
+  });
+
+  it("PR の head を読めなければ、消してよいと言わない", () => {
+    // **判定不能を「消してよい」へ倒さない。** **迷ったら人へ渡す側**である
+    const result = run({
+      branches: [{ name: "feat/unknown-head", sha: "c".repeat(40) }],
+      prs: [{ head: "feat/unknown-head", number: 76, state: "MERGED", headOid: "" }],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "読めないのに消してよいと言っている").not.toContain("merged-leftover");
   });
 
   it("open な PR の head は、宙に浮いていない", () => {

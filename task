@@ -355,7 +355,7 @@ show_stray_branches() {
       return 0
       ;;
   esac
-  echo "PR の無いブランチ / 消し残り (no-pr は人の判断待ち。merged-leftover は消してよい):"
+  echo "PR の無いブランチ / 消し残り (no-pr と beyond-pr は人の判断待ち。merged-leftover は消してよい):"
   printf '%s\n' "$strays" | sed 's/^/  /'
 }
 
