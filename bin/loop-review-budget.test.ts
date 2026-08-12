@@ -33,6 +33,13 @@ type State = {
    * 置いた**ので、ここで真似ると**2 箇所に持つことになる**（今回それで両方壊れた）。
    */
   answers?: string[];
+  /**
+   * **応答はあったが、何を見たか分からない**もの（#179）。
+   *
+   * **`answer` と混ぜない**——あちらは**レビューできなかった応答**で、
+   * **通知として数える**。こちらは**待つのをやめてよいだけ**である。
+   */
+  acks?: string[];
   createdAt?: string;
   headSha?: string;
   /** その取得だけが落ちる。**最初の 1 つだけ試すと、後ろの取得を試せない。** */
@@ -54,6 +61,7 @@ function fakeReviewCommits(state: State, callLog: string): string {
   const rows = [
     ...(state.reviews ?? []),
     ...(state.answers ?? []).map((at) => `${at}\t-\tanswer`),
+    ...(state.acks ?? []).map((at) => `${at}\t-\tack`),
   ].join("\n");
   return [
     "#!/usr/bin/env bash",
@@ -354,6 +362,39 @@ describe("bin/loop-review-budget", () => {
 
       expect(budget.stdout, "無関係な応答で解けている").toContain("pending=1");
       expect(budget.status, "重ねて要求できてしまう").toBe(1);
+    });
+
+    it("何を見たか分からない応答は、応答不能の通知として数えない", () => {
+      // **`notice` は「レビューできなかった」**（環境が無い等）で、**判定を変える**。
+      // **👍 はそれではない**ので、**混ぜると #78 の完了条件 3 に触る** (#179)
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [request(minutesAgo(200))],
+          acks: [minutesAgo(100)],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.stdout, "通知として数えている").not.toContain("環境が無い");
+      expect(budget.stdout, "レビュー済みにしている").toContain("reviewed_head=no");
+    });
+
+    it("何を見たか分からない応答でも、未応答は解ける", () => {
+      // **返ってきたことは事実**である。**解けないと、要求済みで未応答のまま
+      // 猶予を過ぎ、`review-unanswered` が積まれる**
+      const budget = run(
+        {
+          reviews: [],
+          createdAt: minutesAgo(300),
+          comments: [request(minutesAgo(200))],
+          acks: [minutesAgo(100)],
+        },
+        { LOOP_PENDING_REVIEW_GRACE_MIN: "30" },
+      );
+
+      expect(budget.stdout, "応答が届いているのに未応答のまま").not.toContain("pending=1");
     });
 
     it("応答があっても、レビュー済みにはしない", () => {
