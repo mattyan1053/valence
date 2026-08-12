@@ -257,6 +257,72 @@ describe("bin/loop-review-commits", () => {
         .join("\n");
     }
 
+    /**
+     * **review オブジェクトで返った応答**を `--all` に通し、`answer` の行を返す。
+     *
+     * **同じものが器の違いで落ちていた** (#178 のレビュー)。`answers` は
+     * **issue コメントのループの中でしか積まれない**ので、**中身の無い review** は
+     * **`--pair` で消費されて出力からも落ち、応答として返らない**。
+     */
+    function reviewAnswersOf(pr: number, reviews: { body: string }[]): string {
+      const dir = mkdtempSync(join(tmpdir(), "loop-review-commits-gh-"));
+      symlinkSync("/usr/bin/bash", join(dir, "bash"));
+      const rows = reviews
+        .map((review, index) => `${laterThanNow(60 + index)}\t${HEAD}\t${review.body}`)
+        .join("\n");
+      writeFileSync(
+        join(dir, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          `if [[ $* == *"/pulls/${pr}/reviews"* ]]; then`,
+          "  cat <<'ROWS'",
+          rows,
+          "ROWS",
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"pr view"* ]]; then',
+          "  cat <<'PRVIEW'",
+          `${HEAD}\t本文`,
+          "PRVIEW",
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"/compare/"* ]]; then echo ahead; exit 0; fi',
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const result = spawnSync(SCRIPT, ["--all", String(pr)], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      });
+      rmSync(dir, { recursive: true, force: true });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout
+        .split("\n")
+        .filter((line) => line.endsWith("\tanswer"))
+        .join("\n");
+    }
+
+    it("中身の無い review も、応答として返す", () => {
+      // **器が違うだけで、同じ「レビューできなかった応答」である**——
+      // **落ちると、待つ側は応答が届いているのに上限まで待つ** (#78 / #178 のレビュー)。
+      // **`--pair` は SHA を持たない応答を消費して出力しない**ので、
+      // **ここで応答として返さないと、どこにも出てこない**
+      const answers = reviewAnswersOf(60, [{ body: "" }]);
+
+      expect(answers.trim(), "中身の無い review を落としている").not.toBe("");
+    });
+
+    it("中身のある review は、応答の行にしない", () => {
+      // **広げすぎない。** レビューが成立したものは**SHA を持つ行**で返る——
+      // **両方で返すと、`bin/loop-review-budget` が応答不能の通知として数える**
+      const answers = reviewAnswersOf(61, [{ body: "Reviewed commit: `abcdef1234`" }]);
+
+      expect(answers.trim(), "レビューを応答不能の通知として数えている").toBe("");
+    });
+
     it("知らない断り文句でも、応答として数える", () => {
       // **文言の列挙へ戻さない**（#159）。**列挙から漏れたものが「応答なし」に落ちると、
       // `pending` が減らず再要求が永久に禁じられる**——昨夜これで 2 時間止まった
