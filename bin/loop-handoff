@@ -139,13 +139,12 @@ prs="$(gh api graphql --paginate \
       pullRequests(states:OPEN,first:50,after:$endCursor){
         pageInfo{hasNextPage endCursor}
         nodes{number headRefOid body labels(first:50){nodes{name}}
-          commits(last:1){nodes{commit{statusCheckRollup{state}}}}
           timelineItems(itemTypes:LABELED_EVENT, last:50){
             nodes{... on LabeledEvent{createdAt label{name}}}}}}}}' \
   --jq '.data.repository.pullRequests.nodes[]
     | "\(.number)\u001f\([.labels.nodes[].name] | join(","))\u001f\(.headRefOid)\u001f\(
         [.timelineItems.nodes[] | select(.label.name == "changes-requested") | .createdAt] | max // ""
-      )\u001f\(.commits.nodes[0].commit.statusCheckRollup.state // "none")\u001f\((.body // "") | gsub("\\s+"; " "))"')" ||
+      )\u001f\((.body // "") | gsub("\\s+"; " "))"')" ||
   fail_unknown "open PR"
 
 # **未解決スレッドを、ゲートと同じ読み方で取る。**
@@ -178,8 +177,63 @@ declare -A last_author_of=()
 # そこへ寄せると、**worker の返信を master の判断として読む**。
 declare -A untriaged_of=()
 declare -A requested_of=()
-while IFS="$FIELD" read -r number _labels _head labeled_at _ci _body; do
+
+# **ゲートが落とす条件は、ここから見えていなければならない** (#125)。
+#
+# **集約値 (`statusCheckRollup`) では同値にならない** (#173 のレビュー)。あれは
+# **必須でないチェックも混ざった値**なので、**必須でないものが落ちている間は
+# `FAILURE` のまま**——**必須が pending → pass に変わってゲートが不合格 → 合格に
+# なっても、指紋が動かない**。**マージできるようになった、まさにその瞬間に黙る。**
+#
+# **一覧は書き写さない。** `bin/loop-gate --required-checks` が正で、
+# **2 箇所に持つと片方だけ直して食い違う** (#159 で踏んだ形)。
+if ! required_out="$("${BASH_SOURCE[0]%/*}/loop-gate" --required-checks)" || [[ -z $required_out ]]; then
+  echo "[FAIL] 必須チェックの一覧を取得できません（bin/loop-gate --required-checks）" >&2
+  exit 2
+fi
+mapfile -t REQUIRED_CHECKS <<<"$required_out"
+
+# PR ごとの、必須チェックの結果。**指紋に入れる**
+declare -A checks_of=()
+
+while IFS="$FIELD" read -r number _labels _head labeled_at _body; do
   [[ -n $number ]] || continue
+
+  # **ゲートと同じ読み方をする**（`gh pr checks`。名前は `@base64` で受け取る）。
+  # **区切りを含む job 名は PR 側で決められる**ので、生の名前を並べると
+  # **1 つの名前で行を増やし、実在しない必須チェックを pass に見せられる**。
+  #
+  # **終了コードで判定しない。** `gh pr checks` は**落ちているときも走っている
+  # ときも非ゼロ**を返す——**読めなかったのと区別が付かない**。出力で判定する。
+  checks_out="$(gh pr checks "$number" --json name,bucket \
+    --jq '"T\t\(type)", (.[]? | "C\t\(.name | @base64)\t\(.bucket)")' 2>/dev/null)"
+  checks_type=""
+  check_lines=()
+  while IFS= read -r line; do
+    case "$line" in
+      T$'\t'*) checks_type="${line#T$'\t'}" ;;
+      C$'\t'*) check_lines+=("${line#C$'\t'}") ;;
+    esac
+  done <<<"$checks_out"
+  [[ $checks_type == "array" ]] || fail_unknown "CI の状態 (#$number)"
+
+  # **必須の並び順で書く。** 名前そのものは指紋へ入れない——
+  # **外から決められる文字列を指紋へ入れると、揺れがそのまま通知になる**。
+  states=""
+  for name in "${REQUIRED_CHECKS[@]}"; do
+    if ! want="$(printf '%s' "$name" | base64 | tr -d '\n')" || [[ -z $want ]]; then
+      fail_unknown "必須チェック名の符号化 ($name)"
+    fi
+    bucket="none"
+    for line in "${check_lines[@]}"; do
+      if [[ ${line%%$'\t'*} == "$want" ]]; then
+        bucket="${line#*$'\t'}"
+        break
+      fi
+    done
+    states+="${bucket},"
+  done
+  checks_of[$number]="$states"
   threads="$(gh api graphql --paginate \
     -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" -F number="$number" \
     -f query='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){
@@ -229,6 +283,12 @@ details=""
 for number in "${!unresolved_of[@]}"; do
   details+="${number}:${unresolved_of[$number]}:${last_comment_of[$number]-} "
 done
+# **ゲートが見る条件を、同じ形で持つ** (#125)。名前ではなく**必須の並び順の結果**を書く
+checks=""
+while IFS="$FIELD" read -r number _labels _head _labeled_at _body; do
+  [[ -n $number ]] || continue
+  checks+="${number}:${checks_of[$number]-} "
+done <<<"$prs"
 # **理由の無い保留を探す** (#163)。**判定はここに書かない**——`./task loop:status` も
 # 同じことを見るので、**2 箇所に置くと片方だけ直して食い違う**。
 #
@@ -278,7 +338,7 @@ done
 # **読めなかったときの受け皿は上にある**（`$prs` の取得が失敗すれば `fail_unknown`）。
 # ここは**取れている本文から数えるだけ**なので、失敗しうる操作を挟まない。
 declare -A parked_seen=()
-while IFS="$FIELD" read -r _number labels _head _labeled_at _ci body; do
+while IFS="$FIELD" read -r _number labels _head _labeled_at body; do
   [[ ",$labels," == *",parked,"* ]] || continue
   rest="$body"
   while [[ $rest =~ Closes[[:space:]]+#([0-9]+) ]]; do
@@ -302,7 +362,7 @@ parked_issues=${#parked_seen[@]}
 #
 # **番号だけを入れる。** 時刻を入れると**変わらないはずのもので指紋が動く**ので、
 # **「同じ状態では 2 通目を送らない」を壊す側**に倒れる。
-readonly STATE="prs=${prs}|detail=${details}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}|silent-park=${silent_park}"
+readonly STATE="prs=${prs}|detail=${details}|checks=${checks}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}|silent-park=${silent_park}"
 
 # **「送った」と「見た」を分ける** (#125)。
 #
@@ -368,7 +428,7 @@ mismatched=""
 answered=""
 # **当否がまだ判断されていない指摘がある** PR。**動けるのは master だけ**である。
 untriaged=""
-while IFS="$FIELD" read -r number labels _head _labeled_at _ci _body; do
+while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
   [[ -n $number ]] || continue
   unresolved="${unresolved_of[$number]-0}"
   [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
@@ -421,7 +481,10 @@ elif [[ -n $answered ]]; then
   reason="PR #${answered} に未解決の指摘がある"
   if [[ $ROLE == "worker" ]]; then
     to="master"
-    reason="PR #${answered} の対応が返っている（確認して resolve できる）"
+    # **状態から読めることだけを言う。** 「対応が返っている」とは書かない——
+    # **出口は「何もしなかった場合も含めて必ず通す」**ので、**何も書いていない周回も
+    # ここへ来る**。**書いた前提で文を作ると、していないことを言う** (#173 のレビュー)。
+    reason="PR #${answered} の未解決スレッドの最後の発言が bot ではない（確認して resolve できる）"
   fi
 elif [[ -n $changes_requested ]]; then
   to="worker"
@@ -464,10 +527,19 @@ fi
 
 # **送ると決めたときだけ「送った」と書く。** ここより前に書くと、
 # **送らずに終わった周回が「送信済み」を作る** (#125)。
-printf '%s' "${INFORMED}${FIELD}${STATE}" >"$common_dir/valence-loop-handoff-$to" || {
-  echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$to" >&2
-  exit 2
-}
+#
+# **送った側にも書く。** `answered` の宛先は**呼んだ役で反転する**ので、
+# 宛先だけに書くと**同じ指紋のまま master→worker→master と 2 通出る** (#173 のレビュー)。
+# **自分で見て、自分で配った**のだから、**もう一度知らせても新しいことは何も無い**。
+#
+# **何もしなかった周回とは分ける。** あちらは**誰にも配っていない**ので、
+# **その状態を「届いた」と数えてはいけない**——それが #125 の本体である。
+for role in "$to" "$ROLE"; do
+  printf '%s' "${INFORMED}${FIELD}${STATE}" >"$common_dir/valence-loop-handoff-$role" || {
+    echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$role" >&2
+    exit 2
+  }
+done
 
 printf '%s\t%s\n' "$to" "$reason"
 exit "$mismatch_exit"

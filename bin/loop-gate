@@ -16,6 +16,39 @@
 # shellcheck disable=SC2016
 set -uo pipefail
 
+# .github/workflows/*.yml のジョブ名。これらが pass として存在することを個別に要求する。
+# 「全部 pass」だけでは、ワークフローが起動しなかった PR が 0 件で通ってしまう。
+readonly DEFAULT_REQUIRED_CHECKS="lint / typecheck / boundaries / test
+build
+shell scripts
+dependency vulnerabilities
+new dependencies
+analyze"
+
+# 必須チェックは行単位で読む。空白のみの上書きを通すと必須チェックが 0 件になり、
+# CI が動いていない commit が素通りする。
+mapfile -t REQUIRED_CHECKS <<<"${LOOP_REQUIRED_CHECKS:-$DEFAULT_REQUIRED_CHECKS}"
+required=()
+for name in "${REQUIRED_CHECKS[@]}"; do
+  [[ -n ${name//[[:space:]]/} ]] && required+=("$name")
+done
+if ((${#required[@]} == 0)); then
+  echo "[FAIL] 設定: 必須チェックが空です。空にすることはできません" >&2
+  exit 2
+fi
+
+# **一覧を、呼ぶ側へ渡す** (#125)。**書き写させない**——`bin/loop-handoff` の指紋が
+# ここと同値でないと、**必須でないチェックが落ちたまま必須が pass に変わったとき**、
+# **ゲートは不合格 → 合格に変わるのに指紋が動かない**。**通知は抑止され続ける**ので、
+# **マージできるようになった、まさにその瞬間に黙る**。
+#
+# **入口の確認より前に返す。** これは周回の判定ではなく**定数の問い合わせ**である——
+# 後ろに置くと、**尋ねるたびに `bin/loop-lease check` が走り、偽の「飛ばした」が積まれる**。
+if [[ ${1-} == "--required-checks" ]]; then
+  printf '%s\n' "${required[@]}"
+  exit 0
+fi
+
 # **入口を飛ばしていないか、ここでも確かめる**（#161）。**出口だけでは遅い**——
 # 気づくのは終わったあとで、**その周回の直列化は既に効いていない**。
 # **周回で最初に触るものが確かめれば、やり直せるうちに分かる**。
@@ -41,15 +74,6 @@ if ! REVIEW_BOT="$("$bot_script_dir/loop-review-commits" --bot)" || [[ -z $REVIE
 fi
 readonly REVIEW_BOT
 
-# .github/workflows/*.yml のジョブ名。これらが pass として存在することを個別に要求する。
-# 「全部 pass」だけでは、ワークフローが起動しなかった PR が 0 件で通ってしまう。
-readonly DEFAULT_REQUIRED_CHECKS="lint / typecheck / boundaries / test
-build
-shell scripts
-dependency vulnerabilities
-new dependencies
-analyze"
-
 readonly MAX_FILES="${LOOP_MAX_FILES:-40}"
 readonly MAX_LINES="${LOOP_MAX_LINES:-1500}"
 
@@ -68,18 +92,6 @@ if ! [[ $MAX_FILES =~ ^[0-9]+$ ]] || ((MAX_FILES < 1)); then
 fi
 if ! [[ $MAX_LINES =~ ^[0-9]+$ ]] || ((MAX_LINES < 1)); then
   echo "[FAIL] 設定: LOOP_MAX_LINES は正の整数で指定してください" >&2
-  exit 2
-fi
-
-# 必須チェックは行単位で読む。空白のみの上書きを通すと必須チェックが 0 件になり、
-# CI が動いていない commit が素通りする。
-mapfile -t REQUIRED_CHECKS <<<"${LOOP_REQUIRED_CHECKS:-$DEFAULT_REQUIRED_CHECKS}"
-required=()
-for name in "${REQUIRED_CHECKS[@]}"; do
-  [[ -n ${name//[[:space:]]/} ]] && required+=("$name")
-done
-if ((${#required[@]} == 0)); then
-  echo "[FAIL] 設定: 必須チェックが空です。空にすることはできません" >&2
   exit 2
 fi
 

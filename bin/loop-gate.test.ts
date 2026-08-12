@@ -372,3 +372,56 @@ describe("bin/loop-gate の上限到達後の扱い", () => {
     expect(result.stdout).toContain("レビューが要求した 89 行");
   });
 });
+
+/**
+ * 必須チェックの一覧を、呼ぶ側へ渡す（#125）。
+ *
+ * **書き写させない。** `bin/loop-handoff` の指紋がゲートと同値でないと、
+ * **必須でないチェックが落ちたまま必須が pass に変わったとき**、
+ * **ゲートは不合格 → 合格に変わるのに指紋が動かず、通知が抑止され続ける**——
+ * **マージできるようになった、まさにその瞬間に黙る**（#173 のレビュー）。
+ *
+ * **2 箇所に持つと片方だけ直して食い違う**（#159 で踏んだ形）。
+ */
+describe("必須チェックの一覧", () => {
+  /** **周回の判定ではなく定数の問い合わせ**なので、PR 番号も stub も要らない。 */
+  function askRequired(env: Record<string, string> = {}): Run {
+    const result = spawnSync(SCRIPT, ["--required-checks"], {
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it("1 行 1 件で出す", () => {
+    const result = askRequired();
+
+    expect(result.status).toBe(0);
+    // **`.github/workflows/*.yml` の job 名**がそのまま出る（写しを作らないための口）
+    expect(result.stdout.trim().split("\n").length).toBeGreaterThan(1);
+    expect(result.stdout).toContain("build");
+  });
+
+  it("上書きされたら、そちらを出す", () => {
+    // **判定に使う一覧と同じもの**が出ること。別の口から出すと、
+    // **上書きした環境でだけ食い違う**
+    const result = askRequired({ LOOP_REQUIRED_CHECKS: "alpha\nbeta" });
+
+    expect(result.stdout.trim().split("\n")).toEqual(["alpha", "beta"]);
+  });
+
+  it("空にはできない", () => {
+    // **判定側と同じ検査を通る。** ここだけ素通りすると、
+    // **呼ぶ側は「必須 0 件」を受け取って、何も見ないまま同値だと思う**
+    expect(askRequired({ LOOP_REQUIRED_CHECKS: "  \n " }).status).toBe(2);
+  });
+
+  it("入口の確認より前に返す", () => {
+    // **定数を尋ねただけで、周回の記録が動かない。** `bin/loop-lease check` は
+    // **lease を持たない周回を記録する**ので、ここを通すと
+    // **問い合わせるたびに偽の「飛ばした」が積まれる**（`bin/loop-handoff` が呼ぶ）
+    const result = askRequired();
+
+    expect(result.stderr, "入口の確認が走っている").not.toMatch(/lease/i);
+  });
+});

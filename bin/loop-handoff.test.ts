@@ -30,6 +30,19 @@ const BOT_GRAPHQL = execFileSync(fileURLToPath(new URL("./loop-review-commits", 
   .trim()
   .replace(/\[bot\]$/, "");
 
+/**
+ * 必須チェックの一覧（**GitHub の check 名**）。
+ *
+ * **ここにも書き写さない**——`bin/loop-gate` が正で、**写しを持つと出所を変えても
+ * 緑のまま**になる（#135 と同じ理由）。
+ */
+const REQUIRED = execFileSync(fileURLToPath(new URL("./loop-gate", import.meta.url)), [
+  "--required-checks",
+])
+  .toString()
+  .trim()
+  .split("\n");
+
 type Run = { status: number; stdout: string; stderr: string };
 
 /**
@@ -74,12 +87,13 @@ type State = {
     lastComment?: number;
     head?: string;
     /**
-     * CI の状態（`statusCheckRollup`）。
+     * CI の結果（check 名 → bucket）。**書かなかったものは pass** とみなす。
      *
      * **ゲートはここで落とすのに、handoff からは見えていなかった** (#125)。
-     * **変われば前へ進んだ**ことを表すので、指紋に入れてよい値である。
+     * **必須でないチェックも混ざる**ので、**集約値ではなく必須チェックごとに見る**
+     * （#173 のレビュー）。
      */
-    ci?: string;
+    checks?: Record<string, string>;
   }[];
   /**
    * 理由の無い保留（人待ちにしたが、理由を投稿できていない PR）。
@@ -146,12 +160,32 @@ describe("bin/loop-handoff", () => {
     return (pr.labels ?? []).includes("changes-requested") ? LABELED_AT : "";
   }
 
+  /**
+   * その PR の `gh pr checks` に答える分岐。
+   *
+   * **pending のときは非ゼロで終わる**（実物と同じ）。**終了コードで合否を決めていたら、
+   * ここで落ちる**——**読めなかったのか、走っている最中なのかは、出力でしか分からない**。
+   */
+  function checkLines(pr: NonNullable<State["prs"]>[number]): string[] {
+    const buckets = { ...Object.fromEntries(REQUIRED.map((name) => [name, "pass"])), ...pr.checks };
+    const rows = Object.entries(buckets).map(
+      ([name, bucket]) => `C\\t${Buffer.from(name, "utf8").toString("base64")}\\t${bucket}`,
+    );
+    const pending = Object.values(buckets).includes("pending");
+    return [
+      `if [[ $* == *"pr checks ${pr.number}"* ]]; then`,
+      `  printf '%b' ${JSON.stringify(["T\\tarray", ...rows, ""].join("\\n"))}`,
+      `  exit ${pending ? 8 : 0}`,
+      "fi",
+    ];
+  }
+
   function withState(state: State): void {
     // **本文は最後に置く。** 途中に置くと、本文に混じった空白で列がずれる
     const prs = (state.prs ?? [])
       .map(
         (pr) =>
-          `${pr.number}${FIELD}${(pr.labels ?? []).join(",")}${FIELD}${pr.head ?? "a".repeat(40)}${FIELD}${labeledAtOf(pr)}${FIELD}${pr.ci ?? "SUCCESS"}${FIELD}${pr.body ?? ""}`,
+          `${pr.number}${FIELD}${(pr.labels ?? []).join(",")}${FIELD}${pr.head ?? "a".repeat(40)}${FIELD}${labeledAtOf(pr)}${FIELD}${pr.body ?? ""}`,
       )
       .join("\n");
     // **一覧（検索）は古い値を返しうる。** ここでは**わざと古い値**を返させ、
@@ -191,25 +225,9 @@ describe("bin/loop-handoff", () => {
           "totalCount",
           `${state.ready ?? 0}${FIELD}${state.inProgress ?? 0}${FIELD}${state.backlog ?? 0}`,
         ),
-        // **CI の状態を、問い合わせて・取り出しているか。**
-        //
-        // **スタブは何を訊かれても同じ列を返す**ので、ここで確かめないと
-        // **GitHub へ尋ねていない実装でも緑**になる（**試験が実装の中を 1 度も
-        // 通らない**形。#159 で踏んだ）。
-        //
-        // **2 つに分けて見る。** 問い合わせだけを見ると、**`--jq` に文字列が
-        // 残っているだけで満たされる**——**実際にそれで変異が生き残った**。
-        // **問い合わせ（`{state}`）と取り出し（`.state`）は別の綴り**である。
-        'if [[ $* == *"pullRequests(states:OPEN"* ]]; then',
-        '  if [[ $* != *"statusCheckRollup{state}"* ]]; then',
-        '    echo "スタブ: CI の状態を問い合わせていない" >&2',
-        "    exit 1",
-        "  fi",
-        '  if [[ $* != *"statusCheckRollup.state"* ]]; then',
-        '    echo "スタブ: 問い合わせた CI の状態を取り出していない" >&2',
-        "    exit 1",
-        "  fi",
-        "fi",
+        // **CI は PR ごとに引く**（ゲートと同じ `gh pr checks`）。
+        // **名前は @base64 で受け渡す**——区切りを含む job 名で行を増やされないため
+        ...(state.prs ?? []).flatMap((pr) => checkLines(pr)),
         // **PR 一覧も検索を通さない口から取る。** label を付けた直後は一覧が古い
         ...answerLines("pullRequests(states:OPEN", prs),
         // **ゲートと同じ読み方をしているか。** スレッド自体をページングしていないと、
@@ -259,6 +277,9 @@ describe("bin/loop-handoff", () => {
       "grep",
       "sort",
       "wc",
+      // **必須チェック名を `@base64` と同じ形に揃える**のに使う（`bin/loop-gate` と同じ）
+      "base64",
+      "tr",
     ]) {
       const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
       if (found !== "") {
@@ -636,12 +657,16 @@ describe("bin/loop-handoff", () => {
   describe("CI の状態", () => {
     // **ゲートは CI で落とすのに、handoff からは同じ状態に見えていた**（#125）。
     // **#115 で head SHA と未解決スレッドを足したときと同じ形が、CI に残っていた**。
+    const first = REQUIRED[0] ?? "";
+
     it("pass から fail に変われば、また送る", () => {
-      withState({ prs: [{ number: 12, labels: ["changes-requested"], ci: "SUCCESS" }] });
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
       expect(run("master").status).toBe(0);
 
       // **label も head も未解決スレッドも動かない。** 動いたのは CI だけである
-      withState({ prs: [{ number: 12, labels: ["changes-requested"], ci: "FAILURE" }] });
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"], checks: { [first]: "fail" } }],
+      });
 
       expect(run("master").status, "ゲートが落とす条件が指紋に入っていない").toBe(0);
     });
@@ -649,10 +674,114 @@ describe("bin/loop-handoff", () => {
     it("CI が同じままなら、2 通目を送らない", () => {
       // **毎回変わる値を入れない**（`bin/loop-stall` の識別子と同じ制約）。
       // **CI の状態は「変われば前へ進んだ」を表す**ので、その条件を満たす
-      withState({ prs: [{ number: 12, labels: ["changes-requested"], ci: "PENDING" }] });
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"], checks: { [first]: "pending" } }],
+      });
       expect(run("master").status).toBe(0);
 
       expect(run("master").status, "同じ CI で送っている").toBe(1);
+    });
+
+    it("必須でないチェックが落ちていても、必須が pass に変われば送る", () => {
+      // **ここが本命**（#173 のレビュー）。**集約値を指紋にすると、必須でないものが
+      // 落ちている間は `FAILURE` のまま**なので、**必須が pending → pass に変わって
+      // ゲートが不合格 → 合格になっても、指紋が動かない**——
+      // **マージできるようになった、まさにその瞬間に黙る**
+      const optional = "CodeQL"; // **必須の一覧に無い**チェック
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: ["changes-requested"],
+            checks: { [optional]: "fail", [first]: "pending" },
+          },
+        ],
+      });
+      expect(run("master").status).toBe(0);
+
+      // 必須だけが pass に変わった（**必須でないものは落ちたまま**）
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"], checks: { [optional]: "fail" } }],
+      });
+
+      expect(run("master").status, "集約値を見ていて、合格に変わった瞬間に黙る").toBe(0);
+    });
+
+    it("必須でないチェックだけが変わっても、2 通目を送らない", () => {
+      // **逆向きも見る。** ゲートの合否が動かないものを指紋に入れると、
+      // **無関係な揺れで通知が飛ぶ**（`bin/loop-stall` の識別子と同じ制約）
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "pass" } }],
+      });
+      expect(run("master").status).toBe(0);
+
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "fail" } }],
+      });
+
+      expect(run("master").status, "必須でないチェックで指紋が動いている").toBe(1);
+    });
+
+    it("必須の一覧は、ゲートから取る", () => {
+      // **書き写さない**（#159 と同じ理由）。**上書きした環境で、そちらへ追随するか**を見る
+      const env = { LOOP_REQUIRED_CHECKS: "CodeQL" };
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "pending" } }],
+      });
+      expect(run("master", env).status).toBe(0);
+
+      // **上書きした一覧の外**（既定では必須）だけが動いた
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: ["changes-requested"],
+            checks: { CodeQL: "pending", [first]: "fail" },
+          },
+        ],
+      });
+
+      expect(run("master", env).status, "自前の一覧で見ている").toBe(1);
+    });
+
+    it("CI を読めなければ、送らない側へ倒さない", () => {
+      // **判定不能を「送らない」に倒さない**（このスクリプトの原則）
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }], failsOn: "pr checks" });
+
+      expect(run("master").status).toBe(2);
+    });
+
+    it("必須チェックの名前を、書き写さない", () => {
+      // **写しを持つと、ゲートを変えても緑のまま**になる（#135 の家族）
+      const script = readFileSync(SCRIPT, "utf8");
+
+      for (const name of REQUIRED) {
+        expect(script, `${name} を書き写している`).not.toContain(name);
+      }
+      expect(script, "ゲートから取っていない").toContain("--required-checks");
+    });
+  });
+
+  describe("役で反転する宛先", () => {
+    it("同じ指紋で 2 通目を送らない", () => {
+      // **`answered` の宛先は呼んだ役で反転する**ので、**`informed` を宛先だけに
+      // 書くと、同じ指紋のまま master→worker→master と 2 通出る**（#173 のレビュー）。
+      //
+      // **送った側は、その状態を知っている**——**自分で見て、自分で配った**のだから、
+      // **もう一度知らせても新しいことは何も無い**
+      withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
+      expect(run("master").status, "worker へ渡せていない").toBe(0);
+
+      expect(run("worker").status, "同じ指紋で送り返している").toBe(1);
+    });
+
+    it("何も書いていない周回が、書いたことにしない", () => {
+      // **出口は「何もしなかった場合も含めて必ず通す」**ので、
+      // **「呼んだ側はその周回で書き終えている」という前提は成り立たない**。
+      // **状態から読めることだけを言う**（master の指摘）
+      withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
+
+      expect(run("worker").stdout, "していないことを言っている").not.toContain("対応が返っている");
     });
   });
 
