@@ -213,11 +213,23 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 `parked` と `awaiting-human` を付けて保留にする。保留にしないと、**同時に open な PR は
 1 本・worker は 1 人**なので、**1 件の人待ちがそのまま全停止**になる（実測で約 2 時間）。
 
-**戻すのは人である。**
+**戻すのは人である。** ただし **label を外すのは最後**で、**先に判断を GitHub へ残す。**
+
+**label だけ外しても、輪から出られない。** master が読むのは**未解決スレッドの数と枠**だけで、
+**どちらも 1 回目と同じ値**なので、**同じ入力に同じ答えが返り、また保留になる**。
+**master が消費できる状態を残してから外すこと。**
 
 ```bash
 ./task loop:status                       # 人の判断待ちが一覧に出る
 gh pr view <PR番号>                      # 何が決まれば進むのかが書いてある
+```
+
+**そのまま通すなら**、**未解決スレッドを resolve する**（次の master の周回で
+ゲートが「未解決 0 件」を見る）。**直させるなら**、**スレッドへ何を直すか書いて
+`changes-requested` を付ける**（既にある経路。worker が対応して push する）。
+
+```bash
+gh pr edit <PR番号> --add-label changes-requested   # 直させる場合だけ
 gh pr edit <PR番号> --remove-label awaiting-human --remove-label parked
 ```
 

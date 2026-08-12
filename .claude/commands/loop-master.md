@@ -567,7 +567,17 @@ gh label create awaiting-human --description "人の判断待ち" 2>/dev/null ||
 # **付いていないのに保留したつもりになると、`ready` は上がらないまま
 # 「進めるようにした」と思い込む**——**いちばん危ない**
 if gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
-  gh pr comment <PR番号> --body-file <file>   # 何が決まれば進むのか / 人が何をすれば再開するのか
+  # 本文には **何が決まれば進むのか**と、**人が何をすれば再開するのか**を書く——
+  # **そのまま通すなら人がスレッドを resolve、直させるならスレッドへ書いて
+  # `changes-requested`**。**label を外すのは最後**である（`loop/README.md` と同じ）
+  if ! gh pr comment <PR番号> --body-file <file>; then
+    # **理由の無い保留を残さない。** 一覧には PR 番号が出るので、**見た人は
+    # 「人待ちが 1 件ある」と読み、中身が空だとは思わない**——**停止も積まれない**ので
+    # 3 周の経路にも乗らない。**動いているように見えるぶん、こちらのほうが危ない**。
+    # **戻して数える**（`--add-label` が落ちた場合と同じ形に畳める）
+    gh pr edit <PR番号> --remove-label parked --remove-label awaiting-human || true
+    bin/loop-stall "blocking-findings:<PR番号>@<SHA>"
+  fi
 else
   # **保留にできなかった。** ループは止まる側にあるので、**これまでどおり数える**——
   # 3 周で人を呼ぶ（`review-exhausted:<PR番号>@<SHA>` の場合も同じ）

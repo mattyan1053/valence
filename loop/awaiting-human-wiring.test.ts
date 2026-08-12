@@ -69,11 +69,56 @@ describe("人の判断待ち", () => {
   it("保留に失敗したら、これまでどおり停止を数える", () => {
     // **付いていないのに保留したつもりになると、`ready` は上がらないまま
     // 「進めるようにした」と思い込む**——**いちばん危ない**。
-    // **label を先に付け、成功を確認してから**（`changes-requested` と同じ順序）
+    // **label を先に付け、成功を確認してから**（`changes-requested` と同じ順序）。
+    //
+    // **`|| true` で満たされる表明にしない。** 前の版は `/失敗|\|\|/` で、
+    // **`gh label create … || true` の 1 行だけで通っていた**——**`if` を消して
+    // 元の 2 行へ戻しても赤にならない**。**2 本立っているように見えて、
+    // 押さえていたのは 1 本**だった（master の指摘）
     const branch = humanBranch();
 
-    expect(branch, "失敗を見ていない").toMatch(/失敗|\|\|/);
+    expect(branch, "付いたことを確かめていない").toMatch(/if gh pr edit .*--add-label/);
     expect(branch, "落ちたときの受け皿が無い").toContain("bin/loop-stall");
+  });
+
+  it("理由を投稿できなかったら、保留を残さない", () => {
+    // **番号だけの保留が `loop:status` に出ると、見た人は「人待ちが 1 件ある」と読む**——
+    // **中身が空だとは思わない**。**停止も積まれない**ので 3 周の経路にも乗らない。
+    // **動いているように見えるぶん、こちらのほうが危ない**。
+    // **戻して数える**（`--add-label` が落ちた場合と同じ形に畳める）
+    const branch = humanBranch();
+
+    expect(branch, "投稿の失敗を見ていない").toMatch(/if ! gh pr comment|gh pr comment .*\|\|/);
+    expect(branch, "保留を戻していない").toContain("--remove-label");
+  });
+
+  it("人が判断を記録してから、label を外すと書いてある", () => {
+    // **人が label だけ外しても、輪から出られない**——master が読むのは
+    // **未解決スレッドの数と枠**だけで、**どちらも 1 回目と同じ値**なので、
+    // **同じ入力に同じ答えが返り、また保留になる**。
+    // **master が消費できる状態を残してから外す**（resolve するか、
+    // `changes-requested` を付けるか）。**label を外すのは最後**である
+    const section = read("loop/README.md").split("### 人の判断待ち（`awaiting-human`）")[1] ?? "";
+
+    expect(section, "判断の記録が書かれていない").toMatch(/resolve/);
+    expect(section, "直させる側の経路が書かれていない").toContain("changes-requested");
+
+    // **打つ順序は、打つところで見る。** 節全体で見ると、**手前の散文に
+    // `changes-requested` があるだけで順序が満たされる**——**先に外す形へ戻しても
+    // 緑のまま**になる（実際にそうなった）
+    const block =
+      section
+        .split("```bash")
+        .slice(1)
+        .map((chunk) => chunk.split("```")[0] ?? "")
+        .find((chunk) => chunk.includes("--remove-label")) ?? "";
+
+    expect(block.indexOf("changes-requested"), "打つ順序が書かれていない").toBeGreaterThanOrEqual(
+      0,
+    );
+    expect(block.indexOf("--remove-label"), "label を外すのが先に書かれている").toBeGreaterThan(
+      block.indexOf("changes-requested"),
+    );
   });
 
   it("./task loop:status が、人待ちの PR を見せる", () => {
