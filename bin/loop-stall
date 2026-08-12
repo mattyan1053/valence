@@ -35,6 +35,14 @@ readonly STOP_IDS=(
   "wrong-branch:<PR番号>|worker: PR の head ブランチに切り替わっていない"
   "too-many-own-prs:<件数>|worker: 自分の open PR が 2 件以上"
   "local-ci-failed:<PR番号>|worker: ./task check が通らない"
+  # **「分からない」を「赤」と混ぜない** (#147)。`./task check` が途中で殺されると
+  # **終了コードが取れないまま、出力だけが緑に見える**——**通らなかった**のではなく
+  # **合否が分からない**状態である。
+  #
+  # **押し通してよいが、記録は残す。** 3 周続くなら**この機械では `./task check` が
+  # 実行制限に収まらない**ということで、**人の判断が要る**（避ける方向は #131 / #133）。
+  # **PR より前に起きる**ので Issue 番号で数える。
+  "local-ci-unknown:<Issue番号>|worker: ./task check の合否が分からない (途中で殺された)"
   "implementation-blocked:<Issue番号>|worker: blocked にして人へ渡した (完了条件を満たせない / PR が人手で閉じられた)"
   "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
   "too-many-ready:<件数>|両方: ready の Issue が 2 件以上ある (着手順が一意に決まらない)"

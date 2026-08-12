@@ -80,7 +80,22 @@ cmd_restart() { ensure_up; compose restart app; }
 cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
 
 # lint + typecheck + 依存方向 + テスト をまとめて実行する
-cmd_check() { ensure_up; exec_app pnpm check; }
+# **最後の 1 行で「走り終えた」と「合否」を同時に言う** (#147)。
+#
+# **途中で殺されると、終了コードが取れないまま出力だけが残る**——**その出力は、
+# 成功したときの出力の途中まで**なので、**目で見ると緑に見える**。実際に踏んだ
+# (2026-08-11、PR #142 の周回)。**#121 が入れたのは「出力ではなく終了コードで決める」**で、
+# **「終了コードが存在しない」は守っていない**——**その隣の穴**である。
+#
+# **印は走り終えた証拠でもある。** 途中で殺されればここまで来ないので出ない。
+# **印だけで緑と読ませない**ため、**印に合否そのものを入れる**。
+cmd_check() {
+  ensure_up
+  local status=0
+  exec_app pnpm check || status=$?
+  echo "check-exit=$status"
+  return "$status"
+}
 
 # Biome で lint する
 cmd_lint() { ensure_up; exec_app pnpm lint; }

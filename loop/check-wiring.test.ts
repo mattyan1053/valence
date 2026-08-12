@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,24 +36,47 @@ describe("./task check の読み方", () => {
     //
     // **手順書の書き方をそのまま実行して確かめる。** 文言を見るだけだと、
     // **従っても間違える指示**を素通しにする。
-    const block = read(".claude/commands/loop-worker.md")
+    //
+    // **1 つ目だけを取らない**（#147）。**`find` で 1 つ取ると名指しと同じ**になり、
+    // **打つところが増えても気づけない**——**実際に 4 箇所ある**（rebase・対応後・
+    // 実装中・PR を作る前）。**穴（`<…>`）は埋めて、全部走らせる。**
+    const blocks = read(".claude/commands/loop-worker.md")
       .split("```bash")
+      .slice(1)
       .map((chunk) => chunk.split("```")[0] ?? "")
-      .find((chunk) => chunk.includes("./task check") && chunk.includes("$?"));
-    if (block === undefined) {
-      throw new Error("終了コードを控える書き方が手順書にありません");
-    }
+      .filter((chunk) => chunk.includes("./task check"));
+    expect(blocks.length, "`./task check` を打つブロックが見つからない").toBeGreaterThan(0);
 
-    // **落ちるものに差し替えて打つ。** 控えた値が 2 のままなら、合否は消えていない
     const workspace = mkdtempSync(join(tmpdir(), "check-wiring-"));
     try {
-      const printed = execFileSync(
-        "bash",
-        ["-c", `${block.replaceAll("./task check", "bash -c 'exit 2'")}\necho "status=$status"`],
-        { cwd: workspace, encoding: "utf8" },
-      );
+      // **`gh` と `git` は呼ばせない。** 見たいのは**合否の残り方**であって、
+      // その周りのコマンドではない
+      const stub = join(workspace, "stub");
+      mkdirSync(stub, { recursive: true });
+      for (const command of ["gh", "git"]) {
+        writeFileSync(join(stub, command), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+      }
 
-      expect(printed).toContain("status=2");
+      for (const block of blocks) {
+        // **落ちるものに差し替えて打つ。** 印は合否に合わせて出す（殺された場合は別の試験）
+        const body = block
+          .replace(/<[^>]+>/g, "1")
+          .replaceAll("./task check", "bash -c 'echo check-exit=2; exit 2'");
+        const result = spawnSync("bash", ["-c", `${body}\necho "status=$status reached-end"`], {
+          cwd: workspace,
+          encoding: "utf8",
+          env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+        });
+
+        if (/git push/.test(block)) {
+          // **push があるブロックは、赤なら先へ進まない**（#147 のレビュー 2 周目）。
+          // **`| grep` で繋いで合否が消えると、ここが素通りする**
+          expect(result.stdout, "赤なのに最後まで進んでいる").not.toContain("reached-end");
+        } else {
+          // **読むだけのブロックは、控えた値が残っていること**——**それが #121 の主題**である
+          expect(result.stdout, "合否が消えている").toContain("status=2");
+        }
+      }
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }

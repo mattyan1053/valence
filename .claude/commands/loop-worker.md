@@ -303,7 +303,13 @@ git branch --show-current      # PR の headRefName と一致することを確�
 gh pr checkout <PR番号>
 git fetch origin main
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
-./task check                  # 緑になるまで直す
+./task check >check.log 2>&1; status=$?
+mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+if [[ $mark != "check-exit=$status" ]]; then
+  bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
+  exit
+fi
+((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
 git push --force-with-lease
 ```
 
@@ -317,14 +323,26 @@ push を消さないため。
 対応が終わったら:
 
 ```bash
-./task check          # 緑になるまで直す
+./task check >check.log 2>&1; status=$?
+mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+if [[ $mark != "check-exit=$status" ]]; then
+  bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
+  exit
+fi
+((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
 git push
 ```
 
 push したらこの周回は終わり。**レビュー要求は投げない。** master が判断する。
 **通知は出口で送る**（「周回の出口」を参照）。ここでは送らない。
 
+**終了コードと印の読み方は、ステップ 4 の「実装は必ずテストファースト」に 1 つだけ書いてある。**
+**`./task check` を打つところは 4 つあり**（rebase・対応後・実装中・PR を作る前）、
+**どれも殺されうる**——**レビューの往復ごとに通るのはここ**である。
+
 `./task check` が通らないまま 3 周した場合は `bin/loop-stall "local-ci-failed:<PR番号>"` を通して停止する。
+**合否が分からないとき**（印が出ない）は `bin/loop-stall "local-ci-unknown:<Issue番号>"` を通す——
+**通らないのとは別の状態**である。
 
 ## 4. `ready` の 1 件を実装する
 
@@ -395,11 +413,35 @@ Biome の複雑度（#117）を 2 度見落とし、**どちらも CI まで気�
 
 ```bash
 ./task check >check.log 2>&1; status=$?   # 合否はこの $status で決める
+tail -1 check.log                          # check-exit=<合否>（走り終えた印）
 grep -aE "error|×" check.log              # 絞るのはそのあと
 ```
 
 **パイプで繋ぐと、`$?` は絞り込み側のものになり `./task check` の合否が消える**
 （`./task check | grep …` の `$?` は `grep` の値）。繋ぐなら `${PIPESTATUS[0]}` を見る。
+
+**終了コードと印の両方を見る。** **`./task check` は途中で殺されうる**（実行制限。
+**試験は増える一方で、1 vCPU の VM では長くなり続ける**ので、**確率は上がる**）。
+**殺されたときの出力は、成功したときの出力の途中まで**なので、**目で見ると緑に見える**——
+**#121 が入れた「終了コードで決める」は、終了コードが存在しない場合を守っていない**。
+
+| `status` | 末尾の印 | 読み方 |
+| --- | --- | --- |
+| 0 | `check-exit=0` | **緑** |
+| 0 以外 | `check-exit=<同じ値>` | **赤**（直す） |
+| **取れない / 印が無い** | — | **分からない**（緑でも赤でもない） |
+
+**「分からない」を「赤」と混ぜない。** **押し通してよい**（実行制限は避けられない）が、
+**押し通したと記録に残す**——`bin/loop-stall "local-ci-unknown:<Issue番号>"` を通す。
+**3 周続くなら、この機械では `./task check` が実行制限に収まらない**ということで、
+**人の判断が要る**（避ける方向は #131 / #133 の担当で、ここではやらない）。
+
+**受けただけでは、誰も見ていない。** `tail` は必ず成功するので、**`status` を控えても
+分岐が無ければ、赤でも印が無くてもそのまま push へ進む**——**push の前に分岐を置く**
+（rebase・対応後・PR を作る前の 3 つ。**ここだけは読むだけで、次に push が無い**）。
+
+**master への報告にも、印を見たことを書く。** master は**手元で通っている前提で
+差し戻しの粒度を決めている**ので、**「殺されたのに緑に見えた」ものと区別が付かない**。
 
 完了条件を満たせない、または Issue の記述だけでは判断できない場合は、
 `blocked` label を付けて理由をコメントし、`bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する。
@@ -408,7 +450,13 @@ grep -aE "error|×" check.log              # 絞るのはそのあと
 ### PR を作る
 
 ```bash
-./task check          # 緑を確認してから push
+./task check >check.log 2>&1; status=$?
+mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+if [[ $mark != "check-exit=$status" ]]; then
+  bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
+  exit
+fi
+((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
 git push -u origin <ブランチ>
 gh pr create --base main --title "<日本語>" --body-file <file>
 bin/loop-review-head "<PR番号>" "$(git rev-parse HEAD)"
