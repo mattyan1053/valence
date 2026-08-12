@@ -387,6 +387,78 @@ describe("bin/loop-lease", () => {
     });
   });
 
+  describe("記録の名前を、作業場の長さに依存させない", () => {
+    // **パス全体を 1 つのファイル名成分へ畳んでいた**ので、**深い checkout では
+    // NAME_MAX（一般に 255 バイト）を超え、acquire が常に exit 2 になる**——
+    // **worker がまったく動けなくなる**（約 350 文字のパスで再現済み。#98）。
+    //
+    // **いまの置き場所では踏まない**（`~/valence` で 53 文字）。**踏まないのは
+    // 置き場所がたまたま浅いからで、設計上の保証ではない**——**人が別の場所へ
+    // clone した瞬間に踏む**。
+
+    /**
+     * NAME_MAX を超える長さの作業場を**実際に作る**。
+     * **長さの計算だけで済ませない**（#99 の完了条件）——**畳んだ名前が
+     * ファイルシステムに拒まれること自体**が、この Issue の中身である。
+     */
+    function deepWorkspace(): string {
+      let dir = sandbox;
+      while (dir.length <= 260) {
+        dir = join(dir, "a".repeat(40));
+      }
+      mkdirSync(dir, { recursive: true });
+      expect(spawnSync("git", ["init", "--quiet", dir]).status, "git init できない").toBe(0);
+      return dir;
+    }
+
+    function runIn(dir: string, args: string[]): Run {
+      const result = spawnSync(SCRIPT, args, { cwd: dir, encoding: "utf8" });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
+
+    /** lease の記録。**名前の作り方は試験に写さない。** */
+    function leaseFile(dir: string): string {
+      const name = readdirSync(join(dir, ".git")).find(
+        (entry) => entry.startsWith("valence-loop-lease-worker") && !entry.endsWith(".lock"),
+      );
+      expect(name, `lease の記録が見つからない: ${dir}`).toBeDefined();
+      return join(dir, ".git", name ?? "");
+    }
+
+    it("NAME_MAX を超える長さの作業場でも、取れて返せる", () => {
+      const deep = deepWorkspace();
+
+      const held = runIn(deep, ["acquire", "worker"]);
+
+      expect(held.status, held.stderr).toBe(0);
+      expect(runIn(deep, ["release", "worker", held.stdout.trim()]).status).toBe(0);
+    });
+
+    it("作業場の長さが違っても、記録の名前は同じ長さになる", () => {
+      // **「深いところでも動いた」だけでは足りない。** それだと**もっと深い checkout で
+      // 同じところへ戻る**——**長さを入力に依存させない**ことが直したい性質である
+      const deep = deepWorkspace();
+      expect(acquire().status).toBe(0);
+      expect(runIn(deep, ["acquire", "worker"]).status).toBe(0);
+
+      const shallowName = leaseFile(sandbox).replace(/^.*\//, "");
+      const deepName = leaseFile(deep).replace(/^.*\//, "");
+
+      expect(deep.length, "作業場の長さが変わっていない").toBeGreaterThan(sandbox.length + 100);
+      expect(deepName.length, "記録の名前が作業場の長さで伸びている").toBe(shallowName.length);
+    });
+
+    it("どの作業場が握っているかは、記録の中身を読めば分かる", () => {
+      // **名前から畳んだパスを外すと、そこにあった情報が消える。**
+      // **固定長にしたついでに「誰が握っているか」を読めなくしても、
+      // 名前の長さだけを見る試験は緑のまま通る**（#183 で直したのと同じ形）
+      const deep = deepWorkspace();
+      expect(runIn(deep, ["acquire", "worker"]).status).toBe(0);
+
+      expect(readFileSync(leaseFile(deep), "utf8")).toContain(deep);
+    });
+  });
+
   describe("長い周回のあいだ、期限切れにしない", () => {
     // **TTL は「周回の長さ」への賭けだった。** 実装する周回は `./task check` を含むので
     // 1 時間近くかかり、**返す前に期限が切れる**（実測で 4 周連続）。切れた窓に

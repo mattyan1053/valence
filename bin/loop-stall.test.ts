@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -694,6 +695,25 @@ describe("worker が作業しているあいだは数えない", () => {
   }
 
   /**
+   * この作業場の scope。**名前の作り方を試験へ写さない**（#99）——写すと、
+   * **本物が名前を変えても、試験は古い名前で緑のまま通る**。**本物に 1 周させて読む。**
+   */
+  function workerScope(): string {
+    const lease = join(repo, "bin", "loop-lease");
+    const held = spawnSync(lease, ["acquire", "worker"], { cwd: repo, encoding: "utf8" });
+    expect(held.status, `lease を取れない: ${held.stderr}`).toBe(0);
+    const name = readdirSync(join(repo, ".git")).find((entry) =>
+      entry.startsWith("valence-loop-rounds-worker"),
+    );
+    expect(name, "周回の印が見つからない").toBeDefined();
+    expect(
+      spawnSync(lease, ["release", "worker", held.stdout.trim()], { cwd: repo }).status,
+      "lease を返せない",
+    ).toBe(0);
+    return (name ?? "").replace("valence-loop-rounds-", "");
+  }
+
+  /**
    * worker の活動と「始めた周回の印」を作る。**worker 自身が書く形と同じ。**
    *
    * **印は lease ではない。** lease は返すと消えるので、それを見ていると
@@ -706,7 +726,7 @@ describe("worker が作業しているあいだは数えない", () => {
     longestRound?: number;
   }): void {
     const now = Math.floor(Date.now() / 1000);
-    const scope = `worker${repo.replace(/\//g, "_")}`;
+    const scope = workerScope();
     // **活動の記録は「人が ./task を叩いた」でも新しくなる。**
     // 判定に使っていないことを見るために、**新しいまま置く**
     writeFileSync(
@@ -881,7 +901,9 @@ describe("worker が作業しているあいだは数えない", () => {
     activityAgo: number;
   }): void {
     const now = Math.floor(Date.now() / 1000);
-    const scope = "worker_home_someone_old-workspace";
+    // **値は「この作業場のものと違う」ことだけが要る。** `bin/loop-stall` は
+    // scope を突き合わせるだけで、**そこからパスを読み取らない**（読み取れない）
+    const scope = "worker-other-workspace";
     writeFileSync(
       join(repo, ".git", `valence-loop-roundlen-${scope}`),
       `${options.longestRound}\n${options.longestRound}\n`,
