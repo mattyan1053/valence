@@ -98,24 +98,21 @@ describe("停止識別子", () => {
       ["### 1.0 同じ役の周回が走っていないか確かめる", "wrong-worktree"],
       ["### 1.1 手順とスクリプトを最新にする", "main-sync-failed"],
       ["## 2. open PR を見て、見る順番を決める", "pr-lookup-failed"],
+      // **ずれたときの行き先は、ここに 1 つだけ置く**（各所に書き写さない。#145）。
+      // **主体が違うので名前も分ける**——動かすのは worker、読めない原因は
+      // gh / 認証 / GitHub で、**後者は worker が何周まわしても解けない**
+      ["### 3.1 ゲート", "head-moved:<PR番号>"],
+      ["### 3.1 ゲート", "head-lookup-failed:<PR番号>"],
       ["### exit 0 — マージする", "merge-failed:<PR番号>@<SHA>"],
       ["### exit 0 — マージする", "merge-failed:<PR番号>@<SHA>"],
       ["### exit 1 — 何が足りないかで分ける", "deferred-overflow"],
       ["### 要求が満たされたか確かめる（`changes-requested`）", "awaiting-worker:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
-      // **評価した head が動いたら、その周回の判断は記録も投稿もしない**（#145）。
-      // **worker の対応待ちではない**ので `awaiting-worker` とは別に数える——
-      // 待っているのは worker ではなく、**次の周回で自分が評価し直す**ことである
-      ["### 3.2 レビューを要求してよいか確かめる", "head-unconfirmed:<PR番号>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-unanswered:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### exit 2 — 設定か使い方の誤り", "gate-misconfigured:<PR番号>"],
-      // **読んだ指摘は、評価した head に対するもの**である（#145）。
-      // **動いていたら投稿しない**——次の周回で読み直す
-      ["### まだ誰も答えていない指摘", "head-unconfirmed:<PR番号>"],
-      ["#### rework — worker へ差し戻す", "head-unconfirmed:<PR番号>"],
       ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
       // **人を呼ぶ側は worker 待ちではない。** triage が `human` を返した状態で、
       // **worker には解けない**——`bin/loop-stall` 自身が「**主体が違うものに

@@ -58,10 +58,10 @@ function writingSections(): [string, string][] {
   const pairs: [string, string][] = [];
   let heading = "";
   let writesHere = false;
-  let checksHere = false;
+  let checkedFirst = false;
   const flush = () => {
     if (heading !== "" && writesHere) {
-      pairs.push([heading, checksHere ? "確かめる" : "確かめない"]);
+      pairs.push([heading, checkedFirst ? "確かめてから書く" : "確かめない"]);
     }
   };
   for (const line of read(PROCEDURE).split("\n")) {
@@ -69,13 +69,18 @@ function writingSections(): [string, string][] {
       flush();
       heading = line.trim();
       writesHere = false;
-      checksHere = false;
+      checkedFirst = false;
     }
-    if (writes.test(line)) {
+    // **確認が先にあるか**を見る。**節のどこかにあれば緑、では枝を見落とす**——
+    // **片方の枝にしか無い**形が実際に残っていた（#166 のレビュー 2 周目）。
+    // **同じ行に両方あるときは、その行が確認である**（散文で両方に触れる場合）
+    if (line.includes("bin/loop-head same") && !writesHere) {
+      checkedFirst = true;
+    }
+    // **「resolve しない」は書かない宣言である。** 打ち消しを書き込みと読むと、
+    // **節の冒頭で必ず立ち上がり、どこに確認を置いても「確かめない」**になる
+    if (writes.test(line) && !line.includes("resolve しない")) {
       writesHere = true;
-    }
-    if (line.includes("bin/loop-head same")) {
-      checksHere = true;
     }
   }
   flush();
@@ -148,15 +153,15 @@ describe("周回の途中で動く head", () => {
       // **マージだけは GitHub 側が同じことを確かめる**（`--match-head-commit`）。
       // **#145 の本文が手本にした手当てそのもの**なので、二重には置かない
       ["### exit 0 — マージする", "確かめない"],
-      ["### 要求が満たされたか確かめる（`changes-requested`）", "確かめる"],
-      ["### 3.2 レビューを要求してよいか確かめる", "確かめる"],
+      ["### 要求が満たされたか確かめる（`changes-requested`）", "確かめてから書く"],
+      ["### 3.2 レビューを要求してよいか確かめる", "確かめてから書く"],
       // 節の導入。**ここでは何も書かない**（下の節がそれぞれ書く）
       ["## 4. 対応を確認し、resolve するか worker へ返す", "確かめない"],
-      ["### まだ誰も答えていない指摘", "確かめる"],
-      ["### 返信を確かめる", "確かめる"],
-      ["#### rework — worker へ差し戻す", "確かめる"],
-      ["#### human — 人を呼ぶ", "確かめる"],
-      ["#### defer — Issue へ外出ししてマージする", "確かめる"],
+      ["### まだ誰も答えていない指摘", "確かめてから書く"],
+      ["### 返信を確かめる", "確かめてから書く"],
+      ["#### rework — worker へ差し戻す", "確かめてから書く"],
+      ["#### human — 人を呼ぶ", "確かめてから書く"],
+      ["#### defer — Issue へ外出ししてマージする", "確かめてから書く"],
       // **先行 PR の依存で決まる**ので、head の中身に依らない
       ["### PR を保留にする / 再開する", "確かめない"],
       // **優先順の伝達**であって、評価に基づく投稿ではない
@@ -182,10 +187,19 @@ describe("周回の途中で動く head", () => {
     expect(block, "返っていないのに head を確かめている").toMatch(/if .*await/);
   });
 
-  it("ずれたときの行き先が決まっている", () => {
-    // **「捨てる」だけでは、何周でも同じことが起きる。** worker が push し続ける間
-    // master が判断できない状態は、**3 周続いたら人を呼ぶ**側に置く
-    expect(read(PROCEDURE)).toContain('bin/loop-stall "head-unconfirmed:<PR番号>"');
+  it("動いたのと読めないのを、別の名前で数える", () => {
+    // **主体が違う。** 動いた原因は **worker の push**、読めない原因は
+    // **`gh` / 認証 / GitHub** である——**worker の push では解けないもの**を
+    // worker の周回で待つと、**元気に push している間ずっと数えられない**。
+    //
+    // **#128 は「同じ状態には同じ名前」だった。** これは**逆に「違う状態には違う名前」**である
+    const procedure = read(PROCEDURE);
+
+    expect(procedure, "動いたときの行き先が無い").toContain('bin/loop-stall "head-moved:<PR番号>"');
+    expect(procedure, "読めないときの行き先が無い").toContain(
+      'bin/loop-stall "head-lookup-failed:<PR番号>"',
+    );
+    expect(procedure, "混ざったままの名前が残っている").not.toContain("head-unconfirmed");
   });
 
   it("その識別子が、一覧にある", () => {
@@ -196,14 +210,15 @@ describe("周回の途中で動く head", () => {
       encoding: "utf8",
     });
 
-    expect(listed).toContain("head-unconfirmed:<PR番号>");
+    expect(listed).toContain("head-moved:<PR番号>");
+    expect(listed).toContain("head-lookup-failed:<PR番号>");
   });
 
   it("識別子に head SHA を入れない", () => {
     // **入れると、ずれるたびに別の SHA になり、数え直しで 3 周に届かない**——
     // **ここで数えたいのは「同じ PR で、ずれが続いていること」**である
     expect(read(PROCEDURE), "ずれの識別子に SHA が入っている").not.toContain(
-      "head-unconfirmed:<PR番号>@",
+      "head-moved:<PR番号>@",
     );
   });
 

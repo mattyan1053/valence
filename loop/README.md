@@ -74,7 +74,9 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
 - **記録・投稿する SHA は、ゲートが出した head である**（読み直さない）。書く前に
   `bin/loop-head same <PR番号> <その head>` を通す——**worker はいつでも push できる**ので、
   **読んだ時点で正しくても、書く時点では違いうる**。動いていたらその周回の判断は捨てる
-  （識別子 `head-unconfirmed`）。**マージ側の `--match-head-commit` と同じ考え方**を、
+  （識別子は `head-moved` / `head-lookup-failed`。**主体が違うので分けてある**——
+  動かすのは worker、読めない原因は gh / 認証 / GitHub で、後者は worker では解けない）。
+  **マージ側の `--match-head-commit` と同じ考え方**を、
   記録側にも置いている（#145）。
 - `main` へ直接 push しない。
 - **同時に open にしてよい PR は 1 本**。並行させるとレビュー量が本数倍で増える。
