@@ -375,8 +375,11 @@ bin/loop-lease release master "<token>"
 
 - **満たされている** → `gh pr edit <PR番号> --remove-label changes-requested` で外す。
   **前へ進んだので `bin/loop-stall --reset` を通す。** 次の周回でゲートを回し直す
-- **満たされていない** → 何が足りないかをコメントで返し（label は付けたまま）、
+- **満たされていない** → **`bin/loop-head same <PR番号> <ゲートが出した head>` を通してから**
+  何が足りないかをコメントで返し（label は付けたまま）、
   **`bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"` を通して停止する**
+  （**動いていたら返さない**。`head-unconfirmed` を通して周回を終える——
+  **ここは rework とまったく同じ形**で、**読んだ差分はもう head ではない**）
 
 **満たされていない側でも必ず記録する。** ここは**新しく「通らない条件」を足した場所**で、
 第 3 層（手直しの範囲か）はレビューの上限にしか効かず、**label には関係しない**。
@@ -417,9 +420,16 @@ bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら�
 bin/loop-review-head <PR番号> <ゲートが出した head>
 gh pr comment <PR番号> --body "@codex review"
 
-bin/loop-await-review <PR番号> "$since"
-bin/loop-head same <PR番号> <ゲートが出した head>   # 待っている間に動いていないか
+bin/loop-await-review <PR番号> "$since"; await=$?
+if ((await == 0)); then
+  bin/loop-head same <PR番号> <ゲートが出した head>   # 待っている間に動いていないか
+fi
 ```
+
+**待った結果を先に受ける。** **この直後の分岐は `bin/loop-await-review` の終了コードで
+決まる**（0 / 1 / 2 で行き先が全部違う）のに、**後ろに別のコマンドを置くと `$?` が
+上書きされる**——**返らなかった周回が「返った」に化け、判定不能が消える**。
+**返っていないなら、head を確かめる意味も無い。**
 
 **`bin/loop-head same` が exit 1（動いた）または exit 2（読めない）なら、
 `bin/loop-stall "head-unconfirmed:<PR番号>"` を通して、この PR の周回をそこで終える。**
@@ -505,9 +515,13 @@ resolve しない。**返信を書いた本人が自分で閉じると、確認�
 （3 周で `loop/STOP`）。**PR が健全でもループが止まる。**
 
 ```bash
+bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら、この周回は何も書かない
 gh pr edit <PR番号> --add-label changes-requested   # 先。失敗したらコメントを投稿しない
 gh pr comment <PR番号> --body-file <file>           # 後
 ```
+
+**読んだ指摘は、評価した head に対するもの**である。**動いていたら投稿しない**——
+`bin/loop-stall "head-unconfirmed:<PR番号>"` を通して周回を終え、次の周回で読み直す。
 
 **指摘の当否を判断してから付ける。** 「レビューが来たら機械的に付ける」ではない——
 **外出しする**（`defer`）ものや、**直さないと決める**ものには付けない。
@@ -536,6 +550,10 @@ gh pr edit <PR番号> --add-label changes-requested     # 付け直して初め�
 - 実際に直っているか（差分は `gh pr diff <N>` で読む。ローカルに PR の ref は
   fetch されていないので、`git show refs/pr/<N>:...` は revision 不明で失敗する）
 - 直さないと判断したものは、**その理由が書かれているか**
+
+**resolve も返信も、書く前に `bin/loop-head same <PR番号> <ゲートが出した head>` を通す。**
+**読んだ差分（`gh pr diff`）は、評価した head のもの**である——**動いていたら、
+その返信は新しい head に対する返信として並ぶ**（`head-unconfirmed` を通して周回を終える）。
 
 **対応が十分なら resolve する。** 不十分なら resolve せず、何が足りないかを
 そのスレッドへ返信する。写経ではなく、どこがまだ答えになっていないかを書く。
@@ -599,6 +617,7 @@ resolve しない。**何が決まれば進むのか**を PR に書き、**そ�
 # **label が無い作業場がある。** `./task loop:setup` は 1 度しか走らず、
 # **既に動いている作業場はマージしても label が増えない**（ステップ 1.1 は
 # worktree を切り替えるだけ）。**存在しない label は黙って落ちる**ので、先に用意する
+bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら保留にしない
 gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
 
 # **付いたことを確かめてから進む**（`changes-requested` と同じ順序）。
@@ -652,6 +671,7 @@ master が忘れたときに永久に止まる**（`changes-requested` と同じ
 自分の 1 件が見えず**、上限を 1 件超えて通る（この環境で実測済み。#101）。
 
 ```bash
+bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら外出ししない
 bin/loop-deferred-budget --adding 1    # exit 1 なら作らない
 gh issue create --label backlog --label deferred-finding \
   --title "<指摘の要点>" --body-file <file>

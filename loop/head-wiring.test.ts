@@ -45,6 +45,44 @@ function lastPositionOf(haystack: string, needle: string): number {
 }
 
 /**
+ * **その PR へ、その周回の判断を書く節**を全部並べる。
+ *
+ * **絞ってから見ない。** 置いた場所を名指しすると、**名指ししなかった経路が隠れる**
+ * （#164 で同じことを直した）。**書く節をすべて出し、扱いを添えて突き合わせる**。
+ */
+function writingSections(): [string, string][] {
+  // **PR へ書く**もの: コメント・label・resolve・**SHA 付きの記録**。
+  // Issue の起票や `ready` の付け替えは、**その PR の head に依らない**ので入れない。
+  const writes =
+    /gh pr comment|gh pr edit|resolveReviewThread|resolve|bin\/loop-stall "[a-z-]+:<PR番号>@<SHA>"/;
+  const pairs: [string, string][] = [];
+  let heading = "";
+  let writesHere = false;
+  let checksHere = false;
+  const flush = () => {
+    if (heading !== "" && writesHere) {
+      pairs.push([heading, checksHere ? "確かめる" : "確かめない"]);
+    }
+  };
+  for (const line of read(PROCEDURE).split("\n")) {
+    if (/^#{2,4} /.test(line)) {
+      flush();
+      heading = line.trim();
+      writesHere = false;
+      checksHere = false;
+    }
+    if (writes.test(line)) {
+      writesHere = true;
+    }
+    if (line.includes("bin/loop-head same")) {
+      checksHere = true;
+    }
+  }
+  flush();
+  return pairs;
+}
+
+/**
  * 評価した head と、記録・投稿する head を食い違わせない（#145）。
  *
  * **master は 1 周の中で head を何度も読む。** 読むたびに違いうるので、
@@ -97,10 +135,51 @@ describe("周回の途中で動く head", () => {
     );
   });
 
-  it("worker へ返す前にも確かめる", () => {
-    // **スレッドへの返信も同じ**（#145 の本文）。**古い head を読んで書いた指摘**が、
-    // **新しい head に対する指摘として並ぶ**
-    expect(section("#### rework — worker へ差し戻す")).toContain("bin/loop-head same");
+  it("評価に基づいて書く節を、全部並べて突き合わせる", () => {
+    // **名指しで見ない。** 前の版は `section("#### rework …")` のように
+    // **置いた場所だけを名指し**していたので、**名指ししなかった経路を隠した**——
+    // **実際に 3 つ漏れていた**（`changes-requested` の確認 / まだ誰も答えていない指摘 /
+    // 人を呼ぶ）。**本文が挙げた例は、経路の一覧ではない**（master の指摘）。
+    //
+    // **#164 と同じ形にする。** 節と扱いを**全部並べて `toEqual`**——
+    // **経路が増えたら、ここで必ず立ち止まる**。散文で並べても、
+    // **経路が増えればまた漏れる**（#92 で出口を 1 本にしたときと同じ話）。
+    expect(writingSections()).toEqual([
+      // **マージだけは GitHub 側が同じことを確かめる**（`--match-head-commit`）。
+      // **#145 の本文が手本にした手当てそのもの**なので、二重には置かない
+      ["### exit 0 — マージする", "確かめない"],
+      ["### 要求が満たされたか確かめる（`changes-requested`）", "確かめる"],
+      ["### 3.2 レビューを要求してよいか確かめる", "確かめる"],
+      // 節の導入。**ここでは何も書かない**（下の節がそれぞれ書く）
+      ["## 4. 対応を確認し、resolve するか worker へ返す", "確かめない"],
+      ["### まだ誰も答えていない指摘", "確かめる"],
+      ["### 返信を確かめる", "確かめる"],
+      ["#### rework — worker へ差し戻す", "確かめる"],
+      ["#### human — 人を呼ぶ", "確かめる"],
+      ["#### defer — Issue へ外出ししてマージする", "確かめる"],
+      // **先行 PR の依存で決まる**ので、head の中身に依らない
+      ["### PR を保留にする / 再開する", "確かめない"],
+      // **優先順の伝達**であって、評価に基づく投稿ではない
+      ["### 割り込みを伝える", "確かめない"],
+    ]);
+  });
+
+  it("待った結果を、確認で上書きしない", () => {
+    // **この手順書は人が上から実行する**ので、**「直前のコマンドの終了コード」は
+    // 最後の 1 つ**である。`bin/loop-await-review` の直後に別のコマンドを置くと、
+    // **exit 1（返らなかった）と exit 2（読めない）が 0 に化ける**——
+    // **枠を無駄に払い、判定不能なまま進む**（master の指摘。**位置だけを見ると通る**）。
+    //
+    // **先に受けてから使う**（`bin/loop-review-commits` の受け方が手本）
+    const [block = ""] = blocks(section("### 3.2 レビューを要求してよいか確かめる")).filter(
+      (chunk) => chunk.includes("bin/loop-await-review"),
+    );
+
+    expect(block, "待った結果を受けていない").toMatch(/bin\/loop-await-review[^\n]*\n?[^\n]*\$\?/);
+    expect(positionOf(block, "await"), "受けた結果を見ないまま head を確かめている").toBeLessThan(
+      lastPositionOf(block, "bin/loop-head same"),
+    );
+    expect(block, "返っていないのに head を確かめている").toMatch(/if .*await/);
   });
 
   it("ずれたときの行き先が決まっている", () => {

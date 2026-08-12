@@ -112,6 +112,9 @@ describe("停止識別子", () => {
       ["### 3.2 レビューを要求してよいか確かめる", "review-unanswered:<PR番号>@<SHA>"],
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### exit 2 — 設定か使い方の誤り", "gate-misconfigured:<PR番号>"],
+      // **読んだ指摘は、評価した head に対するもの**である（#145）。
+      // **動いていたら投稿しない**——次の周回で読み直す
+      ["### まだ誰も答えていない指摘", "head-unconfirmed:<PR番号>"],
       ["#### rework — worker へ差し戻す", "head-unconfirmed:<PR番号>"],
       ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
       // **人を呼ぶ側は worker 待ちではない。** triage が `human` を返した状態で、

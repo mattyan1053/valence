@@ -91,6 +91,12 @@ readonly STOP_IDS=(
 # 一覧に無い綴りが混ざっていないことを試験で押さえてある。
 readonly WORKER_FIXES=(
   "awaiting-worker"
+  # **head が動く原因は、worker が push したことである** (#145)。つまり
+  # **この停止が起きているとき、worker はほぼ必ず動いている**——
+  # **master の周回ごとに数えると、worker が元気に push している間に 3 周で止まる**。
+  # **狙いは保たれる**: worker の周回ごとに 1 ずつ数えるので、
+  # **push し続ける間 master が判断できない**なら 3 周で人を呼ぶ。
+  "head-unconfirmed"
 )
 
 usage() {
