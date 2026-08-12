@@ -64,6 +64,21 @@ readonly STOP_IDS=(
   # 件数を付けない。**溜まるほど件数が変わる**ので、付けると連続回数が数え直しになり、
   # 3 周続いても止まらない (`bin/loop-deferred-budget` が件数を出す)。
   "deferred-overflow|master: 外出しした指摘が溜まりすぎている (deferred-finding が上限超え)"
+  # **周回の途中で head が動いた状態**（`bin/loop-head same` の exit 1）。
+  # **その周回の判断は記録しない**（評価したのは、もう head ではない commit）。
+  #
+  # **head SHA を付けない。** ずれるたびに評価した head は違うので、付けると
+  # **毎回別状態として数え直され、3 周に届かない**。**ここで数えたいのは
+  # 「同じ PR で、ずれが続いていること」**——worker が push し続ける間 master が
+  # 判断できない状態は、3 周続いたら人を呼ぶ側に置く。
+  "head-moved:<PR番号>|master: 周回の途中で PR の head が動いた (worker の push)"
+  # **head を読めない状態**（`bin/loop-head same` の exit 2）。**上と分けてある。**
+  #
+  # **主体が違う。** 動かすのは worker だが、**読めない原因は gh / 認証 / GitHub** で、
+  # **worker の push では解けない**。**同じ名前にまとめて `WORKER_FIXES` へ入れると、
+  # worker が元気な間ずっと数えられない** (#145 のレビュー 2 周目。実際にそうしていた)。
+  # **#128 は「同じ状態には同じ名前」だったが、これは逆に「違う状態には違う名前」**である。
+  "head-lookup-failed:<PR番号>|master: PR の head を読み取れない (gh / 認証 / GitHub。worker では解けない)"
   # label と実態が食い違っている状態。**「送るものが無い」と混ぜない**ために別で数える。
   # PR 番号を入れるので、別の PR で起きたら数え直される。
   "handoff-mismatch:<PR番号>|両方: 未解決スレッドがあるのに changes-requested が無い"
@@ -83,6 +98,15 @@ readonly STOP_IDS=(
 # 一覧に無い綴りが混ざっていないことを試験で押さえてある。
 readonly WORKER_FIXES=(
   "awaiting-worker"
+  # **head が動く原因は、worker が push したことである** (#145)。つまり
+  # **この停止が起きているとき、worker はほぼ必ず動いている**——
+  # **master の周回ごとに数えると、worker が元気に push している間に 3 周で止まる**。
+  # **狙いは保たれる**: worker の周回ごとに 1 ずつ数えるので、
+  # **push し続ける間 master が判断できない**なら 3 周で人を呼ぶ。
+  #
+  # **`head-lookup-failed` は入れない。** そちらは gh / 認証 / GitHub が主体で、
+  # **worker が何周まわしても解けない** (`review-unanswered` と同じ側)。
+  "head-moved"
 )
 
 usage() {

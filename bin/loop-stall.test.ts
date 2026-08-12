@@ -747,6 +747,36 @@ describe("worker が作業しているあいだは数えない", () => {
     }
   });
 
+  it("head を読めない状態は、worker の周回で待たない", () => {
+    // **主体が違う。** `bin/loop-head same` の exit 2（`gh` / 認証 / GitHub）は
+    // **worker の push では解けない**——`review-unanswered` と同じ側である。
+    //
+    // **「動いた」と同じ名前にまとめると、worker が元気な間ずっと数えられない**
+    // （**片方の違反を直すために、もう片方を作る**形。master が自分の指示の誤りとして
+    // 挙げた）。**違う状態には違う名前**を打つ
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600 });
+
+    expect(stall("head-lookup-failed:142").stdout).toContain("count=1");
+    expect(stall("head-lookup-failed:142").stdout).toContain("count=2");
+    expect(stall("head-lookup-failed:142").stdout).toContain("[STOP]");
+  });
+
+  it("head が動いた状態も、worker の周回で数える", () => {
+    // **head が動く原因は、worker が push したことである**（#145）。つまり
+    // **この停止が起きているとき、worker はほぼ必ず動いている**——
+    // **master の周回ごとに数えると、worker が元気に push している間に
+    // 3 周で全ループが止まる**（master の指摘）。
+    //
+    // **狙いは保たれる。** worker の周回ごとに 1 ずつ数えるので、
+    // **「worker が push し続ける間 master が判断できない」なら 3 周で人を呼ぶ**
+    workerState({ activityAgo: 10, startedAt: Math.floor(Date.now() / 1000) - 600 });
+
+    const results = [1, 2, 3, 4, 5].map(() => stall("head-moved:142"));
+
+    expect(results.map((result) => result.status)).toEqual([0, 0, 0, 0, 0]);
+  });
+
   it("worker が解くとした識別子は、すべて一覧にある", () => {
     // **綴りがずれると黙って効かなくなる。** 主体の一覧（WORKER_FIXES）と
     // 識別子の一覧（STOP_IDS）は別の軸なので別に持つが、**片方だけ直すと食い違う**
@@ -754,7 +784,9 @@ describe("worker が作業しているあいだは数えない", () => {
     const fixes = (/readonly WORKER_FIXES=\(([^)]*)\)/.exec(script)?.[1] ?? "")
       .split("\n")
       .map((line) => line.trim().replace(/"/g, ""))
-      .filter((line) => line !== "");
+      // **理由はその識別子の隣に書く。** コメントを識別子として読むと、
+      // **書いた瞬間に「一覧に無い」で落ちる**（読み取り側の誤り）
+      .filter((line) => line !== "" && !line.startsWith("#"));
     const kinds = listedSpecs().map((spec) => spec.split(":")[0]);
 
     expect(fixes.length).toBeGreaterThan(0);

@@ -98,6 +98,11 @@ describe("停止識別子", () => {
       ["### 1.0 同じ役の周回が走っていないか確かめる", "wrong-worktree"],
       ["### 1.1 手順とスクリプトを最新にする", "main-sync-failed"],
       ["## 2. open PR を見て、見る順番を決める", "pr-lookup-failed"],
+      // **ずれたときの行き先は、ここに 1 つだけ置く**（各所に書き写さない。#145）。
+      // **主体が違うので名前も分ける**——動かすのは worker、読めない原因は
+      // gh / 認証 / GitHub で、**後者は worker が何周まわしても解けない**
+      ["### 3.1 ゲート", "head-moved:<PR番号>"],
+      ["### 3.1 ゲート", "head-lookup-failed:<PR番号>"],
       ["### exit 0 — マージする", "merge-failed:<PR番号>@<SHA>"],
       ["### exit 0 — マージする", "merge-failed:<PR番号>@<SHA>"],
       ["### exit 1 — 何が足りないかで分ける", "deferred-overflow"],

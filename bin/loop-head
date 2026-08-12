@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# 評価した head が、いまも PR の head かを確かめる。
+#
+#   exit 0 = 同じ (記録・投稿してよい)
+#   exit 1 = 動いた (**その周回の判断は、いまの head のものではない**)
+#   exit 2 = 読めない / 使い方の誤り
+#
+# **master は 1 周の中で head を何度も読む。** 読むたびに違いうるので、
+# **評価した head と、記録・投稿する head が食い違う** (#145)。
+#
+# **実測** (#165 の周回)。
+#
+#   02:31:31Z  bin/loop-review-head 165 5b41ebec   # 記録して要求を投げ、返るまで待つ
+#              (待っている間に worker が 673d4f6d を push)
+#              レビューが返る                       # 5b41ebec に対するもの
+#              ゲートを回し直す → head=673d4f6d     # 別の head
+#
+# **レビュー 2 回目の枠を、既に消えた head に使った。** 指摘の本文も古い head を
+# 指していたが、**それが新しい head にも当てはまるかは誰も確かめていない**。
+#
+# **`bin/loop-merge --match-head-commit` と同じ考え方**である。あちらは
+# **判定した head と実際にマージされる head が同じ**であることを GitHub 側で確かめる。
+# **記録側には同じ手当てが無かった**ので、ここに置く。
+#
+# **これは `bin/loop-review-head` とは別のものである。** あちらは
+# **「どの head にレビューが走ったか」の台帳**で、こちらは
+# **「いま GitHub の head は何か」**を尋ねる。混ぜると、台帳が現物を語り始める。
+#
+# **止める側に倒す。** 読めなければ「同じ」とは言わない——**この仕組みが塞ごうとした
+# 「確かめていないのに確かめた顔をする」**が、そのまま残るからである。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **入口を飛ばしていないか、ここでも確かめる**（#161）。**止めない**（`|| true`）。
+"${BASH_SOURCE[0]%/*}/loop-lease" check || true
+
+# 前方一致で比べるときの最短。**短いほど何にでも当たる**ので、
+# **「確かめた」と言えない長さ**を、確かめたことにしない。
+# git の既定の短縮長 (7) をそのまま使う。
+readonly MIN_SHA=7
+
+usage() {
+  echo "使い方: bin/loop-head same <PR番号> <評価した head SHA>" >&2
+  echo "        exit 0 = 同じ / exit 1 = 動いた / exit 2 = 読めない・使い方の誤り" >&2
+  echo "        短縮された SHA でもよい（${MIN_SHA} 文字以上、前方一致で比べる）" >&2
+  exit 2
+}
+
+[[ $# -eq 3 ]] || usage
+[[ $1 == "same" ]] || usage
+# 数字だけを受け付ける。PR 番号以外が渡る経路を作らない。
+[[ $2 =~ ^[0-9]+$ ]] || usage
+readonly PR="$2"
+readonly EVALUATED="$3"
+
+# **16 進の SHA だけを受け付ける。** 空文字や「不明」のような値を渡されて
+# **前方一致がたまたま通る**ことを防ぐ。
+if ! [[ $EVALUATED =~ ^[0-9a-f]{$MIN_SHA,40}$ ]]; then
+  echo "[FAIL] 評価した head SHA が短すぎるか、SHA ではありません: $EVALUATED" >&2
+  echo "       ${MIN_SHA} 文字以上の 16 進で渡してください（ゲートが出した値をそのまま使う）" >&2
+  exit 2
+fi
+
+if ! current="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>&1)"; then
+  echo "[FAIL] PR #$PR の head を読み取れません" >&2
+  printf '%s\n' "$current" >&2
+  exit 2
+fi
+# **空を「同じ」に倒さない。** gh は成功しながら空を返すことがある。
+if ! [[ $current =~ ^[0-9a-f]{40}$ ]]; then
+  echo "[FAIL] PR #$PR の head を読み取れません（返ってきた値: ${current:-空}）" >&2
+  exit 2
+fi
+
+if [[ $current == "$EVALUATED"* ]]; then
+  exit 0
+fi
+
+# **どちらの head なのかを両方出す。** 「動いた」だけでは、
+# **どの判断を捨てたのかが後から読めない**。
+echo "[WARN] PR #$PR の head が周回の途中で動きました" >&2
+echo "       評価した head: $EVALUATED" >&2
+echo "       いまの head  : $current" >&2
+echo "       この周回の判断は、いまの head のものではありません（記録・投稿しないこと）" >&2
+exit 1
