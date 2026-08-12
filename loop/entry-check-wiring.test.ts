@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -200,6 +201,98 @@ describe("入口を飛ばした周回", () => {
 
     expect(lines[0]?.split("\t"), "前の版が読めない形になっている").toHaveLength(2);
     expect(lines[1], "印が残っていない").toMatch(/^[ps]:/);
+  });
+
+  it("lease を読めなかったら、記録はしないが黙りもしない", () => {
+    // **「分からない」の倒し方を 2 つに分ける。**
+    //
+    // | | 記録に残すか | 言うか |
+    // | --- | --- | --- |
+    // | 印が無い / 種類が違う（持ち主が分からない） | **残さない** | 黙ってよい |
+    // | **lease を読めない**（ロックが作れない・取れない） | **残さない** | **言う** |
+    //
+    // **言っても記録は汚れない**（`./task loop:status` の件数は増えない）。
+    // **そして読めない状態は続く**——ロックが作れないのは**権限や置き場所の問題**で、
+    // **次の周回でも同じ**である。**黙ると、直すべきものが誰の目にも入らない**。
+    //
+    // **文言も分ける。** 「入口の acquire を飛ばした可能性」と言い切ると、
+    // **読めなかっただけの周回に出したときに逆向きの誤解**になる
+    mkdirSync(join(repo, ".git", "valence-loop-lease-master.lock"));
+
+    const checked = lease("check");
+
+    expect(checked.status, "読めないことで止めている").toBe(0);
+    expect(checked.stderr, "読めなかったことを言っていない").toMatch(/読め|判定できません/);
+    expect(checked.stderr, "読めないのに飛ばしたと言い切っている").not.toContain("飛ばした可能性");
+    expect(record(), "分からないものを記録している").toBe("");
+  });
+
+  it("上限の設定が壊れていても、記録は増え続けない", () => {
+    // **`tail -n abc` は落ちる。** 落ちると `if` が偽になり、**畳む処理ごと飛んで
+    // 追記だけが毎回残る**——**この PR が上限を付けた理由**（際限なく積む記録は
+    // 無いのと同じ）**に、設定 1 つで戻る**。しかも**上限に達していないのか
+    // 畳めていないのか、見分けが付かない**（Codex は 25 行まで増えるのを実測している）。
+    //
+    // **隣の設定（TTL・ロック待ち）は既に検証されている。** 同じ形に揃える
+    for (let round = 0; round < 25; round++) {
+      spawnSync(script("loop-lease"), ["check"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, LOOP_LEASE_MISSING_KEEP: "abc" },
+      });
+    }
+
+    const checked = spawnSync(script("loop-lease"), ["check"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, LOOP_LEASE_MISSING_KEEP: "abc" },
+    });
+
+    expect(checked.stderr, "設定が壊れていることを言っていない").toContain(
+      "LOOP_LEASE_MISSING_KEEP",
+    );
+    expect(record().split("\n").filter(Boolean).length, "上限が効いていない").toBeLessThanOrEqual(
+      20,
+    );
+  });
+
+  it("畳めなかったら、そう言う", () => {
+    // **`tail` が落ちる理由は設定だけではない**（記録が読めない、置き換えられない）。
+    // **検証を足しても、そこは通り抜ける**——**黙ると「上限に達していない」と
+    // 見分けが付かない**まま、記録だけが増え続ける。
+    //
+    // **追記はできるが、置き換えはできない**状態を作る（`.git` を読み取り専用にすると、
+    // **既にあるファイルへの追記は通り、新しい一時ファイルは作れない**）
+    lease("check");
+    const git = join(repo, ".git");
+    chmodSync(git, 0o555);
+    try {
+      const checked = lease("check");
+
+      expect(checked.stderr, "畳めなかったことを言っていない").toMatch(/畳めません/);
+      expect(checked.status, "畳めないことで止めている").toBe(0);
+    } finally {
+      chmodSync(git, 0o755);
+    }
+  });
+
+  it("畳めなかった理由も、そのまま出す", () => {
+    // **`2>/dev/null` を置くかどうかは、別に決まる**（master の指摘）。
+    // **置かない側へ倒した**——**「畳めません」だけでは、設定なのか権限なのか、
+    // 記録が読めないのかが分からない**。**直せるのは理由を見た人だけ**である。
+    //
+    // **追記はできるが読めない**状態を作る（書き込みだけ許す）
+    const path = join(repo, ".git", "valence-loop-lease-missing");
+    writeFileSync(path, "");
+    chmodSync(path, 0o200);
+    try {
+      const checked = lease("check");
+
+      expect(checked.stderr, "畳めなかったことを言っていない").toMatch(/畳めません/);
+      expect(checked.stderr, "落ちた当のものが何も言っていない").toContain("tail");
+    } finally {
+      chmodSync(path, 0o644);
+    }
   });
 
   it("記録は増え続けない", () => {

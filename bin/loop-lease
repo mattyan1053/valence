@@ -38,7 +38,8 @@ readonly ROLES=(master worker)
 readonly TTL_SEC="${LOOP_LEASE_TTL_SEC:-1800}"
 
 # 飛ばした記録を何件残すか。**増え続けないための上限**であって、意味のある数ではない。
-readonly MISSING_KEEP="${LOOP_LEASE_MISSING_KEEP:-20}"
+readonly MISSING_KEEP_DEFAULT=20
+MISSING_KEEP="${LOOP_LEASE_MISSING_KEEP:-$MISSING_KEEP_DEFAULT}"
 
 # 読み書きのロックを待つ時間。ここは一瞬で終わる操作なので短くてよい。
 readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
@@ -113,6 +114,20 @@ if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
   echo "[FAIL] 設定: LOOP_LEASE_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
   exit 2
 fi
+# **ここだけ落とさずに既定へ戻す。** 上の 2 つは**直列化そのもの**を決めるので、
+# 誤っていれば止めるのが正しい。**こちらは記録を畳む件数**でしかなく、
+# **止めると診断のための設定 1 つで周回が動かなくなる**。
+#
+# **黙って「上限が効かない」へは倒さない。** `tail -n abc` は落ち、**`if` が偽になって
+# 畳む処理ごと飛ぶ**ので、**追記だけが毎回残る**——**この記録に上限を付けた理由
+# （際限なく積む記録は、読む気を失わせるぶん、無いのと同じ）に、設定 1 つで戻る**。
+# しかも**上限に達していないのか畳めていないのか、見分けが付かない**。
+if ! [[ $MISSING_KEEP =~ ^[1-9][0-9]*$ ]]; then
+  echo "[WARN] 設定: LOOP_LEASE_MISSING_KEEP は 1 以上の整数（件）で指定してください" >&2
+  echo "       ${MISSING_KEEP_DEFAULT} 件で畳みます（この設定は無視します）" >&2
+  MISSING_KEEP="$MISSING_KEEP_DEFAULT"
+fi
+readonly MISSING_KEEP
 
 # **git の共通ディレクトリに置く。** master は worktree で動くので、作業ツリーごとに
 # 置くと同じ役が 2 つ走っても気づけない。`bin/loop-stall` と同じ理由・同じ形。
@@ -352,10 +367,15 @@ record_missing() {
   fi
   # **記録は増え続けない。** 読むのは `./task loop:status`、**古いものから畳むのはここ**——
   # **際限なく積む記録は、読む気を失わせるぶん、無いのと同じ**になる。
-  if kept="$(tail -n "$MISSING_KEEP" "$record" 2>/dev/null)"; then
-    printf '%s\n' "$kept" >"$record.tmp.$$" \
-      && mv -f "$record.tmp.$$" "$record" \
-      || rm -f "$record.tmp.$$"
+  #
+  # **畳めなかったら言う**（`2>/dev/null` を置かない）。**落ちる理由は設定だけではない**
+  # ——記録が読めない場合もここを通る。**黙ると「上限に達していない」と見分けが付かない**。
+  if ! kept="$(tail -n "$MISSING_KEEP" "$record")" \
+    || ! printf '%s\n' "$kept" >"$record.tmp.$$" \
+    || ! mv -f "$record.tmp.$$" "$record"; then
+    rm -f "$record.tmp.$$" 2>/dev/null
+    echo "[WARN] 飛ばした記録を畳めません: $record" >&2
+    echo "       この記録は ${MISSING_KEEP} 件を超えて増え続けます" >&2
   fi
   exec 8>&-
 }
@@ -380,16 +400,17 @@ if [[ $ACTION == "check" ]]; then
   unknown=""
   taken=""
   for role in "${ROLES[@]}"; do
-    set_role_paths "$role" >/dev/null 2>&1 || {
-      unknown="1"
+    # **理由を捨てない。** **なぜ読めないのかは、これらのメッセージにしか書かれていない**
+    set_role_paths "$role" || {
+      unknown="$unknown $role"
       continue
     }
-    lock_state >/dev/null 2>&1 || {
-      unknown="1"
+    lock_state || {
+      unknown="$unknown $role"
       continue
     }
     read_lease quiet || {
-      unknown="1"
+      unknown="$unknown $role"
       exec 9>&-
       continue
     }
@@ -407,7 +428,17 @@ if [[ $ACTION == "check" ]]; then
     [[ $held_owner != "$owner" ]] || exit 0
   done
   if [[ -n $unknown ]]; then
-    # 読めない役があった。**「持っていない」と言い切らない**
+    # **読めない役があった。「持っていない」と言い切らない**——**記録にも残さない**
+    # （**偽の記録より取りこぼしのほうが安い**）。**ただし黙らない。**
+    #
+    # **言っても記録は汚れない**（`./task loop:status` の件数は増えない）。
+    # **そして読めない状態は続く**——ロックが作れないのは**権限や置き場所の問題**で、
+    # **次の周回でも同じ**である。**黙ると、直すべきものが誰の目にも入らない**。
+    #
+    # **「飛ばした」と同じ文言にしない。** 言い切ると、**読めなかっただけの周回に
+    # 出したときに逆向きの誤解**になる。
+    echo "[WARN] lease を読めませんでした（役:${unknown}）。この周回が持っているかは判定できません" >&2
+    echo "       入口を飛ばしたかどうかは、この周回については分かりません（記録もしません）" >&2
     exit 0
   fi
   # **どちらの場合も、言うことは 1 つである。**
