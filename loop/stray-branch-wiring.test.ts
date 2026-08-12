@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,6 +115,54 @@ describe("宙に浮いたブランチ", () => {
 
       expect(shown, "どのブランチかが出ていない").toContain("feat/lost");
       expect(shown, "何が起きているのかが出ていない").toMatch(/PR/);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("出たブランチ名を、そのまま記録できる", () => {
+    // **「見つかったのに記録されない」は、呼ぶ側から見ないと形が分からない**
+    // （master の指摘）。**検出は通るのに `bin/loop-stall` が exit 2**——
+    // **人へ渡す経路がそこで切れる**（しかも **3 周の経路にも乗らない**）。
+    const workspace = mkdtempSync(join(tmpdir(), "stray-record-"));
+    try {
+      expect(spawnSync("git", ["init", "--quiet", workspace]).status).toBe(0);
+      const stub = join(workspace, "stub");
+      mkdirSync(stub, { recursive: true });
+      writeFileSync(
+        join(stub, "git"),
+        [
+          "#!/usr/bin/env bash",
+          `if [[ $* == *"--git-common-dir"* ]]; then printf '%s\n' ${JSON.stringify(join(workspace, ".git"))}; exit 0; fi`,
+          `if [[ $* == *"--show-toplevel"* ]]; then printf '%s\n' ${JSON.stringify(workspace)}; exit 0; fi`,
+          'if [[ $* == *"ls-remote"* ]]; then',
+          // **git が受け付ける名前**（`+` は ref に使える）
+          "  printf '%s\t%s\n' aaaaaaaa refs/heads/feat/a+b",
+          "  exit 0",
+          "fi",
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      writeFileSync(join(stub, "gh"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+
+      const found = spawnSync(join(REPO_ROOT, "bin/loop-stray-branches"), [], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+      });
+      expect(found.status, "宙に浮いたブランチを見つけていない").toBe(1);
+      const branch = (found.stdout.split("\n")[0] ?? "").split("\t")[1] ?? "";
+      expect(branch, "ブランチ名が出ていない").toBe("feat/a+b");
+
+      // **出た名前を、そのまま人へ渡す経路へ通す**
+      const recorded = spawnSync(join(REPO_ROOT, "bin/loop-stall"), [`stray-branch:${branch}`], {
+        cwd: workspace,
+        encoding: "utf8",
+      });
+
+      expect(recorded.status, "見つけたのに記録できない").toBe(0);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }

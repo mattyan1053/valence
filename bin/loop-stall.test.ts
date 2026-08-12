@@ -91,6 +91,42 @@ describe("bin/loop-stall の停止識別子", () => {
     expect(run(["merge-failed:12"], sandbox).status).toBe(2);
   });
 
+  it("git が受け付けるブランチ名は、そのまま記録できる", () => {
+    // **同じファイルの中で、2 つの検査が違う幅を見ていた**（#148 のレビュー 2 周目）。
+    // **内側（書式）を広げても、外側の文字検査が先に立つ**ので届かない。
+    //
+    // **倒れる向きが目的と逆だった**——**`no-pr` は見つかるのに記録できない**ので、
+    // **人へ渡らない**。しかも **`exit 2` は「記録できていない」**なので、
+    // **3 周の経路にも乗らない**——**「誰も見ていない」が、そのブランチにだけ残る**
+    for (const branch of ["feat/a+b", "release/a=b", "feat/a{b}"]) {
+      expect(
+        spawnSync("git", ["check-ref-format", "--branch", branch]).status,
+        `${branch} は git が受け付けない`,
+      ).toBe(0);
+
+      const recorded = run([`stray-branch:${branch}`], sandbox);
+
+      expect(recorded.status, `${branch} を記録できない`).toBe(0);
+      run(["--reset"], sandbox);
+    }
+  });
+
+  it("制御文字が混ざるものは、これまでどおり弾く", () => {
+    // **外側の検査の目的は落とさない**（識別子は**タブ区切りの行**に書かれるので、
+    // 制御文字が混ざると**記録の列が壊れる**）。**git もこれらを受け付けない**。
+    //
+    // **空白では外側を押さえられない。** 内側の書式（`<ブランチ>` は `[^[:space:]]+`）でも
+    // 弾かれるので、**外側を `.+` へ広げても緑のまま**になる——**その条件を満たしたまま
+    // 壊せる形**が、まさにこれだった（**制御文字は内側を通る**）
+    for (const bad of ["stray-branch:feat/a\u0001b", "stray-branch:feat/a\u007fb"]) {
+      expect(run([bad], sandbox).status, `${JSON.stringify(bad)} を受け付けている`).toBe(2);
+    }
+    // 空白と改行も、これまでどおり弾く（こちらは内側と外側の両方が見る）
+    for (const bad of ["stray-branch:feat/a b", "stray-branch:feat/a\nb"]) {
+      expect(run([bad], sandbox).status, `${JSON.stringify(bad)} を受け付けている`).toBe(2);
+    }
+  });
+
   it("--reset は識別子の検査を通さずカウンタを消す", () => {
     const reset = run(["--reset"], sandbox);
 
