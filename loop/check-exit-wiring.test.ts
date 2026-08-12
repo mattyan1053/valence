@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -192,6 +200,83 @@ describe("./task check の終わりの印", () => {
       expect(result.stalled, `${block.section}: 緑なのに記録している`).toBe("");
     }
   });
+
+  it.each(checkBlocks().map((block, index) => [index, block.section] as const))(
+    "%i 番目（%s）は、2 本同時に走ってもそれぞれ自分の出力だけを読む",
+    (index) => {
+      // **固定パスだと、後発が先発を truncate して出力が混ざる**（#130）。
+      // **壊れるのは判定ではなく調査**である——**合否は `$status` なので正しいまま**で、
+      // **読む側は log を疑わない**。**症状は「原因が分からない」ではなく
+      // 「間違った原因が読める」**（他方の失敗を自分のものとして読む）。
+      //
+      // **「固定パスでなくなったこと」ではなく、「混ざらないこと」を見る**（master の指定）
+      const workspace = mkdtempSync(join(tmpdir(), "check-log-"));
+      try {
+        const tmp = join(workspace, "tmp");
+        mkdirSync(tmp, { recursive: true });
+        // **列挙して 1 つしか走らせない**と、**残りが固定パスへ戻っても緑のまま**になる
+        // （#183 のレビュー）——**「4 箇所ある」という主張を、実行が裏切る**
+        const block = checkBlocks()[index]?.body ?? "";
+        expect(block, "`./task check` を打つ節が無い").not.toBe("");
+
+        /**
+         * **重なるように走らせる。** すれ違うだけでは truncate を起こせない。
+         * **失敗として返す**——**読む側が中身を見るのは落ちたとき**である
+         */
+        // **絞り込みに当たらない失敗を作る**（#183 のレビュー）。**`Error:` も
+        // `ELIFECYCLE` も大文字**で、**`grep -aE "error|×"` は 1 行も出さない**——
+        // **絞り込みに賭けると、外れた瞬間に唯一の写しが消える**
+        const fake = (mark: string) =>
+          `bash -c 'echo "ELIFECYCLE ${mark}"; sleep 0.4; echo "ELIFECYCLE ${mark}"; echo check-exit=1; exit 1'`;
+        const body = (mark: string) =>
+          block.replace(/<[^>]+>/g, "1").replaceAll("./task check", fake(mark));
+
+        writeFileSync(
+          join(workspace, "run.sh"),
+          [
+            "#!/usr/bin/env bash",
+            "(",
+            body("AAAA"),
+            `) > "${join(workspace, "outA")}" 2>&1 &`,
+            "(",
+            body("BBBB"),
+            `) > "${join(workspace, "outB")}" 2>&1 &`,
+            "wait",
+            "",
+          ].join("\n"),
+          { mode: 0o755 },
+        );
+        // **`bin/` の偽物**（この節は落ちたときに記録を通す）
+        mkdirSync(join(workspace, "bin"), { recursive: true });
+        for (const name of ["loop-stall"]) {
+          writeFileSync(join(workspace, "bin", name), "#!/usr/bin/env bash\nexit 0\n", {
+            mode: 0o755,
+          });
+        }
+        for (const name of ["git", "gh"]) {
+          writeFileSync(join(workspace, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+        }
+
+        spawnSync("bash", [join(workspace, "run.sh")], {
+          cwd: workspace,
+          encoding: "utf8",
+          env: { ...process.env, TMPDIR: tmp, PATH: `${workspace}:${process.env.PATH}` },
+        });
+
+        const outA = readFileSync(join(workspace, "outA"), "utf8");
+        const outB = readFileSync(join(workspace, "outB"), "utf8");
+
+        expect(outA, "自分の出力を読めていない").toContain("AAAA");
+        expect(outA, "他方の出力が混ざっている").not.toContain("BBBB");
+        expect(outB, "自分の出力を読めていない").toContain("BBBB");
+        expect(outB, "他方の出力が混ざっている").not.toContain("AAAA");
+        // **走り終わったら残らない**（残すと溜まる）
+        expect(readdirSync(tmp), "出力ファイルが残っている").toEqual([]);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("`./task check` を打つ節を、全部並べて突き合わせる", () => {
     // **絞ってから見ない。** **打つのに見ていない節**が 1 つでもあれば、

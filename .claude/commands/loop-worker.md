@@ -303,8 +303,14 @@ git branch --show-current      # PR の headRefName と一致することを確�
 gh pr checkout <PR番号>
 git fetch origin main
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
-./task check >check.log 2>&1; status=$?
-mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+# **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ったとき、後発が先発を
+# truncate して混ざる**——**合否は `$status` なので正しいまま**なので、
+# **読む側は log を疑わず、他方の失敗を自分のものとして読む**
+log="$(mktemp)" || { bin/loop-stall "local-ci-unknown:<Issue番号>"; exit; }
+./task check >"$log" 2>&1; status=$?
+mark="$(tail -1 "$log")"                   # check-exit=<合否>（走り終えた印）
+((status == 0)) || cat "$log"              # **落ちたら全部出す**（消す前に。下記）
+rm -f "$log"                               # **残さない**（溜まると作業ツリーが汚れる）
 if [[ $mark != "check-exit=$status" ]]; then
   bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
   exit
@@ -323,8 +329,14 @@ push を消さないため。
 対応が終わったら:
 
 ```bash
-./task check >check.log 2>&1; status=$?
-mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+# **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ったとき、後発が先発を
+# truncate して混ざる**——**合否は `$status` なので正しいまま**なので、
+# **読む側は log を疑わず、他方の失敗を自分のものとして読む**
+log="$(mktemp)" || { bin/loop-stall "local-ci-unknown:<Issue番号>"; exit; }
+./task check >"$log" 2>&1; status=$?
+mark="$(tail -1 "$log")"                   # check-exit=<合否>（走り終えた印）
+((status == 0)) || cat "$log"              # **落ちたら全部出す**（消す前に。下記）
+rm -f "$log"                               # **残さない**（溜まると作業ツリーが汚れる）
 if [[ $mark != "check-exit=$status" ]]; then
   bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
   exit
@@ -409,12 +421,20 @@ bin/loop-claim take <N>
 Biome の複雑度（#117）を 2 度見落とし、**どちらも CI まで気づかなかった**。
 **テストが緑であることと、`./task check` が通ることは別である。**
 
-**絞るなら、先に走らせて終了コードを控える。**
+**絞り込みに賭けない** (#183 のレビュー)。**消したあとは唯一の写しが無い**ので、
+**`grep -aE "error|×"` が外した瞬間に原因が消える**——**`Error:` も `ELIFECYCLE` も
+`ERR_PNPM_` も大文字**で、**pnpm やランタイム側で落ちた失敗はまるごと当たらない**。
+**混ざるより、消えるほうが後戻りできない。** **落ちたら全部出して、絞るのは読む側でやる。**
+
+**先に走らせて終了コードを控える。**
 
 ```bash
-./task check >check.log 2>&1; status=$?   # 合否はこの $status で決める
-tail -1 check.log                          # check-exit=<合否>（走り終えた印）
-grep -aE "error|×" check.log              # 絞るのはそのあと
+# **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ると混ざる**
+log="$(mktemp)" || { bin/loop-stall "local-ci-unknown:<Issue番号>"; exit; }
+./task check >"$log" 2>&1; status=$?      # 合否はこの $status で決める
+tail -1 "$log"                             # check-exit=<合否>（走り終えた印）
+((status == 0)) || cat "$log"              # **落ちたら全部出す**（絞るのは読む側でやる）
+rm -f "$log"                               # **残さない**
 ```
 
 **パイプで繋ぐと、`$?` は絞り込み側のものになり `./task check` の合否が消える**
@@ -450,8 +470,14 @@ grep -aE "error|×" check.log              # 絞るのはそのあと
 ### PR を作る
 
 ```bash
-./task check >check.log 2>&1; status=$?
-mark="$(tail -1 check.log)"                # check-exit=<合否>（走り終えた印）
+# **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ったとき、後発が先発を
+# truncate して混ざる**——**合否は `$status` なので正しいまま**なので、
+# **読む側は log を疑わず、他方の失敗を自分のものとして読む**
+log="$(mktemp)" || { bin/loop-stall "local-ci-unknown:<Issue番号>"; exit; }
+./task check >"$log" 2>&1; status=$?
+mark="$(tail -1 "$log")"                   # check-exit=<合否>（走り終えた印）
+((status == 0)) || cat "$log"              # **落ちたら全部出す**（消す前に。下記）
+rm -f "$log"                               # **残さない**（溜まると作業ツリーが汚れる）
 if [[ $mark != "check-exit=$status" ]]; then
   bin/loop-stall "local-ci-unknown:<Issue番号>"   # 合否が分からない。push しない
   exit
