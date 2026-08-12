@@ -125,11 +125,20 @@ describe("bin/loop-stray-branches", () => {
         "fi",
         // **ブランチごとに引く。** **一括で取ると、上限を超えた古い PR が「無い」に化ける**
         // （この repo は既に PR が 171 件）。**fork の PR は別物**なので、
-        // **同じリポジトリのものだけ**を返す（`isCrossRepository` で絞るのは呼ぶ側）
-        ...options.prs.map(
-          (pr) =>
-            `if [[ $* == *"--head ${pr.head}"* ]]; then printf '%s\\u001f%s\\u001f%s\\u001f%s\\n' ${pr.number} ${pr.state} ${pr.crossRepo === true ? "true" : "false"} ${JSON.stringify(pr.headOid ?? "a".repeat(40))}; exit 0; fi`,
-        ),
+        // **同じリポジトリのものだけ**を返す（`isCrossRepository` で絞るのは呼ぶ側）。
+        //
+        // **同じ head の PR は、まとめて返す。** 1 件ずつ `exit` すると
+        // **最初の 1 件しか返らず**、**「複数付きうる」経路を 1 度も通せない**
+        ...[...new Set(options.prs.map((pr) => pr.head))].map((head) => {
+          const rows = options.prs
+            .filter((pr) => pr.head === head)
+            .map(
+              (pr) =>
+                `${pr.number}\\u001f${pr.state}\\u001f${pr.crossRepo === true ? "true" : "false"}\\u001f${pr.headOid ?? "a".repeat(40)}`,
+            )
+            .join("\\n");
+          return `if [[ $* == *"--head ${head}"* ]]; then printf '%b\\n' ${JSON.stringify(rows)}; exit 0; fi`;
+        }),
         "exit 0",
         "",
       ].join("\n"),
@@ -307,6 +316,39 @@ describe("bin/loop-stray-branches", () => {
     expect(result.status).toBe(1);
     expect(result.stdout, "fork の PR を自分のものとして数えている").toContain("no-pr");
     expect(result.stdout).not.toContain("merged-leftover");
+  });
+
+  it("終わった PR が複数あっても、先端を含むものがあれば消してよい", () => {
+    // **`gh pr list` は並び順を保証しない**（`--limit` は「最大何件取るか」だけ）。
+    // **最後に読んだ 1 件で決めると、先に返ってきた一致が捨てられる**——
+    // **作業は PR に残っているのに、人待ちが毎周回積まれ、3 周ごとに `loop/STOP`**
+    // になる（#180 のレビュー）。**呼びすぎる側が積み上がる**形である。
+    //
+    // **一致するものを先に返す**（後ろが上書きする実装なら、ここで落ちる）
+    const result = run({
+      branches: [{ name: "feat/remade", sha: "b".repeat(40) }],
+      prs: [
+        { head: "feat/remade", number: 76, state: "MERGED", headOid: "b".repeat(40) },
+        { head: "feat/remade", number: 60, state: "CLOSED", headOid: "c".repeat(40) },
+      ],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "先端を含む PR があるのに人へ渡している").toContain("merged-leftover");
+  });
+
+  it("終わった PR が複数あっても、どれも先端を含まなければ人へ渡す", () => {
+    // **集約を「どれか 1 つでも終わっていれば消してよい」に広げない**——
+    // **それは先端を見ない形**（#177 の前）に戻ることである
+    const result = run({
+      branches: [{ name: "feat/remade", sha: "d".repeat(40) }],
+      prs: [
+        { head: "feat/remade", number: 76, state: "MERGED", headOid: "b".repeat(40) },
+        { head: "feat/remade", number: 60, state: "CLOSED", headOid: "c".repeat(40) },
+      ],
+    });
+
+    expect(result.stdout, "先端を含まないのに消してよいと言っている").toContain("beyond-pr");
   });
 
   it("ブランチごとに引く（一括の上限に依らない）", () => {
