@@ -37,6 +37,9 @@ readonly ROLES=(master worker)
 # 賭けているのは**周回の長さではなく、活動と活動の間隔**である。
 readonly TTL_SEC="${LOOP_LEASE_TTL_SEC:-1800}"
 
+# 飛ばした記録を何件残すか。**増え続けないための上限**であって、意味のある数ではない。
+readonly MISSING_KEEP="${LOOP_LEASE_MISSING_KEEP:-20}"
+
 # 読み書きのロックを待つ時間。ここは一瞬で終わる操作なので短くてよい。
 readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
 
@@ -44,6 +47,7 @@ usage() {
   echo "使い方: bin/loop-lease acquire <役>" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
   echo "        bin/loop-lease held <役>        その周回が lease を持っているか（読むだけ）" >&2
+  echo "        bin/loop-lease check <役>       持っていなければ言って記録する（止めない）" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
   echo "        bin/loop-lease ttl              期限（秒）を出す" >&2
   echo "        役: ${ROLES[*]}" >&2
@@ -222,6 +226,39 @@ if [[ -f $STATE ]]; then
 fi
 
 case "$ACTION" in
+check)
+  # **入口を飛ばした周回を、出口より前に捕まえる**（#161）。
+  #
+  # **書いてあっても踏む。** 両方の手順書が「冒頭で呼べ」と書いているのに、
+  # **通知で始めた周回で 3 回飛ばされた**——踏んだのは **#157 を実装した本人**と
+  # **#143 の完了条件を書いた本人**である。**通知の経路には「周回の開始」という
+  # 区切りが無い**（メッセージを読むと、そのまま調査や実装へ入る）。
+  #
+  # **出口だけでは遅い。** 気づくのは終わったあとで、**その周回の直列化は既に効いていない**。
+  # **周回で最初に触るもの**が確かめれば、**やり直せるうちに分かる**。
+  #
+  # **止めない。** #157 の判断を覆さない——**止めていたら #159 の特定が止まっていた**。
+  # **気づける形は保ったまま、飛ばしにくくする。**
+  [[ $# -eq 2 ]] || usage
+  if [[ -n $held_token ]]; then
+    exit 0
+  fi
+  echo "[WARN] この周回は $ROLE の lease を持っていません（入口の acquire を飛ばした可能性）" >&2
+  echo "       並行していた場合、直列化は働いていません。いま取り直してください:" >&2
+  echo "         bin/loop-lease acquire $ROLE" >&2
+
+  # **記録は増え続けない。** 読むのは `./task loop:status`、**古いものから畳むのはここ**——
+  # **際限なく積む記録は、読む気を失わせるぶん、無いのと同じ**になる。
+  missing="$common_dir/valence-loop-lease-missing"
+  if ! printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ROLE" "$PWD" >>"$missing"; then
+    echo "[WARN] 飛ばした記録を残せません: $missing" >&2
+    echo "       この周回のぶんは ./task loop:status に出ません（数え直せません）" >&2
+    exit 0
+  fi
+  if kept="$(tail -n "$MISSING_KEEP" "$missing" 2>/dev/null)"; then
+    printf '%s\n' "$kept" >"$missing.tmp" && mv -f "$missing.tmp" "$missing" || rm -f "$missing.tmp"
+  fi
+  ;;
 held)
   # **持っているかを読むだけ。** 書かない・奪わない・印も残さない。
   #
