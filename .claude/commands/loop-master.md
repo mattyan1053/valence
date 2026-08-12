@@ -366,7 +366,7 @@ bin/loop-lease release master "<token>"
 - **満たされている** → `gh pr edit <PR番号> --remove-label changes-requested` で外す。
   **前へ進んだので `bin/loop-stall --reset` を通す。** 次の周回でゲートを回し直す
 - **満たされていない** → 何が足りないかをコメントで返し（label は付けたまま）、
-  **`bin/loop-stall "changes-requested:<PR番号>@<SHA>"` を通して停止する**
+  **`bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"` を通して停止する**
 
 **満たされていない側でも必ず記録する。** ここは**新しく「通らない条件」を足した場所**で、
 第 3 層（手直しの範囲か）はレビューの上限にしか効かず、**label には関係しない**。
@@ -547,11 +547,16 @@ bin/loop-triage --findings <残っている指摘の件数> \
 #### rework — worker へ差し戻す
 
 resolve しない。何を直すかと、なぜそれが必要かを返信し、
-`bin/loop-stall "blocking-findings:<PR番号>@<SHA>"` を通す。
+`bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"` を通す。
 
 **差し戻す側でも必ず記録する。** 記録しないと、**対応が来ないまま何周でも回る**
 （`changes-requested` で塞いだのと同じ穴が開く）。識別子に head SHA が入るので、
 **worker が push した周回は別状態として数え直される。**
+
+**名前は 1 つしかない。** 「未解決の指摘が残っている」も「出した要求が満たされていない」も
+**worker の対応待ち**で、**同じ状態には同じ名前**を打つ——**`changes-requested` が
+付いているかは、待っている状態の性質ではなく、自分がその周回までに何をしたか**である。
+**別の名前で数えると、label を付けた瞬間に数え直され、3 周に届かない**（#128。実測）。
 
 #### human — 人を呼ぶ
 
@@ -576,12 +581,12 @@ if gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
     # 3 周の経路にも乗らない。**動いているように見えるぶん、こちらのほうが危ない**。
     # **戻して数える**（`--add-label` が落ちた場合と同じ形に畳める）
     gh pr edit <PR番号> --remove-label parked --remove-label awaiting-human || true
-    bin/loop-stall "blocking-findings:<PR番号>@<SHA>"
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
   fi
 else
   # **保留にできなかった。** ループは止まる側にあるので、**これまでどおり数える**——
   # 3 周で人を呼ぶ（`review-exhausted:<PR番号>@<SHA>` の場合も同じ）
-  bin/loop-stall "blocking-findings:<PR番号>@<SHA>"
+  bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
 fi
 ```
 
@@ -593,7 +598,7 @@ fi
 **`awaiting-human` も一緒に付ける。** `parked` だけだと**先行 PR 待ちと区別が付かず**、
 **何を待っているのか分からない保留**が残る。**一覧は `./task loop:status` に出る。**
 
-**停止は数えない。** 人待ちで `parked` にしたのに `blocking-findings` を積み続けると、
+**停止は数えない。** 人待ちで `parked` にしたのに `awaiting-worker` を積み続けると、
 **進めるようにしたのに 3 周で `loop/STOP` に達する**——**止めないために保留にした意味が消える**。
 **忘れられる経路を作らないほう**は、**label と `./task loop:status` の一覧**が担う。
 

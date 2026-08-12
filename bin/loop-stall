@@ -46,14 +46,21 @@ readonly STOP_IDS=(
   "merge-failed:<PR番号>@<SHA>|master: マージに失敗"
   "review-exhausted:<PR番号>@<SHA>|master: レビュー上限に達し、手直しも上限超え"
   "review-unanswered:<PR番号>@<SHA>|master: レビューが返らず、マージも再要求もできない"
-  "blocking-findings:<PR番号>@<SHA>|master: 優先度 1 / 2 の指摘が残っている"
+  # **1 つの状態に 1 つの名前。** 以前は「優先度 1 / 2 の指摘が残っている」と
+  # 「出した要求が満たされていない」を別の名前で数えていたが、**どちらも
+  # 「worker の対応を待っている」**である。**`changes-requested` が付いているかは、
+  # 待っている状態の性質ではなく、master がその周回までに何をしたか**なので、
+  # **label を付けた瞬間に同じ膠着が別の名前になり、カウンタが割れた**（#128。実測）。
+  # **第 4 層は文字列一致で数える**ので、割れると**3 周に届かず沈黙する**。
+  #
+  # **選び方を決めるのではなく、名前を 1 つにした。** 選び方を自動化しても
+  # **選ぶ対象が 2 つあることは変わらず**、**master の操作で名前が変わる余地が残る**。
+  # head SHA は残す——**変われば前へ進んだ**を表す値なので、変わってよい。
+  "awaiting-worker:<PR番号>@<SHA>|master: worker の対応を待っている (指摘が残っている / 出した要求が満たされていない)"
   # 件数を付けない。着手できる状態が 1 つでもあればこの識別子を使わないので、
   # 付けられる数はどれも 0 で、**状態が同じなのに毎回変わる値**にしかならない。
   # blocked だけがある状態もここに含める (人の判断待ちで、ループの中では解けない)。
   "no-work|master: 着手できる作業が無い (open PR も backlog / ready / in-progress も 0 件)"
-  # label を外せるのは master だけなので、外し忘れると永久にマージされない。
-  # head SHA を入れるので、worker が push した周回は別状態として数え直される。
-  "changes-requested:<PR番号>@<SHA>|master: 出した要求が満たされていない (label が外れない)"
   # 件数を付けない。**溜まるほど件数が変わる**ので、付けると連続回数が数え直しになり、
   # 3 周続いても止まらない (`bin/loop-deferred-budget` が件数を出す)。
   "deferred-overflow|master: 外出しした指摘が溜まりすぎている (deferred-finding が上限超え)"
@@ -75,8 +82,7 @@ readonly STOP_IDS=(
 # 「誰が解くか」)。**綴りがずれると黙って効かなくなる**ので、
 # 一覧に無い綴りが混ざっていないことを試験で押さえてある。
 readonly WORKER_FIXES=(
-  "blocking-findings"
-  "changes-requested"
+  "awaiting-worker"
 )
 
 usage() {
