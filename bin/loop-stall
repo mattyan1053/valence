@@ -413,9 +413,31 @@ if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
     [[ -z $worker_epoch ]] || ((started > worker_epoch)) && worker_epoch="$started"
   done
   # 窓 = いちばん長かった周回 × 2。**実測が無ければ lease の期限で代用する。**
+  #
+  # **生きている作業場のものだけを見る** (#175 のレビュー)。記録は**作業場ごと**にあり
+  # (scope はパスから作る)、**書き換えるのはその作業場の周回だけ**である——
+  # **長い周回を記録した作業場が使われなくなると、その値は誰も更新しない**ので、
+  # **別の作業場で何周しても落ちず、窓は永久に広いまま**になる。
+  # **この機械には既に worker 役の scope が 2 つある**ので、**#82 を待たずに踏む。**
+  #
+  # **1 つに絞らない**（いちばん新しい周回の作業場だけ、にはしない）。
+  # **軽い Issue の作業場が新しく、重い Issue の作業場が少し古い**とき、
+  # **重いほうが窓の外へ出る**——**長い周回の途中で止めない**という性質を壊す。
+  #
+  # **生死の基準を新しく作らない。** **lease の期限は「最後に活動してからの経過」で
+  # 測る既存の基準**（`bin/loop-lease`）なので、そのまま使う。活動は `./task` が
+  # 記録するので、**走っている作業場は必ず新しい**。
+  # **窓で判定しない**——**窓を決めるのに窓が要る**ことになり、初回や記録が消えたときに
+  # 決まらない。**消さない**のも意図的である（**削除は戻せない**）。
   longest_round=0
   for len in "$common_dir"/valence-loop-roundlen-worker*; do
     [[ -f $len ]] || continue
+    scope="${len##*/valence-loop-roundlen-}"
+    activity="$common_dir/valence-loop-activity-$scope"
+    [[ -f $activity ]] || continue
+    read -r last_active <"$activity" 2>/dev/null || continue
+    [[ $last_active =~ ^[0-9]+$ ]] || continue
+    (($(date +%s) - last_active < lease_ttl)) || continue
     read -r seconds <"$len" 2>/dev/null || continue
     [[ $seconds =~ ^[0-9]+$ ]] || continue
     ((seconds > longest_round)) && longest_round="$seconds"

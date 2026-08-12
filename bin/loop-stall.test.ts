@@ -869,6 +869,52 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(results.at(-1)?.stdout).toContain("count=0");
   });
 
+  /** 別の作業場の記録を置く。**scope はパスから作る**ので、パスが変われば増える。 */
+  function otherWorkspace(options: { longestRound: number; activityAgo: number }): void {
+    const now = Math.floor(Date.now() / 1000);
+    const scope = "worker_home_someone_old-workspace";
+    writeFileSync(
+      join(repo, ".git", `valence-loop-roundlen-${scope}`),
+      `${options.longestRound}\n${options.longestRound}\n`,
+    );
+    writeFileSync(
+      join(repo, ".git", `valence-loop-activity-${scope}`),
+      `${now - options.activityAgo}\n`,
+    );
+  }
+
+  it("使われなくなった作業場の実測は、窓に効かせない", () => {
+    // **記録は作業場ごとにある**（scope はパスから作る）が、**窓は全部の最大**だった。
+    // **長い周回を記録した作業場が使われなくなると、その値は誰も更新しない**ので、
+    // **別の作業場で何周しても落ちず、窓は永久に広いまま**になる（#175 のレビュー）。
+    // **この機械には既に worker 役の scope が 2 つある**ので、**#82 を待たずに踏む**。
+    //
+    // **生死の基準を新しく作らない。** **lease の期限は「最後に活動してからの経過」**で
+    // 測る既存の基準なので、**そのまま流用する**（活動は `./task` が記録する）。
+    const now = Math.floor(Date.now() / 1000);
+    const ttl = Number(
+      spawnSync(join(repo, "bin", "loop-lease"), ["ttl"], { cwd: repo, encoding: "utf8" }).stdout,
+    );
+    workerState({ activityAgo: 1, startedAt: now - 3000, longestRound: 5 });
+    // **使われていない作業場**（活動が期限より古い）に、長い実測が残っている
+    otherWorkspace({ longestRound: 4000, activityAgo: ttl + 60 });
+
+    expect(stall().stdout, "死んだ作業場の実測で窓が広がっている").toContain("count=1");
+  });
+
+  it("生きている作業場の実測は、自分のでなくても効かせる", () => {
+    // **1 つに絞ると「短いほうへ倒す」になる**（master の指摘）。**軽い Issue の
+    // 作業場が新しく、重い Issue の作業場が少し古い**とき、**新しいほうだけを見ると
+    // 重いほうが窓の外へ出る**——**#129 / #142 が入れた性質を壊す**。
+    // **生きている作業場の中の最大**にする
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 1, startedAt: now - 3000, longestRound: 5 });
+    // **走っている作業場**（活動が新しい）に、長い実測がある
+    otherWorkspace({ longestRound: 4000, activityAgo: 5 });
+
+    expect(stall().stdout, "生きている作業場の実測を捨てている").toContain("count=0");
+  });
+
   it("実測が短くても、窓は既定より狭くしない", () => {
     // **窓の材料は直近 N 回の最大になった** (#146)。**忘れる以上、忘れたあとの 1 回は
     // 既定へ戻る**——**そこから下へは行かない**ようにする。**記録が無いときと同じ

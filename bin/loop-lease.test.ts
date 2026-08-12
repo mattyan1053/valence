@@ -671,8 +671,12 @@ describe("bin/loop-lease", () => {
       expect(Number(lines[0]), "1 行目が最大になっていない").toBe(Math.max(...history));
     });
 
-    it("前の版が書いた記録（1 行だけ）でも壊れない", () => {
-      // **1 行だけの記録が残っている機械で動く**こと（移行の一度きり）
+    it("前の版が書いた記録（1 行だけ）の値は、そこで捨てる", () => {
+      // **移行の一度きりの経路**（1 行目は「窓に使う値」であって履歴ではないので、
+      // **履歴へ入れない**）。**これが実測で残っていた 4239 そのもの**である。
+      //
+      // **「60 以上」だけでは、捨てたことを言っていない**——**4239 のままでも通る**
+      // ので、**1 行目を履歴へ入れる回帰を 1 度も見ていない**（#175 のレビュー）。
       round(30);
       const name = readdirSync(join(sandbox, ".git")).find((entry) =>
         entry.startsWith("valence-loop-roundlen-worker"),
@@ -681,7 +685,9 @@ describe("bin/loop-lease", () => {
 
       round(60);
 
-      expect(Number(roundLenLines()[0])).toBeGreaterThanOrEqual(60);
+      const seconds = Number(roundLenLines()[0]);
+      expect(seconds, "新しい実測が入っていない").toBeGreaterThanOrEqual(60);
+      expect(seconds, "前の版の値を履歴へ引き継いでいる").toBeLessThan(4239);
     });
 
     it("書けなければ、黙って成功しない", () => {
