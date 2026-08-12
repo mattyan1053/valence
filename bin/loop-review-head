@@ -54,9 +54,11 @@ set -uo pipefail
 # **入口を飛ばしていないか、ここでも確かめる**（#161）。**出口だけでは遅い**——
 # 気づくのは終わったあとで、**その周回の直列化は既に効いていない**。
 # **周回で最初に触るものが確かめれば、やり直せるうちに分かる**。
+#
+# **役を渡さない。** このスクリプトは master も worker も使うので、役を書き固めると
+# **正常な周回のたびに偽の記録が積まれる**（`bin/loop-lease` の `check` を読むこと）。
 # **止めない**（`|| true`）——気づける形は保ったまま、飛ばしにくくする。
-"${BASH_SOURCE[0]%/*}/loop-lease" check "worker" || true
-
+"${BASH_SOURCE[0]%/*}/loop-lease" check || true
 
 usage() {
   echo "使い方: bin/loop-review-head <PR番号> <head SHA>          記録する" >&2
