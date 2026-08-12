@@ -102,28 +102,45 @@ while read -r sha ref; do
   # 無ければ終わったものとして扱う。
   state=""
   number=""
-  # **先端を含む PR が 1 つでもあるか。** **最後に読んだ 1 件で決めない**——
-  # **`gh pr list` は並び順を保証しない**（`--limit` は「最大何件取るか」だけ）ので、
-  # **先に返ってきた一致が捨てられる** (#180 のレビュー)。**作業は PR に残っているのに
-  # 人待ちが毎周回積まれ、3 周ごとに `loop/STOP` を作り続ける**——
-  # **呼びすぎる側が積み上がる**形である。
-  tip_in_pr=0
-  while IFS="$FIELD" read -r pr_number pr_state pr_cross pr_oid; do
+  while IFS="$FIELD" read -r pr_number pr_state pr_cross _pr_oid; do
     [[ -n $pr_number ]] || continue
     # **絞り込みを jq の中に置かない。** **偽の `gh` から作れない形になり、
     # 試験がこの判定を 1 度も通らない** (#159 で踏んだ)。
     [[ $pr_cross != "true" ]] || continue
-    # **state で絞らない。** **OPEN があるブランチは下で作業中として扱い、
-    # 何も出力しない**ので、**ここで OPEN を外しても 1 度も効かない**——
-    # **発火しない検査は置かない** (#178 で 1 つ外したのと同じ判断)。
-    # **仮に効いたとしても、open な PR が先端を含むなら「作業は PR にある」で正しい。**
-    [[ -n $pr_oid && $pr_oid == "$sha" ]] && tip_in_pr=1
     # **表示に使うのは 1 件だけ**（どの PR かが分かればよい）
     if [[ $state != "OPEN" ]]; then
       state="$pr_state"
       number="$pr_number"
     fi
   done <<<"$prs"
+
+  # **先端がどの PR に入っているかは、上限に依らない口で尋ねる** (#180 のレビュー 2 周目)。
+  #
+  # **一覧の `--limit` に根拠は無い。** **上げても、次の誰かが同じ問いを持つ** (#134 の形)
+  # ので、**数字を調整せず、判定から外す**——**「この commit を含む PR があるか」は、
+  # その head の一覧の何番目にあるかと関係が無い**。
+  #
+  # **open な PR が含んでいたら、消してはいけない**（PR が壊れる）。**一覧の上限では
+  # そこも取りこぼす**ので、**state もこちらから見る**。
+  if ! tip_prs="$(gh api --paginate "repos/{owner}/{repo}/commits/$sha/pulls" \
+    --jq '.[] | "\(.number)\u001f\(.state)\u001f\(.head.repo.full_name)\u001f\(.base.repo.full_name)"' 2>/dev/null)"; then
+    fail_unknown "先端を含む PR ($branch)"
+  fi
+  tip_in_pr=0
+  tip_open=0
+  while IFS="$FIELD" read -r tip_number tip_state tip_head_repo tip_base_repo; do
+    [[ -n $tip_number ]] || continue
+    # **fork の PR は別物である**（上と同じ判断。**絞り込みは jq に置かない**）
+    [[ $tip_head_repo == "$tip_base_repo" ]] || continue
+    if [[ $tip_state == "open" ]]; then
+      tip_open=1
+    else
+      tip_in_pr=1
+    fi
+  done <<<"$tip_prs"
+
+  # **作業中である。** 上の `state` は一覧の上限で取りこぼしうるので、こちらでも見る
+  ((tip_open == 0)) || continue
 
   case "$state" in
     OPEN)
