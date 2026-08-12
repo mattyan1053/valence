@@ -303,7 +303,8 @@ git branch --show-current      # PR の headRefName と一致することを確�
 gh pr checkout <PR番号>
 git fetch origin main
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
-./task check                  # 緑になるまで直す
+./task check >check.log 2>&1; status=$?   # 合否はこの $status で決める
+tail -1 check.log                          # check-exit=<合否>（走り終えた印）
 git push --force-with-lease
 ```
 
@@ -317,14 +318,21 @@ push を消さないため。
 対応が終わったら:
 
 ```bash
-./task check          # 緑になるまで直す
+./task check >check.log 2>&1; status=$?   # 合否はこの $status で決める
+tail -1 check.log                          # check-exit=<合否>（走り終えた印）
 git push
 ```
 
 push したらこの周回は終わり。**レビュー要求は投げない。** master が判断する。
 **通知は出口で送る**（「周回の出口」を参照）。ここでは送らない。
 
+**終了コードと印の読み方は、ステップ 4 の「実装は必ずテストファースト」に 1 つだけ書いてある。**
+**`./task check` を打つところは 4 つあり**（rebase・対応後・実装中・PR を作る前）、
+**どれも殺されうる**——**レビューの往復ごとに通るのはここ**である。
+
 `./task check` が通らないまま 3 周した場合は `bin/loop-stall "local-ci-failed:<PR番号>"` を通して停止する。
+**合否が分からないとき**（印が出ない）は `bin/loop-stall "local-ci-unknown:<Issue番号>"` を通す——
+**通らないのとは別の状態**である。
 
 ## 4. `ready` の 1 件を実装する
 
@@ -428,7 +436,8 @@ grep -aE "error|×" check.log              # 絞るのはそのあと
 ### PR を作る
 
 ```bash
-./task check          # 緑を確認してから push
+./task check >check.log 2>&1; status=$?   # 緑を確認してから push
+tail -1 check.log                          # check-exit=<合否>（走り終えた印）
 git push -u origin <ブランチ>
 gh pr create --base main --title "<日本語>" --body-file <file>
 bin/loop-review-head "<PR番号>" "$(git rev-parse HEAD)"

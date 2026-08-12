@@ -12,13 +12,37 @@ function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
 }
 
-/** `./task check` を走らせる bash ブロック（**打つところ**）。 */
-function checkBlock(): string {
-  const blocks = read(PROCEDURE)
-    .split("```bash")
-    .slice(1)
-    .map((chunk) => chunk.split("```")[0] ?? "");
-  return blocks.find((block) => block.includes("./task check >check.log")) ?? "";
+/** 節ごとの bash ブロック。 */
+function blocks(): { section: string; body: string }[] {
+  const found: { section: string; body: string }[] = [];
+  let section = "";
+  let body: string[] | undefined;
+  for (const line of read(PROCEDURE).split("\n")) {
+    if (/^#{2,4} /.test(line)) {
+      section = line.trim();
+    }
+    if (line.startsWith("```")) {
+      if (body !== undefined) {
+        found.push({ section, body: body.join("\n") });
+      }
+      body = line.startsWith("```bash") ? [] : undefined;
+      continue;
+    }
+    body?.push(line);
+  }
+  return found;
+}
+
+/**
+ * **`./task check` を打つブロックを、全部並べる。**
+ *
+ * **1 つだけ返さない。** `find` で 1 つ取ると**名指しと同じ**になり、
+ * **打つところが増えても気づけない**——**#166 / #168 と同じ形を 3 回続けて踏んだ**
+ * （直した場所の隣が抜ける）。**「打つところで見る」に直しても、
+ * 「打つところが 1 つとは限らない」は別の話**である。
+ */
+function checkBlocks(): { section: string; body: string }[] {
+  return blocks().filter((block) => block.body.includes("./task check"));
 }
 
 /**
@@ -83,6 +107,19 @@ describe("./task check の終わりの印", () => {
     expect(result.status, "timeout に殺されていない").not.toBe(0);
   });
 
+  it("`./task check` を打つ節を、全部並べて突き合わせる", () => {
+    // **絞ってから見ない。** **打つのに見ていない節**が 1 つでもあれば、
+    // そこから「殺されたのに緑」が入る——**レビューの往復ごとに通る経路**もある
+    expect(
+      checkBlocks().map((block) => [block.section, block.body.includes("check-exit")]),
+    ).toEqual([
+      ["### 保留を解いた PR を rebase する", true],
+      ["### 保留を解いた PR を rebase する", true],
+      ["### 実装は必ずテストファースト", true],
+      ["### PR を作る", true],
+    ]);
+  });
+
   it("手順書が、印と終了コードの両方を見る", () => {
     // **片方だけだと、片方の壊れ方をそのまま通す**（#147 の本文）。
     // **`status` が空でないこと**と**ログの末尾に印があること**の両方である。
@@ -90,10 +127,10 @@ describe("./task check の終わりの印", () => {
     // **散文ではなく、打つところで見る。** 節全体で見ると**表や説明に
     // `check-exit` があるだけで満たされ**、**ブロックから消しても緑のまま**になる
     // （#168 のレビュー 2 周目で踏んだ形——**書いたのに入っていない**）
-    const block = checkBlock();
-
-    expect(block, "終了コードを見ていない").toContain("status=$?");
-    expect(block, "終わりの印を見ていない").toContain("check-exit");
+    for (const block of checkBlocks()) {
+      expect(block.body, `${block.section}: 終了コードを見ていない`).toContain("status=$?");
+      expect(block.body, `${block.section}: 終わりの印を見ていない`).toContain("check-exit");
+    }
   });
 
   it("「分からない」を「赤」と混ぜない", () => {
