@@ -278,7 +278,14 @@ parked_issues=${#parked_seen[@]}
 # **head SHA は「変われば前へ進んだ」を表す値**なので、時刻のように毎回変わる値を
 # 入れるのとは違う（`bin/loop-stall` の識別子と同じ制約を満たす）。
 # **未解決スレッド数も要る。** push が無くても master が指摘を返せば状態は動く。
-readonly STATE="prs=${prs}|detail=${details}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
+# **理由の無い保留も指紋に入れる。** **理由を投稿し直しても `prs` にも `details` にも
+# 現れない**（issue コメントはどちらにも入らない）ので、**入れないと「送信済み」のまま**
+# になる——**その PR の話だけでなく、`ready` を worker へ渡す通知も同じ指紋で止まる**。
+# **「直したら止まる」がいちばん悪い形**である (#163)。
+#
+# **番号だけを入れる。** 時刻を入れると**変わらないはずのもので指紋が動く**ので、
+# **「同じ状態では 2 通目を送らない」を壊す側**に倒れる。
+readonly STATE="prs=${prs}|detail=${details}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}|silent-park=${silent_park}"
 
 # **状態を求めたら、いちばん最初にすべての役の記録を更新する。分岐はそのあと。**
 # 分岐ごとに更新すると、**通らなかった分岐の記録が古いまま残り**、

@@ -159,7 +159,10 @@ describe("bin/loop-handoff", () => {
         ...answerLines(
           "awaiting-human",
           (state.silentPark ?? [])
-            .map((number) => `${number}${FIELD}2026-08-12T04:00:00Z${FIELD}`)
+            .map(
+              (number) =>
+                `${number}${FIELD}parked,awaiting-human${FIELD}2026-08-12T04:00:00Z${FIELD}`,
+            )
             .join("\n"),
         ),
         // **件数は検索を通さない口から取る。** 一覧側（下）はわざと 0 を返すので、
@@ -250,6 +253,31 @@ describe("bin/loop-handoff", () => {
       expect(handoff.status).toBe(0);
       expect(handoff.stdout, "master へ渡していない").toMatch(/^master\t/);
       expect(handoff.stdout, "どの PR かが出ていない").toContain("42");
+    });
+
+    it("理由を投稿し直したら、次の周回は送れる", () => {
+      // **「直したら止まる」がいちばん悪い形**である。**理由を投稿し直しても
+      // `prs` にも `details` にも現れない**（issue コメントはどちらにも入らない）ので、
+      // **指紋に入れないと「送信済み」のまま**になる——**その PR の話だけでなく、
+      // `ready` を worker へ渡す通知も同じ指紋で止まる**（master の指摘）。
+      withState({
+        prs: [{ number: 42, labels: ["parked", "awaiting-human"] }],
+        silentPark: [42],
+        ready: 1,
+      });
+      expect(run("worker").status, "1 周目で渡せていない").toBe(0);
+
+      // 理由を投稿し直した（**label も PR の中身も変わらない**）
+      withState({
+        prs: [{ number: 42, labels: ["parked", "awaiting-human"] }],
+        silentPark: [],
+        ready: 1,
+      });
+
+      const second = run("master");
+
+      expect(second.status, "指紋が変わらず、直したのに黙っている").toBe(0);
+      expect(second.stdout).toMatch(/^worker\t/);
     });
 
     it("理由が投稿されている保留では、何も言わない", () => {

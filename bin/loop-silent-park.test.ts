@@ -67,9 +67,14 @@ describe("bin/loop-silent-park", () => {
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
-  /** `<PR番号>␟<人待ちにした時刻>␟<最後の発言の時刻>` */
-  function row(number: number, parkedAt: string, lastComment: string): string {
-    return [String(number), parkedAt, lastComment].join(FIELD);
+  /** `<PR番号>␟<いまの label>␟<人待ちにした時刻>␟<最後の発言の時刻>` */
+  function row(
+    number: number,
+    parkedAt: string,
+    lastComment: string,
+    labels = "parked,awaiting-human",
+  ): string {
+    return [String(number), labels, parkedAt, lastComment].join(FIELD);
   }
 
   it("理由を投稿できなかった保留を挙げる", () => {
@@ -96,8 +101,26 @@ describe("bin/loop-silent-park", () => {
   });
 
   it("人待ちでない PR は見ない", () => {
-    // **時刻が空なら、その PR は人待ちにされていない**
-    expect(run(withRows([row(42, "", "2026-08-12T03:00:00Z")])).status).toBe(0);
+    // **時刻が空なら、その PR は 1 度も人待ちにされていない**
+    expect(run(withRows([row(42, "", "2026-08-12T03:00:00Z", "")])).status).toBe(0);
+  });
+
+  it("人が戻した保留は、挙げない", () => {
+    // **`LABELED_EVENT` は履歴なので、label を外しても残る。**
+    // **いまの label を見ないと、外れた PR を挙げ続ける**——しかも
+    // **これは例外的な経路ではなく、書いてある再開手順そのもの**である。
+    //
+    // `loop/README.md` の再開手順は「**スレッドを resolve**」か
+    // 「**スレッドへ書いて `changes-requested`**」＋ label を外す、で、
+    // **どちらも issue コメントを作らない**——**手順どおりに再開した PR が、
+    // その瞬間から「理由の無い保留」になり、消えない**。
+    //
+    // **占めるのは 1 番目の椅子である**（`bin/loop-handoff` は他の持ち物より先に見る）。
+    // **偽物がそこに座ると、本物が出てこない**
+    const result = run(withRows([row(42, "2026-08-12T04:00:00Z", "", "changes-requested")]));
+
+    expect(result.status, "外れた label の保留を挙げている").toBe(0);
+    expect(result.stdout).toBe("");
   });
 
   it("読めなければ、0 件と同じ顔をしない", () => {

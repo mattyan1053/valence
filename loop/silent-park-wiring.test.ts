@@ -60,7 +60,9 @@ describe("理由の無い保留", () => {
   it("./task loop:status が、理由の無い保留を見せる", () => {
     // **番号だけでは足りない。** 見た人が**「人待ちが 1 件ある」と読んで終わる**ので、
     // **理由が投稿されていないこと**まで出す
-    const shown = statusWith([["42", "2026-08-12T04:00:00Z", ""].join(FIELD)]);
+    const shown = statusWith([
+      ["42", "parked,awaiting-human", "2026-08-12T04:00:00Z", ""].join(FIELD),
+    ]);
 
     expect(shown, "どの PR かが出ていない").toContain("42");
     expect(shown, "何が起きているのかが出ていない").toMatch(/理由/);
@@ -68,7 +70,9 @@ describe("理由の無い保留", () => {
 
   it("正常な人待ちでは、何も足さない", () => {
     // **うるさくしない。** ここが毎回鳴ると、**本当に拾ってほしいものが埋もれる**
-    const shown = statusWith([["42", "2026-08-12T04:00:00Z", "2026-08-12T04:00:01Z"].join(FIELD)]);
+    const shown = statusWith([
+      ["42", "parked,awaiting-human", "2026-08-12T04:00:00Z", "2026-08-12T04:00:01Z"].join(FIELD),
+    ]);
 
     expect(shown).toBe("");
   });
@@ -129,7 +133,7 @@ describe("理由の無い保留", () => {
           // **障害が明けたあと、GitHub から見える状態**——label はあるが、発言は無い
           'if [[ $* == *"api graphql"* ]]; then',
           `  labeled="$(cat ${JSON.stringify(labeledAt)} 2>/dev/null || true)"`,
-          "  [[ -z $labeled ]] || printf '42\\u001f%s\\u001f\\n' \"$labeled\"",
+          "  [[ -z $labeled ]] || printf '42\\u001fparked,awaiting-human\\u001f%s\\u001f\\n' \"$labeled\"",
           "  exit 0",
           "fi",
           "exit 0",
@@ -172,6 +176,26 @@ describe("理由の無い保留", () => {
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
+  });
+
+  it("master のステップ 2 が、自分で見つけて直す", () => {
+    // **`bin/loop-handoff` だけでは、master が見つけたときに誰も送らない。**
+    // `to == ROLE` で exit 1、**そのとき STATE は全役ぶん記録済み**なので、
+    // **次の worker の周回も「送信済み」で exit 1** になる（master が手元で追った）。
+    //
+    // **「全役ぶん先に記録する」は正しい**（通らなかった分岐の記録が古くなる）ので
+    // そこは変えない。**噛み合っていないのは「自分へは送らない」（#92）と
+    // 「master にしか直せない」が同時に立っていること**である。
+    //
+    // **`parked` を選ばないのはステップ 2 の決め事**なので、**例外もそこに置く**——
+    // `bin/loop-handoff` を触らずに済み、**#92 の線も覆さない**。
+    const step2 =
+      read(".claude/commands/loop-master.md").split("## 2. open PR を見て、見る順番を決める")[1] ??
+      "";
+    const section = step2.split(/\n## /)[0] ?? "";
+
+    expect(section, "ステップ 2 が理由の無い保留を見ていない").toContain("bin/loop-silent-park");
+    expect(section, "見つけたあと何をするのかが書かれていない").toMatch(/投稿し直す|保留を戻す/);
   });
 
   it("./task loop:status から呼ばれている", () => {

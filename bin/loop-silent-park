@@ -56,6 +56,9 @@ mapfile -t repo_parts <<<"$repo_ref"
 # **一覧（検索）を信じない。** label 絞り込みは検索の索引を経由するので、
 # **付けた直後は古い値が返る**（#101 で実測）。**リポジトリを直接引く。**
 #
+# **打ち消しの履歴 (`UNLABELED_EVENT`) は見ない。** 付け外しを繰り返すと**順序を見る**
+# ことになるが、**知りたいのはいまの状態だけ**である——**いまの label を取って絞る。**
+#
 # **見るのは `awaiting-human` であって `parked` ではない。** `parked` は
 # **先行 PR 待ち**にも付くので、**人待ちだけを見分けられるのはこの label である**。
 #
@@ -68,19 +71,24 @@ rows="$(gh api graphql --paginate \
     repository(owner:$owner,name:$repo){
       pullRequests(states:OPEN,first:50,after:$endCursor){
         pageInfo{hasNextPage endCursor}
-        nodes{number
+        nodes{number labels(first:50){nodes{name}}
           timelineItems(itemTypes:LABELED_EVENT, last:50){
             nodes{... on LabeledEvent{createdAt label{name}}}}
           comments(last:1){nodes{createdAt}}}}}}' \
   --jq '.data.repository.pullRequests.nodes[]
-    | "\(.number)\(
+    | "\(.number)\([.labels.nodes[].name] | join(","))\(
         [.timelineItems.nodes[] | select(.label.name == "awaiting-human") | .createdAt] | max // ""
       )\(.comments.nodes[0].createdAt // "")"')" || fail_unknown "open PR"
 
 found=0
-while IFS="$FIELD" read -r number parked_at last_comment_at; do
+while IFS="$FIELD" read -r number labels parked_at last_comment_at; do
   [[ -n $number ]] || continue
-  # **人待ちにされていない PR は見ない。**
+  # **いまも人待ちの PR だけを見る。** `LABELED_EVENT` は**履歴なので、外しても残る**——
+  # **いまの label を見ないと、人が手順どおり戻した PR を挙げ続ける**
+  # (再開手順は「スレッドを resolve」か「スレッドへ書いて `changes-requested`」で、
+  # **どちらも issue コメントを作らない**)。**占めるのは持ち手の 1 番目である。**
+  [[ ",$labels," == *",awaiting-human,"* ]] || continue
+  # **1 度も人待ちにされていない PR は見ない**（label はあるが記録が読めない場合）。
   [[ -n $parked_at ]] || continue
   # **保留にした後に何か書かれていれば、理由はそこにある。**
   # 時刻はどちらも GitHub が記録した ISO8601 (UTC, 固定長) なので文字列で比べられる。
