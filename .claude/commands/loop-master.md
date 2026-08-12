@@ -555,9 +555,29 @@ resolve しない。何を直すかと、なぜそれが必要かを返信し、
 
 #### human — 人を呼ぶ
 
-resolve しない。**何が決まれば進むのか**を PR に書き、
-`bin/loop-stall "blocking-findings:<PR番号>@<SHA>"` を通して停止する
-（手直しが上限を超えていて指摘が残っていない場合は `review-exhausted:<PR番号>@<SHA>`）。
+resolve しない。**何が決まれば進むのか**を PR に書き、**その PR を保留にする。**
+
+```bash
+gh pr edit <PR番号> --add-label parked --add-label awaiting-human
+gh pr comment <PR番号> --body-file <file>   # 何が決まれば進むのか / 人が何をすれば再開するのか
+```
+
+**保留にしないと、ループ全体が止まる。** 同時に open な PR は 1 本で worker も 1 人なので、
+**1 件の人待ちがそのまま全停止**になる——**紐づく Issue が `in-progress` のまま残り、
+次を `ready` へ昇格させられない**（実測で**約 2 時間、どちらのループも何も進めなかった**）。
+**`parked` を付けると、その Issue は「着手中」に数えない**ので、**次の 1 件へ進める。**
+
+**`awaiting-human` も一緒に付ける。** `parked` だけだと**先行 PR 待ちと区別が付かず**、
+**何を待っているのか分からない保留**が残る。**一覧は `./task loop:status` に出る。**
+
+**停止は数えない。** 人待ちで `parked` にしたのに `blocking-findings` を積み続けると、
+**進めるようにしたのに 3 周で `loop/STOP` に達する**——**止めないために保留にした意味が消える**。
+**忘れられる経路を作らないほう**は、**label と `./task loop:status` の一覧**が担う。
+
+**戻すのは人である。** 判断した人が **`awaiting-human` と `parked` を外す**と、
+次の master の周回で**普通の PR としてゲートに乗る**——**master が外す形にすると、
+master が忘れたときに永久に止まる**（`changes-requested` と同じ懸念）。
+**その手順を PR のコメントに書いておくこと。**
 
 #### defer — Issue へ外出ししてマージする
 

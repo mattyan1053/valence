@@ -188,7 +188,7 @@ JSON
   # ループが使うものに加え、**Issue テンプレートが付ける label** も用意する。
   # 存在しない label を書いても GitHub はエラーにせず黙って落とすため、
   # 起票が候補から漏れたことに誰も気づけない。
-  for label in backlog ready in-progress blocked parked changes-requested deferred-finding bug; do
+  for label in backlog ready in-progress blocked parked awaiting-human changes-requested deferred-finding bug; do
     if gh label list --limit 200 --json name --jq '.[].name' | grep -qxF "$label"; then
       echo "==> label は既にある: $label"
     else
@@ -277,9 +277,22 @@ show_missing_lease() {
   tail -3 "$record" | sed 's/^/  /'
 }
 
+# **人の判断待ちの PR を見せる。** 保留にしてループは進めるが、
+# **待っていること自体は見えていないといけない**——**見えない待ちは、忘れられた待ち**である
+# （#109。`.claude/commands/loop-master.md` の「human — 人を呼ぶ」で付く）。
+show_awaiting_human() {
+  local rows
+  rows="$(gh pr list --state open --limit 200 --label awaiting-human \
+    --json number,title --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null)" || return 0
+  [[ -n $rows ]] || return 0
+  echo "人の判断待ち (parked。人が awaiting-human と parked を外すと再開する):"
+  printf '%s\n' "$rows"
+}
+
 # ループの現在地を表示する (open PR / Issue / STOP)
 cmd_loop_status() {
   show_missing_lease
+  show_awaiting_human
   if [[ -f loop/STOP ]]; then
     echo "STOP: あり"
     sed 's/^/  /' loop/STOP
