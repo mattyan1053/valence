@@ -343,6 +343,34 @@ if [[ $ID == "--resumed" ]]; then
     exit 2
   }
   echo "stall resumed"
+  # **STOP の撤去まで、このロックの中で行う** (#151)。
+  #
+  # **以前は `./task loop:resume` が、カウンタを消したあとで STOP を消していた。**
+  # **順番は正しかったが、ロックの外だった**——**`--resumed` が返ってから削除までの間に
+  # 上限へ達した周回が STOP を作ると、その削除がそれを消す**（**止まるべきなのに再開する**）。
+  #
+  # **上限の下限を検査で縛る形は採らない。** **窓へ入れる周回の数だけ数えられる**ので、
+  # **安全な下限は「同時に走るループの数 + 1」**である——**既定の 3 が足りているのは
+  # ループが 2 つだから**で、**作業場が増えれば 3 でも届く** (#82)。**値では追えない。**
+  #
+  # **置き場所は `task` が持っている**（配る側と同じ場所から取る）。**ここで組み立てない**
+  # ——**2 箇所に持つと、片方だけ直して食い違う。**
+  if [[ -z $script_common_dir || $script_common_dir != "$common_dir" || ! -x $TASK ]]; then
+    echo "[FAIL] STOP を消せません（カウンタは消えています）: $TASK" >&2
+    echo "       カウンタ: $STATE" >&2
+    exit 2
+  fi
+  resume_found=0
+  while read -r stop_path; do
+    [[ -f $stop_path ]] || continue
+    rm "$stop_path" || {
+      echo "[FAIL] STOP を消せません: $stop_path" >&2
+      exit 2
+    }
+    echo "==> 削除: $stop_path"
+    resume_found=1
+  done < <("$TASK" loop:stop:paths)
+  ((resume_found == 1)) || echo "==> STOP は無い（停止していない）"
   exit 0
 fi
 

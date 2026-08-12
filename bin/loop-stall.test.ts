@@ -1217,12 +1217,12 @@ describe("人が再開したことを受け取る", () => {
 });
 
 describe("再開の順番", () => {
-  // **STOP を先に消すと、走っている周回が隙間に入る。**
+  // **カウンタを消すことと STOP を消すことは、同じ排他区間で行う** (#151)。
   //
-  //   t0    STOP を消す
-  //   t0+ε  走っていた周回が bin/loop-stall を呼び、上限に達して **STOP を作り直す**
-  //   t0+1s --resumed がカウンタを消す
-  //   結果  **カウンタ 0 / STOP あり**——人には「削除」しか見えないので**再開したように見える**
+  //   t0    --resumed がカウンタを消して返る
+  //   t0+ε  走っていた周回が bin/loop-stall を呼び、上限に達して **STOP を作る**
+  //   t0+1s 削除がその STOP を消す
+  //   結果  **止まるべきなのに再開する**——人には「削除」しか見えない
   //
   // **窓が狭いから起きない、とは言えない。** **STOP は周回の冒頭でしか効かない**ので、
   // **STOP を置いた時点で走っていた周回は最後まで走り切る**——**人が resume を打つのは
@@ -1231,13 +1231,17 @@ describe("再開の順番", () => {
   // **順番は読んでも正しく見える**ので、**入れ替わったことを検出できる形**で見る。
 
   let repo: string;
+  let state: string;
 
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "loop-resume-order-"));
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    state = join(repo, ".git", "valence-loop-stall");
     mkdirSync(join(repo, "bin"));
     copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
     chmodSync(join(repo, "task"), 0o755);
+    copyFileSync(join(REPO_ROOT, "bin", "loop-stall"), join(repo, "bin", "loop-stall"));
+    chmodSync(join(repo, "bin", "loop-stall"), 0o755);
     mkdirSync(join(repo, "loop"));
     writeFileSync(join(repo, "loop", "STOP"), "とめた\n");
   });
@@ -1247,50 +1251,130 @@ describe("再開の順番", () => {
   });
 
   /**
-   * 偽の `bin/loop-stall`。**呼ばれた時点で STOP がまだあるか**を書き残す。
+   * 偽の `task`。**置き場所を聞かれた時点でカウンタがまだあるか**を書き残す。
    * **順番そのものを見る**ためのもので、「呼ばれた」だけでは入れ替わりを検出できない。
    */
-  function withStall(exitCode = 0): void {
+  function withTask(): void {
     writeFileSync(
-      join(repo, "bin", "loop-stall"),
+      join(repo, "task"),
       [
         "#!/usr/bin/env bash",
-        `if [[ -e "${join(repo, "loop", "STOP")}" ]]; then`,
-        `  echo "stop-present $*" >> "${join(repo, "order.log")}"`,
+        `if [[ -e "${join(repo, ".git", "valence-loop-stall")}" ]]; then`,
+        `  echo "state-present $*" >> "${join(repo, "order.log")}"`,
         "else",
-        `  echo "stop-absent $*" >> "${join(repo, "order.log")}"`,
+        `  echo "state-absent $*" >> "${join(repo, "order.log")}"`,
         "fi",
-        `exit ${exitCode}`,
+        'if [[ $1 == "loop:stop:paths" ]]; then',
+        `  printf '%s\\n' "${join(repo, "loop", "STOP")}"`,
+        "fi",
+        "exit 0",
         "",
       ].join("\n"),
       { mode: 0o755 },
     );
   }
 
+  /** カウンタを 1 つ作る。**消す対象が無いと、順番を見られない。** */
+  function counted(): void {
+    expect(
+      spawnSync(join(repo, "bin", "loop-stall"), ["dirty"], { cwd: repo, encoding: "utf8" }).status,
+      "カウンタを作れない",
+    ).toBe(0);
+    expect(existsSync(state), "カウンタが無い").toBe(true);
+  }
+
   function resume(): { status: number; stdout: string; stderr: string } {
-    const result = spawnSync("./task", ["loop:resume"], { cwd: repo, encoding: "utf8" });
+    const result = spawnSync(join(repo, "bin", "loop-stall"), ["--resumed"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
   it("カウンタを消してから STOP を消す", () => {
     // **逆だと、隙間に入った周回が STOP を作り直したあとでカウンタが消える**
-    withStall();
+    counted();
+    withTask();
 
     expect(resume().status).toBe(0);
 
-    expect(readFileSync(join(repo, "order.log"), "utf8")).toContain("stop-present --resumed");
+    expect(readFileSync(join(repo, "order.log"), "utf8")).toContain("state-absent loop:stop:paths");
     expect(existsSync(join(repo, "loop", "STOP"))).toBe(false);
   });
 
   it("カウンタを消せなければ、STOP を消さない", () => {
     // **消えたのに古いカウンタが残る**と、再開した直後に 1 周で止まり直す
     // （#127 の症状そのもの）。**消せないなら、再開しないほうがよい**
-    withStall(1);
-
+    counted();
+    withTask();
+    // **書き込めないディレクトリでは消せない。** ロックのファイルは既にあるので開ける
+    chmodSync(join(repo, ".git"), 0o555);
     const result = resume();
+    chmodSync(join(repo, ".git"), 0o755);
 
     expect(result.status).not.toBe(0);
     expect(existsSync(join(repo, "loop", "STOP")), "STOP が消えている").toBe(true);
-    expect(result.stderr).toContain("STOP は消しません");
+    expect(result.stderr).toContain("停止カウンタを消せません");
+  });
+
+  it("./task loop:resume は、その区間へ通す", () => {
+    // **人が打つのは resume 1 つだけ**である。**区間の中でカウンタと STOP の
+    // 両方が片付く**ことを、本物の `task` で見る
+    counted();
+
+    const result = spawnSync("./task", ["loop:resume"], { cwd: repo, encoding: "utf8" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(repo, "loop", "STOP")), "STOP が残っている").toBe(false);
+    expect(existsSync(state), "カウンタが残っている").toBe(false);
+  });
+
+  /**
+   * 本物の `bin/loop-stall` を `real-loop-stall` として置き、
+   * **窓に 1 周ぶん差し込む包み**を `bin/loop-stall` にする（#151）。
+   *
+   * **窓は「`--resumed` が返ってから、STOP が消されるまで」**である。
+   * **順番を正しくしても、ロックの外にあるかぎり残る**——**そこへ実際に周回を入れる。**
+   */
+  function withRoundInTheWindow(): void {
+    const real = join(repo, "bin", "real-loop-stall");
+    copyFileSync(join(REPO_ROOT, "bin", "loop-stall"), real);
+    chmodSync(real, 0o755);
+    writeFileSync(
+      join(repo, "bin", "loop-stall"),
+      [
+        "#!/usr/bin/env bash",
+        `"${real}" "$@"; status=$?`,
+        // **走っていた周回が、ちょうどここで上限に達する。** STOP を作り直す
+        'if [[ $1 == "--resumed" && $status -eq 0 ]]; then',
+        `  "${real}" dirty >/dev/null 2>&1`,
+        "fi",
+        "exit $status",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
+  it("再開の途中で上限に達した周回の STOP を、消さない", () => {
+    // **上限を 1 にすると成立する**（#151）。**踏めるかどうかは値で決まるが、
+    // 窓そのものは値と無関係**——**カウンタの操作と STOP の削除が別プロセス**で、
+    // **ロックの外に隙間がある**。
+    //
+    // **既定の 3 で踏まないのは、窓に入れる周回が 2 つしかないから**である。
+    // **作業場が増えれば 3 でも届く**（#82）ので、**下限を検査で縛る形では追えない**。
+    withRoundInTheWindow();
+
+    const resumed = spawnSync("./task", ["loop:resume"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, LOOP_MAX_STALL_REPEATS: "1" },
+    });
+
+    expect(resumed.status).toBe(0);
+    expect(
+      existsSync(join(repo, "loop", "STOP")),
+      "走っていた周回が作った STOP を、再開処理が消している",
+    ).toBe(true);
   });
 });
