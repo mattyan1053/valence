@@ -73,6 +73,23 @@ describe("レビューの到着を待つ配線", () => {
     expect(beforeBudget()).toContain('bin/loop-stall "review-budget-unknown:');
   });
 
+  it("基準と、待つ側は同じ口から取る", () => {
+    // **待つ側は応答の一覧（`--all`）を見る**（#78。**SHA を持たない応答は既定の
+    // 出力から落ちる**ため）。**基準を別の口から取ると、両者が違うものを測る**——
+    // **古い応答が基準より新しい**状態で、**何も届いていないのに「返った」**になり、
+    // **その周回でゲートを回し直す**（実害は空回りだが、待った意味が消える）。
+    //
+    // **どちらの口かを書き写さない。** **`bin/loop-await-review` が実際に呼ぶ形**から
+    // 取る——**出所を変えれば、写しを持っているほうだけが落ちる**（#135 と同じ）
+    const awaiting = readFileSync(join(REPO_ROOT, "bin/loop-await-review"), "utf8");
+    const flag = awaiting.match(/loop-review-commits" (--[a-z]+)/)?.[1] ?? "";
+
+    expect(flag, "待つ側がどの口を見ているのか読み取れない").not.toBe("");
+    expect(beforeBudget(), "基準を別の口から取っている").toContain(
+      `bin/loop-review-commits ${flag}`,
+    );
+  });
+
   it.each(["exit 0", "exit 3"] as const)("%s の経路は、先に取った基準を使う", (path) => {
     // **パイプに繋いで取り直さない。** 終了コードが `cut` のものになり、
     // 取得の失敗が「レビューが 1 件も無い」に化ける（#76 で 1 度直した形）
