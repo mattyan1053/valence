@@ -126,8 +126,8 @@ describe("入口を飛ばした周回", () => {
     // ここで見たいのは**同じ測り方で値が違うとき**である
     expect(lease("acquire", "worker").status).toBe(0);
     const state = leaseFile();
-    const [token, since, mine] = readFileSync(state, "utf8").trim().split("\t");
-    writeFileSync(state, `${token}\t${since}\t${mine?.split(":")[0]}:999999:1\n`);
+    const [first = "", mine = ""] = readFileSync(state, "utf8").split("\n");
+    writeFileSync(state, `${first}\n${mine.split(":")[0]}:999999:1\n`);
 
     const checked = lease("check");
 
@@ -135,9 +135,9 @@ describe("入口を飛ばした周回", () => {
     expect(record(), "何が起きていたのかが記録に残っていない").toContain("別の周回が保持中");
   });
 
-  /** いま記録されている持ち主の印。 */
+  /** いま記録されている持ち主の印（**2 行目**。1 行目は前の版が読む形のまま）。 */
   function owner(): string {
-    return readFileSync(leaseFile(), "utf8").trim().split("\t")[2] ?? "";
+    return readFileSync(leaseFile(), "utf8").split("\n")[1] ?? "";
   }
 
   it("役を当てない", () => {
@@ -162,7 +162,8 @@ describe("入口を飛ばした周回", () => {
     // **持ち主が自分かどうか分からない**——**分からないものを飛ばしと呼ばない**
     expect(lease("acquire", "worker").status).toBe(0);
     const state = leaseFile();
-    writeFileSync(state, `${readFileSync(state, "utf8").split("\t").slice(0, 2).join("\t")}\n`);
+    // **印の行だけを落とす**（この仕組みより前の版が書いた lease と同じ形になる）
+    writeFileSync(state, `${readFileSync(state, "utf8").split("\n")[0]}\n`);
 
     const checked = lease("check");
 
@@ -181,6 +182,25 @@ describe("入口を飛ばした周回", () => {
     }
     return join(dir, found);
   }
+
+  it("前の版が読める形のまま、印を足す", () => {
+    // **実際に踏んだ。** 印を 3 列目に足したところ、**前の版が lease を読めなくなった**——
+    // `IFS=$'\t' read -r held_token held_since` は**残り全部を 2 つ目へ入れる**ので、
+    // **時刻が数値に見えなくなり `[FAIL] lease の記録を読めません`** になる。
+    //
+    // **lease のファイルは版をまたいで共有される。** master は worktree で
+    // `origin/main` の版を走らせ、worker はブランチの版を走らせる——
+    // **マージされるまでの間、両方が同じファイルを読む**。**そこで落ちると、
+    // 直列化そのものが働かない**（実測では `bin/loop-handoff` が exit 2 を受け取った）。
+    //
+    // **1 行目は変えない。** 印は 2 行目に置く——**前の版は 1 行目しか読まない**
+    expect(lease("acquire", "worker").status).toBe(0);
+
+    const lines = readFileSync(leaseFile(), "utf8").split("\n");
+
+    expect(lines[0]?.split("\t"), "前の版が読めない形になっている").toHaveLength(2);
+    expect(lines[1], "印が残っていない").toMatch(/^[ps]:/);
+  });
 
   it("記録は増え続けない", () => {
     // **誰が読み、誰が消すのか。** 読むのは `./task loop:status`、

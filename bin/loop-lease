@@ -289,7 +289,17 @@ read_lease() {
   held_owner=""
   [[ -f $STATE ]] || return 0
 
-  IFS=$'\t' read -r held_token held_since held_owner <"$STATE"
+  # **1 行目は「前の版が読める形」のまま**（token と時刻の 2 列）。**印は 2 行目**である。
+  #
+  # **実際に踏んだ。** 3 列目に足したところ、**前の版が読めなくなった**——
+  # `read -r held_token held_since` は**残り全部を 2 つ目へ入れる**ので、
+  # **時刻が数値に見えなくなる**。**lease のファイルは版をまたいで共有される**
+  # （master は worktree で `origin/main` の版、worker はブランチの版を走らせる）ので、
+  # **マージされるまでの間、直列化そのものが働かなくなる**。
+  {
+    IFS=$'\t' read -r held_token held_since
+    read -r held_owner || held_owner=""
+  } <"$STATE"
   if ! [[ $held_since =~ ^[0-9]+$ ]]; then
     echo "[FAIL] lease の記録を読めません: $STATE" >&2
     return 2
@@ -456,7 +466,7 @@ acquire)
   # 言えず、**別の周回が持っているときに黙る**（#161 で直した向きの誤り）。
   # **作れなければ空のまま**——`check` はそれを「分からない」として扱う。
   owner="$(round_owner)" || owner=""
-  printf '%s\t%s\t%s\n' "$token" "$now" "$owner" >"$STATE" || {
+  printf '%s\t%s\n%s\n' "$token" "$now" "$owner" >"$STATE" || {
     echo "[FAIL] lease を書き込めません: $STATE" >&2
     exit 2
   }
