@@ -869,8 +869,17 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(results.at(-1)?.stdout).toContain("count=0");
   });
 
-  /** 別の作業場の記録を置く。**scope はパスから作る**ので、パスが変われば増える。 */
-  function otherWorkspace(options: { longestRound: number; activityAgo: number }): void {
+  /**
+   * 別の作業場の記録を置く。**scope はパスから作る**ので、パスが変われば増える。
+   *
+   * **周回の印（`startedAgo`）と活動の記録（`activityAgo`）は別に置ける。**
+   * **人が `./task` を叩くと活動だけが新しくなる**ので、**食い違う状態**が要る。
+   */
+  function otherWorkspace(options: {
+    longestRound: number;
+    startedAgo: number;
+    activityAgo: number;
+  }): void {
     const now = Math.floor(Date.now() / 1000);
     const scope = "worker_home_someone_old-workspace";
     writeFileSync(
@@ -878,10 +887,27 @@ describe("worker が作業しているあいだは数えない", () => {
       `${options.longestRound}\n${options.longestRound}\n`,
     );
     writeFileSync(
+      join(repo, ".git", `valence-loop-rounds-${scope}`),
+      `${now - options.startedAgo}\n`,
+    );
+    writeFileSync(
       join(repo, ".git", `valence-loop-activity-${scope}`),
       `${now - options.activityAgo}\n`,
     );
   }
+
+  it("人が `./task` を叩いても、使われなくなった作業場は生き返らない", () => {
+    // **活動の記録は生存に使えない**（このファイルの上のほうに書いてある）——
+    // **`./task` は lease の有無に関係なく毎回 heartbeat を打つ**ので、
+    // **人がその作業場で 1 回叩けば、長い実測が窓へ戻る**（#175 のレビュー 2 周目）。
+    // **周回の開始でしか動かない印（rounds）で見る。**
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 1, startedAt: now - 3000, longestRound: 5 });
+    // **周回はずっと前で終わっているが、人がいま `./task` を叩いた**
+    otherWorkspace({ longestRound: 4000, startedAgo: 100000, activityAgo: 5 });
+
+    expect(stall().stdout, "心拍で死んだ作業場が生き返っている").toContain("count=1");
+  });
 
   it("使われなくなった作業場の実測は、窓に効かせない", () => {
     // **記録は作業場ごとにある**（scope はパスから作る）が、**窓は全部の最大**だった。
@@ -896,8 +922,8 @@ describe("worker が作業しているあいだは数えない", () => {
       spawnSync(join(repo, "bin", "loop-lease"), ["ttl"], { cwd: repo, encoding: "utf8" }).stdout,
     );
     workerState({ activityAgo: 1, startedAt: now - 3000, longestRound: 5 });
-    // **使われていない作業場**（活動が期限より古い）に、長い実測が残っている
-    otherWorkspace({ longestRound: 4000, activityAgo: ttl + 60 });
+    // **使われていない作業場**（最後の周回がずっと前）に、長い実測が残っている
+    otherWorkspace({ longestRound: 4000, startedAgo: 100000, activityAgo: ttl + 60 });
 
     expect(stall().stdout, "死んだ作業場の実測で窓が広がっている").toContain("count=1");
   });
@@ -909,8 +935,8 @@ describe("worker が作業しているあいだは数えない", () => {
     // **生きている作業場の中の最大**にする
     const now = Math.floor(Date.now() / 1000);
     workerState({ activityAgo: 1, startedAt: now - 3000, longestRound: 5 });
-    // **走っている作業場**（活動が新しい）に、長い実測がある
-    otherWorkspace({ longestRound: 4000, activityAgo: 5 });
+    // **走っている作業場**（自分の実測から見て、まだ周回の途中でありうる）に長い実測がある
+    otherWorkspace({ longestRound: 4000, startedAgo: 2500, activityAgo: 5 });
 
     expect(stall().stdout, "生きている作業場の実測を捨てている").toContain("count=0");
   });
