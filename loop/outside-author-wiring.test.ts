@@ -54,7 +54,16 @@ describe("ループの外の著者", () => {
    *
    * **判定・`gh`・`bin/loop-stall` は偽物**にして、**呼ばれたことだけ**を見る。
    */
-  function runBlock(body: string, outsideExit: number, editFails = false) {
+  function runBlock(
+    body: string,
+    outsideExit: number,
+    options: {
+      editFails?: boolean;
+      commentFails?: boolean;
+      parkedHead?: string;
+      headExit?: number;
+    } = {},
+  ) {
     const workspace = mkdtempSync(join(tmpdir(), "outside-author-"));
     try {
       const stub = join(workspace, "stub");
@@ -65,7 +74,10 @@ describe("ループの外の著者", () => {
         [
           "#!/usr/bin/env bash",
           `printf '%s\\n' "$*" >> ${JSON.stringify(join(workspace, "gh-calls"))}`,
-          ...(editFails ? ['[[ $* == *"pr edit"* ]] && exit 1'] : []),
+          ...(options.editFails === true ? ['[[ $* == *"pr edit"* ]] && exit 1'] : []),
+          ...(options.commentFails === true ? ['[[ $* == *"pr comment"* ]] && exit 1'] : []),
+          // 保留の一覧（**外す経路**が引く）
+          `[[ $* == *"pr list"* ]] && { printf '%s\\n' 12; exit 0; }`,
           "exit 0",
           "",
         ].join("\n"),
@@ -85,7 +97,19 @@ describe("ループの外の著者", () => {
             "",
           ],
         ],
-        ["loop-head", ["#!/usr/bin/env bash", "exit 0", ""]],
+        ["loop-head", ["#!/usr/bin/env bash", `exit ${options.headExit ?? 0}`, ""]],
+        [
+          "loop-parked-head",
+          [
+            "#!/usr/bin/env bash",
+            `printf '%s\\n' "$*" >> ${JSON.stringify(join(workspace, "parked-head"))}`,
+            options.parkedHead === undefined
+              ? "[[ $1 == get ]] && exit 1"
+              : `[[ $1 == get ]] && { printf '%s\\n' ${JSON.stringify(options.parkedHead)}; exit 0; }`,
+            "exit 0",
+            "",
+          ],
+        ],
       ] as const) {
         writeFileSync(join(workspace, "bin", name), script.join("\n"), { mode: 0o755 });
       }
@@ -98,7 +122,11 @@ describe("ループの外の著者", () => {
 
       const readIf = (name: string) =>
         existsSync(join(workspace, name)) ? readFileSync(join(workspace, name), "utf8") : "";
-      return { gh: readIf("gh-calls"), stalled: readIf("stalled") };
+      return {
+        gh: readIf("gh-calls"),
+        stalled: readIf("stalled"),
+        parkedHead: readIf("parked-head"),
+      };
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
@@ -158,12 +186,103 @@ describe("ループの外の著者", () => {
     // **ループは止まる側にある。** **保留したつもりで何も付いていない**のがいちばん悪い
     // （人待ちの節と同じ倒し方）
     for (const block of waitingBlocks()) {
-      const result = runBlock(block.body, 0, true);
+      const result = runBlock(block.body, 0, { editFails: true });
 
       expect(result.stalled, `${block.section}: 保留に失敗したのに数えていない`).toContain(
         "awaiting-worker",
       );
     }
+  });
+
+  it("どちらの著者でも、何が足りないかを投稿する", () => {
+    // **これが最悪の倒れ方だった**（#176 のレビュー）。**外の枝にだけ置くと、
+    // 通常の worker（＝ほぼ全部）が何を直せばよいか分からないまま 3 周で `loop/STOP`**——
+    // **この PR が消しに来た「一人の不在で全部止まる」を、別の形で作る**。
+    //
+    // **散文には書いてあった。** **試験はブロックだけを走らせる**ので、
+    // **散文に残ったコメントは誰も確かめない**
+    for (const block of waitingBlocks()) {
+      for (const outside of [0, 1, 2]) {
+        const result = runBlock(block.body, outside);
+
+        expect(result.gh, `${block.section}: 著者判定 ${outside} で投稿していない`).toContain(
+          "pr comment",
+        );
+      }
+    }
+  });
+
+  it("理由を投稿できなければ、保留にせず数える", () => {
+    // **理由の無い保留を作らない** (#163)。**投稿してから保留にする**ので、
+    // **投稿が落ちた時点で保留にしない**——戻す操作が要らない
+    for (const block of waitingBlocks()) {
+      const result = runBlock(block.body, 0, { commentFails: true });
+
+      expect(result.gh, `${block.section}: 理由が無いのに保留にしている`).not.toContain(
+        "--add-label parked",
+      );
+      expect(result.stalled, `${block.section}: 投稿に失敗したのに数えていない`).toContain(
+        "awaiting-worker",
+      );
+    }
+  });
+
+  it("保留にするときは、保留にした head を記録する", () => {
+    // **著者が対応したかを、あとから状態だけで決めるため**（#70 の完了条件）
+    for (const block of waitingBlocks()) {
+      const result = runBlock(block.body, 0);
+
+      expect(result.parkedHead, `${block.section}: 保留にした head を残していない`).toContain(
+        "record",
+      );
+    }
+  });
+
+  describe("保留を外す", () => {
+    /** 保留を外す経路のブロック。 */
+    function unparkBlock(): string {
+      const found = blocks().find((block) => block.body.includes("loop-parked-head get"));
+      expect(found, "保留を外す経路が無い").toBeDefined();
+      return found?.body ?? "";
+    }
+
+    it("head が動いていたら、外す", () => {
+      // **fork から出す人に triage 権限は無い**ので、**自分では外せない**——
+      // **push しても誰も見に来ない**（`bin/loop-silent-park` にも出てこない）
+      const result = runBlock(unparkBlock(), 0, { parkedHead: "a".repeat(40), headExit: 1 });
+
+      expect(result.gh, "保留を外していない").toContain("--remove-label parked");
+      expect(result.gh, "何待ちかの印を外していない").toContain("awaiting-human");
+    });
+
+    it("head が同じなら、外さない", () => {
+      // **対応していないのに外すと、また指摘して保留に戻すだけ**（毎周回うるさくなる）
+      const result = runBlock(unparkBlock(), 0, { parkedHead: "a".repeat(40), headExit: 0 });
+
+      expect(result.gh, "動いていないのに外している").not.toContain("--remove-label parked");
+    });
+
+    it("head を読めなければ、外さない", () => {
+      // **判定不能をどちらへも倒さない**（このループの原則）
+      const result = runBlock(unparkBlock(), 0, { parkedHead: "a".repeat(40), headExit: 2 });
+
+      expect(result.gh, "読めないのに外している").not.toContain("--remove-label parked");
+    });
+
+    it("記録の無い保留は、触らない", () => {
+      // **人が外すと決めた保留がある**（先行 PR 待ち）。**そこまで外すと、
+      // 保留の意味が消える**
+      const result = runBlock(unparkBlock(), 0, { headExit: 1 });
+
+      expect(result.gh, "人待ちの保留まで外している").not.toContain("--remove-label parked");
+    });
+
+    it("ループの中の著者なら、触らない", () => {
+      // **中の保留は、これまでどおり人が外す**（`awaiting-human` の規定）
+      const result = runBlock(unparkBlock(), 1, { parkedHead: "a".repeat(40), headExit: 1 });
+
+      expect(result.gh, "中の保留まで外している").not.toContain("--remove-label parked");
+    });
   });
 
   it("判定は 1 箇所に置く", () => {

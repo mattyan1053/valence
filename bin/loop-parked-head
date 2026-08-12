@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# 保留にした時点の head を残し、あとで引けるようにする。
+#
+#   bin/loop-parked-head record <PR番号> <head SHA>   記録する (上書き)
+#   bin/loop-parked-head get <PR番号>                 記録を出す
+#
+#   exit 0 = 記録した / 出した
+#   exit 1 = 記録が無い (get のみ)
+#   exit 2 = 使い方の誤り / 読み書きできない
+#
+# **ループの外の著者は `parked` を外せない** (#70)。**fork から出す人に triage 権限は
+# 無い**うえ、**master は外さない**と決めてあり、**ステップ 2 は `parked` を選ばない**——
+# **対応を push しても誰も見に来ない**。**理由は書いてあるので `bin/loop-silent-park`
+# にも出てこない**（あちらが見るのは「理由の無い保留」だけである）。
+#
+# **「戻すのは人である」とは衝突しない。** あの規定は **master の記憶に依存させるな**
+# という意味で、**状態から機械的に決まるなら記憶ではない**——`bin/loop-claim audit` も
+# `bin/loop-stray-branches` も、**毎周回、状態だけを見ている**。
+# **保留にした head から動いていれば、著者が対応した**ので外してよい。
+#
+# **比較はここでやらない。** **いまの head を GitHub から読むのは `bin/loop-head`** が
+# 持っている——**同じ判定を 2 箇所に置くと、片方だけ直して食い違う** (#159)。
+# ここは**台帳**だけである（`bin/loop-review-head` と同じ分け方）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-parked-head record <PR番号> <head SHA>   記録する" >&2
+  echo "       bin/loop-parked-head get <PR番号>                 記録を出す" >&2
+  echo "       exit 0 = 記録した / 出した / exit 1 = 記録が無い / exit 2 = 誤り" >&2
+  exit 2
+}
+
+[[ $# -ge 2 ]] || usage
+readonly ACTION="$1"
+readonly PR="$2"
+
+# PR 番号はファイル名になる。**数字だけに絞ってパス操作を成立させない**
+# (`bin/loop-review-head` と同じ)。
+[[ $PR =~ ^[0-9]+$ ]] || {
+  echo "[FAIL] PR 番号は数字で指定してください: $PR" >&2
+  exit 2
+}
+
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+readonly STORE="$common_dir/valence-loop-parked-heads"
+readonly FILE="$STORE/$PR"
+
+case "$ACTION" in
+record)
+  [[ $# -eq 3 ]] || usage
+  # **ブランチ名や短すぎる値を記録すると、前方一致が誤爆する**
+  # (`bin/loop-review-head` と同じ判断)。
+  [[ $3 =~ ^[0-9a-f]{7,40}$ ]] || {
+    echo "[FAIL] head SHA として読めません: $3" >&2
+    exit 2
+  }
+  mkdir -p "$STORE" 2>/dev/null || {
+    echo "[FAIL] 記録の置き場を作れません: $STORE" >&2
+    exit 2
+  }
+  printf '%s\n' "$3" >"$FILE.tmp" 2>/dev/null && mv -f "$FILE.tmp" "$FILE" 2>/dev/null || {
+    rm -f "$FILE.tmp" 2>/dev/null || true
+    echo "[FAIL] 保留にした head を記録できません: $FILE" >&2
+    exit 2
+  }
+  ;;
+get)
+  [[ $# -eq 2 ]] || usage
+  # **記録が無い保留がある**（先行 PR 待ちなど、人が外す保留）。
+  # **そこを「動いた」と読むと、master が外さないと決めた保留まで外れる。**
+  [[ -f $FILE ]] || exit 1
+  read -r sha <"$FILE" 2>/dev/null || {
+    echo "[FAIL] 記録を読み取れません: $FILE" >&2
+    exit 2
+  }
+  [[ $sha =~ ^[0-9a-f]{7,40}$ ]] || {
+    echo "[FAIL] 記録が壊れています: $FILE" >&2
+    exit 2
+  }
+  printf '%s\n' "$sha"
+  ;;
+*)
+  usage
+  ;;
+esac
+exit 0
