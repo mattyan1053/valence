@@ -114,11 +114,12 @@ describe("停止識別子", () => {
       ["### 3.2 レビューを要求してよいか確かめる", "review-budget-unknown:<PR番号>"],
       ["### exit 2 — 設定か使い方の誤り", "gate-misconfigured:<PR番号>"],
       ["#### rework — worker へ差し戻す", "awaiting-worker:<PR番号>@<SHA>"],
-      // **人を呼ぶ側は worker 待ちではない。** triage が `human` を返した状態で、
-      // **worker には解けない**——`bin/loop-stall` 自身が「**主体が違うものに
+      // **人を呼ぶ側は worker 待ちではない。** triage が `human` を返した状態は
+      // **worker には解けない**——`bin/loop-stall` 自身が
+      // 「**主体が違うものに worker の周回を効かせない**」と書いている
+      // （`awaiting-worker` は `WORKER_FIXES` に入るので、**worker の周回が動いている
+      // 間ずっと数えられない**）。**2 つあるのは、保留の失敗と投稿の失敗で経路が違う**ため
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
-      // **人を呼ぶ側は worker 待ちではない。** triage が `human` を返した状態で、
-      // **worker には解けない**——`bin/loop-stall` 自身が「**主体が違うものに
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### defer — Issue へ外出ししてマージする", "deferred-overflow"],
       ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "issue-lookup-failed"],
@@ -137,9 +138,10 @@ describe("停止識別子", () => {
       ...identifiersIn(".claude/commands/loop-master.md"),
       ...identifiersIn(".claude/commands/loop-worker.md"),
     ]);
-    const unused = listedSpecs().filter(
-      (spec) => !used.has(spec) && !identifiersIn(".claude/commands/loop-worker.md").includes(spec),
-    );
+    // **`used` に worker のぶんは既に入っている。** 同じものをもう一度除いても
+    // **後半は常に true** で、**「worker 側も見ている」ように読めるぶん、
+    // 次に触る人が二重に守られていると思う**（#164 のレビューで見送ったもの）
+    const unused = listedSpecs().filter((spec) => !used.has(spec));
 
     expect(unused, "打つ場所が無い識別子が一覧に残っている").toEqual([]);
   });

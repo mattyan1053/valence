@@ -212,6 +212,26 @@ details=""
 for number in "${!unresolved_of[@]}"; do
   details+="${number}:${unresolved_of[$number]}:${last_comment_of[$number]-} "
 done
+# **理由の無い保留を探す** (#163)。**判定はここに書かない**——`./task loop:status` も
+# 同じことを見るので、**2 箇所に置くと片方だけ直して食い違う**。
+#
+# **読めなくても止めない。** ここは持ち手を決めるのが仕事で、
+# **付け足しの診断で本業を落とさない**。**ただし黙らない** (#161 と同じ判断)。
+silent_park=""
+if parks="$("${BASH_SOURCE[0]%/*}/loop-silent-park")"; then
+  : # 無い
+else
+  case $? in
+    1)
+      # **番号だけを取り出す。** 1 行目で足りる (複数あっても、渡す相手は同じ)
+      IFS=$'\t' read -r silent_park _parked_at <<<"$parks"
+      ;;
+    *)
+      echo "[WARN] 理由の無い保留があるかどうかを読めません（bin/loop-silent-park）" >&2
+      ;;
+  esac
+fi
+
 # **件数も検索を通さない。** ここが遅れると `ready` の昇格が伝わらない。
 counts="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
   -f query='query($owner:String!,$repo:String!){
@@ -327,7 +347,13 @@ while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
 done <<<"$prs"
 
 # 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
-if [[ -n $untriaged ]]; then
+if [[ -n $silent_park ]]; then
+  # **忘れられる側にある**ので、いちばん先に見る (#163)。**ステップ 2 は `parked` を
+  # 選ばない**ので、**ここで渡さないと誰もその PR を見ない**。
+  # **直せるのは master** である (理由を投稿し直すか、保留を戻す)。
+  to="master"
+  reason="PR #${silent_park} が理由の無い保留になっている（理由を投稿し直すか、保留を戻す）"
+elif [[ -n $untriaged ]]; then
   # **当否を判断できるのは master だけ**である。**放っておくとループが止まる側**なので、
   # 他の持ち物より先に見る。
   to="master"

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# 理由の無い保留 (人待ちにしたが、理由を投稿できていない PR) を挙げる。
+#
+#   exit 0 = 無い (何も出さない)
+#   exit 1 = ある (標準出力に `<PR番号>\t<人待ちにした時刻>`)
+#   exit 2 = 読めない
+#
+# **人待ちにするときは、label を付けてから理由を投稿する。** 投稿が落ちたら label を
+# 戻すが、**その戻しも `|| true` で握り潰す**——**止めずに `bin/loop-stall` まで進む**
+# ためで、そこは正しい。**問題は、落ちる原因が API 障害だと戻す側も同じ理由で落ちる**
+# ことである (**相関する**)。
+#
+# 残るのは **`awaiting-human` が付いていて、理由がどこにも無い PR** である。
+# **ステップ 2 は `parked` を選ばない**ので**次の周回はその PR を見ず**、
+# **停止は 1 回しか積まれない**——**3 周に届かないので人も呼ばれない** (#163)。
+#
+# **新しい記録を作らない。** 証拠は GitHub 側に残っている——**label はあるのに、
+# それより後の発言が 1 つも無い**。**障害が明けた周回が拾える**ので、
+# **落ちている最中に書き残す必要が無い** (書き残す先も同じ障害で落ちうる)。
+#
+# **拾い手は 1 つに決まらない** (#161 と同じ判断)。**`./task loop:status` は人が読む場所**、
+# **`bin/loop-handoff` は毎周回通る場所**で、**どちらか片方だけでは届かない**——
+# 判定はここ 1 つに置き、**両方から呼ぶ**。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **入口の確認は置かない**（#161）。ここは**手順書が直接叩くものではなく**、
+# `bin/loop-handoff` と `./task loop:status` から呼ばれる**部品**である——
+# **呼ぶ側が既に確かめている**ので、ここでも確かめると**同じ周回の記録が 2 行になる**
+# （実測。20 件の上限を 1 周で 2 つ食う）。
+
+# 列区切り。**タブにしない**——`IFS` の空白として畳まれ、**空の列があると列がずれる**
+# (`bin/loop-handoff` で実際に踏んだ)。
+readonly FIELD=$'\037'
+
+usage() {
+  echo "使い方: bin/loop-silent-park" >&2
+  echo "        exit 0 = 無い / exit 1 = ある (標準出力) / exit 2 = 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || usage
+
+fail_unknown() {
+  echo "[FAIL] GitHub の状態を読み取れません: $1" >&2
+  echo "       理由の無い保留があるかどうかは、この周回では分かりません" >&2
+  exit 2
+}
+
+# owner / repo は `{owner}` の置換が効かない（置換されるのは `gh api` の
+# エンドポイントだけ）ので、先に引く。
+repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || fail_unknown "リポジトリ"
+mapfile -t repo_parts <<<"$repo_ref"
+
+# **一覧（検索）を信じない。** label 絞り込みは検索の索引を経由するので、
+# **付けた直後は古い値が返る**（#101 で実測）。**リポジトリを直接引く。**
+#
+# **見るのは `awaiting-human` であって `parked` ではない。** `parked` は
+# **先行 PR 待ち**にも付くので、**人待ちだけを見分けられるのはこの label である**。
+#
+# **最後の発言は「誰の」でも構わない。** ここで見たいのは
+# **保留にしてから、何か書かれたか**であって、書いた人ではない——
+# **役は同じアカウントで動く**ので、GitHub 側では master と worker を見分けられない。
+rows="$(gh api graphql --paginate \
+  -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+  -f query='query($owner:String!,$repo:String!,$endCursor:String){
+    repository(owner:$owner,name:$repo){
+      pullRequests(states:OPEN,first:50,after:$endCursor){
+        pageInfo{hasNextPage endCursor}
+        nodes{number
+          timelineItems(itemTypes:LABELED_EVENT, last:50){
+            nodes{... on LabeledEvent{createdAt label{name}}}}
+          comments(last:1){nodes{createdAt}}}}}}' \
+  --jq '.data.repository.pullRequests.nodes[]
+    | "\(.number)\(
+        [.timelineItems.nodes[] | select(.label.name == "awaiting-human") | .createdAt] | max // ""
+      )\(.comments.nodes[0].createdAt // "")"')" || fail_unknown "open PR"
+
+found=0
+while IFS="$FIELD" read -r number parked_at last_comment_at; do
+  [[ -n $number ]] || continue
+  # **人待ちにされていない PR は見ない。**
+  [[ -n $parked_at ]] || continue
+  # **保留にした後に何か書かれていれば、理由はそこにある。**
+  # 時刻はどちらも GitHub が記録した ISO8601 (UTC, 固定長) なので文字列で比べられる。
+  [[ -n $last_comment_at && $last_comment_at > $parked_at ]] && continue
+  printf '%s\t%s\n' "$number" "$parked_at"
+  found=1
+done <<<"$rows"
+
+((found == 1)) || exit 0
+exit 1
