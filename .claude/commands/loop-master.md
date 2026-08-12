@@ -555,9 +555,52 @@ resolve しない。何を直すかと、なぜそれが必要かを返信し、
 
 #### human — 人を呼ぶ
 
-resolve しない。**何が決まれば進むのか**を PR に書き、
-`bin/loop-stall "blocking-findings:<PR番号>@<SHA>"` を通して停止する
-（手直しが上限を超えていて指摘が残っていない場合は `review-exhausted:<PR番号>@<SHA>`）。
+resolve しない。**何が決まれば進むのか**を PR に書き、**その PR を保留にする。**
+
+```bash
+# **label が無い作業場がある。** `./task loop:setup` は 1 度しか走らず、
+# **既に動いている作業場はマージしても label が増えない**（ステップ 1.1 は
+# worktree を切り替えるだけ）。**存在しない label は黙って落ちる**ので、先に用意する
+gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
+
+# **付いたことを確かめてから進む**（`changes-requested` と同じ順序）。
+# **付いていないのに保留したつもりになると、`ready` は上がらないまま
+# 「進めるようにした」と思い込む**——**いちばん危ない**
+if gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+  # 本文には **何が決まれば進むのか**と、**人が何をすれば再開するのか**を書く——
+  # **そのまま通すなら人がスレッドを resolve、直させるならスレッドへ書いて
+  # `changes-requested`**。**label を外すのは最後**である（`loop/README.md` と同じ）
+  if ! gh pr comment <PR番号> --body-file <file>; then
+    # **理由の無い保留を残さない。** 一覧には PR 番号が出るので、**見た人は
+    # 「人待ちが 1 件ある」と読み、中身が空だとは思わない**——**停止も積まれない**ので
+    # 3 周の経路にも乗らない。**動いているように見えるぶん、こちらのほうが危ない**。
+    # **戻して数える**（`--add-label` が落ちた場合と同じ形に畳める）
+    gh pr edit <PR番号> --remove-label parked --remove-label awaiting-human || true
+    bin/loop-stall "blocking-findings:<PR番号>@<SHA>"
+  fi
+else
+  # **保留にできなかった。** ループは止まる側にあるので、**これまでどおり数える**——
+  # 3 周で人を呼ぶ（`review-exhausted:<PR番号>@<SHA>` の場合も同じ）
+  bin/loop-stall "blocking-findings:<PR番号>@<SHA>"
+fi
+```
+
+**保留にしないと、ループ全体が止まる。** 同時に open な PR は 1 本で worker も 1 人なので、
+**1 件の人待ちがそのまま全停止**になる——**紐づく Issue が `in-progress` のまま残り、
+次を `ready` へ昇格させられない**（実測で**約 2 時間、どちらのループも何も進めなかった**）。
+**`parked` を付けると、その Issue は「着手中」に数えない**ので、**次の 1 件へ進める。**
+
+**`awaiting-human` も一緒に付ける。** `parked` だけだと**先行 PR 待ちと区別が付かず**、
+**何を待っているのか分からない保留**が残る。**一覧は `./task loop:status` に出る。**
+
+**停止は数えない。** 人待ちで `parked` にしたのに `blocking-findings` を積み続けると、
+**進めるようにしたのに 3 周で `loop/STOP` に達する**——**止めないために保留にした意味が消える**。
+**忘れられる経路を作らないほう**は、**label と `./task loop:status` の一覧**が担う。
+
+**戻すのは人である。** 判断した人が **`awaiting-human` と `parked` を外す**と、
+次の master の周回で**普通の PR としてゲートに乗る**——**master が外す形にすると、
+master が忘れたときに永久に止まる**（`changes-requested` と同じ懸念）。
+**その手順を PR のコメントに書いておくこと。**
 
 #### defer — Issue へ外出ししてマージする
 

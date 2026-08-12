@@ -193,7 +193,8 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 | `ready` | **次にやる 1 件。同時に 1 件だけ** | master |
 | `in-progress` | worker が着手中 | worker |
 | `blocked` | 判断が要る。ループは触らない | どちらでも |
-| `parked` | **PR に付ける。** 先行 PR を待って保留中 | master |
+| `parked` | **PR に付ける。** 待って保留中（先行 PR / 人の判断） | master |
+| `awaiting-human` | **PR に付ける。** 人の判断を待っている（`parked` と一緒に付く） | master |
 | `changes-requested` | **PR に付ける。** master が出した要求が未処理 | master |
 | `deferred-finding` | レビュー上限に達した PR から外出しした指摘 | master |
 
@@ -205,6 +206,35 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 要求だけが残って label が付かない）。外れないまま 3 周続いたら第 4 層が人を呼ぶ。
 
 **Issue テンプレートからの起票も `backlog` に入る**（`.github/ISSUE_TEMPLATE/`）。
+
+### 人の判断待ち（`awaiting-human`）
+
+**人を待つあいだも、ループは他の作業を進める。** master が人を呼ぶときは、その PR へ
+`parked` と `awaiting-human` を付けて保留にする。保留にしないと、**同時に open な PR は
+1 本・worker は 1 人**なので、**1 件の人待ちがそのまま全停止**になる（実測で約 2 時間）。
+
+**戻すのは人である。** ただし **label を外すのは最後**で、**先に判断を GitHub へ残す。**
+
+**label だけ外しても、輪から出られない。** master が読むのは**未解決スレッドの数と枠**だけで、
+**どちらも 1 回目と同じ値**なので、**同じ入力に同じ答えが返り、また保留になる**。
+**master が消費できる状態を残してから外すこと。**
+
+```bash
+./task loop:status                       # 人の判断待ちが一覧に出る
+gh pr view <PR番号>                      # 何が決まれば進むのかが書いてある
+```
+
+**そのまま通すなら**、**未解決スレッドを resolve する**（次の master の周回で
+ゲートが「未解決 0 件」を見る）。**直させるなら**、**スレッドへ何を直すか書いて
+`changes-requested` を付ける**（既にある経路。worker が対応して push する）。
+
+```bash
+gh pr edit <PR番号> --add-label changes-requested   # 直させる場合だけ
+gh pr edit <PR番号> --remove-label awaiting-human --remove-label parked
+```
+
+**外した次の master の周回で、普通の PR としてゲートに乗る。** master が外す形にすると、
+**master が忘れたときに永久に止まる**ので、**判断した人がその場で戻せる**ようにしてある。
 ここが抜けると、人が立てた Issue が master のどの一覧にも現れない。
 
 **着手順は master が決める。** worker は `ready` の 1 件を取るだけで、順序を判断しない。
