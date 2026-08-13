@@ -19,9 +19,23 @@ export type AppCredentials = {
   readonly privateKey: string;
 };
 
+/**
+ * ユーザーとしてログインするために要るもの。
+ *
+ * **App として署名する資格とは別である**（`AGENTS.md` §6「トークンは 2 種類ある」）。
+ * **こちらは「誰が何を見られるか」**を得るために使い、**App の秘密鍵とは用途が違う**
+ * ——**同じ型にまとめると、片方しか要らない場所へ両方を渡すことになる。**
+ */
+export type OAuthCredentials = {
+  readonly clientId: string;
+  readonly clientSecret: string;
+};
+
 /** 読む環境変数の名前。`.env.example` と揃える。 */
 const APP_ID = "GITHUB_APP_ID";
 const PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY";
+const CLIENT_ID = "GITHUB_APP_CLIENT_ID";
+const CLIENT_SECRET = "GITHUB_APP_CLIENT_SECRET";
 
 /**
  * 環境変数から資格情報を組み立てる。
@@ -35,6 +49,21 @@ export function readAppCredentials(
   return {
     appId: required(env, APP_ID, idSchema),
     privateKey: toPem(required(env, PRIVATE_KEY, secretSchema)),
+  };
+}
+
+/**
+ * 環境変数から OAuth の資格情報を組み立てる。
+ *
+ * **欠けていたら投げる。** **空文字のまま進めると、ログインが GitHub 側で
+ * 「client_id が不正」になり、設定漏れだと分からなくなる。**
+ */
+export function readOAuthCredentials(
+  env: Readonly<Record<string, string | undefined>>,
+): OAuthCredentials {
+  return {
+    clientId: required(env, CLIENT_ID, secretSchema),
+    clientSecret: required(env, CLIENT_SECRET, secretSchema),
   };
 }
 
