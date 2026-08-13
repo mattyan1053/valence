@@ -93,6 +93,100 @@ describe("使えるトークンを用意する", () => {
     expect(result).toEqual({ kind: "needs-login" });
   });
 
+  it("更新に負けても、勝った側が保存したものを使う", async () => {
+    // **失効の瞬間に、同じ人の要求が 2 本並ぶのは普通である**（画面 1 枚でも、
+    // RSC もルートも別々に取りに行く）——**refresh token は 1 度しか使えない**ので、
+    // **負けた側は必ず失敗する。** **その時点で、保存されているのは使える 1 組**である。
+    //
+    // **「ログインしているのに何も見えない」を直すものが、
+    // 「ログインしているのに再ログインへ飛ばす」を作らない。**
+    //
+    // **錠は採らない。** **本番はインスタンスが複数ある**ので、
+    // **プロセス内の錠は別インスタンスの要求に効かない**——
+    // **効かない錠は、効いていることを確かめられないぶん無いより悪い。**
+    const winner: UserTokens = {
+      accessToken: "winner-access",
+      refreshToken: "winner-refresh",
+      expiresAt: at(28800),
+    };
+    let loads = 0;
+    const store = {
+      async load() {
+        loads += 1;
+        // 1 回目は失効したもの、2 回目は勝った側が保存したもの
+        return loads === 1 ? stale : winner;
+      },
+      async save() {
+        throw new Error("保存してはいけない");
+      },
+    };
+    let refreshes = 0;
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: async () => {
+        refreshes += 1;
+        throw new Error("refresh token は使用済みです");
+      },
+      now: at(1),
+    });
+
+    expect(result).toEqual({ kind: "usable", accessToken: "winner-access" });
+    // **繰り返さない。** **`refresh` を呼び直すと、同じ競合をもう一度開く**
+    expect(refreshes, "更新を繰り返している").toBe(1);
+  });
+
+  it("読み直したものも使えなければ、再ログインへ戻す", async () => {
+    // **倒す先は 2 つある。** **読み直したものを `isUsable` に通さず返すと、
+    // 失効したままの access token で GitHub を叩く**——**症状は 401 になり、
+    // 「権限が無い」と見分けられない。**
+    const store = {
+      async load() {
+        return stale;
+      },
+      async save() {
+        throw new Error("保存してはいけない");
+      },
+    };
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: async () => {
+        throw new Error("refresh token は使用済みです");
+      },
+      now: at(1),
+    });
+
+    expect(result).toEqual({ kind: "needs-login" });
+  });
+
+  it("読み直しに失敗したら、再ログインへ戻す", async () => {
+    // **読めないことを「使える」へ倒さない**
+    let loads = 0;
+    const store = {
+      async load() {
+        loads += 1;
+        if (loads === 1) {
+          return stale;
+        }
+        throw new Error("読めません");
+      },
+      async save() {
+        throw new Error("保存してはいけない");
+      },
+    };
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: async () => {
+        throw new Error("refresh token は使用済みです");
+      },
+      now: at(1),
+    });
+
+    expect(result).toEqual({ kind: "needs-login" });
+  });
+
   it("そもそも保存されていなければ、再ログインへ戻す", async () => {
     // **更新を試みない**——**渡す refresh token が無い**
     const store = storeOf(undefined);

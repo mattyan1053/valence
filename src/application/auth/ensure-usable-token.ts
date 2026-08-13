@@ -39,6 +39,26 @@ export type EnsureUsableTokenInput = {
   readonly now: Date;
 };
 
+/**
+ * 保存されているものを読み直して、**使えるならそれを使う**。
+ *
+ * **読み直したものも `isUsable` に通す。** **通さずに返すと、失効したままの
+ * access token で GitHub を叩く**——**症状は 401 になり、「権限が無い」と
+ * 見分けられない。** **読めないことも「使える」へ倒さない。**
+ */
+async function usableFromStore(store: UserTokenStore, now: Date): Promise<UsableToken> {
+  let current: UserTokens | undefined;
+  try {
+    current = await store.load();
+  } catch {
+    return { kind: "needs-login" };
+  }
+  if (isUsable(current, now)) {
+    return { kind: "usable", accessToken: (current as UserTokens).accessToken };
+  }
+  return { kind: "needs-login" };
+}
+
 export async function ensureUsableToken({
   store,
   refresh,
@@ -59,7 +79,17 @@ export async function ensureUsableToken({
   try {
     renewed = await refresh(saved.refreshToken);
   } catch {
-    return { kind: "needs-login" };
+    // **負けただけかもしれない。** **失効の瞬間に、同じ人の要求が 2 本並ぶのは普通**
+    // である（画面 1 枚でも、RSC もルートも別々に取りに行く）——**refresh token は
+    // 1 度しか使えない**ので、**負けた側は必ず失敗する。** **その時点で、
+    // 保存されているのは勝った側が書いた使える 1 組**である。
+    //
+    // **錠は採らない。** **本番はインスタンスが複数ある**ので、**プロセス内の錠は
+    // 別インスタンスの要求に効かない**——**効かない錠は、効いていることを
+    // 確かめられないぶん無いより悪い。**
+    //
+    // **繰り返さない。** **`refresh` を呼び直すと、同じ競合をもう一度開く。**
+    return await usableFromStore(store, now);
   }
 
   // **保存できなければ「使える」とは言わない。** **GitHub 側で refresh token は
