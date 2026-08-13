@@ -311,8 +311,9 @@ describe("bin/loop-lease", () => {
       expect(acquired).toHaveLength(1);
     },
     // **この 1 件だけ枠が違う。** bash 1 つと lease を CONCURRENT_ACQUIRES 個、
-    // 合わせて 17 プロセスを起こす。**同時に起こしても 1 vCPU では費用は壁時計に乗る**
-    // ので、project 全体の枠（10 プロセスぶん）では足りない。
+    // 合わせて `CONCURRENT_ACQUIRES + 1` プロセスを起こす。**同時に起こしても
+    // 1 vCPU では費用は壁時計に乗る**ので、project 全体の枠
+    // （`test/slow-machine.ts` の `MODELLED_SPAWNS` ぶん）では足りない。
     // **全体を上げない**——上げると、本物の無限ループの検出が遅れるだけになる
     budgetFor(CONCURRENT_ACQUIRES + 1),
   );
