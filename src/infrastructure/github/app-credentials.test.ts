@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readAppCredentials } from "./app-credentials";
+import { readAppCredentials, readOAuthCredentials } from "./app-credentials";
 
 /** `.env` に入る形（PEM は 1 行に潰して `\n` でエスケープする）。 */
 const env = {
@@ -83,5 +83,50 @@ describe("GitHub App の資格情報を読む", () => {
     // **インストール先ごとに増える**ので、資格情報に混ぜると 1 つしか扱えなくなる
     expect(() => readAppCredentials(env)).not.toThrow();
     expect(Object.keys(readAppCredentials(env))).toEqual(["appId", "privateKey"]);
+  });
+});
+
+/**
+ * **ログインの資格は、App として署名する資格とは別である**（`AGENTS.md` §6
+ * 「トークンは 2 種類ある」）。**同じ型にまとめると、片方しか要らない場所へ
+ * 両方を渡すことになる。**
+ */
+describe("ログインの資格情報を読む", () => {
+  const env = {
+    GITHUB_APP_CLIENT_ID: "Iv1.abc123",
+    GITHUB_APP_CLIENT_SECRET: "the-secret",
+  };
+
+  it("環境変数から読む", () => {
+    expect(readOAuthCredentials(env)).toEqual({
+      clientId: "Iv1.abc123",
+      clientSecret: "the-secret",
+    });
+  });
+
+  it("欠けている変数があれば、その名前を挙げて投げる", () => {
+    // **空文字のまま進めると、GitHub 側で「client_id が不正」になり、
+    // 設定漏れだと分からなくなる**
+    expect(() => readOAuthCredentials({ ...env, GITHUB_APP_CLIENT_SECRET: undefined })).toThrow(
+      "GITHUB_APP_CLIENT_SECRET",
+    );
+  });
+
+  it("空白だけの値は未設定と同じに扱う", () => {
+    expect(() => readOAuthCredentials({ ...env, GITHUB_APP_CLIENT_ID: "   " })).toThrow(
+      "GITHUB_APP_CLIENT_ID",
+    );
+  });
+
+  it("投げるときに値を載せない", () => {
+    // **秘密がそのままログへ流れる**（§6）
+    expect(() => readOAuthCredentials({ ...env, GITHUB_APP_CLIENT_ID: "" })).toThrow(
+      /^(?!.*the-secret).*$/s,
+    );
+  });
+
+  it("App として署名する資格は要求しない", () => {
+    // **用途が違うものを、同じ入口で要求しない**——**ログインに秘密鍵は要らない**
+    expect(() => readOAuthCredentials(env)).not.toThrow();
   });
 });
