@@ -55,18 +55,28 @@ bin/loop-lease acquire worker      # 出力された token を控える
 `origin/main` の先端へ移る。**ブランチとして `main` を掴まない** (#196)。
 
 ```bash
-{ git fetch origin main || git fetch origin main; } && git switch --detach origin/main
+bin/loop-sync-main          # 移った先の SHA を出す
 ```
 
 **`main` は 1 つの作業場にしか checkout できない。** **掴むと、2 人目は
 `fatal: 'main' is already checked out at …` でここを通れず**、**毎周回止まって
 3 周で `loop/STOP` を配る**——**1 人目まで巻き添えで止まる**（master も同じ形で動いている）。
 
-**競り負けたら 1 度だけやり直す。** **`refs/remotes/origin/main` は
-`--git-common-dir` にある**ので、**worktree を分けても共有**である——**2 人が同じ周回の
-冒頭で fetch すると、後から書く側が `cannot lock ref` で落ちる**（実測で 25/25）。
-**そのとき ref は既に目的の値**なので、**やり直すと「更新するものが無い」で成功する**
-——**直っているのに赤**にしない。**2 度とも落ちたら、そこは本当に失敗である。**
+**やり直すかどうかは、回数ではなく理由で決まる** (#217)。**判断はスクリプトが持つ**
+ので、ここに条件を書き写さない——**やり直してよい理由の一覧は増える**ので、
+**写した側だけが古くなる**（一覧の正は `bin/loop-sync-main` の `RETRYABLE_REASONS`）。
+
+**性質だけ覚えておけばよい。** **一時的なもの（もう一度投げれば通る）はやり直し、
+恒久的なものはやり直さない。知らない理由は止まる側**である。
+
+**由来はこれである。** **2 人が同じ周回の冒頭で fetch すると、後から書く側が
+`cannot lock ref` で落ちる**（実測で 25/25）——**そのとき ref は既に目的の値**なので、
+**やり直すと「更新するものが無い」で成功する**（**直っているのに赤にしない**）。
+
+**規則が現実に合っていないと感じたら、破るのではなく直す。** **直すまでは、規則の
+ほうに従って止まる**——**実際に、`Permission denied` で 2 回落ちたあと 3 回目を
+投げた周回がある**（結果は通ったが、**「rationale が当てはまらないから延長する」を
+通すと、ゲートは助言になる**）。
 
 **detached でよい。** **worker はどこでもブランチを掴まない** (#102)——
 **実装もレビュー対応も detached のまま行い、ブランチ名は push とブランチの更新でだけ使う。**
@@ -346,7 +356,16 @@ bin/loop-head same <PR番号> "$(git rev-parse HEAD)"   # PR の head と一致�
 
 ```bash
 gh pr checkout --detach <PR番号>
-git fetch origin main
+# **取ってくるだけ。** **切り替えると、いま入った PR の checkout を捨てる**
+# ——**やり直すかどうかの判断は、冒頭の同期と同じものが持つ** (#217)
+#
+# **落ちたら、そこで止める。** **受けずに進むと `origin/main` は古いままで、
+# rebase は古い main の上に乗る**——**しかも rebase は成功する**ので、
+# **緑のまま「取り込んだつもり」の PR ができる** (#226 のレビュー)
+if ! bin/loop-sync-main --fetch-only; then
+  bin/loop-stall main-sync-failed
+  exit
+fi
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
 # **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ったとき、後発が先発を
 # truncate して混ざる**——**合否は `$status` なので正しいまま**なので、

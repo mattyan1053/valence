@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,16 +20,32 @@ const PROCEDURE = ".claude/commands/loop-worker.md";
  * 手順書の「`main` を最新化する」ブロックを取り出す。**書き写さない**——
  * **写すと、手順書を直さなくても緑のまま通る**（#181 / #183 と同じ理由）。
  *
- * **`rebase` の節にも `git fetch origin main` がある**ので、そこを外す。
+ * **判断は `bin/loop-sync-main` が持つ** (#217)。**手順書が指しているものを、
+ * 手順書に書いてあるとおりに走らせる。**
  */
 function syncBlock(): string {
   const body = readFileSync(join(REPO_ROOT, PROCEDURE), "utf8");
   const blocks = [...body.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => match[1] ?? "");
+  // **rebase の前にも同じ口を通る**（`--fetch-only`）ので、そちらを外す
   const found = blocks.filter(
-    (block) => block.includes("git fetch origin main") && !block.includes("rebase"),
+    (block) => block.includes("bin/loop-sync-main") && !block.includes("--fetch-only"),
   );
   expect(found, "「main を最新化する」ブロックが 1 つに絞れない").toHaveLength(1);
   return found[0] ?? "";
+}
+
+/**
+ * 作業場から、手順書のとおり `bin/loop-sync-main` を呼べるようにする。
+ *
+ * **手順書は作業場の相対パスで書いてある**ので、**そこに実物が要る**
+ * ——**写しではなく、リポジトリの実物をそのまま置く。**
+ */
+function placeSyncScript(workspace: string): void {
+  const bin = join(workspace, "bin");
+  mkdirSync(bin, { recursive: true });
+  const target = join(bin, "loop-sync-main");
+  copyFileSync(join(REPO_ROOT, "bin/loop-sync-main"), target);
+  chmodSync(target, 0o755);
 }
 
 /**
@@ -89,6 +113,8 @@ describe("worker の main 最新化", () => {
       ]).status,
     ).toBe(0);
     expect(git(["push", "--quiet", "origin", "main"]).status).toBe(0);
+    placeSyncScript(first);
+    placeSyncScript(second);
     return { first, second, origin };
   }
 

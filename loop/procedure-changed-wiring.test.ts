@@ -95,8 +95,17 @@ describe("周回を捨てるかの判定", () => {
     expect(afterMerge).toMatch(/ステップ 6/);
     // **比較の右辺がマージ後の状態になっていること。** 手元の HEAD は
     // マージでは動かないので、取り直さずに比べると必ず「変わっていない」になる
-    expect(afterMerge).toContain("git fetch origin main");
-    expect(afterMerge).toMatch(/bin\/loop-procedure-changed [^\n]+ FETCH_HEAD/);
+    //
+    // **取り直しは冒頭と同じ口を通す** (#226 のレビュー)。**生の fetch だと、
+    // 落ちても次の行が走り、古い `FETCH_HEAD` と比べて「変わっていない」と答える**
+    // ——**それは正常な答えの顔をしている**ので、**赤くならないまま古い手順で進む。**
+    expect(afterMerge).toMatch(/bin\/loop-sync-main/);
+    expect(afterMerge, "取り直しが落ちても次の行が走る").toMatch(
+      /if ! after="\$\(bin\/loop-sync-main\)"; then\n\s*bin\/loop-stall main-sync-failed/,
+    );
+    expect(afterMerge, "古い FETCH_HEAD と比べている").not.toMatch(
+      /bin\/loop-procedure-changed [^\n]*FETCH_HEAD/,
+    );
     // **呼び直す前に切り替える。** `fetch` は `FETCH_HEAD` を更新するだけで
     // **作業ツリーはマージ前のまま**なので、呼び直した先が**古い手順書を読む**
     // （1.1 の経路はそこで `switch --detach` しているので問題ない）

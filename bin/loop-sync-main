@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# `origin/main` の先端へ移る。**やり直すかどうかは、回数ではなく理由で決める。**
+#
+#   bin/loop-sync-main               取ってきて、origin/main の先端へ移る
+#   bin/loop-sync-main --fetch-only  取ってくるだけ（いまいる場所を離れない）
+#
+#   exit 0 = 同期できた（移ったときは、移った先の SHA を出す）
+#   exit 1 = 同期できなかった（理由を標準エラーへそのまま出す）
+#   exit 2 = 使い方の誤り
+#
+# **`--fetch-only` は rebase の前に使う。** **PR の head にいたまま `origin/main` を
+# 取り直す**ので、**切り替えるとその PR の checkout を捨ててしまう。**
+# **判断は 1 つ**——**取ってくるだけの経路にも、同じ分け方が効く。**
+#
+# **「1 度だけやり直す」は `cannot lock ref` のために置かれた** (#217)。
+# **`refs/remotes/origin/main` は `--git-common-dir` にある**ので、**worktree を
+# 分けても共有**である——**2 人が同じ周回の冒頭で fetch すると、後から書く側が
+# 落ちる**（実測で 25/25）。**そのとき ref は既に目的の値**なので、
+# **やり直すと「更新するものが無い」で成功する**——**直っているのに赤にしない。**
+#
+# **実際に落ちたのは別の理由だった**（`Permission denied (publickey)` が 2 回）。
+# **形は同じ「2 回落ちた」だが、原因が違う**——**規則が原因を 1 つに決め打ちして
+# いたので、別の理由で落ちたときに回数だけが当てはまった。**
+#
+# **並べるのは「やり直してよい側」だけ。** **失敗の側を並べると、知らない理由が
+# どの分岐にも入らない** (#207 / #208 で繰り返し出ている形)。
+# **判定できないものは止まる側**である（このループは一貫してそちらへ倒す）。
+#
+# **回数の上限は残す。** **理由で分けても、無限には投げない。**
+#
+# -e は使わない。落ちた理由を見てから分岐する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-sync-main [--fetch-only]" >&2
+  echo "        exit 0 = 同期できた / exit 1 = できなかった / exit 2 = 使い方の誤り" >&2
+  exit 2
+}
+
+FETCH_ONLY=0
+if [[ ${1-} == "--fetch-only" ]]; then
+  FETCH_ONLY=1
+  shift
+fi
+readonly FETCH_ONLY
+
+[[ $# -eq 0 ]] || usage
+
+# **やり直してよい理由。** **一時的なもの——待てば、あるいはもう一度投げれば直るもの
+# ——だけを置く。** **恒久的なもの（認証・リポジトリが無い）は何回投げても同じ**なので、
+# **ここには入れない。**
+#
+# **足すのは、実際に踏んで「やり直せば直る」と分かったものだけにする。**
+# **先回りで並べると、恒久的な失敗を一時的として扱う枠が広がる**——
+# **広がったぶんだけ、止まるべきときに止まらなくなる。**
+readonly RETRYABLE_REASONS="cannot lock ref"
+
+# **投げる回数の上限。** **理由が当たっても、ここを超えて投げない。**
+readonly MAX_ATTEMPTS=2
+
+if ! errfile="$(mktemp)"; then
+  echo "[FAIL] 一時ファイルを作れません" >&2
+  exit 2
+fi
+trap 'rm -f "$errfile"' EXIT
+
+# **その理由なら、もう一度投げてよいか。** **並べたものに当たったときだけ真。**
+retryable() {
+  local reason="$1" pattern
+  while IFS= read -r pattern; do
+    [[ -n $pattern ]] || continue
+    [[ $reason == *"$pattern"* ]] && return 0
+  done <<<"$RETRYABLE_REASONS"
+  return 1
+}
+
+attempt=0
+while true; do
+  ((attempt++))
+  if git fetch origin main 2>"$errfile"; then
+    break
+  fi
+  reason="$(cat "$errfile")"
+
+  if ! retryable "$reason"; then
+    # **やり直しても同じ理由である。** **理由をそのまま出す**——
+    # **「同期できません」だけだと、次に読む者がまた一から調べる。**
+    echo "[FAIL] origin/main を取得できません (やり直しても直らない理由です)" >&2
+    printf '%s\n' "$reason" >&2
+    exit 1
+  fi
+
+  if ((attempt >= MAX_ATTEMPTS)); then
+    echo "[FAIL] origin/main を取得できません (${MAX_ATTEMPTS} 回とも同じところで落ちました)" >&2
+    printf '%s\n' "$reason" >&2
+    exit 1
+  fi
+done
+
+# **取ってくるだけなら、ここで終わり。** **いまいる場所を離れない。**
+if ((FETCH_ONLY == 1)); then
+  exit 0
+fi
+
+# **ブランチとして `main` を掴まない** (#196)。**掴むと、2 人目は
+# `fatal: 'main' is already checked out at …` でここを通れない。**
+if ! git switch --detach origin/main 2>"$errfile"; then
+  # **fetch が通っても、先端へ移れていなければ同期ではない。**
+  echo "[FAIL] origin/main の先端へ移れません" >&2
+  cat "$errfile" >&2
+  exit 1
+fi
+
+# **移った先を出す。** **呼ぶ側が「どこにいるか」を確かめられるようにする。**
+if ! head="$(git rev-parse HEAD)" || [[ -z $head ]]; then
+  echo "[FAIL] 移った先の SHA を読めません" >&2
+  exit 1
+fi
+printf '%s\n' "$head"
