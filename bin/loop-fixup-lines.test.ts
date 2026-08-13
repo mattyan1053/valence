@@ -113,7 +113,9 @@ function runWithLines(fake: Fake): Run {
       // ここを見ないと **@base64 を外しても緑のまま**になる
       // **判定の式まで見る。** テストかどうかを決めているのは gh 側の --jq なので、
       // ここを見ないと **判定を外しても緑のまま**になる
-      '    require "--jq" ".filename" \'endswith(".test.ts")\' "@base64" ".additions" ".deletions" ".commits"',
+      // **新しいファイルと、それを呼んでいるファイル**も同じ 1 回で受け取る（#204）。
+      // **`.status` と `.patch` を尋ねていること**まで見る——**外しても緑のまま**にしない
+      '    require "--jq" ".filename" \'endswith(".test.ts")\' "@base64" ".additions" ".deletions" ".commits" ".status" ".patch"',
       ...emit(fake.files).map((line) => `    ${line}`),
       `    exit ${fake.compareExit ?? 0}`,
       "    ;;",
@@ -144,6 +146,16 @@ function row(path: string, isTest: boolean, additions: number, deletions: number
 }
 
 /**
+ * `R\t<符号化した新しいファイル>\t<符号化した言及元>,…` の 1 行。
+ *
+ * **「呼ばれている」は機械的に見える**——**要求されたファイルが、その名前を書いている**
+ * かどうかである（#204）。**散文から「作れ」を読み取らない。**
+ */
+function mention(added: string, by: string[]): string {
+  return `R\t${b64(added)}\t${by.map((path) => b64(path)).join(",")}`;
+}
+
+/**
  * レビュースレッドの 1 行。
  *
  * **どの commit に対して付いた指摘か**と**誰が付けたか**を持つ。前者が無いと
@@ -155,12 +167,80 @@ function thread(path: string, onCommit: string = REVIEWED, author: string = BOT_
 }
 
 /** files が配列だったとき（正常）の出力を作る。 */
-function runWithFiles(rows: string[], threads: string[] = [], commits: string[] = []): Run {
+function runWithFiles(
+  rows: string[],
+  threads: string[] = [],
+  commits: string[] = [],
+  mentions: string[] = [],
+): Run {
   return runWithLines({
-    files: ["T\tarray", ...commits.map((sha) => `C\t${sha}`), ...rows],
+    files: ["T\tarray", ...commits.map((sha) => `C\t${sha}`), ...rows, ...mentions],
     threads: ["T\tarray", ...threads],
   });
 }
+
+describe("要求に応えて作った新しいファイル", () => {
+  // **`AGENTS.md` §5 は「重複は 3 回目に抽象化する」と言い、第 3 層は抽象化を
+  // 「広がった」と数える**——**規約どおり直すと機械が止める**（#204。#202 で踏んだ）。
+  //
+  // **新しいファイルにはスレッドが付きようがない**ので、**要求ぶんとして外れない。**
+  // **要求されたファイルが、その名前を書いているか**で見る——**呼び出しは機械的に見える。**
+
+  it("要求されたファイルから呼ばれていれば、数えない", () => {
+    // **入力に 2 つ要る**（#204 の完了条件）——**新しいファイルが 1 つだけだと、
+    // 「全部の新しいファイルを外す」でも緑になる。**
+    const result = runWithFiles(
+      [
+        row(".claude/commands/loop-worker.md", false, 12, 4),
+        row("bin/loop-keep-branch", false, 75, 0),
+        row("bin/loop-unrelated", false, 30, 0),
+      ],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [
+        mention("bin/loop-keep-branch", [".claude/commands/loop-worker.md"]),
+        mention("bin/loop-unrelated", []),
+      ],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    // **要求されたファイル 16 行と、そこから呼ばれる 75 行が外れる。**
+    // **無関係な 30 行は、これまでどおり数える**（外しすぎない）
+    expect(result.stdout.trim()).toBe("30\t0\t91");
+  });
+
+  it("要求されていないファイルから呼ばれていても、数える", () => {
+    // **網を外して緑にしない。** **要求と無関係なファイルが名前を書いただけで
+    // 外れるなら、第 3 層は自分で無効にできる。**
+    const result = runWithFiles(
+      [row("bin/loop-other", false, 5, 0), row("bin/loop-keep-branch", false, 75, 0)],
+      [],
+      [],
+      [mention("bin/loop-keep-branch", ["bin/loop-other"])],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("80\t0\t0");
+  });
+
+  it("言及元が来ていなければ、これまでどおり数える", () => {
+    // **外れるのは「この窓で作られたファイル」だけ**である——**既にあったものは、
+    // 要求されたファイルが名前を書いただけで丸ごと外れてはいけない。**
+    //
+    // **「作られたファイルだけ」を選んでいるのは gh 側の `--jq`**（`.status`）なので、
+    // **ここでは「言及元が来ない」ことしか作れない**——**式そのものは
+    // 「判定式が想定どおりであること」が留めている**（テストかどうかの判定と同じ扱い）。
+    const result = runWithFiles(
+      [row(".claude/commands/loop-worker.md", false, 12, 4), row("bin/loop-stall", false, 40, 0)],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("40\t0\t16");
+  });
+});
 
 describe("bin/loop-fixup-lines の数え方", () => {
   it("本体の変更は追加も削除も数える", () => {
@@ -509,7 +589,7 @@ describe("bin/loop-fixup-lines が gh に渡す判定式", () => {
    * 代わりに、**式を書き換えたら必ずこのテストの更新が要る**形にしてある。
    * 「気づかないうちに反転していた」は起きない。
    */
-  const EXPECTED_FILES_JQ = `"T\\t\\(.files | type)", (.commits[]? | "C\\t\\(.sha)"), (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)")`;
+  const EXPECTED_FILES_JQ = `. as $root | "T\\t\\($root.files | type)", ($root.commits[]? | "C\\t\\(.sha)"), ($root.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)"), ($root.files[]? | select(.status == "added") | . as $new | "R\\t\\($new.filename | @base64)\\t\\([$root.files[]? | select(.filename != $new.filename) | select((.patch // "") | contains($new.filename)) | (.filename | @base64)] | join(","))")`;
 
   /** レビュースレッドの側も同じ理由で固定する。 */
   const EXPECTED_THREADS_JQ = `"T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\((.comments.nodes[0].originalCommit.oid) // "-")\\t\\((.comments.nodes[0].author.login) // "-")\\t\\(.path | @base64)")`;
