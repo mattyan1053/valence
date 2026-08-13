@@ -82,6 +82,8 @@ type Fake = {
 function runWithLines(fake: Fake): Run {
   const dir = mkdtempSync(join(tmpdir(), "loop-fixup-fake-"));
   symlinkSync("/usr/bin/bash", join(dir, "bash"));
+  // **符号化を戻すのに要る**（判定を `--jq` へ寄せられないため。#208 のレビュー）
+  symlinkSync("/usr/bin/base64", join(dir, "base64"));
   const emit = (lines: string[]): string[] =>
     // %b で渡す。%s だと JSON.stringify が付けた \t が **タブに戻らず**、
     // 列の分かれていない行を渡してしまう
@@ -145,14 +147,20 @@ function row(path: string, isTest: boolean, additions: number, deletions: number
   return `F\t${isTest}\t${b64(path)}\t${additions}\t${deletions}`;
 }
 
+/** `N\t<符号化したパス>` の 1 行（**この窓で作られたファイル**）。 */
+function newFile(path: string): string {
+  return `N\t${b64(path)}`;
+}
+
 /**
- * `R\t<符号化した新しいファイル>\t<符号化した言及元>,…` の 1 行。
+ * `D\t<符号化したパス>\t<符号化した差分>` の 1 行。
  *
- * **「呼ばれている」は機械的に見える**——**要求されたファイルが、その名前を書いている**
- * かどうかである（#204）。**散文から「作れ」を読み取らない。**
+ * **生の差分をここへ渡す。** **「呼ばれている」の判定は本体（bash）が持つ**ので、
+ * **加工済みの答えを渡すと、判定を 1 度も通らない**（#208 のレビュー。
+ * **差し替えた gh は `--jq` を実行しない**ので、式の中に意味を置けない）。
  */
-function mention(added: string, by: string[]): string {
-  return `R\t${b64(added)}\t${by.map((path) => b64(path)).join(",")}`;
+function patchOf(path: string, patch: string): string {
+  return `D\t${b64(path)}\t${b64(patch)}`;
 }
 
 /**
@@ -186,7 +194,7 @@ describe("要求に応えて作った新しいファイル", () => {
   // **新しいファイルにはスレッドが付きようがない**ので、**要求ぶんとして外れない。**
   // **要求されたファイルが、その名前を書いているか**で見る——**呼び出しは機械的に見える。**
 
-  it("要求されたファイルから呼ばれていれば、数えない", () => {
+  it("要求されたファイルの追加行が呼んでいれば、数えない", () => {
     // **入力に 2 つ要る**（#204 の完了条件）——**新しいファイルが 1 つだけだと、
     // 「全部の新しいファイルを外す」でも緑になる。**
     const result = runWithFiles(
@@ -198,8 +206,12 @@ describe("要求に応えて作った新しいファイル", () => {
       [thread(".claude/commands/loop-worker.md")],
       [],
       [
-        mention("bin/loop-keep-branch", [".claude/commands/loop-worker.md"]),
-        mention("bin/loop-unrelated", []),
+        newFile("bin/loop-keep-branch"),
+        newFile("bin/loop-unrelated"),
+        patchOf(
+          ".claude/commands/loop-worker.md",
+          "@@ -1 +1 @@\n-git push origin\n+bin/loop-keep-branch <ブランチ>\n",
+        ),
       ],
     );
 
@@ -209,6 +221,56 @@ describe("要求に応えて作った新しいファイル", () => {
     expect(result.stdout.trim()).toBe("30\t0\t91");
   });
 
+  it("短い名前が偶然含まれても、数える", () => {
+    // **部分文字列では足りない**（#208 のレビュー）——**`a` のような名前は、
+    // 要求ファイルの差分に文字 `a` が 1 度出るだけで外れる**。
+    // **名前を短くするだけで第 3 層を抜けられる**なら、網ではない。
+    const result = runWithFiles(
+      [row(".claude/commands/loop-worker.md", false, 2, 0), row("a", false, 500, 0)],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [newFile("a"), patchOf(".claude/commands/loop-worker.md", "@@ -1 +1 @@\n+bash の話をする\n")],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "短い名前で抜けられている").toBe("500\t0\t2");
+  });
+
+  it("メタ文字を含む名前でも、似た綴りには当たらない", () => {
+    // **`x.ts` が `xats` に当たる**形にしない（正規表現に生のまま渡さない）
+    const result = runWithFiles(
+      [row(".claude/commands/loop-worker.md", false, 2, 0), row("x.ts", false, 40, 0)],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [newFile("x.ts"), patchOf(".claude/commands/loop-worker.md", "@@ -1 +1 @@\n+xats を足す\n")],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "メタ文字が当たっている").toBe("40\t0\t2");
+  });
+
+  it("削除行にしか無ければ、数える", () => {
+    // **消した行の言及は、呼んでいる証拠にならない**
+    const result = runWithFiles(
+      [
+        row(".claude/commands/loop-worker.md", false, 0, 2),
+        row("bin/loop-keep-branch", false, 75, 0),
+      ],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [
+        newFile("bin/loop-keep-branch"),
+        patchOf(
+          ".claude/commands/loop-worker.md",
+          "@@ -1 +1 @@\n-bin/loop-keep-branch <ブランチ>\n",
+        ),
+      ],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "削除行の言及で外れている").toBe("75\t0\t2");
+  });
+
   it("要求されていないファイルから呼ばれていても、数える", () => {
     // **網を外して緑にしない。** **要求と無関係なファイルが名前を書いただけで
     // 外れるなら、第 3 層は自分で無効にできる。**
@@ -216,14 +278,17 @@ describe("要求に応えて作った新しいファイル", () => {
       [row("bin/loop-other", false, 5, 0), row("bin/loop-keep-branch", false, 75, 0)],
       [],
       [],
-      [mention("bin/loop-keep-branch", ["bin/loop-other"])],
+      [
+        newFile("bin/loop-keep-branch"),
+        patchOf("bin/loop-other", "@@ -1 +1 @@\n+bin/loop-keep-branch を呼ぶ\n"),
+      ],
     );
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe("80\t0\t0");
   });
 
-  it("言及元が来ていなければ、これまでどおり数える", () => {
+  it("差分が来ていなければ、これまでどおり数える", () => {
     // **外れるのは「この窓で作られたファイル」だけ**である——**既にあったものは、
     // 要求されたファイルが名前を書いただけで丸ごと外れてはいけない。**
     //
@@ -589,7 +654,7 @@ describe("bin/loop-fixup-lines が gh に渡す判定式", () => {
    * 代わりに、**式を書き換えたら必ずこのテストの更新が要る**形にしてある。
    * 「気づかないうちに反転していた」は起きない。
    */
-  const EXPECTED_FILES_JQ = `. as $root | "T\\t\\($root.files | type)", ($root.commits[]? | "C\\t\\(.sha)"), ($root.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)"), ($root.files[]? | select(.status == "added") | . as $new | "R\\t\\($new.filename | @base64)\\t\\([$root.files[]? | select(.filename != $new.filename) | select((.patch // "") | contains($new.filename)) | (.filename | @base64)] | join(","))")`;
+  const EXPECTED_FILES_JQ = `"T\\t\\(.files | type)", (.commits[]? | "C\\t\\(.sha)"), (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)"), (.files[]? | select(.status == "added") | "N\\t\\(.filename | @base64)"), (.files[]? | "D\\t\\(.filename | @base64)\\t\\((.patch // "") | @base64)")`;
 
   /** レビュースレッドの側も同じ理由で固定する。 */
   const EXPECTED_THREADS_JQ = `"T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\((.comments.nodes[0].originalCommit.oid) // "-")\\t\\((.comments.nodes[0].author.login) // "-")\\t\\(.path | @base64)")`;
