@@ -181,23 +181,28 @@ describe("作業場ごとに、compose project とポートを分ける", () => 
  * **名前で増やす**。**名前が識別子**なので、**重複は誤り**である。
  */
 describe("./task loop:worker:add / remove", () => {
-  let roots: string[] = [];
+  let roots: { parent: string; dir: string }[] = [];
 
   afterEach(() => {
-    for (const root of roots) {
+    for (const { parent, dir } of roots) {
       // worktree の登録ごと消す（親を消すだけだと prune されない）
-      const repo = join(root, "valence");
-      spawnSync("git", ["-C", repo, "worktree", "prune"], { encoding: "utf8" });
-      rmSync(root, { recursive: true, force: true });
+      spawnSync("git", ["-C", dir, "worktree", "prune"], { encoding: "utf8" });
+      rmSync(parent, { recursive: true, force: true });
     }
     roots = [];
   });
 
-  /** 本物の `task` を持つ使い捨てリポジトリ。**docker は偽物**にする。 */
-  function repo(): { dir: string; log: string; env: NodeJS.ProcessEnv } {
+  /**
+   * 本物の `task` を持つ使い捨てリポジトリ。**docker は偽物**にする。
+   *
+   * **名前を選べるようにしてある**（#195 のレビュー 3 周目）——**`valence` だけで
+   * 作っていると、生の名前と正規化した名前が一致する**ので、**正規化が効く経路を
+   * 1 度も通らない**。
+   */
+  function repo(name = "valence"): { dir: string; log: string; env: NodeJS.ProcessEnv } {
     const parent = mkdtempSync(join(tmpdir(), "worker-add-"));
-    roots.push(parent);
-    const dir = join(parent, "valence");
+    const dir = join(parent, name);
+    roots.push({ parent, dir });
     mkdirSync(dir);
     expect(spawnSync("git", ["init", "--quiet", dir]).status).toBe(0);
     copyFileSync(join(REPO_ROOT, "task"), join(dir, "task"));
@@ -275,6 +280,23 @@ describe("./task loop:worker:add / remove", () => {
 
     expect(clash.status, "同じポートへ落ちる名前を通している").not.toBe(0);
     expect(`${clash.stdout}${clash.stderr}`, "何と衝突したのかが出ていない").toContain("nn");
+  });
+
+  it("正規化した名前で判定する（生の名前で見ない）", () => {
+    // **検査と実行が同じ名前を見ていること**（#195 のレビュー 3 周目）。
+    //
+    // **正規化は多対一**なので、**生の名前がぶつからなくても、正規化した名前は
+    // ぶつかりうる**——**そのとき `add` は通り、`up` が「アドレス使用中」で落ちる**。
+    // **この PR が消しに来た形そのもの**である。
+    //
+    // **`Valence` の下で試す。** `valence` だと**生と正規化が一致する**ので、
+    // **この経路を 1 度も通らない**（`nn` と `pk` は、正規化した名前でだけ衝突する）。
+    const { dir, env } = repo("Valence");
+    expect(task(dir, env, ["loop:worker:add", "nn"]).status).toBe(0);
+
+    const clash = task(dir, env, ["loop:worker:add", "pk"]);
+
+    expect(clash.status, "生の名前で見ているので通している").not.toBe(0);
   });
 
   it("他の作業場のポートを読めなければ、足さない", () => {
