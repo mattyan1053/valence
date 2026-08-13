@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# レビュースレッドへ返信する。**塞いでいるものがあれば、消してよいものだけ消す。**
+#
+#   bin/loop-review-reply <PR番号> <スレッドID> <本文ファイル>
+#
+#   exit 0 = 投稿できた（投稿先の URL を出す）
+#   exit 1 = 塞いでいる pending review を消してはいけない（人が決める）
+#   exit 2 = 投稿できなかった / 使い方の誤り
+#
+# **投稿が落ちた残骸が、次の投稿を全部塞ぐ** (#216)。**502 で落ちた投稿は
+# 空の pending review を 1 つ残し、以後の返信はすべて 422 になる**——
+# **文面は「1 人 1 つしか pending を持てない」**なので、**読むと「2 つ目を書こうと
+# している」に見えるが、実際は「1 つ目が空のまま残っている」**である。
+# **#215 と #224 で 2 回踏み、2 回とも記憶で直した。**
+#
+# **消す側だけを持たない。** **提出済みのコメントが入った pending を消すと、
+# 書いた内容ごと消える**——**中身を確かめてから消す。消せないなら止まる。**
+#
+# **判断をここへ置くのは、master も worker も返信を投稿するからである。**
+# **散文で片方にだけ書くと、もう片方が同じところで詰まる。**
+#
+# -e は使わない。落ちた理由を見てから分岐する。
+set -uo pipefail
+
+# **この文面のときだけ pending を疑う。** **「422 なら pending」だけを覚えると、
+# 別の理由で落ちたときに同じ手を打って、関係のない下書きを消しにいく。**
+readonly BLOCKED_BY_PENDING="one pending review per pull request"
+
+usage() {
+  echo "使い方: bin/loop-review-reply <PR番号> <スレッドID> <本文ファイル>" >&2
+  echo "        exit 0 = 投稿できた / exit 1 = 消してはいけない pending がある" >&2
+  echo "        exit 2 = 投稿できなかった・使い方の誤り" >&2
+  exit 2
+}
+
+[[ $# -eq 3 ]] || usage
+[[ $1 =~ ^[0-9]+$ ]] || usage
+readonly PR="$1"
+readonly THREAD="$2"
+readonly BODY_FILE="$3"
+
+if [[ ! -s $BODY_FILE ]]; then
+  echo "[FAIL] 本文が空です: $BODY_FILE" >&2
+  exit 2
+fi
+
+# **本文はファイルから読む。** **直書きすると、本文中の `'` がクォートを閉じて
+# 途中で切れた返信が投稿される**（`.claude/skills/respond-to-review/`）。
+if ! body="$(cat -- "$BODY_FILE")"; then
+  echo "[FAIL] 本文を読めません: $BODY_FILE" >&2
+  exit 2
+fi
+
+readonly REPLY_QUERY='mutation($t:ID!,$b:String!){
+  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t, body:$b}){
+    comment{url}
+  }
+}'
+
+if ! errfile="$(mktemp)"; then
+  echo "[FAIL] 一時ファイルを作れません" >&2
+  exit 2
+fi
+trap 'rm -f "$errfile"' EXIT
+
+# 返信を 1 回投げる。**落ちた理由は `$errfile` に残す**（それで分岐する）。
+#
+# **`-f` で渡す。`-F` は型を変える。** **`gh` は `@` をファイル読み込みの印として
+# 扱う**ので、**`@` で始まる本文は API を叩く前に落ちる**——**`false` や整数だけの
+# 本文も別の型になる。** **渡すのは利用者が書いた文字列**で、**変えてよいものではない。**
+#
+# **落ちても、このスクリプトは「pending review が原因ではありません」と出す**
+# ——**原因は本文の 1 文字目なのに、そう読める文面はどこにも出ない。**
+# **このスクリプトが塞ごうとしている形そのもの**である。
+post_reply() {
+  gh api graphql -f query="$REPLY_QUERY" -f t="$THREAD" -f b="$body" \
+    --jq '.data.addPullRequestReviewThreadReply.comment.url' 2>"$errfile"
+}
+
+# **投稿できたら、そこで終わり。** **pending を探しに行かない**——
+# **消す経路へ近づけない。**
+if url="$(post_reply)" && [[ -n $url ]]; then
+  printf '%s\n' "$url"
+  exit 0
+fi
+
+reason="$(cat "$errfile")"
+
+if [[ $reason != *"$BLOCKED_BY_PENDING"* ]]; then
+  echo "[FAIL] 返信を投稿できません (pending review が原因ではありません)" >&2
+  printf '%s\n' "$reason" >&2
+  exit 2
+fi
+
+# ここから先は「1 つ目が空のまま残っている」を疑う経路である。
+#
+# **確かめてから消すまでを、1 つの錠に入れる。** **GitHub は 1 人 1 つしか pending を
+# 持たせない**（それがこのスクリプトの前提でもある）ので、**master と worker が同じ
+# アカウントで見ているのは同じ 1 つ**である（#174）——**確かめた後・消す前に下書きが
+# 1 件入ると、それごと消える。**
+#
+# **錠は広く取らない。** **最初の 1 回の投稿は錠の外**である——**塞がれていない
+# 普通の返信が、別の周回の始末を待つ理由は無い。**
+#
+# **これで閉まるのはループ同士だけである。** **同じアカウントは人もブラウザで使い、
+# その人は錠を取らない**——**「錠を入れたので安全になった」ではない。**
+# **残る約束は「消す直前まで空だったものを消す」**である。
+#
+# **取れなければ消さない。** **他の「消さない」分岐と揃える。**
+lock_path="${LOOP_REVIEW_REPLY_LOCK:-}"
+if [[ -z $lock_path ]]; then
+  if ! common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    || [[ -z $common_dir ]]; then
+    echo "[FAIL] ロックの置き場を決められません (git リポジトリの中で実行すること)" >&2
+    exit 2
+  fi
+  lock_path="$common_dir/valence-loop-review-reply.lock"
+fi
+
+lock_wait="${LOOP_REVIEW_REPLY_LOCK_WAIT_SEC:-10}"
+if ! [[ $lock_wait =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_REVIEW_REPLY_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+
+exec 9>"$lock_path" || {
+  echo "[FAIL] ロックを作成できません: $lock_path" >&2
+  exit 2
+}
+if ! flock -w "$lock_wait" 9; then
+  echo "[FAIL] 別の周回が pending review を始末しています（${lock_wait} 秒待機）" >&2
+  echo "       消さずに終わります。次の周回で同じ状態ならそこで片付きます" >&2
+  exit 2
+fi
+
+# **錠を取ったら、状態を読み直す。** **待っている間に、先に入った周回が消して
+# 投げ直している**ことがある——**そのとき塞いでいるものはもう無い**（#225 のレビュー）。
+# **待つ前に読んだ理由のまま進むと、「pending が見つかりません」で投稿できずに終わる。**
+#
+# **読み直しは、やってみることで行う。** **塞がれていなければ投稿は通る**ので、
+# **問い合わせを 1 つ増やすより、目的の操作そのもので確かめる。**
+if url="$(post_reply)" && [[ -n $url ]]; then
+  printf '%s\n' "$url"
+  exit 0
+fi
+
+reason="$(cat "$errfile")"
+if [[ $reason != *"$BLOCKED_BY_PENDING"* ]]; then
+  echo "[FAIL] 返信を投稿できません (pending review が原因ではありません)" >&2
+  printf '%s\n' "$reason" >&2
+  exit 2
+fi
+
+if ! me="$(gh api user --jq '.login' 2>/dev/null)" || [[ -z $me ]]; then
+  echo "[FAIL] 投稿している利用者を確かめられません (消してよいかを決められません)" >&2
+  exit 2
+fi
+
+# **選ぶのは bash 側でやる。** **`--jq` で絞り込むと、絞り込みそのものを
+# 試験から動かせない**——**「他人のものを消さない」が効いているかを見られなくなる**
+# （このリポジトリに `jq` は無く、スタブが `--jq` を解釈できない）。
+if ! reviews="$(gh api "repos/{owner}/{repo}/pulls/$PR/reviews" --paginate \
+  --jq '.[] | "\(.id)\t\(.state)\t\(.user.login)\t\(.body // "" | length)"' \
+  2>/dev/null)"; then
+  echo "[FAIL] PR #$PR のレビュー一覧を取得できません" >&2
+  exit 2
+fi
+
+pending=""
+# **他人の pending があったかどうかを、別に覚える。** **「自分のが無い」と
+# 「そもそも 1 つも無い」は別の状態**である——**前者は消してはいけないものが
+# 塞いでいる**（人が決める）、**後者は塞いでいる理由が分からない。**
+others=0
+while IFS=$'\t' read -r id state login body_length; do
+  [[ $state == "PENDING" ]] || continue
+  # **自分の pending だけを見る。** **他人の下書きは、空でも消さない。**
+  if [[ $login != "$me" ]]; then
+    ((others++))
+    continue
+  fi
+  pending="$id"$'\t'"$body_length"
+  break
+done <<<"$reviews"
+
+if [[ -z $pending && $others -gt 0 ]]; then
+  echo "[FAIL] 他の利用者の pending review が ${others} 件、返信を塞いでいます。消しません" >&2
+  echo "       持ち主が提出するか、人が確かめてください" >&2
+  exit 1
+fi
+
+if [[ -z $pending ]]; then
+  # **塞がれているのに 1 つも無い。** **消さずに報告する**——
+  # **見つからないことを「無い」へ倒して他を消しにいかない。**
+  echo "[FAIL] 返信が塞がれていますが、pending review が見つかりません" >&2
+  echo "       別の理由です。人が確かめてください" >&2
+  exit 2
+fi
+
+pending_id="${pending%%$'\t'*}"
+pending_body_length="${pending##*$'\t'}"
+
+if [[ ! $pending_id =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] pending review の id を読めません" >&2
+  exit 2
+fi
+
+# **本文とコメントの両方を見る。** **本文が空でも、コメントが下書きされている
+# ことがある**——**片方だけ見て消すと、書いた内容ごと消える。**
+if ! comment_count="$(gh api "repos/{owner}/{repo}/pulls/$PR/reviews/$pending_id/comments" \
+  --paginate --jq 'length' 2>/dev/null)"; then
+  echo "[FAIL] pending review ($pending_id) の中身を確かめられません" >&2
+  echo "       確かめられないものは消しません" >&2
+  exit 2
+fi
+comment_count="$(printf '%s' "$comment_count" | tr -d '[:space:]')"
+
+if [[ $pending_body_length != "0" || $comment_count != "0" ]]; then
+  # **止まるほうへ倒す。** **消せば通るが、消したものは戻らない。**
+  echo "[FAIL] pending review ($pending_id) に書きかけが入っています。消しません" >&2
+  echo "       本文 ${pending_body_length} 文字 / コメント ${comment_count} 件" >&2
+  echo "       提出するか、内容を確かめて人が消してください" >&2
+  echo "       ブラウザで書きかけていないか、この PR の Files changed を見ること" >&2
+  echo "       (同じアカウントを人も使う。人は錠を取らないので、ここでは止められない)" >&2
+  exit 1
+fi
+
+if ! gh api --method DELETE "repos/{owner}/{repo}/pulls/$PR/reviews/$pending_id" >/dev/null 2>&1; then
+  echo "[FAIL] 空の pending review ($pending_id) を消せません" >&2
+  exit 2
+fi
+
+# **投げるのはここまで。** **最初の 1 回・錠を取った直後・消した直後**の 3 回で、
+# **どれも理由が違う**（初回 / 待つ間に変わりうる / 片付けた）。**同じ理由で繰り返さない。**
+if url="$(post_reply)" && [[ -n $url ]]; then
+  printf '%s\n' "$url"
+  exit 0
+fi
+
+echo "[FAIL] 空の pending review を消しても投稿できません" >&2
+cat "$errfile" >&2
+exit 2
