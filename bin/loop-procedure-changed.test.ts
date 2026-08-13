@@ -26,9 +26,20 @@ describe("bin/loop-procedure-changed", () => {
     return spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).stdout.trim();
   }
 
-  function run(...args: string[]): Run {
+  /** そのまま渡す。**役を書かない呼び方**も試せるようにしておく。 */
+  function runRaw(...args: string[]): Run {
     const result = spawnSync(SCRIPT, args, { cwd: repo, encoding: "utf8" });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  /**
+   * **役は必須**なので、書いていなければ master を補う。
+   *
+   * **ここで補うのは、この試験が見たいのが役の分かれ方ではなく判定そのもの**だから
+   * である——**役を書かない呼び方は `runRaw` で別に試す。**
+   */
+  function run(...args: string[]): Run {
+    return args[0] === "--role" ? runRaw(...args) : runRaw("--role", "master", ...args);
   }
 
   beforeEach(() => {
@@ -95,7 +106,7 @@ describe("bin/loop-procedure-changed", () => {
   it("--list は、除いているものも隠さない", () => {
     // **判定だけ別の場所で例外にすると、`--list` が嘘をつく。**
     // **対象はスクリプトが 1 つ持つ**のがこの仕組みの前提である
-    const listed = run("--list");
+    const listed = run("--role", "master", "--list");
 
     expect(listed.stdout).toContain("bin/");
     expect(listed.stdout).toContain("test.ts");
@@ -136,7 +147,7 @@ describe("bin/loop-procedure-changed", () => {
 
   it("対象の一覧を出せる", () => {
     // **一覧の正はスクリプト 1 箇所。** 手順書に書き写すと、片方だけ直して食い違う
-    const listed = run("--list");
+    const listed = run("--role", "master", "--list");
 
     expect(listed.status).toBe(0);
     expect(listed.stdout).toContain("bin/");
@@ -168,7 +179,7 @@ describe("bin/loop-procedure-changed", () => {
   describe("役ごとの対象", () => {
     it("既定は master の手順書を見る", () => {
       // **既定を変えない。** **既存の呼び出しが、黙って別のものを見るようになる**
-      const listed = run("--list");
+      const listed = run("--role", "master", "--list");
 
       expect(listed.stdout).toContain(".claude/commands/loop-master.md");
       expect(listed.stdout).not.toContain(".claude/commands/loop-worker.md");
@@ -190,6 +201,19 @@ describe("bin/loop-procedure-changed", () => {
 
     it("役だけ書いて中身が無ければ、使い方の誤りにする", () => {
       expect(run("--role").status).toBe(2);
+    });
+
+    it("役を書かなければ、判定しない", () => {
+      // **既定を持たせない** (#228 のレビュー)。**書き忘れが黙って別の役を見張る**
+      // ——**master の手順書を直した PR で worker が空振りし、worker の手順書を
+      // 直した PR で捨てない**（**本命の穴**）。**どちらも「それらしい答え」なので
+      // 赤くならない。** **`exit 2` なら「1 以外はすべて捨てる」に乗る。**
+      expect(runRaw("HEAD").status).toBe(2);
+    });
+
+    it("`--list` にも役が要る", () => {
+      // **役ごとに一覧が違う**ので、**役を言わずに出せると、どちらか分からない**
+      expect(runRaw("--list").status).toBe(2);
     });
   });
 });

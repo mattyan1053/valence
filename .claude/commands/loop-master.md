@@ -84,7 +84,7 @@ bin/loop-sync-main          # 移った先の SHA を出す（before と比べ�
 **マージのたびに必ず 1 周消える**（実際に踏んだ）。
 
 ```bash
-bin/loop-procedure-changed "$before"
+bin/loop-procedure-changed --role master "$before"
 ```
 
 **対象の一覧はスクリプトが持つ**（`--list` で見られる）。**ここに書き写さない** ——
@@ -388,7 +388,7 @@ if ! after="$(bin/loop-sync-main)"; then
   bin/loop-stall main-sync-failed
   exit
 fi
-bin/loop-procedure-changed "$before" "$after"
+bin/loop-procedure-changed --role master "$before" "$after"
 ```
 
 **`exit 1` だけが「続けてよい」**（1.1 と同じ扱い。**1 以外はすべて捨てる**）。

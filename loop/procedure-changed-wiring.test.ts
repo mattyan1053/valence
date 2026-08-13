@@ -12,10 +12,14 @@ function read(path: string): string {
 
 /** 対象の一覧の正は **スクリプト**。手順書に書き写さない。 */
 function watched(): string[] {
-  return execFileSync(join(REPO_ROOT, "bin/loop-procedure-changed"), ["--list"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  })
+  return execFileSync(
+    join(REPO_ROOT, "bin/loop-procedure-changed"),
+    ["--role", "master", "--list"],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    },
+  )
     .split("\n")
     .filter((line) => line !== "");
 }
@@ -201,6 +205,28 @@ describe("worker の版ずれ", () => {
   it("捨てる側へ倒す条件が書いてある", () => {
     // **`exit 1` だけが「続けてよい」**（1 以外はすべて捨てる。master と同じ扱い）
     expect(sync).toMatch(/1 以外/);
+  });
+
+  it("捨てるときは、消してから返して呼び直す", () => {
+    // **ここはステップ 5 を通らずに周回を終える唯一の経路**で、**すぐ上で
+    // `main-sync-failed` を積む**——**消し忘れると、成功した周回を挟んでいるのに
+    // 3 周連続と数えて全ループを止める。**
+    //
+    // **握ったまま呼び直すと、呼び直された周回が 1.0 で自分自身に阻まれる。**
+    // **1.0 でも lease を返す**ので、**捨てる段のところから先だけを見る**
+    const reset = sync.indexOf("bin/loop-stall --reset");
+    expect(reset, "カウンタを消していない").toBeGreaterThanOrEqual(0);
+    const tail = sync.slice(reset);
+    const release = tail.indexOf("bin/loop-lease release worker");
+    const reinvoke = tail.indexOf("/loop-worker を呼び直す");
+
+    expect(release, "lease を返していない").toBeGreaterThan(0);
+    expect(reinvoke, "返す前に呼び直している").toBeGreaterThan(release);
+  });
+
+  it("呼び直しは 1 回だけだと書いてある", () => {
+    // **入れ替わりは追随した時点で収束する**ので、**2 回続けて起きるのは異常**である
+    expect(sync).toMatch(/呼び直しは 1 回だけ/);
   });
 
   it("捨てすぎない理由も書いてある", () => {

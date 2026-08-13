@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # その役が実行するものが、この周回の間に入れ替わったかを判定する。
 #
-#   bin/loop-procedure-changed [--role master|worker] <前の SHA> [<後の SHA>]
+#   bin/loop-procedure-changed --role master|worker <前の SHA> [<後の SHA>]
 #
 #   exit 0 = 変わった (**この周回は捨てる**)
 #   exit 1 = 変わっていない (そのまま進んでよい)
@@ -60,20 +60,23 @@ readonly COMMON=(
 
 
 usage() {
-  echo "使い方: bin/loop-procedure-changed [--role master|worker] <前の SHA> [<後の SHA>]" >&2
+  echo "使い方: bin/loop-procedure-changed --role master|worker <前の SHA> [<後の SHA>]" >&2
   echo "       後の SHA を省くと HEAD と比べる" >&2
-  echo "       bin/loop-procedure-changed [--role …] --list   対象の一覧を出す" >&2
+  echo "       bin/loop-procedure-changed --role … --list   対象の一覧を出す" >&2
   exit 2
 }
 
-# **既定は master。** **既存の呼び出しを変えない**ためで、
-# **worker 側は `--role worker` を明示する**。
-ROLE="master"
-if [[ ${1-} == "--role" ]]; then
-  [[ $# -ge 2 ]] || usage
-  ROLE="$2"
-  shift 2
+# **役は必ず書かせる。既定を持たせない** (#228 のレビュー)。**書き忘れが黙って別の役を
+# 見張る**——**master の手順書を直した PR で worker が空振りし、worker の手順書を
+# 直した PR で捨てない**（**本命の穴**）。**どちらも「それらしい答え」なので赤くならない。**
+# **必須なら `exit 2` で、手順書の「1 以外はすべて捨てる」に乗って黙って進まない。**
+if [[ ${1-} != "--role" ]]; then
+  echo "[FAIL] 役を指定してください (--role master|worker)" >&2
+  usage
 fi
+[[ $# -ge 2 ]] || usage
+ROLE="$2"
+shift 2
 case "$ROLE" in
   master | worker) ;;
   *)
