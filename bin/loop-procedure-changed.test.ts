@@ -177,12 +177,15 @@ describe("bin/loop-procedure-changed", () => {
    * 変えない**（`src/` だけの PR で捨てないのと同じ理由）。
    */
   describe("役ごとの対象", () => {
-    it("既定は master の手順書を見る", () => {
-      // **既定を変えない。** **既存の呼び出しが、黙って別のものを見るようになる**
+    it("master を指すと、master の手順書を見る", () => {
+      // **既定はもう無い** (#228 のレビュー)。**「既定は master」と書いたままにすると、
+      // 次に読む人が「書き忘れは master になるはず」と読む**——**実際は `exit 2`** である
       const listed = run("--role", "master", "--list");
 
       expect(listed.stdout).toContain(".claude/commands/loop-master.md");
-      expect(listed.stdout).not.toContain(".claude/commands/loop-worker.md");
+      expect(listed.stdout, "相手の手順書まで見ている").not.toContain(
+        ".claude/commands/loop-worker.md",
+      );
     });
 
     it("worker を指すと、worker の手順書を見る", () => {
