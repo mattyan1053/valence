@@ -1321,6 +1321,64 @@ describe("止まっていないのに、止めたと言わない", () => {
     );
   });
 
+  it("途中まで止まっていたら、止まっていないとは言わない", () => {
+    // **worktree ごとに書くので、途中で落ちうる**（権限・ディスク）。**そこまでは
+    // 止まっている**のに、**「どのループも止まっていません」と言うと逆の誤解になる**
+    // ——**人は「まだ全部走っている」と読み、止まっている側を放置する**（#191 のレビュー）
+    repo = mkdtempSync(join(tmpdir(), "loop-stop-partial-write-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    mkdirSync(join(repo, "bin"));
+    for (const name of ["loop-stall", "loop-lease"]) {
+      copyFileSync(join(REPO_ROOT, "bin", name), join(repo, "bin", name));
+      chmodSync(join(repo, "bin", name), 0o755);
+    }
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+    spawnSync("git", ["-C", repo, "add", "-A"]);
+    spawnSync("git", [
+      "-C",
+      repo,
+      "-c",
+      "user.email=loop@example.invalid",
+      "-c",
+      "user.name=loop",
+      "commit",
+      "--quiet",
+      "-m",
+      "init",
+    ]);
+    const worktree = `${repo}-wt`;
+    expect(
+      spawnSync("git", ["-C", repo, "worktree", "add", "--detach", "--quiet", worktree]).status,
+      "worktree を作れない",
+    ).toBe(0);
+    // **2 つ目だけ書けなくする。** 1 つ目は止まり、2 つ目で落ちる
+    chmodSync(worktree, 0o555);
+
+    let result = spawnSync(join(repo, "bin", "loop-stall"), ["dirty"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    for (let index = 0; index < 2; index += 1) {
+      result = spawnSync(join(repo, "bin", "loop-stall"), ["dirty"], {
+        cwd: repo,
+        encoding: "utf8",
+      });
+    }
+    const stoppedFirst = existsSync(join(repo, "loop", "STOP"));
+    chmodSync(worktree, 0o755);
+    spawnSync("git", ["-C", repo, "worktree", "remove", "--force", worktree]);
+    rmSync(worktree, { recursive: true, force: true });
+
+    expect(stoppedFirst, "1 つ目も止まっていない（前提が崩れている）").toBe(true);
+    expect(result.stderr, "止まっていないと断定している").not.toContain(
+      "どのループも止まっていません",
+    );
+    expect(result.stderr, "全部を止められなかったことが出ていない").toContain("全 worktree");
+    // **どこまで止まったかが読めること。** 「失敗した」だけだと、**人は残りを探せない**
+    expect(result.stderr, "どこまで作れたかが出ていない").toContain("ここまでに 1 個は作成済み");
+  });
+
   it("止められなかったら、bin/loop-stall が [FAIL] を出す", () => {
     // **[STOP] だけで終わると、人は止まったと読む。** **`task` を非ゼロで返すように
     // しても、呼ぶ側が見ていなければ素通りする**——**両方を見る**

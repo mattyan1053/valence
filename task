@@ -237,10 +237,14 @@ cmd_loop_stop() {
   fi
   while read -r p; do
     [[ -n $p ]] || continue
-    mkdir -p "$(dirname "$p")"
-    printf '%s\n' "$reason" > "$p"
+    # **どこまで止まったかを言えるようにする** (#191 のレビュー)。**途中で落ちると、
+    # そこまでは止まっている**ので、**「1 つも止めていない」とは違う状態**になる
+    if ! mkdir -p "$(dirname "$p")" || ! printf '%s\n' "$reason" > "$p"; then
+      echo "==> 作成できません: $p（ここまでに ${found} 個は作成済み）" >&2
+      return 1
+    fi
     echo "==> 作成: $p"
-    found=1
+    found=$((found + 1))
   done <<<"$paths"
   # **1 つも作れなかったら、止めたと言わない。** 取得が成功しても、
   # **worktree が 1 つも返らなければ結果は同じ**である
