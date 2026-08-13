@@ -105,7 +105,13 @@ describe("bin/loop-stray-branches", () => {
                   : `  [[ $* == *"/workspace-${index}"* ]] && { printf '%s\\n' ${JSON.stringify(branch)}; exit 0; }`,
               ],
         ),
-        "  exit 1",
+        // **detached の答えは、呼び方で変わる**（#199 のレビュー）——
+        // **`--quiet` があれば何も出さずに 1、無ければ 128 で `fatal`** である。
+        // **常に 1 を返すと、実装から `--quiet` を外す変異が緑のまま通る**
+        // ——**`--quiet` こそがこの直しの本体**なのに、押さえられない。
+        '  if [[ $* == *"--quiet"* ]]; then exit 1; fi',
+        '  echo "fatal: ref HEAD is not a symbolic ref" >&2',
+        "  exit 128",
         "fi",
         "exit 0",
         "",
