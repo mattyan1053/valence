@@ -52,6 +52,31 @@ describe("トークンの暗号", () => {
     expect(() => decryptToken(key, ALICE, flipped)).toThrow(/復号できません/);
   });
 
+  it("暗号文に文字を挿しても、戻さない", () => {
+    // **`Buffer.from` はここでも不正文字を捨てる**（#215 のレビュー 2 周目）——
+    // **正しい暗号文の IV・タグ・本文へ `!` を挿しても同じバイト列へ戻り、
+    // 長さ検査と GCM 認証を通って元の平文が返る。**
+    //
+    // **返る平文は同じ**なので、**別のトークンにはならない**が、
+    // **「1 文字でも書き換えられていたら戻さない」と 2 度書いてある**——
+    // **残すなら、直すのはコメントのほうになる。**
+    const [iv, tag, body] = encryptToken(key, ALICE, "ghu_secret").split(".") as [
+      string,
+      string,
+      string,
+    ];
+
+    for (const spoiled of [
+      [`${iv}!`, tag, body],
+      [iv, `${tag}!`, body],
+      [iv, tag, `${body}!`],
+    ]) {
+      expect(() => decryptToken(key, ALICE, spoiled.join(".")), spoiled.join(".")).toThrow(
+        /復号できません/,
+      );
+    }
+  });
+
   it("形の違うものを渡されても、戻さない", () => {
     // **DB の値は壊れうる**（移行の失敗、手で書き換え）——**平文として返さない**
     expect(() => decryptToken(key, ALICE, "これは暗号文ではない")).toThrow(/復号できません/);

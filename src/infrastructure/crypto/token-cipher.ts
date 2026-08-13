@@ -10,6 +10,7 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { z } from "zod";
 
 /** 使う鍵。**中身は持ち出さない** (型で包んで、そのまま文字列にしない)。 */
 export type EncryptionKey = {
@@ -33,6 +34,21 @@ const TAG_BYTES = 16;
 const ALGORITHM = "aes-256-gcm";
 
 /**
+ * base64 として**正規形**なら、その中身を返す。**そうでなければ `undefined`。**
+ *
+ * **`Buffer.from(..., "base64")` は不正な文字を黙って捨てる。** **末尾の `=` を `!` に
+ * 変えても、途中へ 1 文字挿しても、同じバイト列へ戻る**——**長さだけを見ていると、
+ * 「書き換えられていたら戻さない」が成立しない** (#215 のレビュー)。
+ *
+ * **戻して同じ字面になるか**で見る。**文字集合と padding を別々に検査しない**——
+ * **2 つに割ると、片方だけ古くなる。**
+ */
+function fromCanonicalBase64(value: string): Buffer | undefined {
+  const bytes = Buffer.from(value, "base64");
+  return bytes.toString("base64") === value ? bytes : undefined;
+}
+
+/**
  * 環境変数から鍵を読む。
  *
  * **短い鍵で静かに動かない。** **弱いまま本番へ出ると、外から見て分からない**
@@ -40,26 +56,26 @@ const ALGORITHM = "aes-256-gcm";
  *
  * **名前だけを載せる。** **値を載せると、鍵がそのままログへ流れる。**
  */
+const keySchema = z
+  .string()
+  .trim()
+  // **緩めない。** **`z.string()` だけにすると、正規形と 32 バイトの両方が消える**
+  // ——**「統一した」と言いながら、守っていたものを落とすことになる** (#215 のレビュー)。
+  .refine((value) => {
+    const bytes = fromCanonicalBase64(value);
+    return bytes !== undefined && bytes.length === KEY_BYTES;
+  });
+
 export function readEncryptionKey(
   env: Readonly<Record<string, string | undefined>>,
 ): EncryptionKey {
-  const raw = env[KEY_NAME];
-  if (raw === undefined || raw.trim() === "") {
+  const parsed = keySchema.safeParse(env[KEY_NAME]);
+  // **Zod のエラーを持ち上げない。** **検証結果には受け取った値が入りうる**ので、
+  // **鍵がそのままログへ流れる** (`readAppCredentials` と同じ判断)。**名前だけを載せる。**
+  if (!parsed.success) {
     throw new Error(`環境変数が設定されていないか、形式が違います: ${KEY_NAME}`);
   }
-  let bytes: Buffer;
-  try {
-    bytes = Buffer.from(raw, "base64");
-  } catch {
-    throw new Error(`環境変数が設定されていないか、形式が違います: ${KEY_NAME}`);
-  }
-  // **`Buffer.from` は base64 でない文字を黙って捨てる。** **長さだけでは足りない**
-  // ——**末尾の `=` を `!` に変えても 32 バイトへ復号され、長さ検査を通る** (#215 の
-  // レビュー)。**戻して同じ字面になるか**まで見る (**正規形と一致するか**)。
-  if (bytes.length !== KEY_BYTES || bytes.toString("base64") !== raw.trim()) {
-    throw new Error(`環境変数が設定されていないか、形式が違います: ${KEY_NAME}`);
-  }
-  return { bytes };
+  return { bytes: fromCanonicalBase64(parsed.data) as Buffer };
 }
 
 /**
@@ -124,10 +140,18 @@ export function decryptToken(key: EncryptionKey, userId: string, sealed: string)
     throw sealedError();
   }
   const [rawIv, rawTag, rawBody] = parts as [string, string, string];
-  const iv = Buffer.from(rawIv, "base64");
-  const tag = Buffer.from(rawTag, "base64");
-  const body = Buffer.from(rawBody, "base64");
-  if (iv.length !== IV_BYTES || tag.length !== TAG_BYTES) {
+  // **3 要素とも正規形まで見る。** **1 つでも緩いと、そこへ文字を挿して同じ平文を
+  // 返させられる**——**「1 文字でも書き換えられていたら戻さない」が成立しない。**
+  const iv = fromCanonicalBase64(rawIv);
+  const tag = fromCanonicalBase64(rawTag);
+  const body = fromCanonicalBase64(rawBody);
+  if (
+    iv === undefined ||
+    tag === undefined ||
+    body === undefined ||
+    iv.length !== IV_BYTES ||
+    tag.length !== TAG_BYTES
+  ) {
     throw sealedError();
   }
   try {

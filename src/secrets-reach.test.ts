@@ -79,6 +79,51 @@ describe("秘密がクライアントへ届かない", () => {
     return seen;
   }
 
+  /**
+   * その中身が client component か。
+   *
+   * **先頭固定では足りない**（#215 のレビュー 2 周目）——**ライセンスや JSDoc を
+   * 置いた client component が候補から外れる**（`@/` と同じ形）。
+   * **先頭のコメントを読み飛ばしてから見る。**
+   *
+   * **行頭一致（`m` フラグ）にはしない。** **関数の中の文字列にも当たる**——
+   * **倒す先は 2 つある**（**見逃す側**と、**関係ないファイルを client と読む側**）。
+   */
+  function hasClientDirective(source: string): boolean {
+    let rest = source;
+    for (;;) {
+      const trimmed = rest.replace(/^\s+/, "");
+      if (trimmed.startsWith("//")) {
+        rest = trimmed.slice(trimmed.indexOf("\n") + 1);
+        continue;
+      }
+      if (trimmed.startsWith("/*")) {
+        const end = trimmed.indexOf("*/");
+        if (end === -1) {
+          return false;
+        }
+        rest = trimmed.slice(end + 2);
+        continue;
+      }
+      return /^["']use client["']/.test(trimmed);
+    }
+  }
+
+  it("先頭のコメントを読み飛ばして、directive を見る", () => {
+    // **見逃す側**
+    expect(hasClientDirective('"use client";\n')).toBe(true);
+    expect(hasClientDirective('// SPDX-License-Identifier: MIT\n"use client";\n')).toBe(true);
+    expect(hasClientDirective('/**\n * 画面。\n */\n"use client";\n')).toBe(true);
+    expect(hasClientDirective("/* one */ // two\n'use client';\n")).toBe(true);
+
+    // **入れすぎる側**——**関数の中の文字列は directive ではない**
+    expect(hasClientDirective('export function f() {\n  return "use client";\n}\n')).toBe(false);
+    expect(hasClientDirective('import { x } from "./x";\n"use client";\n')).toBe(false);
+    expect(hasClientDirective("export const x = 1;\n")).toBe(false);
+    // **閉じていないブロックコメントは、読み飛ばせない**（そこで止める）
+    expect(hasClientDirective('/* 閉じていない\n"use client";\n')).toBe(false);
+  });
+
   it("`tsconfig.json` の別名は `@/` のままである", () => {
     // **別名が変わったら、上の走査は辺を落とす。** **落としても緑のまま**なので、
     // **別名そのものを見て、変わったらここで止まる**ようにする
@@ -95,7 +140,7 @@ describe("秘密がクライアントへ届かない", () => {
     }
 
     const leaking = sourceFiles(SRC)
-      .filter((file) => /^\s*["']use client["']/.test(readFileSync(file, "utf8")))
+      .filter((file) => hasClientDirective(readFileSync(file, "utf8")))
       .flatMap((file) => {
         const reachable = reachableFrom(file);
         return serverOnly
