@@ -145,15 +145,27 @@ extract_required_checks() {
 
 if head_script="$(gh api -H "Accept: application/vnd.github.raw" \
   "repos/{owner}/{repo}/contents/bin/loop-ci-status?ref=$head_sha" 2>/dev/null)"; then
-  if head_required="$(extract_required_checks "$head_script")"; then
-    while IFS= read -r name; do
-      [[ -n ${name//[[:space:]]/} ]] || continue
-      for known in "${required[@]}"; do
-        [[ $known == "$name" ]] && continue 2
-      done
-      required+=("$name")
-    done <<<"$head_required"
+  # **取れたのに読めない**のと、**取れない**のは別である（#207 で決めた形）。
+  #
+  # **取れないのは一時的**（通信・認証）で、**次の周回で直りうる**——`main` の一覧で判定する。
+  # **読めないのは恒久的**（宣言の書式が変わった）で、**次の周回でも読めない**——
+  # **待っても解けないものを「待つ」側へ倒すと、`main` の一覧だけで
+  # 「必須はすべて成功」と言い続ける。この判定が直しに来た形が、そのまま戻る。**
+  #
+  # **同じ PR の中で起こりうる。** **書式を変える commit と workflow を足す commit が
+  # 1 本に入っていれば、head 側の `--required-checks` も `bin/required-checks.test.ts` も
+  # 正常なまま、ゲートだけが緩む**（#221 のレビュー）。**だから、ここで止める。**
+  if ! head_required="$(extract_required_checks "$head_script")"; then
+    echo "[FAIL] PR #$PR の head から必須チェックの一覧を読めません (宣言の書式が変わった?)" >&2
+    exit 2
   fi
+  while IFS= read -r name; do
+    [[ -n ${name//[[:space:]]/} ]] || continue
+    for known in "${required[@]}"; do
+      [[ $known == "$name" ]] && continue 2
+    done
+    required+=("$name")
+  done <<<"$head_required"
 fi
 
 # **`gh pr checks` を使わない。** **`bucket` は `status` から導かれる**ので、

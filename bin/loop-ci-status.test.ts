@@ -674,6 +674,37 @@ describe("bin/loop-ci-status", () => {
       expect(result.stdout).toContain("beta");
     });
 
+    it("head は取れたのに一覧が見つからなければ、止める", () => {
+      // **一時的か恒久的かで分ける**（#207 で決めた形）。**取れなかったのは次の周回で
+      // 直りうる**が、**書式が変わったのなら次も読めない**——**待っても解けないものを
+      // 「待つ」側へ倒すと、`main` の一覧だけで「必須はすべて成功」と言い続ける。**
+      // **この PR が直しに来た形が、そのまま戻る。**
+      headScriptBody = ["#!/usr/bin/env bash", "declare -r CHECKS=(alpha beta)", ""].join("\n");
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+    });
+
+    it("一覧の引用符が閉じていなければ、止める", () => {
+      // **途中で切れた応答を「そこまで」で拾わない。** **拾うと名前が黙って減る。**
+      headScriptBody = ['readonly DEFAULT_REQUIRED_CHECKS="alpha', "beta"].join("\n");
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+    });
+
     it("head を読めなければ、main の一覧で判定する", () => {
       // **判定不能を「通す」へ倒さない**が、**読めないだけで全部止めるのも違う**
       //（#207 の「読めなければ止めない」と揃える）。**gamma は `main` の一覧に
