@@ -697,6 +697,13 @@ gh pr edit <PR番号> --add-label changes-requested     # 付け直して初め�
   fetch されていないので、`git show refs/pr/<N>:...` は revision 不明で失敗する）
 - 直さないと判断したものは、**その理由が書かれているか**
 
+**スレッドへの返信は `bin/loop-review-reply <PR番号> <スレッドID> <本文ファイル>` を通す。**
+**`gh api` を直接叩かない**——**前の投稿が落ちた残骸（空の pending review）が、
+次の投稿を全部塞ぐ** (#216。**master も worker も同じところで詰まる**ので、
+**始末はスクリプトが持つ**)。**exit 1 は「消してはいけないものが塞いでいる」**
+（人が決める）、**exit 2 は投稿できなかった**——**どちらも「投げた」で終わらせない。**
+手順は `.claude/skills/respond-to-review/` にある。
+
 **resolve も返信も、書く前に `bin/loop-head same <PR番号> <ゲートが出した head>` を通す。**
 **読んだ差分（`gh pr diff`）は、評価した head のもの**である——**動いていたら、
 その返信は新しい head に対する返信として並ぶ**（周回を終える。行き先はステップ 3.1）。
