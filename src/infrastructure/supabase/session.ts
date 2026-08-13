@@ -31,17 +31,32 @@ export type SessionCookies = {
   setAll(cookies: { name: string; value: string; options?: Record<string, unknown> }[]): void;
 };
 
+/**
+ * 繋ぎ先。**ブラウザが行く先と、サーバが叩く先は別である。**
+ *
+ * **開発では docker の中と外で名前が違う**（`compose.yaml`。`app` は Supabase と
+ * 同じ network にいるのでコンテナ名で引き、ブラウザはコンテナ名を解決できない）。
+ * **片方へ寄せると、どちらへ寄せても通らない**——`localhost:54321` にすると
+ * **app コンテナが自分自身を叩き**、`kong:8000` にすると **ブラウザが解決できない。**
+ *
+ * **本番では同じ値でよい。** **同じでも壊れない形にしてある。**
+ */
 export type SupabaseConnection = {
-  readonly url: string;
+  /** サーバから叩く先。**交換・本人確認・行の読み書きはこちら。** */
+  readonly serverUrl: string;
+  /** ブラウザが行く先。**認可画面へ送る URL はこちらへ揃える。** */
+  readonly publicUrl: string;
   readonly publishableKey: string;
 };
 
 /** 読む環境変数の名前。`.env.example` と揃える。 */
-const URL_NAME = "NEXT_PUBLIC_SUPABASE_URL";
+const SERVER_URL_NAME = "SUPABASE_URL";
+const PUBLIC_URL_NAME = "NEXT_PUBLIC_SUPABASE_URL";
 const KEY_NAME = "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY";
 
 const connectionSchema = z.object({
-  [URL_NAME]: z.url(),
+  [SERVER_URL_NAME]: z.url(),
+  [PUBLIC_URL_NAME]: z.url(),
   [KEY_NAME]: z.string().trim().min(1),
 });
 
@@ -56,16 +71,48 @@ export function readSupabaseConnection(
 ): SupabaseConnection {
   const parsed = connectionSchema.safeParse(env);
   if (!parsed.success) {
-    throw new Error(`環境変数が設定されていないか、形式が違います: ${URL_NAME} / ${KEY_NAME}`);
+    throw new Error(
+      `環境変数が設定されていないか、形式が違います: ${SERVER_URL_NAME} / ${PUBLIC_URL_NAME} / ${KEY_NAME}`,
+    );
   }
-  return { url: parsed.data[URL_NAME], publishableKey: parsed.data[KEY_NAME] };
+  return {
+    serverUrl: parsed.data[SERVER_URL_NAME],
+    publicUrl: parsed.data[PUBLIC_URL_NAME],
+    publishableKey: parsed.data[KEY_NAME],
+  };
+}
+
+/**
+ * ブラウザへ渡す URL へ直す。
+ *
+ * **`signInWithOAuth` が作る URL は、クライアントを作ったときの繋ぎ先で始まる。**
+ * **サーバ側の名前のまま返すと、ブラウザが解決できない。**
+ *
+ * **クライアントを 2 つ作って使い分けない。** **PKCE の検証子を入れる Cookie の
+ * 名前は繋ぎ先から決まる**ので、**書くときと読むときで繋ぎ先が違うと、
+ * 戻ってきたときに検証子が見つからない**——**置き換えるのは出口の 1 箇所だけにする。**
+ *
+ * **知らない行き先は書き換えない。** **何でも書き換えると、外から渡された URL の
+ * 行き先まで変えてしまう。**
+ */
+export function toBrowserUrl(connection: SupabaseConnection, url: string): string {
+  const serverOrigin = new URL(connection.serverUrl).origin;
+  const target = new URL(url);
+  if (target.origin !== serverOrigin) {
+    return url;
+  }
+  const publicOrigin = new URL(connection.publicUrl).origin;
+  // **問い合わせと素片を落とさない。** **`state` と PKCE の検証子はそこに載っている。**
+  return `${publicOrigin}${target.pathname}${target.search}${target.hash}`;
 }
 
 export function createSessionClient(
   connection: SupabaseConnection,
   cookies: SessionCookies,
 ): SupabaseClient {
-  return createServerClient(connection.url, connection.publishableKey, {
+  // **サーバ側の繋ぎ先で作る。** **このクライアントが叩くのは、交換・本人確認・
+  // 行の読み書き**——**どれもサーバから出ていく。**
+  return createServerClient(connection.serverUrl, connection.publishableKey, {
     cookies: {
       getAll: () => cookies.getAll(),
       setAll: (updated) => {
@@ -88,6 +135,7 @@ export function createSessionClient(
  */
 export async function startGithubLogin(
   client: SupabaseClient,
+  connection: SupabaseConnection,
   redirectTo: string,
 ): Promise<string> {
   // **`scopes` は渡さない。** **GitHub App の権限は App 側の設定で決まる**ので、
@@ -100,7 +148,8 @@ export async function startGithubLogin(
   if (error !== null || data.url === null) {
     throw new Error("ログインを開始できません");
   }
-  return data.url;
+  // **ここが出口である。** **ブラウザが解決できる名前へ直してから渡す。**
+  return toBrowserUrl(connection, data.url);
 }
 
 /**

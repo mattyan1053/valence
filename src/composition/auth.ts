@@ -69,7 +69,8 @@ async function storeForCurrentUser(
   }
   const connection = readSupabaseConnection(process.env);
   return createSupabaseUserTokenStore({
-    url: connection.url,
+    // **サーバから叩く。** **ブラウザ向けの名前を使うと、app コンテナが自分自身を叩く。**
+    url: connection.serverUrl,
     publishableKey: connection.publishableKey,
     userId,
     userAccessToken: accessToken,
@@ -79,7 +80,7 @@ async function storeForCurrentUser(
 
 /** GitHub の認可画面の URL。**戻り先はこちらで決める**（外から受けない）。 */
 export async function githubLoginUrl(callbackUrl: string): Promise<string> {
-  return startGithubLogin(await sessionClient(), callbackUrl);
+  return startGithubLogin(await sessionClient(), readSupabaseConnection(process.env), callbackUrl);
 }
 
 /**
