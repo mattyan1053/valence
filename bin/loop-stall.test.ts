@@ -951,6 +951,58 @@ describe("worker が作業しているあいだは数えない", () => {
     );
   }
 
+  it("片方の作業場だけが新しい周回を始めても、数えない", () => {
+    // **作業場が増えると、無関係な周回で別の PR のカウンタが進む**（#144）。
+    // **印を全部の作業場から取って最大値にしていた**ので、**PR を直している worker が
+    // 同じ長い周回にいても、別の worker が周回を始めるたびに数が進む**——
+    // **別 worker の 3 周だけで全ループを誤停止しうる。**
+    //
+    // **入力を 2 つ用意する。** **1 つの作業場だけでは、この経路に入らない**
+    // （#195 / #196 / #197 / #198 で 4 回続けて踏んだ形）
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 600, activityAgo: 10 });
+    expect(stall().stdout, "1 周目は印を覚えるだけ").toContain("count=0");
+
+    // **もう一方だけが、新しい周回を始めた**（こちらは同じ周回の中にいる）
+    otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
+
+    expect(stall().stdout, "無関係な周回で数が進んでいる").toContain("count=0");
+  });
+
+  it("どの作業場も新しい周回を始めたら、数える", () => {
+    // **混ざらなくすることは、数えなくすることではない**（#47 で塞いだ
+    // 「正常に動きながら何も進まない」が、ここに開き直る）。
+    // **片方だけ見ると「誰のカウンタも進まない」でも緑になる**
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 600, activityAgo: 10 });
+    expect(stall().stdout).toContain("count=0");
+
+    // **両方が、新しい周回を始めた**
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
+
+    expect(stall().stdout, "誰の周回でも数が進まなくなっている").toContain("count=1");
+  });
+
+  it("使われなくなった作業場は、数を止め続けない", () => {
+    // **「全員が新しい周回を始めたか」で見る**と、**周回を始めなくなった作業場が
+    // 1 つあるだけで、数が永久に止まる**——**混ざらなくすることは、数えなくすること
+    // ではない**（#47 で塞いだ「正常に動きながら何も進まない」が、ここに開き直る）。
+    //
+    // **生きている作業場だけを見る**（#175 と同じ判定を、印のほうにも当てる）
+    const now = Math.floor(Date.now() / 1000);
+    // **窓の外にいる作業場**（600 秒の周回なので窓は 1800 秒。3 時間前は死んでいる）
+    otherWorkspace({ longestRound: 600, startedAgo: 10800, activityAgo: 10800 });
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    expect(stall().stdout).toContain("count=0");
+
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+
+    expect(stall().stdout, "死んだ作業場が数を止めている").toContain("count=1");
+  });
+
   it("人が `./task` を叩いても、使われなくなった作業場は生き返らない", () => {
     // **活動の記録は生存に使えない**（このファイルの上のほうに書いてある）——
     // **`./task` は lease の有無に関係なく毎回 heartbeat を打つ**ので、

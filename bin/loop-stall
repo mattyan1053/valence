@@ -443,12 +443,18 @@ if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
   && [[ $lease_ttl =~ ^[0-9]+$ ]]; then
   # **始めた周回の印。** lease と違って返しても消えないので、
   # **周回と周回の間でも「どの周回まで始めたか」が読める**。
-  for rounds in "$common_dir"/valence-loop-rounds-worker*; do
-    [[ -f $rounds ]] || continue
-    read -r started <"$rounds" 2>/dev/null || continue
-    [[ $started =~ ^[0-9]+$ ]] || continue
-    [[ -z $worker_epoch ]] || ((started > worker_epoch)) && worker_epoch="$started"
-  done
+  # **いちばん遅い作業場に合わせる** (#144)。**最大値を取ると、無関係な worker が
+  # 周回を始めるたびに数が進む**——**PR を直している worker が同じ長い周回にいても、
+  # 別 worker の 3 周だけで全ループを誤停止しうる。**
+  #
+  # **担当を突き止めない。** **どの作業場がどの PR を見ているかは、ここからは分からない**
+  # （PR 番号から作業場を引くには GitHub が要る）。**代わりに「全員が新しい周回を
+  # 始めたか」を見る**——**担当している作業場も必ずその中にいる**ので、
+  # **無関係な周回だけでは進まない。**
+  #
+  # **止まらなくなる形にはしない。** **見るのは生きている作業場だけ**なので、
+  # **周回を始めなくなった作業場は、その窓を過ぎた時点で外れる**（すぐ下と同じ判定）。
+
   # 窓 = いちばん長かった周回 × 2。**実測が無ければ lease の期限で代用する。**
   #
   # **生きている作業場のものだけを見る** (#175 のレビュー)。記録は**作業場ごと**にあり
@@ -472,21 +478,32 @@ if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
   # **新しい閾値は作っていない**（**下と同じ式・同じ既定**を、作業場ごとに当てるだけ）。
   #
   # **消さない**のも意図的である（**削除は戻せない**）。読むときに外すだけにする。
+  # **印と窓を、同じ 1 つの走査で取る** (#144)。**生死の判定を 2 箇所に持つと、
+  # 片方だけ直して食い違う**——**印の側だけ生死を見ないと、周回を始めなくなった
+  # 作業場が数を永久に止める。**
   now_epoch="$(date +%s)"
   longest_round=0
-  for len in "$common_dir"/valence-loop-roundlen-worker*; do
-    [[ -f $len ]] || continue
-    read -r seconds <"$len" 2>/dev/null || continue
-    [[ $seconds =~ ^[0-9]+$ ]] || continue
-    scope="${len##*/valence-loop-roundlen-}"
-    scope_rounds="$common_dir/valence-loop-rounds-$scope"
+  for scope_rounds in "$common_dir"/valence-loop-rounds-worker*; do
     [[ -f $scope_rounds ]] || continue
     read -r scope_started <"$scope_rounds" 2>/dev/null || continue
     [[ $scope_started =~ ^[0-9]+$ ]] || continue
-    scope_window=$((seconds * 2))
-    ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
+    scope="${scope_rounds##*/valence-loop-rounds-}"
+    # **実測が無い作業場もいる**（一度も返していない）。**そのときは既定の窓で見る**
+    seconds=""
+    len="$common_dir/valence-loop-roundlen-$scope"
+    if [[ -f $len ]]; then
+      read -r seconds <"$len" 2>/dev/null || seconds=""
+      [[ $seconds =~ ^[0-9]+$ ]] || seconds=""
+    fi
+    scope_window="$lease_ttl"
+    if [[ -n $seconds ]]; then
+      scope_window=$((seconds * 2))
+      ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
+    fi
     ((now_epoch - scope_started < scope_window)) || continue
-    ((seconds > longest_round)) && longest_round="$seconds"
+    [[ -z $seconds ]] || ((seconds <= longest_round)) || longest_round="$seconds"
+    # **いちばん遅い作業場に合わせる**（上の理由）
+    [[ -n $worker_epoch ]] && ((scope_started >= worker_epoch)) || worker_epoch="$scope_started"
   done
   ((longest_round > 0)) && worker_round_window=$((longest_round * 2)) \
     || worker_round_window="$lease_ttl"
