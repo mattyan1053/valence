@@ -144,6 +144,11 @@ describe("./task check の終わりの印", () => {
         ].join("\n"),
         { mode: 0o755 },
       );
+      // **この節は `bin/loop-sync-main` も通る**（取ってくるだけの口）。
+      // **無いと、そこで止まって以降が走らない**——見たいのはその先である
+      writeFileSync(join(workspace, "bin", "loop-sync-main"), "#!/usr/bin/env bash\nexit 0\n", {
+        mode: 0o755,
+      });
       writeFileSync(
         join(workspace, "bin", "loop-stall"),
         [
@@ -248,7 +253,7 @@ describe("./task check の終わりの印", () => {
         );
         // **`bin/` の偽物**（この節は落ちたときに記録を通す）
         mkdirSync(join(workspace, "bin"), { recursive: true });
-        for (const name of ["loop-stall"]) {
+        for (const name of ["loop-stall", "loop-sync-main"]) {
           writeFileSync(join(workspace, "bin", name), "#!/usr/bin/env bash\nexit 0\n", {
             mode: 0o755,
           });
