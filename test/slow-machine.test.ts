@@ -102,7 +102,7 @@ describe("プロセスを起こす試験の枠", () => {
 
   it("bin/ と loop/ の試験は、実測から導いた枠で走る", () => {
     // **既定の 5 秒はこの機械の実測の内側にある。** いちばん重い試験は
-    // git と loop-stall を 10 回起こし、1 回あたり 0.22〜1.00 秒かかる（実測）。
+    // git と loop-stall を `MODELLED_SPAWNS` 回起こし、1 回あたり 0.22〜1.00 秒かかる（実測）。
     // **枠は「数えた回数 × 実測の最悪値 × 安全率」で決める**——
     // 伸ばすのではなく、**何回起こすかから導く**
     const scripts = named("scripts");
@@ -127,8 +127,8 @@ describe("プロセスを起こす試験の枠", () => {
 
   it("hook にも同じ根拠の枠を与える", () => {
     // **本体だけ伸ばしても、本体へ到達する前に落ちる。**
-    // `bin/loop-claim.test.ts` の `beforeEach` は 16 プロセスを同期実行する
-    // （git 2 回と `which` 14 回）。既定の hookTimeout は 10 秒しかない
+    // `bin/loop-claim.test.ts` の `beforeEach` は `MODELLED_HOOK_SPAWNS` ぶんを
+    // 同期実行する（git 2 回と `which` 14 回）。既定の hookTimeout は 10 秒しかない
     expect(named("scripts")?.test.hookTimeout).toBe(budgetFor(MODELLED_HOOK_SPAWNS));
   });
 
