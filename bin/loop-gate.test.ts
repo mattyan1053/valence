@@ -27,11 +27,6 @@ const BOT = execFileSync(fileURLToPath(new URL("./loop-review-commits", import.m
   .toString()
   .trim();
 
-/** gh の `--jq` の `@base64` と同じ符号化。 */
-function b64(value: string): string {
-  return Buffer.from(value, "utf8").toString("base64");
-}
-
 type Run = { status: number; stdout: string; stderr: string };
 
 /**
@@ -95,12 +90,6 @@ case "$args" in
     [[ -n \${FAKE_SIZE_FAIL:-} ]] && exit 1
     printf '%s\\n' "\${FAKE_SIZE_FILES:-5}" "\${FAKE_SIZE_LINES:-100}"
     ;;
-  "pr checks"*)
-    require "--jq" "(type)" ".name" "@base64" ".bucket"
-    [[ -n \${FAKE_CHECKS_FAIL:-} ]] && exit 1
-    printf '%s' "\${FAKE_CHECKS-T$'\\t'array$'\\n'C$'\\t'YWxwaGE=$'\\t'pass}"
-    printf '\\n'
-    ;;
   "api graphql"*)
     require "--jq" "isResolved"
     [[ -n \${FAKE_THREADS_FAIL:-} ]] && exit 1
@@ -114,6 +103,17 @@ exit 0
   );
 
   // 補助スクリプトの差し替え。出力と終了コードだけを持つ
+  //
+  // **CI の判定は bin/loop-ci-status が持つ** (#206)。**ゲートは終了コードで分ける**ので、
+  // **ここでも終了コードだけを差し替える**（文面で分けていないことが、これで見える）
+  writeFileSync(
+    join(bin, "loop-ci-status"),
+    `#!/usr/bin/env bash
+printf '%s\\n' "\${FAKE_CI_OUT:-必須 6 件すべて決着して成功}"
+exit \${FAKE_CI_EXIT:-0}
+`,
+    { mode: 0o755 },
+  );
   writeFileSync(
     join(bin, "loop-review-commits"),
     `#!/usr/bin/env bash
@@ -217,36 +217,27 @@ describe("bin/loop-gate は 1 条件でも欠ければ止める", () => {
     { name: "規模上限: ファイル数", env: { FAKE_SIZE_FILES: "999" }, marker: "規模上限" },
     { name: "規模上限: 行数", env: { FAKE_SIZE_LINES: "99999" }, marker: "規模上限" },
     {
-      name: "GHA CI: 必須チェックが pass でない",
-      env: { FAKE_CHECKS: `T\tarray\nC\t${b64("alpha")}\tfail` },
+      name: "GHA CI: 決着して成功していない",
+      env: { FAKE_CI_EXIT: "1" },
       marker: "GHA CI",
     },
+    // **文面まで見る。** **「待つ」と「人を呼ぶ」を、読む側が語で見分ける**ので、
+    // **同じ行に見えると master がどちらへも倒せる**
     {
-      name: "GHA CI: 必須チェックが無い",
-      env: { FAKE_CHECKS: `T\tarray\nC\t${b64("beta")}\tpass` },
-      marker: "GHA CI",
+      name: "GHA CI: まだ決着していない",
+      env: { FAKE_CI_EXIT: "3" },
+      marker: "pending",
     },
-    // **文面まで見る。** 「0 件」を消しても必須チェック不足で落ちるので、
-    // 目印だけだと検査を消したことに気づけない
     {
-      name: "GHA CI: チェックが 0 件",
-      env: { FAKE_CHECKS: "T\tarray" },
-      marker: "1 件も登録されていません",
+      name: "GHA CI: 決着しないまま予算を超えた",
+      env: { FAKE_CI_EXIT: "4" },
+      marker: "予算を超えました",
     },
     { name: "レビュー: 1 件も無い", env: { FAKE_REVIEWED: "" }, marker: "レビュー" },
     {
       name: "レビュー: 現 head が未レビューで上限未満",
       env: { FAKE_REVIEWED: `2026-01-01T00:00:00Z\t${"b".repeat(40)}` },
       marker: "レビュー",
-    },
-    {
-      // **チェック名は PR 側で決められる**（pull_request で走る job 名）。
-      // 名前 "dummy\nC\talpha" を持つ成功ジョブが 1 つあると、生のまま並べる実装では
-      // 2 行目が `C<TAB>alpha<TAB>pass` になり、**実在しない必須チェックが pass に見える**
-      // （修正前の実装に食わせて GATE PASS が出ることを確認済み）
-      name: "GHA CI: 区切りを含むチェック名で必須チェックを偽装できない",
-      env: { FAKE_CHECKS: `T\tarray\nC\t${b64("dummy\nC\talpha")}\tpass` },
-      marker: "GHA CI",
     },
     { name: "未解決スレッドがある", env: { FAKE_THREADS: "2" }, marker: "未解決スレッド" },
     {
@@ -272,7 +263,7 @@ describe("bin/loop-gate は判定できないものを合格にしない", () =>
   const cases: { name: string; env: Record<string, string>; marker: string }[] = [
     { name: "PR の情報を取れない", env: { FAKE_PR_VIEW_FAIL: "1" }, marker: "判定対象" },
     { name: "規模を取れない", env: { FAKE_SIZE_FAIL: "1" }, marker: "規模上限" },
-    { name: "チェック結果を取れない", env: { FAKE_CHECKS_FAIL: "1" }, marker: "GHA CI" },
+    { name: "チェック結果を取れない", env: { FAKE_CI_EXIT: "2" }, marker: "GHA CI" },
     { name: "スレッドを取れない", env: { FAKE_THREADS_FAIL: "1" }, marker: "未解決スレッド" },
     {
       name: "レビュー済み commit を取れない",

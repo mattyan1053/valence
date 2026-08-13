@@ -16,37 +16,18 @@
 # shellcheck disable=SC2016
 set -uo pipefail
 
-# .github/workflows/*.yml のジョブ名。これらが pass として存在することを個別に要求する。
-# 「全部 pass」だけでは、ワークフローが起動しなかった PR が 0 件で通ってしまう。
-readonly DEFAULT_REQUIRED_CHECKS="lint / typecheck / boundaries / test
-build
-shell scripts
-dependency vulnerabilities
-new dependencies
-analyze"
-
-# 必須チェックは行単位で読む。空白のみの上書きを通すと必須チェックが 0 件になり、
-# CI が動いていない commit が素通りする。
-mapfile -t REQUIRED_CHECKS <<<"${LOOP_REQUIRED_CHECKS:-$DEFAULT_REQUIRED_CHECKS}"
-required=()
-for name in "${REQUIRED_CHECKS[@]}"; do
-  [[ -n ${name//[[:space:]]/} ]] && required+=("$name")
-done
-if ((${#required[@]} == 0)); then
-  echo "[FAIL] 設定: 必須チェックが空です。空にすることはできません" >&2
-  exit 2
-fi
-
 # **一覧を、呼ぶ側へ渡す** (#125)。**書き写させない**——`bin/loop-handoff` の指紋が
 # ここと同値でないと、**必須でないチェックが落ちたまま必須が pass に変わったとき**、
 # **ゲートは不合格 → 合格に変わるのに指紋が動かない**。**通知は抑止され続ける**ので、
 # **マージできるようになった、まさにその瞬間に黙る**。
 #
+# **持っているのは `bin/loop-ci-status` である** (#206)。**判定と一覧を同じ側に置く**
+# ——**2 箇所に持つと片方だけ直して食い違う** (#159 で踏んだ形)。ここは口だけを残す。
+#
 # **入口の確認より前に返す。** これは周回の判定ではなく**定数の問い合わせ**である——
 # 後ろに置くと、**尋ねるたびに `bin/loop-lease check` が走り、偽の「飛ばした」が積まれる**。
 if [[ ${1-} == "--required-checks" ]]; then
-  printf '%s\n' "${required[@]}"
-  exit 0
+  exec "${BASH_SOURCE[0]%/*}/loop-ci-status" --required-checks
 fi
 
 # **入口を飛ばしていないか、ここでも確かめる**（#161）。**出口だけでは遅い**——
@@ -151,66 +132,21 @@ else
 fi
 
 # --- 3. GHA CI ----------------------------------------------------------------
-# gh の失敗、チェック 0 件、pass 以外の bucket はすべて不合格にする。
-# gh pr checks は「取得の失敗」でも「チェックが pending / fail」でも非ゼロで終わる
-# (pending は exit 8)。終了コードだけで弾くと、CI が落ちている PR を「取得できません」
-# として片付けてしまい、worker へ修正を返す経路が死ぬ。出力の有無で切り分ける。
-# 1 行目に結果の型、2 行目以降に "C<TAB>符号化した名前<TAB>bucket" を出させる。
-# **型を出力に含める**のは、取得の失敗と「チェック 0 件」を見分けるため
-# (どちらも本文が空になる)。bin/loop-fixup-lines と同じ形。
+# **判定は `bin/loop-ci-status` が持つ** (#206)。**`status` と `conclusion` は別の軸**で、
+# **`gh pr checks` の `bucket` は `status` から導かれる**ので **`conclusion` が落ちる**——
+# **実物が 105 分「pending」のまま止まり、master は毎周回「正しく何もしない」を選んだ。**
 #
-# **チェック名は @base64 で符号化して受け取る。** 名前は pull_request で走る job 名から
-# 来るので **PR 側で決められる**。区切り (タブ・改行) を含む名前をそのまま並べると、
-# `dummy\nC\talpha\tpass` のような名前 1 つで**行を増やし、実在しない必須チェックを
-# pass に見せられる**。符号化後は [A-Za-z0-9+/=] だけなので区切りを跨げない。
-# **復号はしない。** 突き合わせはこちらが持つ必須チェック名を符号化して行い、
-# 表示にも自分の名前しか使わない (外部由来の文字列を出力へ戻さない)。
-checks_out="$(gh pr checks "$PR" --json name,bucket \
-  --jq '"T\t\(type)", (.[]? | "C\t\(.name | @base64)\t\(.bucket)")' 2>/dev/null)"
-checks_type=""
-check_lines=()
-while IFS= read -r line; do
-  case "$line" in
-    T$'\t'*) checks_type="${line#T$'\t'}" ;;
-    C$'\t'*) check_lines+=("${line#C$'\t'}") ;;
-  esac
-done <<<"$checks_out"
-
-if [[ $checks_type != "array" ]]; then
-  fail "GHA CI: gh pr checks で結果を取得できません"
-elif ((${#check_lines[@]} == 0)); then
-  fail "GHA CI: チェックが 1 件も登録されていません"
-else
-  missing=()
-  bad=()
-  for name in "${required[@]}"; do
-    # 比較する側も同じ符号化に揃える。base64 は 76 桁で折り返す実装があるので改行を落とす
-    # (-w0 は GNU 限定なので使わない)。jq の @base64 は折り返さない。
-    if ! want="$(printf '%s' "$name" | base64 | tr -d '\n')" || [[ -z $want ]]; then
-      fail "GHA CI: 必須チェック名を符号化できません: $name"
-      break
-    fi
-    bucket=""
-    for line in "${check_lines[@]}"; do
-      if [[ ${line%%$'\t'*} == "$want" ]]; then
-        bucket="${line#*$'\t'}"
-        break
-      fi
-    done
-    if [[ -z $bucket ]]; then
-      missing+=("$name")
-    elif [[ $bucket != "pass" ]]; then
-      bad+=("$name=$bucket")
-    fi
-  done
-  if ((${#missing[@]} > 0)); then
-    fail "GHA CI: 必須チェックが見つかりません: ${missing[*]}"
-  elif ((${#bad[@]} > 0)); then
-    fail "GHA CI: pass していないチェック: ${bad[*]}"
-  else
-    pass "GHA CI: 必須 ${#required[@]} 件すべて pass"
-  fi
-fi
+# **待つ / 人を呼ぶ / 直させる を、終了コードで分ける。** **文面で分けない**——
+# **読む側が語を写すと、片方だけ変わって食い違う** (`bin/loop-stall` と同じ判断)。
+ci_status=0
+ci_out="$("${BASH_SOURCE[0]%/*}/loop-ci-status" "$PR")" || ci_status=$?
+case "$ci_status" in
+  0) pass "GHA CI: $ci_out" ;;
+  1) fail "GHA CI: $ci_out" ;;
+  3) fail "GHA CI: pending。$ci_out" ;;
+  4) fail "GHA CI: pending のまま予算を超えました。$ci_out" ;;
+  *) fail "GHA CI: 判定できません (bin/loop-ci-status が exit $ci_status)" ;;
+esac
 
 # --- 4. レビュー済み ----------------------------------------------------------
 # Codex の応答は 3 通りある。指摘ありは review オブジェクト、指摘なしは会話コメントか

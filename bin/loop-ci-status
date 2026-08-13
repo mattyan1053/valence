@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# PR の必須チェックが決着したかを、`status` と `conclusion` の両方で見る。
+#
+#   bin/loop-ci-status <PR番号>
+#   bin/loop-ci-status --fingerprint <PR番号>   決着の別だけを、必須の並び順で返す
+#   bin/loop-ci-status --required-checks        必須チェック名を並べる (定数の問い合わせ)
+#
+#   exit 0 = 必須がすべて決着して成功
+#   exit 1 = 決着して失敗 / 必須が見つからない (worker に直させる)
+#   exit 3 = まだ決着していないが、予算の内 (待つ)
+#   exit 4 = 決着しないまま予算を超えた (人を呼ぶ)
+#   exit 2 = 読めない / 使い方の誤り
+#
+# **`status` と `conclusion` は別の軸である。** **実物が 105 分止まった** (#206)——
+# **`conclusion=success` なのに `status=in_progress` のまま**で、
+# **`gh pr checks` の `bucket` は `status` から導かれる**ので **pending と読まれた**。
+# **master は毎周回「正しく何もしない」を選び、そのたびに永久へ近づいた。**
+# **片方に丸めない** (#90「並べ忘れた値がどの分岐にも入らない」と同族)。
+#
+# **止めるだけにしない。** **本当に走っている CI を止めると、#47 で塞いだ
+# 「正常に動きながら何も進まない」の逆側**——**健全な待ちを壊す**——へ倒れる。
+#
+# **`bin/loop-lease check` は通さない。** **`bin/loop-gate` の中から呼ばれる**ので
+# 入口は既に確かめてあり、**`--required-checks` は定数の問い合わせ**である
+# (尋ねるたびに偽の「飛ばした」が積まれる。`bin/loop-gate` の同じ判断を参照)。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# 列の区切り。**タブにしない**——`IFS` の空白として畳まれ、空の列があるとずれる。
+readonly FIELD=$'\037'
+
+# .github/workflows/*.yml のジョブ名。これらが決着して成功していることを個別に要求する。
+# 「全部 pass」だけでは、ワークフローが起動しなかった PR が 0 件で通ってしまう。
+readonly DEFAULT_REQUIRED_CHECKS="lint / typecheck / boundaries / test
+build
+shell scripts
+dependency vulnerabilities
+new dependencies
+analyze"
+
+# **成功の側を並べ、それ以外は失敗へ倒す。** 失敗の側を並べると、
+# **GitHub が値を増やしたときに、知らない値がどの分岐にも入らない** (#90)。
+readonly OK_CONCLUSIONS="success skipped neutral"
+
+# **`timeout-minutes` を宣言しない job の「諦める時間」** (GitHub Actions の既定)。
+# **無いのではなく 360 分である。**
+readonly DEFAULT_TIMEOUT_MIN=360
+
+# **指紋は予算を見ない。** **`bin/loop-handoff` は「同じ状態か」だけを見る** ので、
+# **予算を入れると時間の経過だけで指紋が動き、何も変わっていないのに通知が飛ぶ**。
+# **`bucket` のままだと、ゲートが `conclusion` で成功へ変わっても指紋が動かない**
+# ——**マージできるようになった、まさにその瞬間に黙る** (#173 / #207)。
+
+usage() {
+  echo "使い方: bin/loop-ci-status <PR番号>" >&2
+  echo "        bin/loop-ci-status --fingerprint <PR番号>" >&2
+  echo "        bin/loop-ci-status --required-checks" >&2
+  echo "        exit 0 = 決着して成功 / exit 1 = 失敗・欠け / exit 3 = 待つ" >&2
+  echo "        exit 4 = 予算を超えた / exit 2 = 読めない・使い方の誤り" >&2
+  exit 2
+}
+
+mapfile -t REQUIRED_CHECKS <<<"${LOOP_REQUIRED_CHECKS:-$DEFAULT_REQUIRED_CHECKS}"
+required=()
+for name in "${REQUIRED_CHECKS[@]}"; do
+  [[ -n ${name//[[:space:]]/} ]] && required+=("$name")
+done
+if ((${#required[@]} == 0)); then
+  echo "[FAIL] 設定: 必須チェックが空です。空にすることはできません" >&2
+  exit 2
+fi
+
+if [[ ${1-} == "--required-checks" ]]; then
+  [[ $# -eq 1 ]] || usage
+  printf '%s\n' "${required[@]}"
+  exit 0
+fi
+
+FINGERPRINT=0
+if [[ ${1-} == "--fingerprint" ]]; then
+  FINGERPRINT=1
+  shift
+fi
+readonly FINGERPRINT
+
+[[ $# -eq 1 ]] || usage
+[[ $1 =~ ^[0-9]+$ ]] || usage
+readonly PR="$1"
+
+if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
+  || [[ -z $head_sha || $head_sha == "null" ]]; then
+  echo "[FAIL] PR #$PR の head を読み取れません" >&2
+  exit 2
+fi
+
+# **`gh pr checks` を使わない。** **`bucket` は `status` から導かれる**ので、
+# **`conclusion` が落ちる**——**この Issue が直しに来たものが、そこで消える** (#206)。
+#
+# **チェック名は @base64 で符号化して受け取る。** 名前は job 名から来るので
+# **PR 側で決められる**——区切りを含む名前で行を増やされないようにする
+# (`bin/loop-gate` と同じ判断。**復号はしない**)。
+if ! checks_out="$(gh api --paginate "repos/{owner}/{repo}/commits/$head_sha/check-runs" \
+  --jq ".check_runs[]? | \"\\(.name | @base64)$FIELD\\(.status)$FIELD\\(.conclusion // \"\")$FIELD\\(.started_at // \"\")\"" \
+  2>/dev/null)"; then
+  echo "[FAIL] PR #$PR の check-runs を取得できません" >&2
+  exit 2
+fi
+
+# **予算は、その場所の数字から取る** (#206)。**ジョブ自身が諦める時間より長く待つ
+# 理由が無い**ので、**`.github/workflows/` の `timeout-minutes` の最大**を使う。
+#
+# **その PR の head から読む** (#207 のレビュー)。**master は PR を checkout しない**ので、
+# **手元の作業ツリーを読むと `main` の値**になる——**PR が timeout を伸ばしていると、
+# 正当に走っているジョブを 21 分で止め、繰り返せば全ループを止める**。
+# **検査を起動したのは PR 側の workflow**である。
+#
+# **いちばん長いものに合わせる。** **短いほうに合わせると、長い CI を持つ検査で
+# 誤って止める**——**倒す先を「待つ」側へ寄せる**。
+# **どの workflow の検査かを引き当てない**のは、**check run から workflow まで
+# API を挟む**うえ、**当たらなかったときに倒れる先がまた要る**からである。
+#
+# **読めなければ止めない。** **判定不能を「止める」へ倒さない。**
+budget_min=""
+# **全部の job が `timeout-minutes` を宣言していると確かめられたか。**
+all_declared=1
+# **workflow を読めたか。** **`budget_min` の有無で代用しない**——**どの job も
+# 宣言していないと、読めているのに空**になり、**既定へ倒れない**（#207 のレビュー）。
+workflows_read=0
+if ((FINGERPRINT == 0)) \
+  && workflow_paths="$(gh api "repos/{owner}/{repo}/contents/.github/workflows?ref=$head_sha" \
+    --jq '.[]? | select(.type == "file") | .path' 2>/dev/null)"; then
+  workflows_read=1
+  # **1 本でも読めなければ、予算を捨てる。** **部分的に集めた最大は、最大ではない**
+  # ——**飛ばして残りの最大を使うと、予算が黙って縮み、そのまま誤停止になる**
+  # （`ci-pending` が 3 周続けば `loop/STOP`）。**「読めなかった」へ畳む。**
+  while IFS= read -r workflow_path; do
+    [[ -n $workflow_path ]] || continue
+    # **名前は API から来る。** **経路に使う前に形を絞る**（外部由来の文字列を
+    # そのまま組み立てない。`bin/loop-gate` と同じ判断）。**弾いた 1 本が最大だったら**
+    # 同じことが起きるので、**弾いたときも予算を捨てる**。
+    if ! [[ $workflow_path =~ ^\.github/workflows/[A-Za-z0-9._-]+$ ]]; then
+      budget_min=""
+      workflows_read=0
+      break
+    fi
+    if ! body="$(gh api -H "Accept: application/vnd.github.raw" \
+      "repos/{owner}/{repo}/contents/$workflow_path?ref=$head_sha" 2>/dev/null)"; then
+      budget_min=""
+      workflows_read=0
+      break
+    fi
+    # **job の数と、宣言の数を数える。** **宣言しない job の「諦める時間」は、
+    # 無いのではなく 360 分**（GitHub の既定）——**数えないと、別の workflow の値で
+    # 短く測ることになる**（**いま直したのと同じ「小さい予算で止める」形**）。
+    #
+    # **破棄はしない。** **破棄すると、その PR では `exit 4` が二度と出ない**——
+    # **それは #206 そのもの**で、**このスクリプトはそれを直すために在る。**
+    #
+    # **数え方は作り込まない。** **見分けが付かなければ 360 へ倒す**ので、
+    # **倒れる先は常に安全側**である。
+    jobs=0
+    declared=0
+    in_jobs=0
+    while IFS= read -r line; do
+      if [[ $line =~ ^jobs:[[:space:]]*$ ]]; then
+        in_jobs=1
+        continue
+      fi
+      ((in_jobs == 1)) || continue
+      # **字下げが無い行が来たら `jobs:` の外**である
+      if [[ $line =~ ^[^[:space:]] ]]; then
+        in_jobs=0
+        continue
+      fi
+      [[ $line =~ ^\ \ [A-Za-z0-9_.-]+:[[:space:]]*$ ]] && ((jobs++))
+      if [[ $line =~ ^[[:space:]]+timeout-minutes:[[:space:]]*([0-9]+) ]]; then
+        ((declared++))
+        minutes="${BASH_REMATCH[1]}"
+        if [[ -z $budget_min ]] || ((minutes > budget_min)); then
+          budget_min="$minutes"
+        fi
+      fi
+    done <<<"$body"
+    ((jobs > 0 && declared >= jobs)) || all_declared=0
+  done <<<"$workflow_paths"
+  # **1 つでも宣言していない job があれば、既定まで待つ。** **宣言の最大がそれより
+  # 長ければ、そちらを使う**（宣言してあるなら、それが「諦める時間」である）。
+  # **読めたかは旗で見る。** **`budget_min` の有無で代用すると、どの job も宣言して
+  # いないときに「読めなかった」と同じ扱いになる**——**そちらは一時的、こちらは恒久的**で、
+  # **倒す先が逆**である。
+  if ((workflows_read == 1 && all_declared == 0)) \
+    && { [[ -z $budget_min ]] || ((budget_min < DEFAULT_TIMEOUT_MIN)); }; then
+    budget_min="$DEFAULT_TIMEOUT_MIN"
+  fi
+fi
+
+now_epoch="$(date +%s)"
+
+# **指紋は必須の並び順で書く。** **名前そのものは入れない**——
+# **外から決められる文字列を指紋へ入れると、揺れがそのまま通知になる**。
+states=""
+missing=()
+bad=()
+waiting=()
+overdue=()
+for name in "${required[@]}"; do
+  # 比較する側も同じ符号化に揃える。base64 は 76 桁で折り返す実装があるので改行を落とす。
+  if ! want="$(printf '%s' "$name" | base64 | tr -d '\n')" || [[ -z $want ]]; then
+    echo "[FAIL] 必須チェック名を符号化できません: $name" >&2
+    exit 2
+  fi
+  found=0
+  status=""
+  conclusion=""
+  started=""
+  while IFS="$FIELD" read -r got_name got_status got_conclusion got_started; do
+    [[ $got_name == "$want" ]] || continue
+    found=1
+    status="$got_status"
+    conclusion="$got_conclusion"
+    started="$got_started"
+    break
+  done <<<"$checks_out"
+
+  if ((found == 0)); then
+    missing+=("$name")
+    states+="none,"
+    continue
+  fi
+
+  # **決着しているか**は `conclusion` で決まる。**`status` は見ない**——
+  # **実物が食い違っていた**（`in_progress` + `success`）。
+  if [[ -n $conclusion ]]; then
+    if [[ " $OK_CONCLUSIONS " == *" $conclusion "* ]]; then
+      states+="ok,"
+      continue
+    fi
+    bad+=("$name=$conclusion")
+    states+="bad,"
+    continue
+  fi
+  states+="pending,"
+
+  # ここから先は、まだ決着していない検査である。
+  if [[ -z $budget_min || -z $started ]]; then
+    waiting+=("$name=$status")
+    continue
+  fi
+  if ! started_epoch="$(date -d "$started" +%s 2>/dev/null)" \
+    || ! [[ $started_epoch =~ ^[0-9]+$ ]]; then
+    waiting+=("$name=$status")
+    continue
+  fi
+  if ((now_epoch - started_epoch > budget_min * 60)); then
+    overdue+=("$name=$status")
+  else
+    waiting+=("$name=$status")
+  fi
+done
+
+if ((FINGERPRINT == 1)); then
+  printf '%s\n' "${states%,}"
+  exit 0
+fi
+
+# **決着した失敗が先。** **待ちに混ぜると、直せるものを待ち続ける。**
+if ((${#missing[@]} > 0)); then
+  echo "必須チェックが見つかりません: ${missing[*]}"
+  exit 1
+fi
+if ((${#bad[@]} > 0)); then
+  echo "成功していないチェック: ${bad[*]}"
+  exit 1
+fi
+if ((${#overdue[@]} > 0)); then
+  echo "決着しないまま ${budget_min} 分を超えました: ${overdue[*]}"
+  exit 4
+fi
+if ((${#waiting[@]} > 0)); then
+  echo "まだ決着していません: ${waiting[*]}"
+  exit 3
+fi
+echo "必須 ${#required[@]} 件すべて決着して成功"
+exit 0
