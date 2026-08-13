@@ -33,7 +33,7 @@ describe("ログインを終える", () => {
     const { saved, port } = store();
 
     const result = await completeLogin({
-      store: port,
+      openStore: async () => port,
       refresh: async (refreshToken) => {
         expect(refreshToken).toBe(PROVIDER.refreshToken);
         return RENEWED;
@@ -52,7 +52,7 @@ describe("ログインを終える", () => {
     const { saved, port } = store();
 
     await completeLogin({
-      store: port,
+      openStore: async () => port,
       refresh: async () => RENEWED,
       provider: PROVIDER,
       abandonSession: async () => {},
@@ -67,7 +67,7 @@ describe("ログインを終える", () => {
     const { saved, port } = store();
 
     const result = await completeLogin({
-      store: port,
+      openStore: async () => port,
       refresh: async () => {
         throw new Error("だめ");
       },
@@ -89,7 +89,7 @@ describe("ログインを終える", () => {
     });
 
     const result = await completeLogin({
-      store: port,
+      openStore: async () => port,
       refresh: async () => RENEWED,
       provider: PROVIDER,
       abandonSession: async () => {},
@@ -125,7 +125,7 @@ describe("ログインを終える", () => {
       const { count, abandonSession } = abandoning();
 
       const result = await completeLogin({
-        store: undefined,
+        openStore: async () => undefined,
         refresh: async () => RENEWED,
         provider: PROVIDER,
         abandonSession,
@@ -140,7 +140,7 @@ describe("ログインを終える", () => {
       const { port } = store();
 
       const result = await completeLogin({
-        store: port,
+        openStore: async () => port,
         refresh: async () => {
           throw new Error("だめ");
         },
@@ -161,7 +161,7 @@ describe("ログインを終える", () => {
       });
 
       const result = await completeLogin({
-        store: port,
+        openStore: async () => port,
         refresh: async () => RENEWED,
         provider: PROVIDER,
         abandonSession,
@@ -178,7 +178,7 @@ describe("ログインを終える", () => {
       const { port } = store();
 
       const result = await completeLogin({
-        store: port,
+        openStore: async () => port,
         refresh: async () => RENEWED,
         provider: PROVIDER,
         abandonSession,
@@ -188,6 +188,29 @@ describe("ログインを終える", () => {
       expect(count(), "入れた人のセッションを畳んでいる").toBe(0);
     });
 
+    it("置き場を開く途中で落ちたら、畳んでから投げ直す", async () => {
+      // **数える場所を、境界の内側へ寄せる** (#224 のレビュー)。**開く手前で落ちると、
+      // ここへ一度も入らないまま「作りかけのセッション」が残る**——**設定の不備で
+      // 毎回失敗する形**が、まさにそれだった。
+      //
+      // **「いない人」（`undefined`）と混ぜない。** **前者は入口へ戻せば済む**が、
+      // **後者は直るまで直らない**——**握りつぶすと、原因がどこにも出ない。**
+      const { count, abandonSession } = abandoning();
+
+      await expect(
+        completeLogin({
+          openStore: async () => {
+            throw new Error("鍵が設定されていません");
+          },
+          refresh: async () => RENEWED,
+          provider: PROVIDER,
+          abandonSession,
+        }),
+      ).rejects.toThrow(/鍵が設定されていません/);
+
+      expect(count(), "セッションが残っている").toBe(1);
+    });
+
     it("畳めなかったら、黙って入口へ戻さない", async () => {
       // **畳めていないことは、呼ぶ側に伝わる必要がある** (`signOut` と同じ判断)。
       // **「入口へ戻した」とだけ返すと、ログイン済みのまま残ったことが消える。**
@@ -195,7 +218,7 @@ describe("ログインを終える", () => {
 
       await expect(
         completeLogin({
-          store: port,
+          openStore: async () => port,
           refresh: async () => {
             throw new Error("だめ");
           },

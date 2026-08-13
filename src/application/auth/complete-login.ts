@@ -33,8 +33,17 @@ export type ProviderTokens = {
 export type LoginResult = { readonly kind: "signed-in" } | { readonly kind: "needs-login" };
 
 export type CompleteLoginInput = {
-  /** 本人として開けた置き場。**開けなければ `undefined`。** */
-  readonly store: UserTokenStore | undefined;
+  /**
+   * 本人として置き場を開く。**その人がいなければ `undefined`。**
+   *
+   * **開く手続きごと受け取る** (#224 のレビュー)。**開いた結果だけを受け取ると、
+   * 開く手前で落ちたときにここへ一度も入らない**——**「作りかけのセッションを
+   * 畳む」が、その経路にだけ効かなくなる。**
+   *
+   * **「いない人」と「開けなかった」を分ける。** **前者は入口へ戻せば済む**が、
+   * **後者は設定が直るまで直らない**——**混ぜると、原因がどこにも出ない。**
+   */
+  readonly openStore: () => Promise<UserTokenStore | undefined>;
   readonly refresh: RefreshUserTokens;
   readonly provider: ProviderTokens;
   /**
@@ -59,13 +68,23 @@ async function abandon(abandonSession: () => Promise<void>): Promise<LoginResult
 }
 
 export async function completeLogin({
-  store,
+  openStore,
   refresh,
   provider,
   abandonSession,
 }: CompleteLoginInput): Promise<LoginResult> {
+  let store: UserTokenStore | undefined;
+  try {
+    store = await openStore();
+  } catch (error) {
+    // **畳んでから投げ直す。** **握りつぶすと、設定の不備が「入口へ戻った」に
+    // 化ける**——**毎回同じところで失敗しているのに、誰にも見えない。**
+    await abandonSession();
+    throw error;
+  }
+
   if (store === undefined) {
-    // **交換は通ったのに、置き場を本人として開けない。**
+    // **交換は通ったのに、その人がいない。** **こちらは入口へ戻せば済む。**
     return abandon(abandonSession);
   }
 
