@@ -1095,6 +1095,52 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(stall().stdout, "生きている作業場の実測を捨てている").toContain("count=0");
   });
 
+  it("他の作業場の実測は、2 周目以降も効かせる", () => {
+    // **1 つ上の試験は `stall()` を 1 回しか呼んでいない**（#200 のレビュー 3 周目）——
+    // **「B だけが進んだ 2 周目」を 1 度も通っていない**ので、**除外の側が
+    // 自分の実測だけで測っていても緑になる**。**入力が経路を選んでいる。**
+    //
+    // **実測 5 秒の作業場が 3000 秒の周回にいる**とき、**自分の窓（10 秒）では
+    // 窓の外へ出る**——**「全員」から落ちるので、B が進むたびに数が増える**。
+    // **自分の実測が当てにならないときこそ、他の作業場の実測で守る必要がある**
+    // （#129 / #142 の「長い周回の途中で止めない」）
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 1, startedAt: now - 3000, longestRound: 5 });
+    otherWorkspace({ longestRound: 4000, startedAgo: 2500, activityAgo: 5 });
+    expect(stall().stdout, "1 周目は印を覚えるだけ").toContain("count=0");
+
+    // **B だけが新しい周回を始めた**（A は同じ長い周回の途中にいる）
+    otherWorkspace({ longestRound: 4000, startedAgo: 1, activityAgo: 5 });
+
+    expect(stall().stdout, "長い周回の途中にいる作業場が「全員」から落ちている").toContain(
+      "count=0",
+    );
+  });
+
+  it("入れ替わった作業場の 1 周目を、終えた周回として数えない", () => {
+    // **「周回を始めた」と「前回から 1 周終えた」は別**（#200 のレビュー 3 周目）——
+    // **基準が無いのだから、終えたとは言えない。** **前回に無い scope を「進んだ」と
+    // して飛ばすと、入れ替わった直後の作業場が 1 周も終えていないのに数が上限へ届く**
+    // ——**第 4 層が、誰も止まっていないのに人を呼ぶ。**
+    //
+    // **入力は「scope の集合が周回をまたいで変わる」**である（**いまの試験は
+    // 1 度も作っていない**——**今日の形がまた出ている**）
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    expect(stall().stdout, "1 周目は印を覚えるだけ").toContain("count=0");
+
+    // **古い作業場が死に、新しい作業場が 1 周目を始めた**（実測はまだ無い）
+    workerState({ activityAgo: 10, startedAt: now - 10800, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
+
+    expect(stall().stdout, "1 周も終えていない作業場で数えている").toContain("count=0");
+
+    // **基準ができたので、そこから数え始める**
+    otherWorkspace({ longestRound: 600, startedAgo: 0, activityAgo: 10 });
+
+    expect(stall().stdout, "基準を覚えていないので、二度と数えられない").toContain("count=1");
+  });
+
   it("実測が短くても、窓は既定より狭くしない", () => {
     // **窓の材料は直近 N 回の最大になった** (#146)。**忘れる以上、忘れたあとの 1 回は
     // 既定へ戻る**——**そこから下へは行かない**ようにする。**記録が無いときと同じ

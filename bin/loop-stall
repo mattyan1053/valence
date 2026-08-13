@@ -436,7 +436,7 @@ fi
 # **worker の作業ツリーは読まない。** 見るのは worker 自身が git の共通ディレクトリへ
 # 書いた記録だけである。master が相手の作業場を覗く形にすると、
 # 「GitHub を唯一の正とする」という設計に穴が開く。
-declare -A alive_scopes=()
+declare -A alive_scopes=() scope_started_at=() scope_windows=()
 if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
   && lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" \
   && [[ $lease_ttl =~ ^[0-9]+$ ]]; then
@@ -502,8 +502,28 @@ if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
       scope_window=$((seconds * 2))
       ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
     fi
+    scope_started_at["$scope"]="$scope_started"
+    scope_windows["$scope"]="$scope_window"
     ((now_epoch - scope_started < scope_window)) || continue
     alive_scopes["$scope"]="$scope_started"
+  done
+
+  # **生きている作業場の実測は、自分のでなくても効かせる**（#200 のレビュー 3 周目）。
+  # **自分の実測が短い作業場は、長い周回の途中で自分の窓から出る**——
+  # **いちばん守りたい場面（#129 / #142 の「長い周回の途中で止めない」）で
+  # 窓が縮む**という、向きが逆の壊れ方になる。**新しい閾値は作らない**——
+  # **上と同じ式・同じ既定**を、いちばん広い窓で当て直すだけである。
+  #
+  # **広げても戻らない。** **この窓で生き返る作業場は、自分の窓が既に
+  # それより狭い**（狭いから落ちた）ので、**最大を押し上げない。**
+  shared_window="$lease_ttl"
+  for scope in "${!alive_scopes[@]}"; do
+    ((scope_windows[$scope] > shared_window)) && shared_window="${scope_windows[$scope]}"
+  done
+  for scope in "${!scope_started_at[@]}"; do
+    [[ -z ${alive_scopes[$scope]-} ]] || continue
+    ((now_epoch - scope_started_at[$scope] < shared_window)) || continue
+    alive_scopes["$scope"]="${scope_started_at[$scope]}"
   done
 fi
 
@@ -521,9 +541,13 @@ snapshot_epochs() {
 }
 
 # **全 scope が、自分の前回より進んだか。** 1 つでも同じ周回の中なら数えない。
-# **前回に無かった scope は「進んだ」**として扱う（**その作業場は周回を始めている**）。
 #
-#   0 = 全部進んだ / 1 = 進んでいない / 2 = **読めない**（前の版が書いた形）
+#   0 = 全部進んだ / 1 = 進んでいない
+#   2 = **比べる基準が無い**（前の版が書いた形 / 前回に無かった scope）
+#
+# **「周回を始めた」と「前回から 1 周終えた」は別**である。**前回に無い scope には
+# 基準が無いのだから、終えたとは言えない**——**飛ばすと、入れ替わった直後の作業場が
+# 1 周も終えていないのに数が上限へ届く**（第 4 層が、誰も止まっていないのに人を呼ぶ）。
 #
 # **「読めない」を「進んでいない」と混ぜない。** 混ぜると印が書き換わらないまま
 # 同じところへ落ち続け、**その識別子は二度と数えられない**（第 4 層が黙って死ぬ）。
@@ -539,7 +563,7 @@ all_scopes_advanced() {
   done
   unset IFS
   for scope in "${!alive_scopes[@]}"; do
-    [[ -n ${before[$scope]-} ]] || continue
+    [[ -n ${before[$scope]-} ]] || return 2
     ((alive_scopes[$scope] > before[$scope])) || return 1
   done
   return 0
@@ -562,8 +586,9 @@ if ((worker_rounding == 1 && worker_fixes_this == 1)); then
   advanced=0
   [[ -n $prev_epoch ]] && { all_scopes_advanced "$prev_epoch" || advanced=$?; }
   if [[ -z $prev_epoch ]] || ((advanced == 2)); then
-    # この識別子を、この周回で初めて見た（**前の版が書いた形も、ここへ倒す**）。
-    # **印だけ覚えて数えない。** 1 周落ちるが、次の周回から数え始められる。
+    # **比べる基準が無い**（この識別子を初めて見た / 前の版が書いた形 /
+    # 前回に無かった作業場がいる）。**印だけ覚えて数えない。**
+    # 1 周落ちるが、次の周回から数え始められる。
     counted="first"
     prev_epoch="$(snapshot_epochs)"
   elif ((advanced == 0)); then
