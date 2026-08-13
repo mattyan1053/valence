@@ -84,6 +84,18 @@ stat -c '%y' .env                                      # これより古けれ�
 `localhost:54321` を publish しているのは `compose.yaml` ではなく、
 supabase CLI が立てた `supabase_kong_valence` コンテナ。
 
+### DB を要求するテスト
+
+`./task test:db` が、**マイグレーションから作り直してから** `*.db.test.ts` を走らせる。
+接続情報は実行時にスタックから取るので、`.env` に書くものは無い。
+
+**スタックは全作業場で 1 つを共有し、`./task db:*` と `./task test:db` は直列化してある**
+（`.git/valence-db.lock`）。**待たされるのは正常**で、諦めたときだけ理由が出る。
+`./task db:psql` だけは対話用なので直列化していない（`task` のコメントに理由がある）。
+
+「別の作業場が DB を使っています」で止まるなら、**返し忘れではなく本当に走っている**。
+`docker ps` で `supabase_db_valence` を触っているものを見る。
+
 ### Supabase CLI の癖
 
 CLI は**ホストの Docker daemon にスタックを立てさせる一方、疎通確認は自身の

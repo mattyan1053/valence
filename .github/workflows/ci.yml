@@ -49,6 +49,45 @@ jobs:
       - name: Test
         run: pnpm test:coverage
 
+  # **行が持ち主にしか見えないことを、本物の Postgres で確かめる** (#210)。
+  #
+  # **`./task check` からは外してある。** worker が 1 周ごとに叩くものへ
+  # スタックの起動を足すと、**起きていないだけで赤になる**——**「落ちた」と
+  # 「まだ起きていない」が混ざる。** **走らせる場所はここである。**
+  database:
+    name: database policies
+    runs-on: ubuntu-latest
+    # **Supabase の起動 (image の取得を含む) が入るぶん、他より長く取る。**
+    # **宣言しないと 360 分**になり、詰まった実行を誰も止めない。
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # マイグレーションはここで適用される (起動時に supabase/migrations/ を流す)。
+      - name: Start Supabase
+        run: pnpm exec supabase start
+
+      # **接続情報はスタックから取る。** リポジトリにも secrets にも置かない
+      # (ローカルスタックの既定値で、どの機械でも同じもの)。
+      - name: Run database policy tests
+        run: |
+          eval "$(pnpm exec supabase status -o env | grep -E '^[A-Z_]+=')"
+          SUPABASE_URL="$API_URL" \
+          SUPABASE_PUBLISHABLE_KEY="$PUBLISHABLE_KEY" \
+          SUPABASE_SECRET_KEY="$SECRET_KEY" \
+          SUPABASE_JWT_SECRET="$JWT_SECRET" \
+            pnpm test:db
+
   build:
     name: build
     runs-on: ubuntu-latest
