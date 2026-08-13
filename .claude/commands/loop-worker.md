@@ -68,7 +68,8 @@ bin/loop-lease acquire worker      # 出力された token を控える
 **そのとき ref は既に目的の値**なので、**やり直すと「更新するものが無い」で成功する**
 ——**直っているのに赤**にしない。**2 度とも落ちたら、そこは本当に失敗である。**
 
-**detached でよい。** **ブランチを切るのはステップ 4 で、起点は `origin/main` の先端**である。
+**detached でよい。** **worker はどこでもブランチを掴まない** (#102)——
+**実装もレビュー対応も detached のまま行い、ブランチ名は push とブランチの更新でだけ使う。**
 
 どれかに失敗したら `bin/loop-stall main-sync-failed` を通して停止する。
 
@@ -267,8 +268,17 @@ printf '%s\n' "$head_prs"
     `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
     （状態が変わらなければ同じ識別子が積み上がり、3 周で止まる）
 - **PR が無く、コミットが載ったブランチがある** → 公開に失敗した周回の続きである。
-  そのブランチへ切り替え、ステップ 4 の「PR を作る」から再開する。再び失敗したら
-  同じ `publish-failed:<Issue番号>` を記録するので、3 周で止まる
+  そのブランチへ **detached で入り**、ステップ 4 の「PR を作る」から再開する。
+  再び失敗したら同じ `publish-failed:<Issue番号>` を記録するので、3 周で止まる
+
+  ```bash
+  git switch --detach <ブランチ>
+  ```
+
+  **掴まない** (#102)。**ブランチは 1 つの作業場にしか checkout できない**ので、
+  **落ちた作業場が掴んだままだと `git switch <ブランチ>` は exit 128 で落ちる**——
+  **`bin/loop-claim` が所有権を移しても、続きが実行できない。**
+  **detached なら、掴んでいる相手がいても入れる。**
 - **ブランチが無い / コミットが載っていない** → 実装が途中。ステップ 4 の実装から続ける
   （label は `in-progress` のままでよい。付け替え直さない）
 
@@ -280,11 +290,15 @@ printf '%s\n' "$head_prs"
 どこからも辿れなくなる**）。
 
 ```bash
-gh pr checkout <PR番号>
-git branch --show-current      # PR の headRefName と一致することを確認する
+gh pr checkout --detach <PR番号>
+git rev-parse HEAD             # PR の headRefOid と一致することを確認する
 ```
 
 一致しない場合は `bin/loop-stall "wrong-branch:<PR番号>"` を通して停止する。**確認せずに編集しない。**
+
+**ここでも掴まない** (#102)。**別の作業場が同じ PR のブランチを掴んだまま落ちていると、
+`gh pr checkout` は exit 128 で落ちる**——**引き継げないので、その PR は誰も直せなくなる。**
+**detached なので `git branch --show-current` は空を返す。** **commit の id で確かめる。**
 
 未解決スレッドを**ページングして**取る。件数を決め打ちすると、20 件を超えた PR で
 取りこぼし、ブランチ保護でマージできない原因が分からなくなる。
@@ -313,7 +327,7 @@ git branch --show-current      # PR の headRefName と一致することを確�
 指示する。**指示が来てから行う。** 自分の判断で rebase しない。
 
 ```bash
-gh pr checkout <PR番号>
+gh pr checkout --detach <PR番号>
 git fetch origin main
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
 # **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ったとき、後発が先発を
@@ -329,7 +343,7 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
-git push --force-with-lease
+git push --force-with-lease origin HEAD:refs/heads/<ブランチ>
 ```
 
 **`--force` ではなく `--force-with-lease`。** 履歴を書き換えるので、自分が知らない
@@ -355,7 +369,7 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
-git push
+git push origin HEAD:refs/heads/<ブランチ>
 ```
 
 push したらこの周回は終わり。**レビュー要求は投げない。** master が判断する。
@@ -415,7 +429,11 @@ bin/loop-claim take <N>
 **譲る側は「後からロックに入った方」**である。ロックは必ずどちらか一方が取るので、
 **両方が譲って誰も進まない**ことは起きない。
 
-ブランチを切る。命名は `AGENTS.md` に従う（`feat/` `fix/` `chore/` `refactor/` `docs/`）。
+**ブランチ名を決める。切らない。** 命名は `AGENTS.md` に従う
+（`feat/` `fix/` `chore/` `refactor/` `docs/`）。**detached のまま実装する** (#102)。
+
+**掴むと、この作業場が落ちたときに誰も引き継げない**——**別の作業場の `git switch` が
+exit 128 で落ちる**。**ブランチ名を使うのは「PR を作る」の 2 行だけ**である。
 
 ### 実装は必ずテストファースト
 
@@ -496,10 +514,28 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
-git push -u origin <ブランチ>
-gh pr create --base main --title "<日本語>" --body-file <file>
+# **落ちてもこの周回の commit を拾えるように、ブランチ名を先へ進める** (#102)。
+# **掴まれていたら進めない**——**掴んでいるのは落ちた作業場で、そのブランチの先端は
+# いまの HEAD そのもの**（引き継いだ周回は commit を足さない）。**失うものが無い**
+git branch -f <ブランチ> HEAD 2>/dev/null \
+  || echo "[INFO] <ブランチ> は別の作業場が掴んでいます。ブランチは進めません"
+git push origin HEAD:refs/heads/<ブランチ>
+gh pr create --base main --head <ブランチ> --title "<日本語>" --body-file <file>
 bin/loop-review-head "<PR番号>" "$(git rev-parse HEAD)"
 ```
+
+**`--head` を省かない** (#102)。**detached なので、既定の「いまのブランチ」が取れない**
+——**`could not determine the current branch` で PR が作れない**（実測）。
+
+**`git branch -f` は、落ちた周回のためにある。** **push と `gh pr create` の間で落ちると、
+detached の commit はどこからも辿れない**——**ステップ 2.2 の「コミットが載ったブランチ」が
+拾えるように、ブランチ名だけ先に進めておく。** **掴まないので、別の作業場からも
+`git switch --detach` で入れる。**
+
+**進められなくても止まらない。** **`git branch -f` は、掴まれているブランチには
+exit 128 で落ちる**（`git update-ref` なら通るが、**掴んでいる作業場の HEAD を
+黙って動かす**ので使わない）——**そこで止めると、引き継ぎを直したこの変更自身が、
+引き継ぎを止める。**
 
 **作った直後に head を記録する。** PR を開くと自動でレビューが走り、その対象は今の head
 である。指摘ゼロのとき Codex は 👍 リアクションだけで返すことがあり、それは SHA を

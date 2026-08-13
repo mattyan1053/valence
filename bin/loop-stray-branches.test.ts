@@ -68,6 +68,13 @@ describe("bin/loop-stray-branches", () => {
      * **worker が途切れず動く環境では紛失作業が永久に見つからない**。
      */
     busyBranches?: string[];
+    /**
+     * **detached で走っている作業場の HEAD**（#102）。
+     *
+     * **worker はブランチを掴まなくなった**ので、**「掴んでいるブランチ」では
+     * いま触っているものを表せない**——**先端が同じブランチを抑える**。
+     */
+    busyDetachedHeads?: string[];
     /** 走っているかどうかを読めない（`bin/loop-lease busy` が exit 2）。 */
     busyUnreadable?: boolean;
     gitFails?: boolean;
@@ -78,6 +85,12 @@ describe("bin/loop-stray-branches", () => {
     mkdirSync(join(sandbox, "bin"), { recursive: true });
 
     const busyBranches = options.busyBranches ?? [];
+    const busyDetachedHeads = options.busyDetachedHeads ?? [];
+    // **掴んでいる作業場のあとに並べる**（`/workspace-<番号>` の番号を続ける）
+    const detachedAt = busyDetachedHeads.map((sha, index) => ({
+      workspace: `/workspace-${busyBranches.length + index}`,
+      sha,
+    }));
     writeFileSync(
       join(stub, "git"),
       [
@@ -112,6 +125,16 @@ describe("bin/loop-stray-branches", () => {
         '  if [[ $* == *"--quiet"* ]]; then exit 1; fi',
         '  echo "fatal: ref HEAD is not a symbolic ref" >&2',
         "  exit 128",
+        "fi",
+        // **detached の作業場が、どの commit にいるか。** **無関係な commit を既定に置く**
+        // ——**全部を同じ値にすると、「先端が同じか」を見なくても抑えられてしまう**
+        'if [[ $* == *"rev-parse"* ]]; then',
+        ...detachedAt.map(
+          ({ workspace, sha }) =>
+            `  [[ $* == *${JSON.stringify(workspace)}* ]] && { printf '%s\\n' ${JSON.stringify(sha)}; exit 0; }`,
+        ),
+        `  printf '%s\\n' ${JSON.stringify("c".repeat(40))}`,
+        "  exit 0",
         "fi",
         "exit 0",
         "",
@@ -180,7 +203,8 @@ describe("bin/loop-stray-branches", () => {
         "#!/usr/bin/env bash",
         ...(options.busyUnreadable === true ? ["exit 2"] : []),
         ...busyBranches.map((_branch, index) => `printf '%s\\n' "/workspace-${index}"`),
-        `exit ${busyBranches.length > 0 ? 0 : 1}`,
+        ...detachedAt.map(({ workspace }) => `printf '%s\\n' ${JSON.stringify(workspace)}`),
+        `exit ${busyBranches.length + detachedAt.length > 0 ? 0 : 1}`,
         "",
       ].join("\n"),
       { mode: 0o755 },
@@ -497,6 +521,39 @@ describe("bin/loop-stray-branches", () => {
 
     expect(result.status, "detached を「読めない」と扱っている").toBe(1);
     expect(result.stdout, "宙に浮いたブランチを挙げていない").toContain("feat/lost-long-ago");
+  });
+
+  it("detached の作業場が先端にいるブランチは、抑える", () => {
+    // **worker がブランチを掴まなくなった** (#102) ので、**「掴んでいるブランチ」では
+    // いま触っているものを表せない**——**そのままだと、push してから PR ができるまでの
+    // 間ずっと「宙に浮いている」と人へ渡す**（**publish-failed の周回では何周も続く**）。
+    //
+    // **消す側を足したら、残る側の前提を見直す**（`AGENTS.md` §5）——
+    // **#148 が入れた「作業中は抑える」が、掴まなくなった時点で効かなくなる。**
+    const result = run({
+      branches: [{ name: "feat/just-pushed", sha: "b".repeat(40) }],
+      prs: [],
+      busyDetachedHeads: ["b".repeat(40)],
+    });
+
+    expect(result.stdout, "これから PR になるブランチを宙に浮いていると言っている").not.toContain(
+      "no-pr",
+    );
+    expect(result.status).toBe(0);
+  });
+
+  it("detached の作業場が別の commit にいるなら、抑えない", () => {
+    // **倒す先は 2 つある**（#200 で 3 回出た）——**「走っていれば抑える」にすると、
+    // #148 が塞いだ「動いているほど見つからない」へ戻る。**
+    // **先端が同じであること**まで見る
+    const result = run({
+      branches: [{ name: "feat/lost-long-ago", sha: "b".repeat(40) }],
+      prs: [],
+      busyDetachedHeads: ["d".repeat(40)],
+    });
+
+    expect(result.status, "走っている作業場が、無関係なブランチまで抑えている").toBe(1);
+    expect(result.stdout).toContain("feat/lost-long-ago");
   });
 
   it("detached の作業場があっても、ブランチを掴んでいる側は抑える", () => {
