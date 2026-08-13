@@ -554,6 +554,10 @@ if ((count >= MAX_REPEATS)); then
   else
     echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める"
   fi
+  # **止まったかどうかを、終了コードで分ける** (#191 のレビュー)。**読む側が分岐に
+  # 使うのはここ**なので、**標準エラーへ書いても分岐は変わらない**——**手順書の
+  # 「exit 1 → 全ループが停止済み」が嘘になる。**
+  stopped=1
   if [[ -n $script_common_dir && $script_common_dir == "$common_dir" && -x $TASK ]]; then
     # **戻り値を見る** (#190)。**見ないと、止められなかったことが `[STOP]` の後ろに
     # 隠れる**——**人は「止まった、あとで見よう」と読む**。**呼ばれる側を直しても、
@@ -566,6 +570,7 @@ if ((count >= MAX_REPEATS)); then
       echo "       一部だけ止まっている場合があります（作成できたものは残ります）" >&2
       echo "       カウンタ: $STATE" >&2
       echo "       止めるには、この作業ツリーで ./task loop:stop を手で叩くこと" >&2
+      stopped=3
     }
   else
     # 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい。
@@ -573,7 +578,9 @@ if ((count >= MAX_REPEATS)); then
     echo "       カウンタ: $STATE" >&2
     echo "       スクリプト: ${script_common_dir:-不明}" >&2
     echo "       別のリポジトリで実行しているため、そちらの task は実行しません" >&2
+    # **こちらも 1 つも止めていない。** 分けると、同じ意味に 2 つの値が残る
+    stopped=3
   fi
-  exit 1
+  exit "$stopped"
 fi
 exit 0

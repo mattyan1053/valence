@@ -1,5 +1,14 @@
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -176,5 +185,55 @@ describe("停止識別子", () => {
     const unused = listedSpecs().filter((spec) => !used.has(spec));
 
     expect(unused, "打つ場所が無い識別子が一覧に残っている").toEqual([]);
+  });
+});
+
+describe("止められなかったときの終了コード", () => {
+  // **手順書は「exit 1 → 全ループが停止済み」と読ませる** (#191 のレビュー)。
+  // **止められなかったときに同じ値を返すと、その行が嘘になる**——
+  // **読む側（master / worker の手順）は標準エラーではなく終了コードで分岐する。**
+  //
+  // **スクリプトだけ直しても契約にならない。** **値を書き写さず、本物に返させて、
+  // その値が両方の手順書に載っていることを見る。**
+
+  /** 止められない `task` を持つ使い捨てリポジトリで、上限まで走らせたときの終了コード。 */
+  function statusWhenStopFails(): number {
+    const repo = mkdtempSync(join(tmpdir(), "loop-stall-exit-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    mkdirSync(join(repo, "bin"));
+    copyFileSync(join(REPO_ROOT, "bin", "loop-stall"), join(repo, "bin", "loop-stall"));
+    chmodSync(join(repo, "bin", "loop-stall"), 0o755);
+    writeFileSync(
+      join(repo, "task"),
+      '#!/usr/bin/env bash\nif [[ $1 == "loop:stop" ]]; then exit 1; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
+    let result = spawnSync(join(repo, "bin", "loop-stall"), ["dirty"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    for (let index = 0; index < 2; index += 1) {
+      result = spawnSync(join(repo, "bin", "loop-stall"), ["dirty"], {
+        cwd: repo,
+        encoding: "utf8",
+      });
+    }
+    rmSync(repo, { recursive: true, force: true });
+    return result.status ?? -1;
+  }
+
+  it("止まった／止まらなかったで、値が違う", () => {
+    // **同じ値だと、読む側は区別できない**——**標準エラーは分岐に使われない**
+    expect([0, 1, 2]).not.toContain(statusWhenStopFails());
+  });
+
+  it("その値が、両方の手順書に載っている", () => {
+    // **スクリプトだけ直すと「入れたが誰も見ていない」**になる。
+    // **値は写さず、本物に返させたものを探す**
+    const status = statusWhenStopFails();
+
+    for (const path of [".claude/commands/loop-master.md", ".claude/commands/loop-worker.md"]) {
+      expect(read(path), `${path} に exit ${status} が無い`).toContain(`- exit ${status} →`);
+    }
   });
 });

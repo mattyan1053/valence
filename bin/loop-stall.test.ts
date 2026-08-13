@@ -229,7 +229,8 @@ describe("上限に達したときに止める対象", () => {
     // 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい
     const result = runToLimit({ cwd: "other-repo" });
 
-    expect(result.status).toBe(1);
+    // **1 つも止めていない**ので、**「全ループが停止済み」と同じ値にしない** (#191)
+    expect(result.status, "止めていないのに「停止済み」と同じ値を返している").not.toBe(1);
     expect(result.stderr).toContain("止められません");
   });
 
@@ -1407,7 +1408,10 @@ describe("止まっていないのに、止めたと言わない", () => {
 
     expect(result.stdout, "上限に達していない").toContain("[STOP]");
     expect(result.stderr, "止められなかったことが出ていない").toContain("[FAIL]");
-    expect(result.status).toBe(1);
+    // **終了コードで分ける** (#191 のレビュー)。**読む側が分岐に使うのはここ**なので、
+    // **標準エラーへ書いても分岐は変わらない**——**「止まった」と「止まらなかった」が
+    // `exit 1` で同じだと、手順書の「exit 1 → 全ループが停止済み」が嘘になる**
+    expect(result.status, "止まっていないのに「停止済み」と同じ値を返している").not.toBe(1);
   });
 });
 
