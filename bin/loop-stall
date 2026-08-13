@@ -436,19 +436,28 @@ fi
 # **worker の作業ツリーは読まない。** 見るのは worker 自身が git の共通ディレクトリへ
 # 書いた記録だけである。master が相手の作業場を覗く形にすると、
 # 「GitHub を唯一の正とする」という設計に穴が開く。
-worker_epoch=""
-worker_round_window=0
+declare -A alive_scopes=() scope_started_at=() scope_windows=()
 if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
   && lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" \
   && [[ $lease_ttl =~ ^[0-9]+$ ]]; then
   # **始めた周回の印。** lease と違って返しても消えないので、
   # **周回と周回の間でも「どの周回まで始めたか」が読める**。
-  for rounds in "$common_dir"/valence-loop-rounds-worker*; do
-    [[ -f $rounds ]] || continue
-    read -r started <"$rounds" 2>/dev/null || continue
-    [[ $started =~ ^[0-9]+$ ]] || continue
-    [[ -z $worker_epoch ]] || ((started > worker_epoch)) && worker_epoch="$started"
-  done
+  # **作業場ごとに、前回からの進みを見る** (#144)。**最大値を取ると、無関係な worker が
+  # 周回を始めるたびに数が進む**——**PR を直している worker が同じ長い周回にいても、
+  # 別 worker の 3 周だけで全ループを誤停止しうる。**
+  #
+  # **最小値でも足りない** (#200 のレビュー)。**最小値を持っていた作業場が動けば
+  # それだけで動く**ので、**開始時刻がずれていると、片方が 2 周・もう片方が 1 周でも
+  # 上限に達する**。**「いちばん遅い値が動いたか」は「全員が動いたか」ではない。**
+  #
+  # **担当を突き止めない。** **どの作業場がどの PR を見ているかは、ここからは分からない**
+  # （PR 番号から作業場を引くには GitHub が要る）。**代わりに「全員が新しい周回を
+  # 始めたか」を見る**——**担当している作業場も必ずその中にいる**ので、
+  # **無関係な周回だけでは進まない。**
+  #
+  # **止まらなくなる形にはしない。** **見るのは生きている作業場だけ**なので、
+  # **周回を始めなくなった作業場は、その窓を過ぎた時点で外れる**（すぐ下と同じ判定）。
+
   # 窓 = いちばん長かった周回 × 2。**実測が無ければ lease の期限で代用する。**
   #
   # **生きている作業場のものだけを見る** (#175 のレビュー)。記録は**作業場ごと**にあり
@@ -472,30 +481,93 @@ if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
   # **新しい閾値は作っていない**（**下と同じ式・同じ既定**を、作業場ごとに当てるだけ）。
   #
   # **消さない**のも意図的である（**削除は戻せない**）。読むときに外すだけにする。
+  # **印と窓を、同じ 1 つの走査で取る** (#144)。**生死の判定を 2 箇所に持つと、
+  # 片方だけ直して食い違う**——**印の側だけ生死を見ないと、周回を始めなくなった
+  # 作業場が数を永久に止める。**
   now_epoch="$(date +%s)"
-  longest_round=0
-  for len in "$common_dir"/valence-loop-roundlen-worker*; do
-    [[ -f $len ]] || continue
-    read -r seconds <"$len" 2>/dev/null || continue
-    [[ $seconds =~ ^[0-9]+$ ]] || continue
-    scope="${len##*/valence-loop-roundlen-}"
-    scope_rounds="$common_dir/valence-loop-rounds-$scope"
+  for scope_rounds in "$common_dir"/valence-loop-rounds-worker*; do
     [[ -f $scope_rounds ]] || continue
     read -r scope_started <"$scope_rounds" 2>/dev/null || continue
     [[ $scope_started =~ ^[0-9]+$ ]] || continue
-    scope_window=$((seconds * 2))
-    ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
+    scope="${scope_rounds##*/valence-loop-rounds-}"
+    # **実測が無い作業場もいる**（一度も返していない）。**そのときは既定の窓で見る**
+    seconds=""
+    len="$common_dir/valence-loop-roundlen-$scope"
+    if [[ -f $len ]]; then
+      read -r seconds <"$len" 2>/dev/null || seconds=""
+      [[ $seconds =~ ^[0-9]+$ ]] || seconds=""
+    fi
+    scope_window="$lease_ttl"
+    if [[ -n $seconds ]]; then
+      scope_window=$((seconds * 2))
+      ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
+    fi
+    scope_started_at["$scope"]="$scope_started"
+    scope_windows["$scope"]="$scope_window"
     ((now_epoch - scope_started < scope_window)) || continue
-    ((seconds > longest_round)) && longest_round="$seconds"
+    alive_scopes["$scope"]="$scope_started"
   done
-  ((longest_round > 0)) && worker_round_window=$((longest_round * 2)) \
-    || worker_round_window="$lease_ttl"
-  # **既定より狭くしない。** 記録は**直近 N 回ぶんしか残らない** (#146) ので、
-  # **短い周回が続いたあとは窓も縮む**——そこで**次の長い周回の途中に止められる**と、
-  # **#129 / #142 が入れた性質を、忘れる仕組みが壊す**ことになる。
-  # **下限は「記録が無いときと同じ既定」**（lease の期限）で、**新しい根拠を作っていない**。
-  ((worker_round_window >= lease_ttl)) || worker_round_window="$lease_ttl"
+
+  # **生きている作業場の実測は、自分のでなくても効かせる**（#200 のレビュー 3 周目）。
+  # **自分の実測が短い作業場は、長い周回の途中で自分の窓から出る**——
+  # **いちばん守りたい場面（#129 / #142 の「長い周回の途中で止めない」）で
+  # 窓が縮む**という、向きが逆の壊れ方になる。**新しい閾値は作らない**——
+  # **上と同じ式・同じ既定**を、いちばん広い窓で当て直すだけである。
+  #
+  # **広げても戻らない。** **この窓で生き返る作業場は、自分の窓が既に
+  # それより狭い**（狭いから落ちた）ので、**最大を押し上げない。**
+  shared_window="$lease_ttl"
+  for scope in "${!alive_scopes[@]}"; do
+    ((scope_windows[$scope] > shared_window)) && shared_window="${scope_windows[$scope]}"
+  done
+  for scope in "${!scope_started_at[@]}"; do
+    [[ -z ${alive_scopes[$scope]-} ]] || continue
+    ((now_epoch - scope_started_at[$scope] < shared_window)) || continue
+    alive_scopes["$scope"]="${scope_started_at[$scope]}"
+  done
 fi
+
+# **識別子ごとに「各 scope の前回時刻」を持つ。** `<scope>=<時刻>` を `,` で並べ、
+# **scope 順に揃える**（並びが変わっただけで別物にならないため）。
+#
+# **前の版は 1 つの数値だった。** 読めない形は「初めて見た」として扱う——
+# **記録は版をまたいで共有される**ので、**古い形で数え違えるより 1 周落とすほうが安い**。
+snapshot_epochs() {
+  local scope out=""
+  for scope in $(printf '%s\n' "${!alive_scopes[@]}" | sort); do
+    out+="${out:+,}${scope}=${alive_scopes[$scope]}"
+  done
+  printf '%s' "$out"
+}
+
+# **全 scope が、自分の前回より進んだか。** 1 つでも同じ周回の中なら数えない。
+#
+#   0 = 全部進んだ / 1 = 進んでいない
+#   2 = **比べる基準が無い**（前の版が書いた形 / 前回に無かった scope）
+#
+# **「周回を始めた」と「前回から 1 周終えた」は別**である。**前回に無い scope には
+# 基準が無いのだから、終えたとは言えない**——**飛ばすと、入れ替わった直後の作業場が
+# 1 周も終えていないのに数が上限へ届く**（第 4 層が、誰も止まっていないのに人を呼ぶ）。
+#
+# **「読めない」を「進んでいない」と混ぜない。** 混ぜると印が書き換わらないまま
+# 同じところへ落ち続け、**その識別子は二度と数えられない**（第 4 層が黙って死ぬ）。
+all_scopes_advanced() {
+  local previous="$1" pair scope epoch
+  declare -A before=()
+  local IFS=,
+  for pair in $previous; do
+    scope="${pair%%=*}"
+    epoch="${pair#*=}"
+    [[ $scope != "$pair" && $epoch =~ ^[0-9]+$ ]] || return 2
+    before["$scope"]="$epoch"
+  done
+  unset IFS
+  for scope in "${!alive_scopes[@]}"; do
+    [[ -n ${before[$scope]-} ]] || return 2
+    ((alive_scopes[$scope] > before[$scope])) || return 1
+  done
+  return 0
+}
 
 # **worker が解く状態か。** 主体が違うものに worker の周回を効かせない
 # （review-unanswered は Codex が返さないので、worker が元気でも解けない）。
@@ -504,24 +576,26 @@ for kind in "${WORKER_FIXES[@]}"; do
   [[ ${ID%%:*} == "$kind" ]] && worker_fixes_this=1
 done
 
-# **周回が動いているか。** 印が窓の内側にあれば動いている。
+# **周回が動いているか。** **生きている作業場が 1 つでもあれば動いている**——
+# **生死はその作業場自身の窓で測ってある**ので、ここで測り直さない。
 worker_rounding=0
-if [[ -n $worker_epoch ]] && ((worker_round_window > 0)) \
-  && (($(date +%s) - worker_epoch < worker_round_window)); then
-  worker_rounding=1
-fi
+((${#alive_scopes[@]} > 0)) && worker_rounding=1
 
 counted="yes"
 if ((worker_rounding == 1 && worker_fixes_this == 1)); then
-  if [[ $worker_epoch == "$prev_epoch" ]]; then
-    counted="no"
-  elif [[ -z $prev_epoch ]]; then
-    # この識別子を、この周回で初めて見た。**印だけ覚えて数えない。**
+  advanced=0
+  [[ -n $prev_epoch ]] && { all_scopes_advanced "$prev_epoch" || advanced=$?; }
+  if [[ -z $prev_epoch ]] || ((advanced == 2)); then
+    # **比べる基準が無い**（この識別子を初めて見た / 前の版が書いた形 /
+    # 前回に無かった作業場がいる）。**印だけ覚えて数えない。**
+    # 1 周落ちるが、次の周回から数え始められる。
     counted="first"
-    prev_epoch="$worker_epoch"
-  else
+    prev_epoch="$(snapshot_epochs)"
+  elif ((advanced == 0)); then
     count=$((count + 1))
-    prev_epoch="$worker_epoch"
+    prev_epoch="$(snapshot_epochs)"
+  else
+    counted="no"
   fi
 else
   count=$((count + 1))

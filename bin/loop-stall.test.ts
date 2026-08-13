@@ -951,6 +951,105 @@ describe("worker が作業しているあいだは数えない", () => {
     );
   }
 
+  it("片方の作業場だけが新しい周回を始めても、数えない", () => {
+    // **作業場が増えると、無関係な周回で別の PR のカウンタが進む**（#144）。
+    // **印を全部の作業場から取って最大値にしていた**ので、**PR を直している worker が
+    // 同じ長い周回にいても、別の worker が周回を始めるたびに数が進む**——
+    // **別 worker の 3 周だけで全ループを誤停止しうる。**
+    //
+    // **入力を 2 つ用意する。** **1 つの作業場だけでは、この経路に入らない**
+    // （#195 / #196 / #197 / #198 で 4 回続けて踏んだ形）
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 600, activityAgo: 10 });
+    expect(stall().stdout, "1 周目は印を覚えるだけ").toContain("count=0");
+
+    // **もう一方だけが、新しい周回を始めた**（こちらは同じ周回の中にいる）
+    otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
+
+    expect(stall().stdout, "無関係な周回で数が進んでいる").toContain("count=0");
+  });
+
+  it("開始時刻がずれていても、全部の作業場が進むまで数えない", () => {
+    // **最小値では足りない**（#200 のレビュー）。**最小値を持っていた作業場が動けば、
+    // それだけで動く**——**A が 2 周、B が 1 周しか始めていないのに 3 まで達する。**
+    //
+    // **入力を「ずれている」側にする。** **同じ開始時刻だと、最小値と「全員」が
+    // 一致してしまう**（差が無いので、最小値は両方が動いたときにしか動かない）——
+    // **今日 5 回目の「差が無い入力」**である
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 700, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 600, activityAgo: 10 });
+    expect(stall().stdout, "1 周目は印を覚えるだけ").toContain("count=0");
+
+    // **こちらだけが新しい周回を始めた**（もう一方は同じ周回の中にいる）
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+
+    expect(stall().stdout, "片方だけで数が進んでいる").toContain("count=0");
+  });
+
+  it("どの作業場も新しい周回を始めたら、数える", () => {
+    // **混ざらなくすることは、数えなくすることではない**（#47 で塞いだ
+    // 「正常に動きながら何も進まない」が、ここに開き直る）。
+    // **片方だけ見ると「誰のカウンタも進まない」でも緑になる**
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 600, activityAgo: 10 });
+    expect(stall().stdout).toContain("count=0");
+
+    // **両方が、新しい周回を始めた**
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
+
+    expect(stall().stdout, "誰の周回でも数が進まなくなっている").toContain("count=1");
+  });
+
+  it("使われなくなった作業場は、数を止め続けない", () => {
+    // **「全員が新しい周回を始めたか」で見る**と、**周回を始めなくなった作業場が
+    // 1 つあるだけで、数が永久に止まる**——**混ざらなくすることは、数えなくすること
+    // ではない**（#47 で塞いだ「正常に動きながら何も進まない」が、ここに開き直る）。
+    //
+    // **生きている作業場だけを見る**（#175 と同じ判定を、印のほうにも当てる）
+    const now = Math.floor(Date.now() / 1000);
+    // **窓の外にいる作業場**（600 秒の周回なので窓は 1800 秒。3 時間前は死んでいる）
+    otherWorkspace({ longestRound: 600, startedAgo: 10800, activityAgo: 10800 });
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    expect(stall().stdout).toContain("count=0");
+
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+
+    expect(stall().stdout, "死んだ作業場が数を止めている").toContain("count=1");
+  });
+
+  it("前の版が書いた記録が残っていても、そこから数え始められる", () => {
+    // **記録は `--git-common-dir` にあり、版をまたいで共有される**（#200 のレビュー
+    // 2 周目）——**入れ替わる直前の周回で、前の版が 1 つの数値を書いている。**
+    //
+    // **「読めない」を「進んでいない」と同じ扱いにすると、その識別子は二度と
+    // 数えられない**（印が書き換わらないので、何周進めても同じところへ落ちる）。
+    // **第 4 層が黙って死ぬ**——**count が出続けるので、読む人は数えていると思う。**
+    //
+    // **入力は「前の版が書いた状態」である**（**今日 6 回目。今回は「差が無い入力」
+    // ではなく、「古い入力が無い」**——**版をまたぐものは、古い側の入力も要る**）
+    const now = Math.floor(Date.now() / 1000);
+    writeFileSync(
+      join(repo, ".git", "valence-loop-stall"),
+      `1\t${WORKER_FIXES_ID}\t${now - 900}\n`,
+    );
+    workerState({ activityAgo: 10, startedAt: now - 700, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 600, activityAgo: 10 });
+
+    // **1 周落ちる**（読めない形は「初めて見た」として扱う）
+    expect(stall().stdout, "古い記録のまま数えている").toContain("count=1");
+
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
+
+    expect(stall().stdout, "古い記録を書き換えていないので、二度と数えられない").toContain(
+      "count=2",
+    );
+  });
+
   it("人が `./task` を叩いても、使われなくなった作業場は生き返らない", () => {
     // **活動の記録は生存に使えない**（このファイルの上のほうに書いてある）——
     // **`./task` は lease の有無に関係なく毎回 heartbeat を打つ**ので、
@@ -994,6 +1093,52 @@ describe("worker が作業しているあいだは数えない", () => {
     otherWorkspace({ longestRound: 4000, startedAgo: 2500, activityAgo: 5 });
 
     expect(stall().stdout, "生きている作業場の実測を捨てている").toContain("count=0");
+  });
+
+  it("他の作業場の実測は、2 周目以降も効かせる", () => {
+    // **1 つ上の試験は `stall()` を 1 回しか呼んでいない**（#200 のレビュー 3 周目）——
+    // **「B だけが進んだ 2 周目」を 1 度も通っていない**ので、**除外の側が
+    // 自分の実測だけで測っていても緑になる**。**入力が経路を選んでいる。**
+    //
+    // **実測 5 秒の作業場が 3000 秒の周回にいる**とき、**自分の窓（10 秒）では
+    // 窓の外へ出る**——**「全員」から落ちるので、B が進むたびに数が増える**。
+    // **自分の実測が当てにならないときこそ、他の作業場の実測で守る必要がある**
+    // （#129 / #142 の「長い周回の途中で止めない」）
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 1, startedAt: now - 3000, longestRound: 5 });
+    otherWorkspace({ longestRound: 4000, startedAgo: 2500, activityAgo: 5 });
+    expect(stall().stdout, "1 周目は印を覚えるだけ").toContain("count=0");
+
+    // **B だけが新しい周回を始めた**（A は同じ長い周回の途中にいる）
+    otherWorkspace({ longestRound: 4000, startedAgo: 1, activityAgo: 5 });
+
+    expect(stall().stdout, "長い周回の途中にいる作業場が「全員」から落ちている").toContain(
+      "count=0",
+    );
+  });
+
+  it("入れ替わった作業場の 1 周目を、終えた周回として数えない", () => {
+    // **「周回を始めた」と「前回から 1 周終えた」は別**（#200 のレビュー 3 周目）——
+    // **基準が無いのだから、終えたとは言えない。** **前回に無い scope を「進んだ」と
+    // して飛ばすと、入れ替わった直後の作業場が 1 周も終えていないのに数が上限へ届く**
+    // ——**第 4 層が、誰も止まっていないのに人を呼ぶ。**
+    //
+    // **入力は「scope の集合が周回をまたいで変わる」**である（**いまの試験は
+    // 1 度も作っていない**——**今日の形がまた出ている**）
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    expect(stall().stdout, "1 周目は印を覚えるだけ").toContain("count=0");
+
+    // **古い作業場が死に、新しい作業場が 1 周目を始めた**（実測はまだ無い）
+    workerState({ activityAgo: 10, startedAt: now - 10800, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
+
+    expect(stall().stdout, "1 周も終えていない作業場で数えている").toContain("count=0");
+
+    // **基準ができたので、そこから数え始める**
+    otherWorkspace({ longestRound: 600, startedAgo: 0, activityAgo: 10 });
+
+    expect(stall().stdout, "基準を覚えていないので、二度と数えられない").toContain("count=1");
   });
 
   it("実測が短くても、窓は既定より狭くしない", () => {
