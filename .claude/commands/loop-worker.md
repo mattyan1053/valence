@@ -52,11 +52,23 @@ bin/loop-lease acquire worker      # 出力された token を控える
 存在しない場合、作業ツリーが clean であることを確認する。dirty なら、
 前の周回が中断している。`bin/loop-stall dirty` を通して停止し、何が残っているかを報告する。
 
-`main` を最新化する。
+`origin/main` の先端へ移る。**ブランチとして `main` を掴まない** (#196)。
 
 ```bash
-git switch main && git fetch origin main && git merge --ff-only origin/main
+{ git fetch origin main || git fetch origin main; } && git switch --detach origin/main
 ```
+
+**`main` は 1 つの作業場にしか checkout できない。** **掴むと、2 人目は
+`fatal: 'main' is already checked out at …` でここを通れず**、**毎周回止まって
+3 周で `loop/STOP` を配る**——**1 人目まで巻き添えで止まる**（master も同じ形で動いている）。
+
+**競り負けたら 1 度だけやり直す。** **`refs/remotes/origin/main` は
+`--git-common-dir` にある**ので、**worktree を分けても共有**である——**2 人が同じ周回の
+冒頭で fetch すると、後から書く側が `cannot lock ref` で落ちる**（実測で 25/25）。
+**そのとき ref は既に目的の値**なので、**やり直すと「更新するものが無い」で成功する**
+——**直っているのに赤**にしない。**2 度とも落ちたら、そこは本当に失敗である。**
+
+**detached でよい。** **ブランチを切るのはステップ 4 で、起点は `origin/main` の先端**である。
 
 どれかに失敗したら `bin/loop-stall main-sync-failed` を通して停止する。
 
@@ -227,7 +239,7 @@ bin/loop-claim resume <N>
 
 ```bash
 git branch --format='%(refname:short)' | grep -v '^main$'
-git log --oneline main..<ブランチ>                          # コミットが載っているか
+git log --oneline origin/main..<ブランチ>                   # コミットが載っているか
 if ! head_prs="$(gh pr list --state all --limit 200 --head <ブランチ> --json number,state,labels)"; then
   bin/loop-stall pr-lookup-failed
   exit
@@ -262,9 +274,10 @@ printf '%s\n' "$head_prs"
 
 ## 3. レビュー指摘に対応する
 
-**先に対象 PR の head ブランチへ切り替える。** ステップ 1 で `main` にいるので、
-そのまま直すと `main` 上で作業することになり、push しても PR は更新されないか、
-禁止している `main` への直接 push を試みる。
+**先に対象 PR の head ブランチへ切り替える。** ステップ 1 で `origin/main` の先端
+（detached）にいるので、**そのまま直すと、どのブランチにも載らない commit ができる**
+——**push する先が無く、PR は更新されない**（**次に切り替えた時点で、その commit は
+どこからも辿れなくなる**）。
 
 ```bash
 gh pr checkout <PR番号>
