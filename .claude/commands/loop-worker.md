@@ -68,7 +68,8 @@ bin/loop-lease acquire worker      # 出力された token を控える
 **そのとき ref は既に目的の値**なので、**やり直すと「更新するものが無い」で成功する**
 ——**直っているのに赤**にしない。**2 度とも落ちたら、そこは本当に失敗である。**
 
-**detached でよい。** **ブランチを切るのはステップ 4 で、起点は `origin/main` の先端**である。
+**detached でよい。** **worker はどこでもブランチを掴まない** (#102)——
+**実装もレビュー対応も detached のまま行い、ブランチ名は push とブランチの更新でだけ使う。**
 
 どれかに失敗したら `bin/loop-stall main-sync-failed` を通して停止する。
 
@@ -267,8 +268,25 @@ printf '%s\n' "$head_prs"
     `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
     （状態が変わらなければ同じ識別子が積み上がり、3 周で止まる）
 - **PR が無く、コミットが載ったブランチがある** → 公開に失敗した周回の続きである。
-  そのブランチへ切り替え、ステップ 4 の「PR を作る」から再開する。再び失敗したら
-  同じ `publish-failed:<Issue番号>` を記録するので、3 周で止まる
+  そのブランチへ **detached で入り**、ステップ 4 の「PR を作る」から再開する。
+  再び失敗したら同じ `publish-failed:<Issue番号>` を記録するので、3 周で止まる
+
+  ```bash
+  bin/loop-keep-branch --enter <ブランチ>
+  ```
+
+  **掴まない** (#102)。**ブランチは 1 つの作業場にしか checkout できない**ので、
+  **落ちた作業場が掴んだままだと `git switch <ブランチ>` は exit 128 で落ちる**——
+  **`bin/loop-claim` が所有権を移しても、続きが実行できない。**
+  **detached なら、掴んでいる相手がいても入れる。**
+
+  **ブランチと回収用 ref の、辿れるほうへ入る。** **掴まれていて進められなかった周回は、
+  ブランチではない ref に置いてある**（下記「PR を作る」）——**置く側と読む側は 1 組で、
+  読まないなら置いていないのと同じ**である。
+
+  - **exit 0** → 入れた。下の分岐へ進む
+  - **exit 1** → 入る先が無い。**この Issue は「ブランチが無い」側**として扱う
+  - **exit 2** → 判定できない。標準エラーに出た内容を報告して終わる
 - **ブランチが無い / コミットが載っていない** → 実装が途中。ステップ 4 の実装から続ける
   （label は `in-progress` のままでよい。付け替え直さない）
 
@@ -280,11 +298,20 @@ printf '%s\n' "$head_prs"
 どこからも辿れなくなる**）。
 
 ```bash
-gh pr checkout <PR番号>
-git branch --show-current      # PR の headRefName と一致することを確認する
+gh pr checkout --detach <PR番号>
+bin/loop-head same <PR番号> "$(git rev-parse HEAD)"   # PR の head と一致するか
 ```
 
-一致しない場合は `bin/loop-stall "wrong-branch:<PR番号>"` を通して停止する。**確認せずに編集しない。**
+**exit 0 以外なら `bin/loop-stall "wrong-branch:<PR番号>"` を通して停止する。**
+**確認せずに編集しない。**
+
+**照合は目でやらない。** **detached なので `git branch --show-current` は空**で、
+**`headRefOid` は手順書のどこにも出てこない値**である——**「一致することを確認する」と
+書いても、比べる相手がその場に無ければ実行されない。**
+**判定は `bin/loop-head` が持っている**（2 箇所に持たない）。
+
+**ここでも掴まない** (#102)。**別の作業場が同じ PR のブランチを掴んだまま落ちていると、
+`gh pr checkout` は exit 128 で落ちる**——**引き継げないので、その PR は誰も直せなくなる。**
 
 未解決スレッドを**ページングして**取る。件数を決め打ちすると、20 件を超えた PR で
 取りこぼし、ブランチ保護でマージできない原因が分からなくなる。
@@ -313,7 +340,7 @@ git branch --show-current      # PR の headRefName と一致することを確�
 指示する。**指示が来てから行う。** 自分の判断で rebase しない。
 
 ```bash
-gh pr checkout <PR番号>
+gh pr checkout --detach <PR番号>
 git fetch origin main
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
 # **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ったとき、後発が先発を
@@ -329,7 +356,8 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
-git push --force-with-lease
+bin/loop-keep-branch <ブランチ>       # 落ちてもこの周回の commit を辿れるようにする (#102)
+git push --force-with-lease origin HEAD:refs/heads/<ブランチ>
 ```
 
 **`--force` ではなく `--force-with-lease`。** 履歴を書き換えるので、自分が知らない
@@ -355,7 +383,8 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
-git push
+bin/loop-keep-branch <ブランチ>       # 落ちてもこの周回の commit を辿れるようにする (#102)
+git push origin HEAD:refs/heads/<ブランチ>
 ```
 
 push したらこの周回は終わり。**レビュー要求は投げない。** master が判断する。
@@ -415,7 +444,11 @@ bin/loop-claim take <N>
 **譲る側は「後からロックに入った方」**である。ロックは必ずどちらか一方が取るので、
 **両方が譲って誰も進まない**ことは起きない。
 
-ブランチを切る。命名は `AGENTS.md` に従う（`feat/` `fix/` `chore/` `refactor/` `docs/`）。
+**ブランチ名を決める。切らない。** 命名は `AGENTS.md` に従う
+（`feat/` `fix/` `chore/` `refactor/` `docs/`）。**detached のまま実装する** (#102)。
+
+**掴むと、この作業場が落ちたときに誰も引き継げない**——**別の作業場の `git switch` が
+exit 128 で落ちる**。**ブランチ名を使うのは「PR を作る」の 2 行だけ**である。
 
 ### 実装は必ずテストファースト
 
@@ -496,10 +529,29 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
-git push -u origin <ブランチ>
-gh pr create --base main --title "<日本語>" --body-file <file>
+bin/loop-keep-branch <ブランチ>       # 落ちてもこの周回の commit を辿れるようにする (#102)
+git push origin HEAD:refs/heads/<ブランチ>
+gh pr create --base main --head <ブランチ> --title "<日本語>" --body-file <file>
 bin/loop-review-head "<PR番号>" "$(git rev-parse HEAD)"
 ```
+
+**`--head` を省かない** (#102)。**detached なので、既定の「いまのブランチ」が取れない**
+——**`could not determine the current branch` で PR が作れない**（実測）。
+
+**`bin/loop-keep-branch` は、push が落ちた周回のためにある。** **掴まないので、
+push が落ちるとこの周回の commit を指すものが 1 つも無い**——**次の周回は冒頭で
+`origin/main` へ移る**ので、**どこからも辿れなくなる**（**通信障害や
+non-fast-forward は、worker が 1 人でも起きる**）。**ステップ 2.2 の
+「コミットが載ったブランチ」が拾えるように、ブランチ名を先へ進めておく。**
+
+**push の前 3 箇所に置く**（rebase・対応後・ここ）。**1 箇所ずつ書くと、次に足された
+push が抜ける**——**実際に 1 箇所だけになっていた**。**置き忘れは走査で見る**
+（`loop/worker-branch-handoff.test.ts`）。
+
+**掴まれていても止まらない。** **引き継いだ周回が commit を足すと、ブランチは
+worktree 排他で進められない**——**そこで止めると、引き継ぎを直したこの変更自身が、
+引き継ぎを止める。** **ブランチではない ref（`refs/loop/keep/<ブランチ>`）へ置き、
+ステップ 2.2 の `--enter` がそれも見る。** **置く側と読む側は 1 組である。**
 
 **作った直後に head を記録する。** PR を開くと自動でレビューが走り、その対象は今の head
 である。指摘ゼロのとき Codex は 👍 リアクションだけで返すことがあり、それは SHA を
