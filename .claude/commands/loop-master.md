@@ -432,6 +432,7 @@ bin/loop-lease release master "<token>"
 | 落ちた条件 | すること |
 | --- | --- |
 | GHA CI が pending | 何もしない。次の周回で再判定する |
+| GHA CI が pending のまま予算を超えた | 下の「予算を超えたとき」へ。**人へ渡す** |
 | GHA CI が fail | worker に直させる（ステップ 4） |
 | 未解決スレッドがある | worker に対応させる（ステップ 4） |
 | 現 head が未レビュー | ステップ 3.2 へ |
@@ -439,6 +440,27 @@ bin/loop-lease release master "<token>"
 | 上限到達＋手直しが上限超え | 「上限に達した PR をどこへ渡すか」で行き先を決める |
 | 外出しした指摘が溜まりすぎ | `bin/loop-stall "deferred-overflow"` で停止。**読み切るまでマージしない** |
 | master の要求あり | 下の「要求が満たされたか確かめる」へ |
+
+**「pending」と「pending のまま予算を超えた」を、文面の語で見分けない。**
+**`bin/loop-gate` が終了コードで分けた結果を行に載せている**（判定は
+`bin/loop-ci-status`）——**予算の根拠は workflow の `timeout-minutes`** で、
+**ジョブ自身が諦める時間より長く待つ理由が無い**。
+
+**worker には渡さない。** **`conclusion` が出ないまま止まるのは GitHub 側の状態**で、
+**PR に足すもので直る保証が無い**（**実測でも、直したのは人の `gh run rerun` である**）——
+**head を動かして作り直しても、同じ状態にならない理由が無い。**
+
+#### 予算を超えたとき
+
+**記録する前に、head が動いていないことを確かめる。**
+
+```bash
+bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら記録しない
+bin/loop-stall "ci-pending:<PR番号>@<SHA>"
+```
+
+**動いていたら、その pending は前の head のものである**——**新しい head では検査が
+作り直される**ので、**人を呼ぶ理由が無い**。**記録せず、次の周回で測り直す。**
 
 ### 要求が満たされたか確かめる（`changes-requested`）
 
