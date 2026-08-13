@@ -309,7 +309,14 @@ patch_mentions() {
 requested_by_reference() {
   local added="$1" by path
   [[ -n ${added_files[$added]-} ]] || return 1
-  path="$(decode "$added")"
+  # **`$( )` は末尾の改行を全部落とす** (#208 のレビュー)。**git はファイル名に改行を
+  # 許す**ので、**落とすとそこが抜け道になる**——**`large\n` が `large` に化けて、
+  # 単語 `large` に当たる**。**番人を足して戻す。**
+  path="$(
+    decode "$added"
+    printf x
+  )"
+  path="${path%x}"
   [[ -n $path ]] || return 1
   for by in "${!requested[@]}"; do
     [[ $by != "$added" ]] || continue

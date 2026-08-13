@@ -249,6 +249,27 @@ describe("要求に応えて作った新しいファイル", () => {
     expect(result.stdout.trim(), "メタ文字が当たっている").toBe("40\t0\t2");
   });
 
+  it("末尾に改行を持つ名前でも、単語だけの一致では数える", () => {
+    // **`$( )` は末尾の改行を全部落とす**（#208 のレビュー 2 周目）——
+    // **`large\n` が `large` に化けて、単語 `large` に当たる。**
+    // **境界を見るようにしたから効くようになった**（部分文字列のころは結果が同じだった）。
+    //
+    // **git はファイル名に改行を許す。** **名前は PR 側で決められる**ので、
+    // **復号が変形すると、そこが抜け道になる**——**第 3 層は緩い側へ倒さない。**
+    const result = runWithFiles(
+      [row(".claude/commands/loop-worker.md", false, 2, 0), row("bin/large\n", false, 300, 0)],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [
+        newFile("bin/large\n"),
+        patchOf(".claude/commands/loop-worker.md", "@@ -1 +1 @@\n+bin/large を足す\n"),
+      ],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "復号が名前を変形している").toBe("300\t0\t2");
+  });
+
   it("削除行にしか無ければ、数える", () => {
     // **消した行の言及は、呼んでいる証拠にならない**
     const result = runWithFiles(
