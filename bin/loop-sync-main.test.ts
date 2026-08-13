@@ -46,6 +46,8 @@ describe("bin/loop-sync-main", () => {
     fetches: string[];
     /** `switch` が落ちる。 */
     switchFails?: boolean;
+    /** スクリプトへ渡す引数。 */
+    args?: string[];
   }): { status: number; stdout: string; stderr: string; fetches: number; switched: number } {
     const stub = join(sandbox, "stub");
     mkdirSync(stub, { recursive: true });
@@ -87,7 +89,7 @@ describe("bin/loop-sync-main", () => {
 
     const count = (path: string) =>
       existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").length : 0;
-    const result = spawnSync(SCRIPT, [], {
+    const result = spawnSync(SCRIPT, options.args ?? [], {
       encoding: "utf8",
       env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
     });
@@ -150,6 +152,30 @@ describe("bin/loop-sync-main", () => {
     expect(result.stderr).toContain("Permission denied");
   });
 
+  it("--fetch-only は、取ってくるだけで切り替えない", () => {
+    // **rebase の前は、PR の head にいたまま `origin/main` を取り直す**
+    // ——**切り替えると、その PR の checkout を捨ててしまう。**
+    const result = run({ fetches: [""], args: ["--fetch-only"] });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.switched, "切り替えてしまっている").toBe(0);
+  });
+
+  it("--fetch-only でも、理由で分ける", () => {
+    // **判断は 1 つ**。**取ってくるだけの経路にも、同じ分け方が効く。**
+    const result = run({ fetches: [AUTH, ""], args: ["--fetch-only"] });
+
+    expect(result.status).toBe(1);
+    expect(result.fetches, "恒久的な失敗で投げ直している").toBe(1);
+  });
+
+  it("知らない引数は受けない", () => {
+    const result = run({ fetches: [""], args: ["--なにか"] });
+
+    expect(result.status).toBe(2);
+    expect(result.fetches, "使い方が違うのに取りに行っている").toBe(0);
+  });
+
   it("切り替えに失敗したら、同期できたことにしない", () => {
     // **fetch が通っても、先端へ移れていなければ同期ではない。**
     const result = run({ fetches: [""], switchFails: true });
@@ -171,11 +197,10 @@ describe("同期の口は、両方の役から辿れる", () => {
     it(`${doc} が同期の口を指している`, () => {
       const text = readFileSync(join(ROOT, doc), "utf8");
       expect(text).toContain("bin/loop-sync-main");
-      // **生の `git fetch origin main` が残っていると、そちらが実行される**
-      // ——**判断を持たない経路が 1 本残る。**
-      expect(text, "周回の冒頭に、判断を通らない fetch が残っている").not.toContain(
-        "git fetch origin main && git switch",
-      );
+      // **書き方ではなく、残っていないことを見る** (#226 のレビュー)。
+      // **合わせ技だけを探すと、別の書き方で足した 1 本が素通りする**
+      // ——**実際に、マージ後の経路が前のまま残っていた。**
+      expect(text, "判断を通らない fetch が残っている").not.toMatch(/git fetch origin main/);
     });
   }
 });

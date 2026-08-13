@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # `origin/main` の先端へ移る。**やり直すかどうかは、回数ではなく理由で決める。**
 #
-#   bin/loop-sync-main
+#   bin/loop-sync-main               取ってきて、origin/main の先端へ移る
+#   bin/loop-sync-main --fetch-only  取ってくるだけ（いまいる場所を離れない）
 #
-#   exit 0 = 同期できた（移った先の SHA を出す）
+#   exit 0 = 同期できた（移ったときは、移った先の SHA を出す）
 #   exit 1 = 同期できなかった（理由を標準エラーへそのまま出す）
 #   exit 2 = 使い方の誤り
+#
+# **`--fetch-only` は rebase の前に使う。** **PR の head にいたまま `origin/main` を
+# 取り直す**ので、**切り替えるとその PR の checkout を捨ててしまう。**
+# **判断は 1 つ**——**取ってくるだけの経路にも、同じ分け方が効く。**
 #
 # **「1 度だけやり直す」は `cannot lock ref` のために置かれた** (#217)。
 # **`refs/remotes/origin/main` は `--git-common-dir` にある**ので、**worktree を
@@ -27,10 +32,17 @@
 set -uo pipefail
 
 usage() {
-  echo "使い方: bin/loop-sync-main" >&2
+  echo "使い方: bin/loop-sync-main [--fetch-only]" >&2
   echo "        exit 0 = 同期できた / exit 1 = できなかった / exit 2 = 使い方の誤り" >&2
   exit 2
 }
+
+FETCH_ONLY=0
+if [[ ${1-} == "--fetch-only" ]]; then
+  FETCH_ONLY=1
+  shift
+fi
+readonly FETCH_ONLY
 
 [[ $# -eq 0 ]] || usage
 
@@ -84,6 +96,11 @@ while true; do
     exit 1
   fi
 done
+
+# **取ってくるだけなら、ここで終わり。** **いまいる場所を離れない。**
+if ((FETCH_ONLY == 1)); then
+  exit 0
+fi
 
 # **ブランチとして `main` を掴まない** (#196)。**掴むと、2 人目は
 # `fatal: 'main' is already checked out at …` でここを通れない。**

@@ -26,7 +26,10 @@ const PROCEDURE = ".claude/commands/loop-worker.md";
 function syncBlock(): string {
   const body = readFileSync(join(REPO_ROOT, PROCEDURE), "utf8");
   const blocks = [...body.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => match[1] ?? "");
-  const found = blocks.filter((block) => block.includes("bin/loop-sync-main"));
+  // **rebase の前にも同じ口を通る**（`--fetch-only`）ので、そちらを外す
+  const found = blocks.filter(
+    (block) => block.includes("bin/loop-sync-main") && !block.includes("--fetch-only"),
+  );
   expect(found, "「main を最新化する」ブロックが 1 つに絞れない").toHaveLength(1);
   return found[0] ?? "";
 }

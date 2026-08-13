@@ -352,7 +352,9 @@ bin/loop-head same <PR番号> "$(git rev-parse HEAD)"   # PR の head と一致�
 
 ```bash
 gh pr checkout --detach <PR番号>
-git fetch origin main
+# **取ってくるだけ。** **切り替えると、いま入った PR の checkout を捨てる**
+# ——**やり直すかどうかの判断は、冒頭の同期と同じものが持つ** (#217)
+bin/loop-sync-main --fetch-only
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
 # **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ったとき、後発が先発を
 # truncate して混ざる**——**合否は `$status` なので正しいまま**なので、
