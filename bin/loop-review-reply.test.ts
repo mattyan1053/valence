@@ -115,6 +115,27 @@ describe("bin/loop-review-reply", () => {
     ].join("\n");
   }
 
+  /**
+   * 別の周回にロックを握らせる。
+   *
+   * **握ったことを待ってから返す。** **起こしただけでは、検査対象のほうが先に
+   * 取ることがある**——**そのとき「消さない」は偶然になり、たまに落ちる試験になる**
+   * （#225 のレビュー）。
+   */
+  function holdLock(lock: string, ready: string): void {
+    writeFileSync(lock, "");
+    holder = spawn("flock", ["-x", lock, "sh", "-c", `touch ${JSON.stringify(ready)}; sleep 30`], {
+      stdio: "ignore",
+    });
+    const until = Date.now() + 10_000;
+    while (!existsSync(ready)) {
+      if (Date.now() > until) {
+        throw new Error("ロックを握らせられませんでした");
+      }
+      spawnSync("sleep", ["0.05"]);
+    }
+  }
+
   function run(options: {
     /** 投稿の結果を、呼ばれた順に並べる。`ok` は成功、`blocked` は 422。 */
     replies: ("ok" | "blocked" | "other")[];
@@ -149,9 +170,7 @@ describe("bin/loop-review-reply", () => {
 
     const lock = join(sandbox, "reply.lock");
     if (options.lockHeld === true) {
-      // **別の周回が握っている状態**を作る。**待っても取れない。**
-      writeFileSync(lock, "");
-      holder = spawn("flock", ["-x", lock, "sleep", "30"], { stdio: "ignore" });
+      holdLock(lock, join(sandbox, "lock-held"));
     }
     const result = spawnSync(SCRIPT, ["42", THREAD, body], {
       encoding: "utf8",
@@ -183,20 +202,21 @@ describe("bin/loop-review-reply", () => {
   });
 
   it("塞がれていたら、空の pending を消して投げ直す", () => {
+    // **投げるのは 3 回**（初回 / 錠を取った直後 / 消した直後）。**理由がそれぞれ違う。**
     const result = run({
-      replies: ["blocked", "ok"],
+      replies: ["blocked", "blocked", "ok"],
       pendings: [{ id: 7, login: "me", body: "", comments: 0 }],
     });
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.deleted, "消していない").toContain("/reviews/7");
-    expect(result.posts, "投げ直していない").toBe(2);
+    expect(result.posts, "投げ直していない").toBe(3);
   });
 
   it("下書きが入った pending は消さない", () => {
     // **消すと、書いた内容ごと消える。** **止まるほうへ倒す。**
     const result = run({
-      replies: ["blocked"],
+      replies: ["blocked", "blocked"],
       pendings: [{ id: 7, login: "me", body: "書きかけ", comments: 0 }],
     });
 
@@ -208,7 +228,7 @@ describe("bin/loop-review-reply", () => {
   it("提出済みのコメントが入った pending は消さない", () => {
     // **本文が空でも、コメントが下書きされていることがある**——**両方見る。**
     const result = run({
-      replies: ["blocked"],
+      replies: ["blocked", "blocked"],
       pendings: [{ id: 7, login: "me", body: "", comments: 3 }],
     });
 
@@ -218,7 +238,7 @@ describe("bin/loop-review-reply", () => {
 
   it("自分のものでない pending は消さない", () => {
     const result = run({
-      replies: ["blocked"],
+      replies: ["blocked", "blocked"],
       pendings: [{ id: 7, login: "someone-else", body: "", comments: 0 }],
     });
 
@@ -236,7 +256,8 @@ describe("bin/loop-review-reply", () => {
   });
 
   it("塞がれているのに pending が見つからなければ、消さずに報告する", () => {
-    const result = run({ replies: ["blocked"], pendings: [] });
+    // **錠を取ったあとも塞がれたまま**なのに、pending が 1 つも無い状態
+    const result = run({ replies: ["blocked", "blocked"], pendings: [] });
 
     expect(result.status).toBe(2);
     expect(result.deleted).toBe("");
@@ -287,15 +308,28 @@ describe("bin/loop-review-reply", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
-  it("投げ直しても塞がれていたら、繰り返さない", () => {
-    // **同じ手を繰り返すと、同じ競合をもう一度開く**（`ensureUsableToken` と同じ判断）。
+  it("待っている間に片付いていたら、消さずに投稿できる", () => {
+    // **ロックを待つ間に、先に入った周回が消して投げ直している**ことがある
+    // ——**そのとき塞いでいるものはもう無い**（#225 のレビュー）。
+    // **待つ前に読んだ理由のまま進むと、「pending が見つかりません」で
+    // 投稿できずに終わる。** **錠を取ったら、もう一度やってみる。**
+    const result = run({ replies: ["blocked", "ok"], pendings: [] });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.deleted, "消しに行っている").toBe("");
+    expect(result.posts, "投げ直していない").toBe(2);
+  });
+
+  it("消しても塞がれたままなら、そこで止める", () => {
+    // **際限なく投げない。** 投げるのは **最初の 1 回・錠を取った直後・消した直後**
+    // の 3 回までで、**どれも理由が違う**（初回 / 待つ間に変わりうる / 片付けた）。
     const result = run({
-      replies: ["blocked", "blocked"],
+      replies: ["blocked", "blocked", "blocked"],
       pendings: [{ id: 7, login: "me", body: "", comments: 0 }],
     });
 
     expect(result.status).toBe(2);
-    expect(result.posts, "3 回以上投げている").toBe(2);
+    expect(result.posts, "4 回以上投げている").toBe(3);
   });
 });
 

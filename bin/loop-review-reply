@@ -133,6 +133,24 @@ if ! flock -w "$lock_wait" 9; then
   exit 2
 fi
 
+# **錠を取ったら、状態を読み直す。** **待っている間に、先に入った周回が消して
+# 投げ直している**ことがある——**そのとき塞いでいるものはもう無い**（#225 のレビュー）。
+# **待つ前に読んだ理由のまま進むと、「pending が見つかりません」で投稿できずに終わる。**
+#
+# **読み直しは、やってみることで行う。** **塞がれていなければ投稿は通る**ので、
+# **問い合わせを 1 つ増やすより、目的の操作そのもので確かめる。**
+if url="$(post_reply)" && [[ -n $url ]]; then
+  printf '%s\n' "$url"
+  exit 0
+fi
+
+reason="$(cat "$errfile")"
+if [[ $reason != *"$BLOCKED_BY_PENDING"* ]]; then
+  echo "[FAIL] 返信を投稿できません (pending review が原因ではありません)" >&2
+  printf '%s\n' "$reason" >&2
+  exit 2
+fi
+
 if ! me="$(gh api user --jq '.login' 2>/dev/null)" || [[ -z $me ]]; then
   echo "[FAIL] 投稿している利用者を確かめられません (消してよいかを決められません)" >&2
   exit 2
@@ -211,7 +229,8 @@ if ! gh api --method DELETE "repos/{owner}/{repo}/pulls/$PR/reviews/$pending_id"
   exit 2
 fi
 
-# **投げ直すのは 1 度だけ。** **繰り返すと、同じ競合をもう一度開く。**
+# **投げるのはここまで。** **最初の 1 回・錠を取った直後・消した直後**の 3 回で、
+# **どれも理由が違う**（初回 / 待つ間に変わりうる / 片付けた）。**同じ理由で繰り返さない。**
 if url="$(post_reply)" && [[ -n $url ]]; then
   printf '%s\n' "$url"
   exit 0
