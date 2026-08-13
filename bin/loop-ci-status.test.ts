@@ -332,6 +332,55 @@ describe("bin/loop-ci-status", () => {
     expect(result.status, "宣言しない job があると、検出が消えている").toBe(4);
   });
 
+  it("どの job も宣言していなくても、既定で測る", () => {
+    // **最後の条件が 2 つの意味を兼ねていた**（#207 のレビュー 4 周目）——
+    // **「workflow を読めた」を `budget_min` の有無で見ていた**ので、
+    // **どの job も宣言していないと、読めているのに空**になり、**既定へ倒れなかった。**
+    //
+    // **「全部が宣言しない」は恒久的**である（**直すまで毎周回そこに在る**）のに、
+    // **一時的の側（捨てる）へ落ちていた**——**自分で書いた軸が、そのまま当たっていた。**
+    workflowsWithJobs([[null], [null]]);
+
+    const result = run({
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 361 * 60 },
+        { name: "beta", status: "completed", conclusion: "success", startedAgo: 361 * 60 },
+      ],
+    });
+
+    expect(result.status, "どの job も宣言していないと、検出が消えている").toBe(4);
+  });
+
+  it("どの job も宣言していなくても、既定の内なら待つ", () => {
+    // **360 へ倒しすぎない**（既定は「諦める時間」であって、止める合図ではない）
+    workflowsWithJobs([[null], [null]]);
+
+    const result = run({
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 21 * 60 },
+        { name: "beta", status: "completed", conclusion: "success", startedAgo: 21 * 60 },
+      ],
+    });
+
+    expect(result.status, "既定の内なのに止めている").toBe(3);
+  });
+
+  it("読めない 1 本があれば、既定へも倒さない", () => {
+    // **「1 本でも読めなければ捨てる」は、既定へ倒す側にも効く**——
+    // **読めなかった 1 本が 500 分を宣言していたら、360 は根拠にならない。**
+    // **読めた側に宣言しない job がある**入力でないと、この経路に入らない
+    workflowsWithJobs([[null], [15]], { unreadable: 1 });
+
+    const result = run({
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 361 * 60 },
+        { name: "beta", status: "completed", conclusion: "success", startedAgo: 361 * 60 },
+      ],
+    });
+
+    expect(result.status, "読めていないのに既定を名乗っている").toBe(3);
+  });
+
   it("全部の job が宣言していれば、その最大で測る", () => {
     // **360 へ倒しすぎない。** **宣言してあるなら、それが「諦める時間」である。**
     workflowsWithJobs([[20], [15, 10]]);

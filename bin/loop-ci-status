@@ -124,9 +124,13 @@ fi
 budget_min=""
 # **全部の job が `timeout-minutes` を宣言していると確かめられたか。**
 all_declared=1
+# **workflow を読めたか。** **`budget_min` の有無で代用しない**——**どの job も
+# 宣言していないと、読めているのに空**になり、**既定へ倒れない**（#207 のレビュー）。
+workflows_read=0
 if ((FINGERPRINT == 0)) \
   && workflow_paths="$(gh api "repos/{owner}/{repo}/contents/.github/workflows?ref=$head_sha" \
     --jq '.[]? | select(.type == "file") | .path' 2>/dev/null)"; then
+  workflows_read=1
   # **1 本でも読めなければ、予算を捨てる。** **部分的に集めた最大は、最大ではない**
   # ——**飛ばして残りの最大を使うと、予算が黙って縮み、そのまま誤停止になる**
   # （`ci-pending` が 3 周続けば `loop/STOP`）。**「読めなかった」へ畳む。**
@@ -137,11 +141,13 @@ if ((FINGERPRINT == 0)) \
     # 同じことが起きるので、**弾いたときも予算を捨てる**。
     if ! [[ $workflow_path =~ ^\.github/workflows/[A-Za-z0-9._-]+$ ]]; then
       budget_min=""
+      workflows_read=0
       break
     fi
     if ! body="$(gh api -H "Accept: application/vnd.github.raw" \
       "repos/{owner}/{repo}/contents/$workflow_path?ref=$head_sha" 2>/dev/null)"; then
       budget_min=""
+      workflows_read=0
       break
     fi
     # **job の数と、宣言の数を数える。** **宣言しない job の「諦める時間」は、
@@ -180,7 +186,11 @@ if ((FINGERPRINT == 0)) \
   done <<<"$workflow_paths"
   # **1 つでも宣言していない job があれば、既定まで待つ。** **宣言の最大がそれより
   # 長ければ、そちらを使う**（宣言してあるなら、それが「諦める時間」である）。
-  if [[ -n $budget_min ]] && ((all_declared == 0)) && ((budget_min < DEFAULT_TIMEOUT_MIN)); then
+  # **読めたかは旗で見る。** **`budget_min` の有無で代用すると、どの job も宣言して
+  # いないときに「読めなかった」と同じ扱いになる**——**そちらは一時的、こちらは恒久的**で、
+  # **倒す先が逆**である。
+  if ((workflows_read == 1 && all_declared == 0)) \
+    && { [[ -z $budget_min ]] || ((budget_min < DEFAULT_TIMEOUT_MIN)); }; then
     budget_min="$DEFAULT_TIMEOUT_MIN"
   fi
 fi
