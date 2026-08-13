@@ -43,6 +43,10 @@ analyze"
 # **GitHub が値を増やしたときに、知らない値がどの分岐にも入らない** (#90)。
 readonly OK_CONCLUSIONS="success skipped neutral"
 
+# **`timeout-minutes` を宣言しない job の「諦める時間」** (GitHub Actions の既定)。
+# **無いのではなく 360 分である。**
+readonly DEFAULT_TIMEOUT_MIN=360
+
 # **指紋は予算を見ない。** **`bin/loop-handoff` は「同じ状態か」だけを見る** ので、
 # **予算を入れると時間の経過だけで指紋が動き、何も変わっていないのに通知が飛ぶ**。
 # **`bucket` のままだと、ゲートが `conclusion` で成功へ変わっても指紋が動かない**
@@ -118,6 +122,8 @@ fi
 #
 # **読めなければ止めない。** **判定不能を「止める」へ倒さない。**
 budget_min=""
+# **全部の job が `timeout-minutes` を宣言していると確かめられたか。**
+all_declared=1
 if ((FINGERPRINT == 0)) \
   && workflow_paths="$(gh api "repos/{owner}/{repo}/contents/.github/workflows?ref=$head_sha" \
     --jq '.[]? | select(.type == "file") | .path' 2>/dev/null)"; then
@@ -138,17 +144,45 @@ if ((FINGERPRINT == 0)) \
       budget_min=""
       break
     fi
-    while IFS= read -r minutes; do
-      [[ $minutes =~ ^[0-9]+$ ]] || continue
-      if [[ -z $budget_min ]] || ((minutes > budget_min)); then
-        budget_min="$minutes"
+    # **job の数と、宣言の数を数える。** **宣言しない job の「諦める時間」は、
+    # 無いのではなく 360 分**（GitHub の既定）——**数えないと、別の workflow の値で
+    # 短く測ることになる**（**いま直したのと同じ「小さい予算で止める」形**）。
+    #
+    # **破棄はしない。** **破棄すると、その PR では `exit 4` が二度と出ない**——
+    # **それは #206 そのもの**で、**このスクリプトはそれを直すために在る。**
+    #
+    # **数え方は作り込まない。** **見分けが付かなければ 360 へ倒す**ので、
+    # **倒れる先は常に安全側**である。
+    jobs=0
+    declared=0
+    in_jobs=0
+    while IFS= read -r line; do
+      if [[ $line =~ ^jobs:[[:space:]]*$ ]]; then
+        in_jobs=1
+        continue
       fi
-    done < <(
-      printf '%s\n' "$body" \
-        | grep -oE '^[[:space:]]*timeout-minutes:[[:space:]]*[0-9]+' \
-        | grep -oE '[0-9]+$'
-    )
+      ((in_jobs == 1)) || continue
+      # **字下げが無い行が来たら `jobs:` の外**である
+      if [[ $line =~ ^[^[:space:]] ]]; then
+        in_jobs=0
+        continue
+      fi
+      [[ $line =~ ^\ \ [A-Za-z0-9_.-]+:[[:space:]]*$ ]] && ((jobs++))
+      if [[ $line =~ ^[[:space:]]+timeout-minutes:[[:space:]]*([0-9]+) ]]; then
+        ((declared++))
+        minutes="${BASH_REMATCH[1]}"
+        if [[ -z $budget_min ]] || ((minutes > budget_min)); then
+          budget_min="$minutes"
+        fi
+      fi
+    done <<<"$body"
+    ((jobs > 0 && declared >= jobs)) || all_declared=0
   done <<<"$workflow_paths"
+  # **1 つでも宣言していない job があれば、既定まで待つ。** **宣言の最大がそれより
+  # 長ければ、そちらを使う**（宣言してあるなら、それが「諦める時間」である）。
+  if [[ -n $budget_min ]] && ((all_declared == 0)) && ((budget_min < DEFAULT_TIMEOUT_MIN)); then
+    budget_min="$DEFAULT_TIMEOUT_MIN"
+  fi
 fi
 
 now_epoch="$(date +%s)"

@@ -32,7 +32,7 @@ describe("bin/loop-ci-status", () => {
   beforeEach(() => {
     sandbox = mkdtempSync(join(tmpdir(), "loop-ci-status-"));
     expect(spawnSync("git", ["init", "--quiet", sandbox]).status).toBe(0);
-    workflowTimeouts = undefined;
+    workflowJobs = undefined;
     unreadableWorkflow = undefined;
     oddlyNamedWorkflow = undefined;
   });
@@ -50,18 +50,47 @@ describe("bin/loop-ci-status", () => {
    * なる——**PR が timeout を伸ばしていると、正当に走っているジョブを止める**
    *（#207 のレビュー）。
    */
-  let workflowTimeouts: number[] | undefined;
+  /** workflow ごとの job の `timeout-minutes`。`null` は**宣言していない job**。 */
+  let workflowJobs: (number | null)[][] | undefined;
   /** 中身を取れない workflow（添字）。 */
   let unreadableWorkflow: number | undefined;
   /** 名前で弾かれる workflow（添字）。**ファイル名に規則は無い**（空白も置ける）。 */
   let oddlyNamedWorkflow: number | undefined;
+  function workflowsWithJobs(
+    jobs: (number | null)[][],
+    broken: { unreadable?: number; oddlyNamed?: number } = {},
+  ): void {
+    workflowJobs = jobs;
+    unreadableWorkflow = broken.unreadable;
+    oddlyNamedWorkflow = broken.oddlyNamed;
+  }
+
+  /** workflow 1 本につき job 1 つ、いずれも宣言あり。 */
   function workflows(
     timeouts: number[],
     broken: { unreadable?: number; oddlyNamed?: number } = {},
   ): void {
-    workflowTimeouts = timeouts;
-    unreadableWorkflow = broken.unreadable;
-    oddlyNamedWorkflow = broken.oddlyNamed;
+    workflowsWithJobs(
+      timeouts.map((minutes) => [minutes]),
+      broken,
+    );
+  }
+
+  /** その workflow の中身（`gh api` の raw が返すもの）。 */
+  function workflowBody(jobs: (number | null)[]): string {
+    return [
+      "name: w",
+      "on:",
+      "  pull_request:",
+      "jobs:",
+      ...jobs.flatMap((minutes, index) => [
+        `  job${index}:`,
+        "    runs-on: ubuntu-latest",
+        ...(minutes === null ? [] : [`    timeout-minutes: ${minutes}`]),
+        "    steps:",
+        "      - run: true",
+      ]),
+    ].join("\n");
   }
 
   function run(options: {
@@ -108,20 +137,20 @@ describe("bin/loop-ci-status", () => {
         // **head を指して問い合わせているか**を見る（`?ref=<sha>`）——
         // **手元の作業ツリーを読む実装では、この分岐に来ない**
         'if [[ $args == *"contents/.github/workflows?ref=deadbeef"* ]]; then',
-        ...(workflowTimeouts === undefined
+        ...(workflowJobs === undefined
           ? ["  exit 1"]
           : [
-              ...workflowTimeouts.map(
-                (_minutes, index) =>
+              ...workflowJobs.map(
+                (_jobs, index) =>
                   `  printf '%s\\n' ".github/workflows/${index === oddlyNamedWorkflow ? `w${index} と 名前.yml` : `w${index}.yml`}"`,
               ),
               "  exit 0",
             ]),
         "fi",
-        ...(workflowTimeouts ?? []).map((minutes, index) =>
+        ...(workflowJobs ?? []).map((jobs, index) =>
           index === unreadableWorkflow
             ? `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then exit 1; fi`
-            : `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then printf '%s\\n' "    timeout-minutes: ${minutes}"; exit 0; fi`,
+            : `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then printf '%b\\n' ${JSON.stringify(workflowBody(jobs))}; exit 0; fi`,
         ),
         'if [[ $args == *"check-runs"* ]]; then',
         ...(options.ghFails === true ? ["  exit 1"] : []),
@@ -268,6 +297,53 @@ describe("bin/loop-ci-status", () => {
       readFileSync(join(sandbox, "gh.calls"), "utf8"),
       "弾いたはずの名前を問い合わせている",
     ).not.toContain("と 名前");
+  });
+
+  it("宣言しない job があれば、GitHub の既定（360 分）で測る", () => {
+    // **宣言しない job の「諦める時間」は、無いのではなく 360 分**である（#207 の
+    // レビュー 3 周目）。**数えないと、別の workflow の 20 分で 21 分目に止める**——
+    // **いま直したのと同じ「小さい予算で止める」形。**
+    //
+    // **破棄はしない。** **破棄するとその PR では `exit 4` が二度と出ない**——
+    // **それは #206 そのもの**で、**この PR はそれを直すために立っている。**
+    workflowsWithJobs([[20], [15, null]]);
+
+    const result = run({
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 21 * 60 },
+        { name: "beta", status: "completed", conclusion: "success", startedAgo: 21 * 60 },
+      ],
+    });
+
+    expect(result.status, "宣言しない job を数えずに止めている").toBe(3);
+  });
+
+  it("宣言しない job があっても、360 分を超えたら人を呼ぶ", () => {
+    // **破棄との違いはここだけ**である——**この 1 本が無いと、破棄に戻しても緑のまま。**
+    workflowsWithJobs([[20], [15, null]]);
+
+    const result = run({
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 361 * 60 },
+        { name: "beta", status: "completed", conclusion: "success", startedAgo: 361 * 60 },
+      ],
+    });
+
+    expect(result.status, "宣言しない job があると、検出が消えている").toBe(4);
+  });
+
+  it("全部の job が宣言していれば、その最大で測る", () => {
+    // **360 へ倒しすぎない。** **宣言してあるなら、それが「諦める時間」である。**
+    workflowsWithJobs([[20], [15, 10]]);
+
+    const result = run({
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 21 * 60 },
+        { name: "beta", status: "completed", conclusion: "success", startedAgo: 21 * 60 },
+      ],
+    });
+
+    expect(result.status, "宣言があるのに 360 で測っている").toBe(4);
   });
 
   it("予算を読めなければ、待つ側へ倒す", () => {
