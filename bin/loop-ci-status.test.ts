@@ -33,6 +33,8 @@ describe("bin/loop-ci-status", () => {
     sandbox = mkdtempSync(join(tmpdir(), "loop-ci-status-"));
     expect(spawnSync("git", ["init", "--quiet", sandbox]).status).toBe(0);
     workflowTimeouts = undefined;
+    unreadableWorkflow = undefined;
+    oddlyNamedWorkflow = undefined;
   });
 
   afterEach(() => {
@@ -49,8 +51,17 @@ describe("bin/loop-ci-status", () => {
    *（#207 のレビュー）。
    */
   let workflowTimeouts: number[] | undefined;
-  function workflows(timeouts: number[]): void {
+  /** 中身を取れない workflow（添字）。 */
+  let unreadableWorkflow: number | undefined;
+  /** 名前で弾かれる workflow（添字）。**ファイル名に規則は無い**（空白も置ける）。 */
+  let oddlyNamedWorkflow: number | undefined;
+  function workflows(
+    timeouts: number[],
+    broken: { unreadable?: number; oddlyNamed?: number } = {},
+  ): void {
     workflowTimeouts = timeouts;
+    unreadableWorkflow = broken.unreadable;
+    oddlyNamedWorkflow = broken.oddlyNamed;
   }
 
   function run(options: {
@@ -101,14 +112,16 @@ describe("bin/loop-ci-status", () => {
           ? ["  exit 1"]
           : [
               ...workflowTimeouts.map(
-                (_minutes, index) => `  printf '%s\\n' ".github/workflows/w${index}.yml"`,
+                (_minutes, index) =>
+                  `  printf '%s\\n' ".github/workflows/${index === oddlyNamedWorkflow ? `w${index} と 名前.yml` : `w${index}.yml`}"`,
               ),
               "  exit 0",
             ]),
         "fi",
-        ...(workflowTimeouts ?? []).map(
-          (minutes, index) =>
-            `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then printf '%s\\n' "    timeout-minutes: ${minutes}"; exit 0; fi`,
+        ...(workflowTimeouts ?? []).map((minutes, index) =>
+          index === unreadableWorkflow
+            ? `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then exit 1; fi`
+            : `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then printf '%s\\n' "    timeout-minutes: ${minutes}"; exit 0; fi`,
         ),
         'if [[ $args == *"check-runs"* ]]; then',
         ...(options.ghFails === true ? ["  exit 1"] : []),
@@ -215,6 +228,46 @@ describe("bin/loop-ci-status", () => {
     });
 
     expect(result.status, "短いほうの timeout で止めている").toBe(3);
+  });
+
+  it("1 本でも読めなければ、予算を捨てる", () => {
+    // **部分的に集めた最大は、最大ではない**（#207 のレビュー 2 周目）。
+    // **飛ばして残りの最大を使うと、予算が黙って縮む**——**縮んだ予算は、
+    // そのまま誤停止になる**（`ci-pending` が 3 周続けば `loop/STOP`）。
+    //
+    // **一覧が読めないときは止めない**と書いてあるのに、**1 本のときだけ
+    // 止める側へ倒れていた**——**散文にはあるが、実行されるものには無い。**
+    workflows([15, 20], { unreadable: 1 });
+
+    const result = run({
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 16 * 60 },
+        { name: "beta", status: "completed", conclusion: "success", startedAgo: 16 * 60 },
+      ],
+    });
+
+    expect(result.status, "縮んだ予算で止めている").toBe(3);
+  });
+
+  it("名前で弾いた 1 本があっても、予算を捨てる", () => {
+    // **`.github/workflows/` のファイル名に規則は無い**（空白も日本語も置ける）ので、
+    // **弾いた 1 本が最大だったときに同じことが起きる**。**弾くこと自体は正しい**
+    //（外部由来の文字列を経路に組み立てない）——**弾いたあとの倒し方だけが違う。**
+    workflows([15, 20], { oddlyNamed: 1 });
+
+    const result = run({
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 16 * 60 },
+        { name: "beta", status: "completed", conclusion: "success", startedAgo: 16 * 60 },
+      ],
+    });
+
+    expect(result.status, "弾いた 1 本を無かったことにしている").toBe(3);
+    // **弾いた名前を、経路へ組み立てない**（外部由来の文字列をそのまま送らない）
+    expect(
+      readFileSync(join(sandbox, "gh.calls"), "utf8"),
+      "弾いたはずの名前を問い合わせている",
+    ).not.toContain("と 名前");
   });
 
   it("予算を読めなければ、待つ側へ倒す", () => {

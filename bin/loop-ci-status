@@ -121,12 +121,23 @@ budget_min=""
 if ((FINGERPRINT == 0)) \
   && workflow_paths="$(gh api "repos/{owner}/{repo}/contents/.github/workflows?ref=$head_sha" \
     --jq '.[]? | select(.type == "file") | .path' 2>/dev/null)"; then
+  # **1 本でも読めなければ、予算を捨てる。** **部分的に集めた最大は、最大ではない**
+  # ——**飛ばして残りの最大を使うと、予算が黙って縮み、そのまま誤停止になる**
+  # （`ci-pending` が 3 周続けば `loop/STOP`）。**「読めなかった」へ畳む。**
   while IFS= read -r workflow_path; do
+    [[ -n $workflow_path ]] || continue
     # **名前は API から来る。** **経路に使う前に形を絞る**（外部由来の文字列を
-    # そのまま組み立てない。`bin/loop-gate` と同じ判断）
-    [[ $workflow_path =~ ^\.github/workflows/[A-Za-z0-9._-]+$ ]] || continue
-    body="$(gh api -H "Accept: application/vnd.github.raw" \
-      "repos/{owner}/{repo}/contents/$workflow_path?ref=$head_sha" 2>/dev/null)" || continue
+    # そのまま組み立てない。`bin/loop-gate` と同じ判断）。**弾いた 1 本が最大だったら**
+    # 同じことが起きるので、**弾いたときも予算を捨てる**。
+    if ! [[ $workflow_path =~ ^\.github/workflows/[A-Za-z0-9._-]+$ ]]; then
+      budget_min=""
+      break
+    fi
+    if ! body="$(gh api -H "Accept: application/vnd.github.raw" \
+      "repos/{owner}/{repo}/contents/$workflow_path?ref=$head_sha" 2>/dev/null)"; then
+      budget_min=""
+      break
+    fi
     while IFS= read -r minutes; do
       [[ $minutes =~ ^[0-9]+$ ]] || continue
       if [[ -z $budget_min ]] || ((minutes > budget_min)); then
