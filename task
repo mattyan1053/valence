@@ -226,34 +226,138 @@ supabase_cli() {
   compose run --rm --quiet-pull "${tty_flag[@]}" supabase-cli "$@"
 }
 
-# **`./task db:*` は worker が叩かない** (#82)。**作業場ごとに分けても、直列化もしない。**
+# **決定: Supabase のスタックは 1 つを全作業場で共有し、DB を触るコマンドは直列化する**
+# (#82 / #210)。**worker も叩いてよい**（叩かない、ではなくなった）。
 #
-# **理由: DB を触るコードもテストも 1 件も無い。** **壊れる経路が無いので、
-# 分けても直列化しても、効いているかを検証できない**——**検証できない設定を入れない**
-# (`AGENTS.md` §5)。**Supabase のスタックは 1 つのまま、全作業場で共有する。**
+# **理由: 分ける側を検証できない。** **worker はいま 1 人**なので、**作業場ごとに
+# 分けても、分かれていることを試す相手がいない**——**検証できない設定を入れない**
+# (`AGENTS.md` §5)。**一方、直列化のほうは 1 人でも要る**——**`db:reset` は
+# スタックを作り直す**ので、**通知で始めた周回と cron の周回が重なるだけで、
+# 走っている試験の足元から DB が消える**（#68 と同じ重なり方）。
 #
-# **引き金:** **DB を使うテストを書き始めるときに、分けるか直列化するかを決める。**
-# **いまは触るコードが無いので決めない。**
+# **待ち時間は捨てない。** **取れなければ黙って進まず、待って、諦めたら理由を言う**
+# ——**「取れなかったから並行で走った」は、直列化していないのと同じ**である。
+#
+# **次の引き金:** **worker が 2 人になったとき (#85)。** そこで初めて
+# 「作業場ごとに分ける」を検証できるようになる。
+
+# 直列化に使うロックの置き場。**`--git-common-dir` は worktree 間で共有される**ので、
+# **`~/valence` と `~/valence-master` が同じ 1 個を奪い合う**（`show_missing_lease`
+# と同じ置き方）。
+db_lock_path() {
+  local common
+  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [[ -n $common ]] || return 1
+  printf '%s' "$common/valence-db.lock"
+}
+
+# **諦めるまでの待ち時間（秒）。** `db:reset` と DB 試験の合計より長く取る。
+DB_LOCK_WAIT_SECONDS="${DB_LOCK_WAIT_SECONDS:-900}"
+
+# **DB を触るコマンドを、1 つずつ通す。**
+#
+# **入れ子にしない。** 同じプロセスが同じファイルを別の fd で 2 度 flock すると、
+# **自分の解放を自分で待つ**。**掛けるのは `cmd_*` の入口だけ**にする。
+with_db_lock() {
+  local path lock_fd
+  if ! path="$(db_lock_path)"; then
+    echo "==> DB の直列化に使うロックを置く場所がありません (git リポジトリの中で実行すること)" >&2
+    return 1
+  fi
+  if ! exec {lock_fd}>>"$path"; then
+    echo "==> DB の直列化に使うロックを開けません: $path" >&2
+    return 1
+  fi
+  if ! flock -w "$DB_LOCK_WAIT_SECONDS" "$lock_fd"; then
+    echo "==> 別の作業場が DB を使っています (${DB_LOCK_WAIT_SECONDS} 秒待って諦めました): $path" >&2
+    return 1
+  fi
+  "$@"
+}
 
 # Supabase ローカルスタックを起動する
-cmd_db_up() { ensure_up; supabase_cli pnpm supabase start; }
+cmd_db_up() { with_db_lock db_up; }
+db_up() { ensure_up; supabase_cli pnpm supabase start; }
 
 # Supabase ローカルスタックを停止する
-cmd_db_down() { supabase_cli pnpm supabase stop; }
+cmd_db_down() { with_db_lock supabase_cli pnpm supabase stop; }
 
 # ローカル DB をマイグレーションから作り直す
-cmd_db_reset() { ensure_up; supabase_cli pnpm supabase db reset; }
+cmd_db_reset() { with_db_lock db_reset; }
+db_reset() { ensure_up; supabase_cli pnpm supabase db reset; }
 
-# ローカルスタックの接続情報を表示する (.env に貼る値)
-cmd_db_status() { supabase_cli pnpm supabase status; }
+# ローカルスタックの接続情報を表示する (.env に貼る値) 例: ./task db:status -o env
+cmd_db_status() { with_db_lock supabase_cli pnpm supabase status "$@"; }
 
 # ローカル DB に psql で入る 例: ./task db:psql -c "select 1"
+#
+# **ここだけ直列化しない。** **人が対話で入る口**なので、**ロックを持たせると、
+# psql を開いたまま席を立った人が、周回を 15 分止める**——**直列化が守ろうとした
+# 「進むこと」を、直列化自身が壊す。** **壊す側は `db:reset` であり、
+# それはこの口からは出てこない。**
 cmd_db_psql() {
   # コンテナ名は config.toml の project_id から決まる
   local exec_flags=(-i)
   [[ -t 0 ]] && exec_flags+=(-t)
   supabase_cli docker exec "${exec_flags[@]}" supabase_db_valence \
     psql -U postgres -d postgres "$@"
+}
+
+# `supabase status -o env` の 1 行から値だけを取り出す (`KEY="値"` の形)
+supabase_env_value() {
+  local name="$1" env_lines="$2" line
+  line="$(grep -m1 "^${name}=" <<<"$env_lines")" || return 1
+  line="${line#*=}"
+  line="${line%\"}"
+  line="${line#\"}"
+  [[ -n $line ]] || return 1
+  printf '%s' "$line"
+}
+
+# 環境変数を足して app コンテナで実行する 例: exec_app_env FOO=1 -- pnpm test
+exec_app_env() {
+  local env_flags=()
+  while [[ $# -gt 0 && $1 != "--" ]]; do
+    env_flags+=(-e "$1")
+    shift
+  done
+  shift || true
+  compose exec -T "${env_flags[@]}" app "$@"
+}
+
+# DB を要求するテストを実行する (Supabase を作り直してから走らせる)
+cmd_test_db() { with_db_lock run_db_tests "$@"; }
+
+# **マイグレーションから作り直してから走らせる。** **いま在るスキーマではなく、
+# `supabase/migrations/` が作るスキーマ**を試す——**手で足した列や、消し忘れた
+# ポリシーの上で緑になっても、CI と本番では同じものが無い。**
+#
+# **接続情報は毎回スタックから取る。** **リポジトリにも `.env` にも書かない**
+# （`AGENTS.md` §6）。**ここで渡るのはローカル既定の鍵**で、どの機械でも同じ値である
+# ——**本番の値をこの経路へ渡さない。**
+#
+# **URL はホストのものを使わない。** **app コンテナは supabase の network に
+# 繋いである**ので、**コンテナ名で引く**（`compose.yaml`）。
+run_db_tests() {
+  ensure_up
+  db_reset || return 1
+  local env_lines publishable secret jwt
+  if ! env_lines="$(supabase_cli pnpm supabase status -o env)"; then
+    echo "==> Supabase の接続情報を取得できません (./task db:up は通っていますか)" >&2
+    return 1
+  fi
+  if ! publishable="$(supabase_env_value PUBLISHABLE_KEY "$env_lines")" \
+    || ! secret="$(supabase_env_value SECRET_KEY "$env_lines")" \
+    || ! jwt="$(supabase_env_value JWT_SECRET "$env_lines")"; then
+    echo "==> Supabase の接続情報に鍵が含まれていません (CLI の出力の形が変わった?)" >&2
+    return 1
+  fi
+  exec_app_env \
+    "SUPABASE_URL=http://kong:8000" \
+    "SUPABASE_PUBLISHABLE_KEY=$publishable" \
+    "SUPABASE_SECRET_KEY=$secret" \
+    "SUPABASE_JWT_SECRET=$jwt" \
+    -- pnpm test:db "$@"
 }
 
 # GitHub Webhook の転送を開始する (.env の SMEE_URL が必要)

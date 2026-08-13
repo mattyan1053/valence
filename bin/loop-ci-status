@@ -32,8 +32,12 @@ readonly FIELD=$'\037'
 
 # .github/workflows/*.yml のジョブ名。これらが決着して成功していることを個別に要求する。
 # 「全部 pass」だけでは、ワークフローが起動しなかった PR が 0 件で通ってしまう。
+#
+# **workflow を足したらここも足す。** **食い違いは `bin/required-checks.test.ts` が
+# 両方向で見る**——**書き忘れると「赤いまま通る」か「永久に待つ」のどちらかになる。**
 readonly DEFAULT_REQUIRED_CHECKS="lint / typecheck / boundaries / test
 build
+database policies
 shell scripts
 dependency vulnerabilities
 new dependencies
