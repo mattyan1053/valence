@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# detached で作った commit を、ブランチ名の側から辿れるようにする。
+#
+#   bin/loop-keep-branch <ブランチ>
+#
+#   exit 0 = そのブランチが HEAD を指している (進めた / 既に指していた)
+#   exit 1 = 進める必要が無いのに進められない。**push は続けてよい**
+#   exit 2 = 失われる / 使い方の誤り / git を読めない
+#
+# **worker はブランチを掴まない** (#102)。**掴まないと、push が落ちたときに、その周回の
+# commit を指すものが 1 つも無い**——**次の周回は冒頭で `origin/main` へ移る**ので、
+# **どこからも辿れなくなる**。**通信障害や non-fast-forward は、worker が 1 人でも起きる。**
+#
+# **push の前に置く。** **push は 3 箇所ある** (rebase・対応後・PR を作る) ので、
+# **1 箇所ずつ書くと、次に足された push が抜ける**——**実際に 1 箇所だけになっていた**。
+# **置き忘れは手順書の走査で見る** (`loop/worker-branch-handoff.test.ts`)。
+#
+# **`git update-ref` を使わない。** **掴まれているブランチにも通るが、掴んでいる作業場の
+# HEAD を黙って動かす**——**共有された状態は、読むだけでも依存が残る** (`AGENTS.md` §5)。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-keep-branch <ブランチ>" >&2
+  echo "        exit 0 = ブランチが HEAD を指している / exit 1 = 進める必要が無い" >&2
+  echo "        exit 2 = 失われる / 使い方の誤り / 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+readonly BRANCH="$1"
+[[ -n $BRANCH ]] || usage
+
+if ! head="$(git rev-parse HEAD 2>/dev/null)" || [[ -z $head ]]; then
+  echo "[FAIL] いまの HEAD を読み取れません" >&2
+  echo "       この周回の commit を、ブランチ名から辿れるようにできません" >&2
+  exit 2
+fi
+
+# **既に指しているなら、することが無い。** **引き継いだ周回はここへ入る**——
+# 2.2 は `git switch --detach <ブランチ>` で入り、commit を足さない。
+current=""
+if current="$(git rev-parse --verify --quiet "refs/heads/$BRANCH" 2>/dev/null)"; then
+  [[ $current != "$head" ]] || exit 0
+fi
+
+if git branch -f "$BRANCH" "$head" 2>/dev/null; then
+  exit 0
+fi
+
+# **進められなかった。** **掴まれている場合と、そうでない場合を分ける**——
+# **「掴まれていたら全部 [INFO]」にすると、本当に失われる場合まで黙って通す。**
+if [[ -z $current ]]; then
+  echo "[FAIL] $BRANCH を作れません" >&2
+  echo "       この周回の commit ($head) は、どこからも辿れません" >&2
+  exit 2
+fi
+
+# **祖先なら、失うものが無い。** **ブランチの側が既にこの commit を含んでいる**ので、
+# **進めなくても辿れる**（引き継いだ周回で、掴んでいる作業場が先にいる形）。
+if git merge-base --is-ancestor "$head" "$current" 2>/dev/null; then
+  echo "[INFO] $BRANCH は別の作業場が掴んでいます。既にこの commit を含むので、進めません"
+  exit 1
+fi
+
+echo "[FAIL] $BRANCH を進められません（別の作業場が掴んでいます）" >&2
+echo "       この周回の commit ($head) は、ブランチの側から辿れません" >&2
+exit 2

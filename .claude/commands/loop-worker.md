@@ -343,6 +343,7 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
+bin/loop-keep-branch <ブランチ>       # 落ちてもこの周回の commit を辿れるようにする (#102)
 git push --force-with-lease origin HEAD:refs/heads/<ブランチ>
 ```
 
@@ -369,6 +370,7 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
+bin/loop-keep-branch <ブランチ>       # 落ちてもこの周回の commit を辿れるようにする (#102)
 git push origin HEAD:refs/heads/<ブランチ>
 ```
 
@@ -514,11 +516,7 @@ if [[ $mark != "check-exit=$status" ]]; then
   exit
 fi
 ((status == 0)) || exit                    # 赤。緑になるまで直す（push しない）
-# **落ちてもこの周回の commit を拾えるように、ブランチ名を先へ進める** (#102)。
-# **掴まれていたら進めない**——**掴んでいるのは落ちた作業場で、そのブランチの先端は
-# いまの HEAD そのもの**（引き継いだ周回は commit を足さない）。**失うものが無い**
-git branch -f <ブランチ> HEAD 2>/dev/null \
-  || echo "[INFO] <ブランチ> は別の作業場が掴んでいます。ブランチは進めません"
+bin/loop-keep-branch <ブランチ>       # 落ちてもこの周回の commit を辿れるようにする (#102)
 git push origin HEAD:refs/heads/<ブランチ>
 gh pr create --base main --head <ブランチ> --title "<日本語>" --body-file <file>
 bin/loop-review-head "<PR番号>" "$(git rev-parse HEAD)"
@@ -527,15 +525,20 @@ bin/loop-review-head "<PR番号>" "$(git rev-parse HEAD)"
 **`--head` を省かない** (#102)。**detached なので、既定の「いまのブランチ」が取れない**
 ——**`could not determine the current branch` で PR が作れない**（実測）。
 
-**`git branch -f` は、落ちた周回のためにある。** **push と `gh pr create` の間で落ちると、
-detached の commit はどこからも辿れない**——**ステップ 2.2 の「コミットが載ったブランチ」が
-拾えるように、ブランチ名だけ先に進めておく。** **掴まないので、別の作業場からも
-`git switch --detach` で入れる。**
+**`bin/loop-keep-branch` は、push が落ちた周回のためにある。** **掴まないので、
+push が落ちるとこの周回の commit を指すものが 1 つも無い**——**次の周回は冒頭で
+`origin/main` へ移る**ので、**どこからも辿れなくなる**（**通信障害や
+non-fast-forward は、worker が 1 人でも起きる**）。**ステップ 2.2 の
+「コミットが載ったブランチ」が拾えるように、ブランチ名を先へ進めておく。**
 
-**進められなくても止まらない。** **`git branch -f` は、掴まれているブランチには
-exit 128 で落ちる**（`git update-ref` なら通るが、**掴んでいる作業場の HEAD を
-黙って動かす**ので使わない）——**そこで止めると、引き継ぎを直したこの変更自身が、
-引き継ぎを止める。**
+**push の前 3 箇所に置く**（rebase・対応後・ここ）。**1 箇所ずつ書くと、次に足された
+push が抜ける**——**実際に 1 箇所だけになっていた**。**置き忘れは走査で見る**
+（`loop/worker-branch-handoff.test.ts`）。
+
+**掴まれていても止まらない。** **引き継いだ周回は、掴んでいる作業場と同じ commit にいる**
+ので、**進めるものが無い**——**そこで止めると、引き継ぎを直したこの変更自身が、
+引き継ぎを止める。** **ただし、進めないと辿れなくなるときは `[FAIL]` を出す**
+（**「掴まれていたら全部黙る」にすると、本当に失われる場合まで通る**）。
 
 **作った直後に head を記録する。** PR を開くと自動でレビューが走り、その対象は今の head
 である。指摘ゼロのとき Codex は 👍 リアクションだけで返すことがあり、それは SHA を

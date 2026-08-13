@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,6 +137,17 @@ describe("落ちた作業場のブランチを引き継ぐ", () => {
     expect(git(["rev-parse", "HEAD"], dead).stdout.trim()).toBe(tip);
   });
 
+  it("push の前で、必ずブランチ名を先へ進めている", () => {
+    // **捨てると決めたなら、捨て漏れが無いことを見る**（掴むコマンドの走査と同じ形）。
+    // **1 箇所ずつ直すと、次に足された push が抜ける。**
+    for (const pair of pushPairs()) {
+      expect(pair.split("\n").length, `push の前に何も無い: ${pair}`).toBe(2);
+      expect(pair, "push が落ちると、この周回の commit が辿れなくなる").toMatch(
+        /^bin\/loop-keep-branch\b/,
+      );
+    }
+  });
+
   it("引き継いだ側が、そのまま push できる", () => {
     // **ブランチを掴まないので、`git push` は追跡先を持たない**——
     // **`git push` だけでは `HEAD` が「full refname ではない」で落ちる**（実測）。
@@ -156,63 +175,107 @@ describe("落ちた作業場のブランチを引き継ぐ", () => {
     expect(remote).toBe(git(["rev-parse", "HEAD"], taker).stdout.trim());
   });
 
-  /** 「PR を作る」のうち、ブランチ名を先へ進める行。 */
-  function updateBranch(cwd: string, branch: string) {
-    const block = bashBlocks().filter((one) => one.includes("git branch -f"));
-    expect(block, "落ちた周回の commit を拾う手立てが無い").toHaveLength(1);
-    const line = (block[0] ?? "")
-      .split("\n")
-      .filter((one) => one.trim().length > 0 && !one.trim().startsWith("#"))
-      .join("\n")
-      .match(/git branch -f[\s\S]*?\n(?=git push)/)?.[0];
-    expect(line, "ブランチ名を進める行を取り出せない").toBeDefined();
-    return spawnSync("bash", ["-c", (line ?? "").replaceAll("<ブランチ>", branch)], {
-      cwd,
-      encoding: "utf8",
+  /**
+   * **`git push` と、その 1 つ前の行**（**順序ごと手順書から取り出す**）。
+   *
+   * **push は 3 箇所ある。** **1 箇所ずつ書くと、次に足された push が抜ける**——
+   * **実際に 1 箇所だけになっていた**（#202 のレビュー）。
+   */
+  function pushPairs(): string[] {
+    const found = bashBlocks().flatMap((block) => {
+      const lines = block
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("#"));
+      return lines.flatMap((line, index) =>
+        line.startsWith("git push")
+          ? [lines.slice(Math.max(index - 1, 0), index + 1).join("\n")]
+          : [],
+      );
     });
+    expect(found.length, "手順書に push が無い").toBeGreaterThan(0);
+    return found;
   }
 
-  it("落ちても拾えるように、ブランチ名は先へ進めておく", () => {
-    // **消す側を足したら、残る側の前提を見直す**（`AGENTS.md` §5）——**掴まなくなると、
-    // push と `gh pr create` の間で落ちた commit が、どこからも辿れなくなる。**
-    // **ステップ 2.2 の「コミットが載ったブランチ」が拾えなくなる。**
+  /** 手順書のスクリプトを、使い捨ての作業場から呼べるようにする。 */
+  function withScripts(cwd: string): void {
+    mkdirSync(join(cwd, "bin"), { recursive: true });
+    copyFileSync(join(REPO_ROOT, "bin", "loop-keep-branch"), join(cwd, "bin", "loop-keep-branch"));
+    chmodSync(join(cwd, "bin", "loop-keep-branch"), 0o755);
+  }
+
+  /** push だけが落ちる `git`。**通信障害と non-fast-forward は、1 人でも起きる。** */
+  function withFailingPush(cwd: string): NodeJS.ProcessEnv {
+    const stubs = join(cwd, "stub");
+    mkdirSync(stubs, { recursive: true });
+    const real = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      join(stubs, "git"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "push" ]]; then',
+        '  echo "fatal: unable to access: Could not resolve host" >&2',
+        "  exit 128",
+        "fi",
+        `exec ${JSON.stringify(real)} "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    return { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` };
+  }
+
+  it("push が落ちても、この周回の commit を辿れる", () => {
+    // **掴まないと、push が落ちたときに commit を指すものが 1 つも無い**——
+    // **次の周回は冒頭で `origin/main` へ移る**ので、**どこからも辿れなくなる**
+    // （#202 のレビュー。**`main` は掴んでいたので、ローカルのブランチが拾っていた**）。
+    //
+    // **push は 3 箇所ある。** **「経路が複数あるなら、入力も複数要る」**——
+    // **全部の push の前で確かめる**（**1 箇所だけ直すと、残りは静かに失われる**）
     const { taker } = workspaces();
-    expect(git(["commit", "--allow-empty", "--quiet", "-m", "新しい仕事"], taker).status).toBe(0);
+    expect(git(["commit", "--allow-empty", "--quiet", "-m", "この周回の作業"], taker).status).toBe(
+      0,
+    );
+    const made = git(["rev-parse", "HEAD"], taker).stdout.trim();
+    withScripts(taker);
+    const env = withFailingPush(taker);
 
-    const updated = updateBranch(taker, "feat/新しい仕事");
+    for (const [index, pair] of pushPairs().entries()) {
+      const branch = `feat/落ちた-push-${index}`;
+      const ran = spawnSync("bash", ["-c", pair.replaceAll("<ブランチ>", branch)], {
+        cwd: taker,
+        encoding: "utf8",
+        env,
+      });
 
-    expect(updated.status, updated.stderr).toBe(0);
-    expect(
-      git(["rev-parse", "feat/新しい仕事"], taker).stdout.trim(),
-      "ブランチが、この周回の commit まで進んでいない",
-    ).toBe(git(["rev-parse", "HEAD"], taker).stdout.trim());
+      expect(ran.status, `push が落ちていない: ${pair}`).not.toBe(0);
+      expect(
+        git(["rev-parse", branch], taker).stdout.trim(),
+        `push が落ちると辿れなくなる: ${pair}`,
+      ).toBe(made);
+    }
   });
 
   it("進められなくても、引き継ぎは止まらない", () => {
-    // **`git branch -f` は、掴まれているブランチには exit 128 で落ちる**（実測）——
+    // **掴まれているブランチは進められない**（`git branch -f` は exit 128）——
     // **引き継ぎを直したこの変更自身が、引き継ぎを止める**形になる。
-    //
-    // **`git update-ref` なら通るが、掴んでいる作業場の HEAD を黙って動かす**ので採らない
-    // （**共有された状態は、読むだけでも依存が残る**。`AGENTS.md` §5）。
-    // **落ちた作業場が掴んでいるとき、そのブランチの先端はいまの HEAD そのもの**なので、
-    // **進められなくても失うものが無い。**
+    // **引き継いだ周回は、掴んでいる作業場と同じ commit にいる**ので、
+    // **進めるものが無く、失うものも無い。**
     const { dead, taker, origin, tip } = workspaces();
 
     expect(runResume(taker).status).toBe(0);
-    const updated = updateBranch(taker, BRANCH);
+    withScripts(taker);
+    const pairs = pushPairs();
+    const ran = spawnSync("bash", ["-c", (pairs[0] ?? "").replaceAll("<ブランチ>", BRANCH)], {
+      cwd: taker,
+      encoding: "utf8",
+    });
 
-    expect(updated.status, `${updated.stdout}${updated.stderr}`).toBe(0);
-    expect(updated.stdout, "進められなかったことが、どこにも出ていない").toContain("[INFO]");
+    expect(ran.status, `${ran.stdout}${ran.stderr}`).toBe(0);
     // **掴んでいる側の足元を動かしていない**（`git update-ref` との違い）
     expect(git(["rev-parse", "HEAD"], dead).stdout.trim(), "掴んでいる作業場の HEAD が動いた").toBe(
       tip,
     );
-    const pushes = commandLines().filter((line) => line.startsWith("git push origin"));
-    const pushed = spawnSync("bash", ["-c", (pushes[0] ?? "").replaceAll("<ブランチ>", BRANCH)], {
-      cwd: taker,
-      encoding: "utf8",
-    });
-    expect(pushed.status, `${pushed.stderr}`).toBe(0);
     expect(
       spawnSync("git", ["--git-dir", origin, "rev-parse", BRANCH], {
         encoding: "utf8",
