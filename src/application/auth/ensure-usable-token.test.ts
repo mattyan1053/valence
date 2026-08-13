@@ -36,6 +36,7 @@ describe("使えるトークンを用意する", () => {
         saved = tokens;
         this.calls.push(tokens);
       },
+      async clear() {},
     };
   }
 
@@ -119,6 +120,7 @@ describe("使えるトークンを用意する", () => {
       async save() {
         throw new Error("保存してはいけない");
       },
+      async clear() {},
     };
     let refreshes = 0;
 
@@ -147,6 +149,7 @@ describe("使えるトークンを用意する", () => {
       async save() {
         throw new Error("保存してはいけない");
       },
+      async clear() {},
     };
 
     const result = await ensureUsableToken({
@@ -174,6 +177,7 @@ describe("使えるトークンを用意する", () => {
       async save() {
         throw new Error("保存してはいけない");
       },
+      async clear() {},
     };
 
     const result = await ensureUsableToken({
@@ -216,6 +220,7 @@ describe("使えるトークンを用意する", () => {
       async save() {
         throw new Error("書けません");
       },
+      async clear() {},
     };
 
     const result = await ensureUsableToken({

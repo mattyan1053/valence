@@ -32,4 +32,10 @@ export type UserTokenStore = {
   load(): Promise<UserTokens | undefined>;
   /** 更新したものを書く。**書けなかったら投げる。** */
   save(tokens: UserTokens): Promise<void>;
+  /**
+   * 保存されているものを消す。**無くても成功**（ログアウトは何度でも押せる）。
+   *
+   * **消せなかったら投げる。** **黙って成功にすると、「消えた」と思ったまま残る。**
+   */
+  clear(): Promise<void>;
 };

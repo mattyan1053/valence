@@ -131,5 +131,23 @@ export function createSupabaseUserTokenStore({
         throw storeError("保存", response.status);
       }
     },
+
+    async clear(): Promise<void> {
+      // **自分の行だけを狙う。** **絞りを外すと、行が返らないことに頼った実装になる**
+      // ——**ポリシーが緩んだ日に、他人の行を消しに行く**（`load` と同じ判断だが、
+      // **こちらは読むのではなく壊す**ので、外れたときの傷が深い）。
+      //
+      // **消す行が無くても成功する。** **PostgREST は 0 件の削除を 204 で返す**ので、
+      // **ログアウトを 2 度押しても失敗にならない**——**失敗にすると
+      // 「消えていない」と読めてしまう。**
+      const query = `?user_id=eq.${encodeURIComponent(userId)}`;
+      const response = await fetcher(`${endpoint}${query}`, {
+        method: "DELETE",
+        headers,
+      });
+      if (!response.ok) {
+        throw storeError("削除", response.status);
+      }
+    },
   };
 }

@@ -92,6 +92,29 @@ describe("Supabase のユーザートークン置き場", () => {
     expect(rows[0]?.refresh_token).not.toContain("ghr_");
   });
 
+  it("他人としては消せない——持ち主の行が残る", async () => {
+    // **RLS は読みだけでなく削除にも効く。** **効いていなければ、
+    // 他人がログアウトするだけで持ち主のトークンが消える。**
+    const asStranger = createSupabaseUserTokenStore({
+      url: connection.url,
+      publishableKey: connection.publishableKey,
+      userId: owner.id,
+      userAccessToken: stranger.accessToken,
+      key: KEY,
+    });
+
+    await asStranger.clear();
+
+    expect(await storeFor(connection, owner).load()).toBeDefined();
+  });
+
+  it("自分で消すと、読み直しても返らない", async () => {
+    // **消えたことを、消せたことで確かめない。** **読み直すところまでを 1 つにする。**
+    const store = storeFor(connection, owner);
+    await store.clear();
+    expect(await store.load()).toBeUndefined();
+  });
+
   it("他人の置き場からは、その人の 1 組が読めない", async () => {
     // **他人の user_id を名乗っても返らない。** **絞り込みではなく、RLS が決める。**
     const asStranger = createSupabaseUserTokenStore({
