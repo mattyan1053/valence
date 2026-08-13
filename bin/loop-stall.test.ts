@@ -1254,11 +1254,14 @@ describe("再開の順番", () => {
    * 偽の `task`。**置き場所を聞かれた時点でカウンタがまだあるか**を書き残す。
    * **順番そのものを見る**ためのもので、「呼ばれた」だけでは入れ替わりを検出できない。
    */
-  function withTask(): void {
+  function withTask(options: { failsOnPaths?: boolean } = {}): void {
     writeFileSync(
       join(repo, "task"),
       [
         "#!/usr/bin/env bash",
+        ...(options.failsOnPaths === true
+          ? ['if [[ $1 == "loop:stop:paths" ]]; then echo "取れない" >&2; exit 1; fi']
+          : []),
         `if [[ -e "${join(repo, ".git", "valence-loop-stall")}" ]]; then`,
         `  echo "state-present $*" >> "${join(repo, "order.log")}"`,
         "else",
@@ -1315,6 +1318,21 @@ describe("再開の順番", () => {
     expect(result.status).not.toBe(0);
     expect(existsSync(join(repo, "loop", "STOP")), "STOP が消えている").toBe(true);
     expect(result.stderr).toContain("停止カウンタを消せません");
+  });
+
+  it("置き場所を取れなければ、再開を成功にしない", () => {
+    // **プロセス置換の終了状態は `while` へ伝わらない**（#189 のレビュー）。
+    // **取れなかったのに 0 件と読むと**、**カウンタだけ消えて STOP は残ったまま**なのに
+    // **「STOP は無い（停止していない）」と言って成功で終わる**——
+    // **人には再開できたように見え、ループは止まったまま**になる
+    counted();
+    withTask({ failsOnPaths: true });
+
+    const result = resume();
+
+    expect(result.status, "取れなかったのに成功している").not.toBe(0);
+    expect(result.stdout, "0 件と読んでいる").not.toContain("STOP は無い");
+    expect(existsSync(join(repo, "loop", "STOP")), "STOP が消えている").toBe(true);
   });
 
   it("./task loop:resume は、その区間へ通す", () => {

@@ -360,6 +360,15 @@ if [[ $ID == "--resumed" ]]; then
     echo "       カウンタ: $STATE" >&2
     exit 2
   fi
+  # **先に受けて、取れたことを確かめる。** **プロセス置換の終了状態は `while` へ
+  # 伝わらない**ので、`done < <(...)` のままだと**取得の失敗が 0 件と区別できない**——
+  # **カウンタだけ消えて STOP は残るのに、「STOP は無い」と言って成功で終わる**。
+  # **人には再開できたように見え、ループは止まったまま**になる (#189 のレビュー)。
+  if ! stop_paths="$("$TASK" loop:stop:paths)"; then
+    echo "[FAIL] STOP の置き場所を取得できません（カウンタは消えています）: $TASK" >&2
+    echo "       カウンタ: $STATE" >&2
+    exit 2
+  fi
   resume_found=0
   while read -r stop_path; do
     [[ -f $stop_path ]] || continue
@@ -369,7 +378,7 @@ if [[ $ID == "--resumed" ]]; then
     }
     echo "==> 削除: $stop_path"
     resume_found=1
-  done < <("$TASK" loop:stop:paths)
+  done <<<"$stop_paths"
   ((resume_found == 1)) || echo "==> STOP は無い（停止していない）"
   exit 0
 fi
