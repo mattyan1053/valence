@@ -185,13 +185,9 @@ declare -A requested_of=()
 # `FAILURE` のまま**——**必須が pending → pass に変わってゲートが不合格 → 合格に
 # なっても、指紋が動かない**。**マージできるようになった、まさにその瞬間に黙る。**
 #
-# **一覧は書き写さない。** `bin/loop-gate --required-checks` が正で、
-# **2 箇所に持つと片方だけ直して食い違う** (#159 で踏んだ形)。
-if ! required_out="$("${BASH_SOURCE[0]%/*}/loop-gate" --required-checks)" || [[ -z $required_out ]]; then
-  echo "[FAIL] 必須チェックの一覧を取得できません（bin/loop-gate --required-checks）" >&2
-  exit 2
-fi
-mapfile -t REQUIRED_CHECKS <<<"$required_out"
+# **判定は `bin/loop-ci-status` が持つ** (#206 / #207 のレビュー)。**一覧も読み方も
+# 書き写さない**——**2 箇所に持つと片方だけ直して食い違う** (#159 で踏んだ形)。
+# **`bucket` を自分で読むと、ゲートが `conclusion` で成功へ変わっても指紋が動かない。**
 
 # PR ごとの、必須チェックの結果。**指紋に入れる**
 declare -A checks_of=()
@@ -199,40 +195,12 @@ declare -A checks_of=()
 while IFS="$FIELD" read -r number _labels _head labeled_at _body; do
   [[ -n $number ]] || continue
 
-  # **ゲートと同じ読み方をする**（`gh pr checks`。名前は `@base64` で受け取る）。
-  # **区切りを含む job 名は PR 側で決められる**ので、生の名前を並べると
-  # **1 つの名前で行を増やし、実在しない必須チェックを pass に見せられる**。
-  #
-  # **終了コードで判定しない。** `gh pr checks` は**落ちているときも走っている
-  # ときも非ゼロ**を返す——**読めなかったのと区別が付かない**。出力で判定する。
-  checks_out="$(gh pr checks "$number" --json name,bucket \
-    --jq '"T\t\(type)", (.[]? | "C\t\(.name | @base64)\t\(.bucket)")' 2>/dev/null)"
-  checks_type=""
-  check_lines=()
-  while IFS= read -r line; do
-    case "$line" in
-      T$'\t'*) checks_type="${line#T$'\t'}" ;;
-      C$'\t'*) check_lines+=("${line#C$'\t'}") ;;
-    esac
-  done <<<"$checks_out"
-  [[ $checks_type == "array" ]] || fail_unknown "CI の状態 (#$number)"
-
-  # **必須の並び順で書く。** 名前そのものは指紋へ入れない——
-  # **外から決められる文字列を指紋へ入れると、揺れがそのまま通知になる**。
-  states=""
-  for name in "${REQUIRED_CHECKS[@]}"; do
-    if ! want="$(printf '%s' "$name" | base64 | tr -d '\n')" || [[ -z $want ]]; then
-      fail_unknown "必須チェック名の符号化 ($name)"
-    fi
-    bucket="none"
-    for line in "${check_lines[@]}"; do
-      if [[ ${line%%$'\t'*} == "$want" ]]; then
-        bucket="${line#*$'\t'}"
-        break
-      fi
-    done
-    states+="${bucket},"
-  done
+  # **ゲートと同じ判定を、同じところから取る。** **指紋は決着の別だけ**で、
+  # **予算は見ない**——**時間の経過だけで指紋が動くと、何も変わっていないのに通知が飛ぶ**。
+  if ! states="$("${BASH_SOURCE[0]%/*}/loop-ci-status" --fingerprint "$number")" \
+    || [[ -z $states ]]; then
+    fail_unknown "CI の状態 (#$number)"
+  fi
   checks_of[$number]="$states"
   threads="$(gh api graphql --paginate \
     -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" -F number="$number" \

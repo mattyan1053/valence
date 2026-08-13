@@ -2,7 +2,8 @@
 # PR の必須チェックが決着したかを、`status` と `conclusion` の両方で見る。
 #
 #   bin/loop-ci-status <PR番号>
-#   bin/loop-ci-status --required-checks   必須チェック名を並べる (定数の問い合わせ)
+#   bin/loop-ci-status --fingerprint <PR番号>   決着の別だけを、必須の並び順で返す
+#   bin/loop-ci-status --required-checks        必須チェック名を並べる (定数の問い合わせ)
 #
 #   exit 0 = 必須がすべて決着して成功
 #   exit 1 = 決着して失敗 / 必須が見つからない (worker に直させる)
@@ -42,8 +43,14 @@ analyze"
 # **GitHub が値を増やしたときに、知らない値がどの分岐にも入らない** (#90)。
 readonly OK_CONCLUSIONS="success skipped neutral"
 
+# **指紋は予算を見ない。** **`bin/loop-handoff` は「同じ状態か」だけを見る** ので、
+# **予算を入れると時間の経過だけで指紋が動き、何も変わっていないのに通知が飛ぶ**。
+# **`bucket` のままだと、ゲートが `conclusion` で成功へ変わっても指紋が動かない**
+# ——**マージできるようになった、まさにその瞬間に黙る** (#173 / #207)。
+
 usage() {
   echo "使い方: bin/loop-ci-status <PR番号>" >&2
+  echo "        bin/loop-ci-status --fingerprint <PR番号>" >&2
   echo "        bin/loop-ci-status --required-checks" >&2
   echo "        exit 0 = 決着して成功 / exit 1 = 失敗・欠け / exit 3 = 待つ" >&2
   echo "        exit 4 = 予算を超えた / exit 2 = 読めない・使い方の誤り" >&2
@@ -65,6 +72,13 @@ if [[ ${1-} == "--required-checks" ]]; then
   printf '%s\n' "${required[@]}"
   exit 0
 fi
+
+FINGERPRINT=0
+if [[ ${1-} == "--fingerprint" ]]; then
+  FINGERPRINT=1
+  shift
+fi
+readonly FINGERPRINT
 
 [[ $# -eq 1 ]] || usage
 [[ $1 =~ ^[0-9]+$ ]] || usage
@@ -92,27 +106,45 @@ fi
 # **予算は、その場所の数字から取る** (#206)。**ジョブ自身が諦める時間より長く待つ
 # 理由が無い**ので、**`.github/workflows/` の `timeout-minutes` の最大**を使う。
 #
+# **その PR の head から読む** (#207 のレビュー)。**master は PR を checkout しない**ので、
+# **手元の作業ツリーを読むと `main` の値**になる——**PR が timeout を伸ばしていると、
+# 正当に走っているジョブを 21 分で止め、繰り返せば全ループを止める**。
+# **検査を起動したのは PR 側の workflow**である。
+#
 # **いちばん長いものに合わせる。** **短いほうに合わせると、長い CI を持つ検査で
 # 誤って止める**——**倒す先を「待つ」側へ寄せる**。
 # **どの workflow の検査かを引き当てない**のは、**check run から workflow まで
-# 3 回 API を挟む**うえ、**当たらなかったときに倒れる先がまた要る**からである。
+# API を挟む**うえ、**当たらなかったときに倒れる先がまた要る**からである。
 #
 # **読めなければ止めない。** **判定不能を「止める」へ倒さない。**
 budget_min=""
-if toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" && [[ -n $toplevel ]]; then
-  while IFS= read -r minutes; do
-    [[ $minutes =~ ^[0-9]+$ ]] || continue
-    if [[ -z $budget_min ]] || ((minutes > budget_min)); then
-      budget_min="$minutes"
-    fi
-  done < <(
-    grep -rhoE '^[[:space:]]*timeout-minutes:[[:space:]]*[0-9]+' \
-      "$toplevel/.github/workflows/" 2>/dev/null | grep -oE '[0-9]+$'
-  )
+if ((FINGERPRINT == 0)) \
+  && workflow_paths="$(gh api "repos/{owner}/{repo}/contents/.github/workflows?ref=$head_sha" \
+    --jq '.[]? | select(.type == "file") | .path' 2>/dev/null)"; then
+  while IFS= read -r workflow_path; do
+    # **名前は API から来る。** **経路に使う前に形を絞る**（外部由来の文字列を
+    # そのまま組み立てない。`bin/loop-gate` と同じ判断）
+    [[ $workflow_path =~ ^\.github/workflows/[A-Za-z0-9._-]+$ ]] || continue
+    body="$(gh api -H "Accept: application/vnd.github.raw" \
+      "repos/{owner}/{repo}/contents/$workflow_path?ref=$head_sha" 2>/dev/null)" || continue
+    while IFS= read -r minutes; do
+      [[ $minutes =~ ^[0-9]+$ ]] || continue
+      if [[ -z $budget_min ]] || ((minutes > budget_min)); then
+        budget_min="$minutes"
+      fi
+    done < <(
+      printf '%s\n' "$body" \
+        | grep -oE '^[[:space:]]*timeout-minutes:[[:space:]]*[0-9]+' \
+        | grep -oE '[0-9]+$'
+    )
+  done <<<"$workflow_paths"
 fi
 
 now_epoch="$(date +%s)"
 
+# **指紋は必須の並び順で書く。** **名前そのものは入れない**——
+# **外から決められる文字列を指紋へ入れると、揺れがそのまま通知になる**。
+states=""
 missing=()
 bad=()
 waiting=()
@@ -138,6 +170,7 @@ for name in "${required[@]}"; do
 
   if ((found == 0)); then
     missing+=("$name")
+    states+="none,"
     continue
   fi
 
@@ -145,11 +178,14 @@ for name in "${required[@]}"; do
   # **実物が食い違っていた**（`in_progress` + `success`）。
   if [[ -n $conclusion ]]; then
     if [[ " $OK_CONCLUSIONS " == *" $conclusion "* ]]; then
+      states+="ok,"
       continue
     fi
     bad+=("$name=$conclusion")
+    states+="bad,"
     continue
   fi
+  states+="pending,"
 
   # ここから先は、まだ決着していない検査である。
   if [[ -z $budget_min || -z $started ]]; then
@@ -167,6 +203,11 @@ for name in "${required[@]}"; do
     waiting+=("$name=$status")
   fi
 done
+
+if ((FINGERPRINT == 1)); then
+  printf '%s\n' "${states%,}"
+  exit 0
+fi
 
 # **決着した失敗が先。** **待ちに混ぜると、直せるものを待ち続ける。**
 if ((${#missing[@]} > 0)); then

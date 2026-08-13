@@ -161,21 +161,29 @@ describe("bin/loop-handoff", () => {
   }
 
   /**
-   * その PR の `gh pr checks` に答える分岐。
+   * その PR の CI の状態に答える分岐（`bin/loop-ci-status --fingerprint` が引く口）。
    *
-   * **pending のときは非ゼロで終わる**（実物と同じ）。**終了コードで合否を決めていたら、
-   * ここで落ちる**——**読めなかったのか、走っている最中なのかは、出力でしか分からない**。
+   * **`status` と `conclusion` の両方を返す** (#206)。**`bucket` を返す口ではない**——
+   * **`conclusion` が出ているのに `status` が戻らない**状態を、ここで作れる。
    */
   function checkLines(pr: NonNullable<State["prs"]>[number]): string[] {
     const buckets = { ...Object.fromEntries(REQUIRED.map((name) => [name, "pass"])), ...pr.checks };
-    const rows = Object.entries(buckets).map(
-      ([name, bucket]) => `C\\t${Buffer.from(name, "utf8").toString("base64")}\\t${bucket}`,
-    );
-    const pending = Object.values(buckets).includes("pending");
+    const rows = Object.entries(buckets).map(([name, bucket]) => {
+      const encoded = Buffer.from(name, "utf8").toString("base64");
+      const [status, conclusion] =
+        bucket === "pending"
+          ? ["in_progress", ""]
+          : ["completed", bucket === "pass" ? "success" : "failure"];
+      return `${encoded}\\u001f${status}\\u001f${conclusion}\\u001f2026-01-01T00:00:00Z`;
+    });
     return [
-      `if [[ $* == *"pr checks ${pr.number}"* ]]; then`,
-      `  printf '%b' ${JSON.stringify(["T\\tarray", ...rows, ""].join("\\n"))}`,
-      `  exit ${pending ? 8 : 0}`,
+      `if [[ $* == *"pull/${pr.number}"* || $* == *"pr view ${pr.number}"* ]]; then`,
+      `  printf '%s\\n' "head-of-${pr.number}"`,
+      "  exit 0",
+      "fi",
+      `if [[ $* == *"commits/head-of-${pr.number}/check-runs"* ]]; then`,
+      `  printf '%b' ${JSON.stringify([...rows, ""].join("\\n"))}`,
+      "  exit 0",
       "fi",
     ];
   }
@@ -225,7 +233,7 @@ describe("bin/loop-handoff", () => {
           "totalCount",
           `${state.ready ?? 0}${FIELD}${state.inProgress ?? 0}${FIELD}${state.backlog ?? 0}`,
         ),
-        // **CI は PR ごとに引く**（ゲートと同じ `gh pr checks`）。
+        // **CI は PR ごとに引く**（判定は `bin/loop-ci-status` が持つ）。
         // **名前は @base64 で受け渡す**——区切りを含む job 名で行を増やされないため
         ...(state.prs ?? []).flatMap((pr) => checkLines(pr)),
         // **PR 一覧も検索を通さない口から取る。** label を付けた直後は一覧が古い
@@ -750,19 +758,24 @@ describe("bin/loop-handoff", () => {
 
     it("CI を読めなければ、送らない側へ倒さない", () => {
       // **判定不能を「送らない」に倒さない**（このスクリプトの原則）
-      withState({ prs: [{ number: 12, labels: ["changes-requested"] }], failsOn: "pr checks" });
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }], failsOn: "check-runs" });
 
       expect(run("master").status).toBe(2);
     });
 
-    it("必須チェックの名前を、書き写さない", () => {
-      // **写しを持つと、ゲートを変えても緑のまま**になる（#135 の家族）
+    it("必須チェックの名前も、決着の読み方も、書き写さない", () => {
+      // **写しを持つと、判定を変えても緑のまま**になる（#135 の家族）。
+      // **`bucket` を自分で読むと、ゲートが `conclusion` で成功へ変わっても
+      // 指紋が動かない**——**マージできるようになった、まさにその瞬間に黙る**（#207）
       const script = readFileSync(SCRIPT, "utf8");
 
       for (const name of REQUIRED) {
         expect(script, `${name} を書き写している`).not.toContain(name);
       }
-      expect(script, "ゲートから取っていない").toContain("--required-checks");
+      // **理由を書くのは構わない。** **自分で引いていないこと**を見る
+      expect(script, "自分で CI を読んでいる").not.toContain("gh pr checks");
+      expect(script, "判定を持つところから取っていない").toContain("loop-ci-status");
+      expect(script, "指紋を尋ねていない").toContain("--fingerprint");
     });
   });
 

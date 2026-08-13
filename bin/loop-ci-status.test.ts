@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,7 @@ describe("bin/loop-ci-status", () => {
   beforeEach(() => {
     sandbox = mkdtempSync(join(tmpdir(), "loop-ci-status-"));
     expect(spawnSync("git", ["init", "--quiet", sandbox]).status).toBe(0);
+    workflowTimeouts = undefined;
   });
 
   afterEach(() => {
@@ -40,22 +41,16 @@ describe("bin/loop-ci-status", () => {
 
   const REQUIRED = "alpha\nbeta";
 
-  /** `.github/workflows/` に `timeout-minutes` を置く。**閾値の出所はここ**である。 */
+  /**
+   * **その PR の head にある** `.github/workflows/` を答えさせる。**閾値の出所はここ**。
+   *
+   * **master は PR を checkout しない**ので、**手元の作業ツリーを読むと `main` の値**に
+   * なる——**PR が timeout を伸ばしていると、正当に走っているジョブを止める**
+   *（#207 のレビュー）。
+   */
+  let workflowTimeouts: number[] | undefined;
   function workflows(timeouts: number[]): void {
-    const dir = join(sandbox, ".github", "workflows");
-    mkdirSync(dir, { recursive: true });
-    for (const [index, minutes] of timeouts.entries()) {
-      writeFileSync(
-        join(dir, `w${index}.yml`),
-        [
-          "jobs:",
-          "  one:",
-          "    runs-on: ubuntu-latest",
-          `    timeout-minutes: ${minutes}`,
-          "",
-        ].join("\n"),
-      );
-    }
+    workflowTimeouts = timeouts;
   }
 
   function run(options: {
@@ -64,6 +59,8 @@ describe("bin/loop-ci-status", () => {
     ghFails?: boolean;
     /** head を読めない。 */
     headFails?: boolean;
+    /** 指紋だけを尋ねる（`bin/loop-handoff` が使う）。 */
+    fingerprint?: boolean;
   }): { status: number; stdout: string; stderr: string } {
     const stub = join(sandbox, "stub");
     mkdirSync(stub, { recursive: true });
@@ -88,13 +85,31 @@ describe("bin/loop-ci-status", () => {
       [
         "#!/usr/bin/env bash",
         'args="$*"',
+        // **何を尋ねたかを残す。** **尋ねていないことを確かめる**のに要る
+        `printf '%s\\n' "$args" >> ${JSON.stringify(join(sandbox, "gh.calls"))}`,
         // **`--jq` の式まで見る**（#135 と同じ理由）——**スタブが「取り出し済みの値」を
         // 返すだけだと、問い合わせる列を変えても緑のまま**になる
         'if [[ $args == *"headRefOid"* ]]; then',
         ...(options.headFails === true ? ["  exit 1"] : []),
-        `  printf '%s\\n' "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"`,
+        `  printf '%s\\n' "deadbeef"`,
         "  exit 0",
         "fi",
+        // **head を指して問い合わせているか**を見る（`?ref=<sha>`）——
+        // **手元の作業ツリーを読む実装では、この分岐に来ない**
+        'if [[ $args == *"contents/.github/workflows?ref=deadbeef"* ]]; then',
+        ...(workflowTimeouts === undefined
+          ? ["  exit 1"]
+          : [
+              ...workflowTimeouts.map(
+                (_minutes, index) => `  printf '%s\\n' ".github/workflows/w${index}.yml"`,
+              ),
+              "  exit 0",
+            ]),
+        "fi",
+        ...(workflowTimeouts ?? []).map(
+          (minutes, index) =>
+            `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then printf '%s\\n' "    timeout-minutes: ${minutes}"; exit 0; fi`,
+        ),
         'if [[ $args == *"check-runs"* ]]; then',
         ...(options.ghFails === true ? ["  exit 1"] : []),
         '  if [[ $args != *".conclusion"* ]]; then',
@@ -127,15 +142,19 @@ describe("bin/loop-ci-status", () => {
     rmSync(target);
     spawnSync("cp", [SCRIPT, target]);
     chmodSync(target, 0o755);
-    const result = spawnSync(target, ["42"], {
-      cwd: sandbox,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${stub}:${process.env.PATH}`,
-        LOOP_REQUIRED_CHECKS: REQUIRED,
+    const result = spawnSync(
+      target,
+      options.fingerprint === true ? ["--fingerprint", "42"] : ["42"],
+      {
+        cwd: sandbox,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${stub}:${process.env.PATH}`,
+          LOOP_REQUIRED_CHECKS: REQUIRED,
+        },
       },
-    });
+    );
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
@@ -290,6 +309,76 @@ describe("bin/loop-ci-status", () => {
     const result = run({ ghFails: true });
 
     expect(result.status, "読めないのに人を呼んでいる").toBe(2);
+  });
+
+  it("指紋は、必須の並び順で決着の別を返す", () => {
+    // **`bin/loop-handoff` は指紋で「同じ状態か」を見る**（#173）。**`bucket` のままだと、
+    // ゲートが `conclusion` で成功へ変わっても指紋が動かない**——
+    // **マージできるようになった、まさにその瞬間に黙る**（#207 のレビュー）。
+    workflows([5]);
+
+    const result = run({
+      fingerprint: true,
+      checks: [
+        { name: "alpha", status: "in_progress", conclusion: "success", startedAgo: 6300 },
+        { name: "beta", status: "in_progress", startedAgo: 10 },
+      ],
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "決着の別を、必須の並び順で返していない").toBe("ok,pending");
+  });
+
+  it("指紋は、workflow を読みに行かない", () => {
+    // **指紋は「同じ状態か」だけを表す。** **予算は要らない**ので、
+    // **尋ねない**——**尋ねると、その PR ごとに余計な往復が増える。**
+    workflows([5]);
+
+    expect(
+      run({
+        fingerprint: true,
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "in_progress", startedAgo: 10 },
+        ],
+      }).status,
+    ).toBe(0);
+
+    expect(
+      readFileSync(join(sandbox, "gh.calls"), "utf8"),
+      "指紋なのに workflow を読んでいる",
+    ).not.toContain("workflows");
+  });
+
+  it("指紋は、予算を見ない", () => {
+    // **指紋は「同じ状態か」だけを表す。** **予算を見ると、時間の経過だけで指紋が動き、
+    // 何も変わっていないのに通知が飛ぶ**——**workflow を読む必要も無い。**
+    const result = run({
+      fingerprint: true,
+      checks: [
+        { name: "alpha", status: "in_progress", startedAgo: 100000 },
+        { name: "beta", status: "completed", conclusion: "failure", startedAgo: 10 },
+      ],
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("pending,bad");
+  });
+
+  it("指紋でも、必須が無ければ分かる形で返す", () => {
+    const result = run({
+      fingerprint: true,
+      checks: [{ name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 }],
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("ok,none");
+  });
+
+  it("指紋でも、取得できなければ止める側へ倒さない", () => {
+    const result = run({ fingerprint: true, ghFails: true });
+
+    expect(result.status).toBe(2);
   });
 
   it("head を読めなければ、止める側へ倒さない", () => {
