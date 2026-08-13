@@ -41,15 +41,26 @@ worker_name_ok() {
   return 1
 }
 
-# そのポートを既に使っている作業場（同じ親の下の worktree を見る）。**無ければ空**。
+# そのポートを既に使っている作業場。
+#
+#   exit 0 = 見つかった（名前を出す） / exit 1 = 無い / exit 2 = 読めない
+#
+# **「読めない」を「無い」に倒さない** (#195 のレビュー)。**倒すと、読めなかっただけで
+# 「衝突なし」になり、そのまま足してしまう**——**弾く仕組みを入れたなら、
+# 弾けなかったときに何が起きるかまで見る**（#190 で塞いだのと同じ形）。
 workspace_with_port() {
-  local want="$1" p other
+  local want="$1" p other listed
+  # **プロセス置換にしない。** **中の終了コードは呼び出し側に伝わらない**ので、
+  # **`git worktree list` が落ちるとループが 0 回回り、「無い」と同じ見え方になる**
+  if ! listed="$(git worktree list --porcelain)"; then
+    return 2
+  fi
   while read -r p; do
     [[ -n $p && $p != "$PWD" ]] || continue
-    other="$(workspace_port "$(basename -- "$p")")" || return 1
+    other="$(workspace_port "$(basename -- "$p")")" || return 2
     [[ $other != "$want" ]] || { printf '%s' "$(basename -- "$p")"; return 0; }
-  done < <(git worktree list --porcelain | awk '/^worktree /{print $2}')
-  printf ''
+  done < <(printf '%s\n' "$listed" | awk '/^worktree /{print $2}')
+  return 1
 }
 
 # 既定の作業場は動かさない（**設定を足さなくても、1 人運用はこれまでどおり**）。
@@ -67,7 +78,11 @@ workspace_port() {
     printf '%s' "$DEFAULT_APP_PORT"
     return 0
   fi
-  if ! digest="$(printf '%s' "$name" | sha256sum)"; then
+  # **digest は `git` で取る** (#195 のレビュー)。**`sha256sum` はホスト標準ではない**
+  # ——**このファイルは 8 行上で「`readlink -f` は GNU 依存なので使わない」と書いている**
+  # のに、**入口の `compose()` が GNU 前提**になっていた。**`git` は既に必須**である
+  # （このコマンド自身が `git worktree` を使う）。
+  if ! digest="$(printf '%s' "$name" | git hash-object --stdin)"; then
     echo "[FAIL] 作業場のポートを決められません: $name" >&2
     return 1
   fi
@@ -327,7 +342,7 @@ cmd_loop_stop_paths() {
 
 # worker の作業場を増やす 例: ./task loop:worker:add b
 cmd_loop_worker_add() {
-  local name="${1:-}" wt port existing
+  local name="${1:-}" wt port existing found
   if ! worker_name_ok "$name"; then return 1; fi
   wt="${PWD}-worker-${name}"
   if [[ -e $wt ]]; then
@@ -338,10 +353,23 @@ cmd_loop_worker_add() {
   # **ポートが重なる名前は、足す前に弾く** (#82)。**名前は決定論的にポートへ写る**ので、
   # **別の名前が同じポートへ落ちることはある**——**足したあとに `up` が
   # 「アドレス使用中」で落ちる形にすると、原因が名前だと分からない。**
-  if existing="$(workspace_with_port "$port")" && [[ -n $existing ]]; then
-    echo "==> ポート $port が $existing と重なります。別の名前にしてください" >&2
-    return 1
-  fi
+  # **`set -e` があるので、非ゼロを受けるときは `||` で受ける**（そうしないと、
+  # **「衝突なし」を返した瞬間にコマンドごと落ちる**）
+  local found=0
+  existing="$(workspace_with_port "$port")" || found=$?
+  case $found in
+    0)
+      echo "==> ポート $port が $existing と重なります。別の名前にしてください" >&2
+      return 1
+      ;;
+    1) ;;
+    *)
+      # **読めなかったなら足さない。** **待つ必要は無い**——**足してから
+      # 「アドレス使用中」で落ちるより、足さないほうが戻せる**
+      echo "==> 他の作業場のポートを読めないので、足しません（同じポートかもしれません）" >&2
+      return 1
+      ;;
+  esac
   # **detached で作る。** ブランチとして main を掴むと、他の作業場が main を
   # checkout できなくなる（master の worktree と同じ理由）。
   git worktree add --detach "$wt" HEAD || return 1
@@ -360,7 +388,17 @@ cmd_loop_worker_remove() {
   # **コンテナを先に落とす。** worktree を消してから落とそうとすると、
   # **compose がファイルを読めず、コンテナだけが残る**
   (cd "$wt" && compose down --remove-orphans) || return 1
-  git worktree remove --force "$wt" || return 1
+  # **`--force` を付けない** (#195 のレビュー)。**`--force` は「dirty でも locked でも
+  # 消す」**で、**worker の作業場はほぼ常に dirty**——**commit していない実装が、
+  # 確認なしに消える。戻せない。**
+  #
+  # **`git worktree remove` は dirty なら自分で拒む。** **拒まれたら、何をすればよいかを出す。**
+  if ! git worktree remove "$wt"; then
+    echo "==> 消せませんでした: $wt" >&2
+    echo "    未コミットの変更が残っているなら、commit するか、了解のうえで" >&2
+    echo "    git worktree remove --force $wt を手で叩くこと" >&2
+    return 1
+  fi
   echo "==> 作業場を削除: $wt"
 }
 

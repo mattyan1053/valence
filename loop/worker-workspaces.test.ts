@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -227,18 +228,78 @@ describe("./task loop:worker:add / remove", () => {
 
   it("ポートが既にある作業場と重なる名前は、足す前に失敗する", () => {
     // **N 人で衝突しないことを、確率に任せない。** 名前は決定論的にポートへ写るので、
-    // **別の名前が同じポートへ落ちることはある**（`valence-worker-s` と
-    // `valence-worker-aa` は、どちらも 3377 になる）。
+    // **別の名前が同じポートへ落ちることはある**（`nn` と `pk` は、どちらも 3002）。
     //
     // **足したあとに `up` が「アドレス使用中」で落ちる形にしない**——
-    // **落ちるのは 2 人目が動き出したときで、原因が名前だと分からない**
+    // **落ちるのは 2 人目が動き出したときで、原因が名前だと分からない**。
+    //
+    // **数字を書き写していない。本物に探させた**（写す先が変われば、また探す）。
+    //
+    // ---8<--- 衝突する名前の探し方 ---
+    //   source ./task >/dev/null 2>&1
+    //   for a in {a..z} {a..z}{a..z}; do
+    //     printf '%s\t%s\n' "$a" "$(workspace_port "valence-worker-$a")"
+    //   done | sort -k2,2n |
+    //     awk -F'\t' '{ if ($2 == p) { print pn, $1, $2; exit }; p = $2; pn = $1 }'
+    // ---8<--- ここまで ---
     const { dir, env } = repo();
-    expect(task(dir, env, ["loop:worker:add", "s"]).status).toBe(0);
+    expect(task(dir, env, ["loop:worker:add", "nn"]).status).toBe(0);
 
-    const clash = task(dir, env, ["loop:worker:add", "aa"]);
+    const clash = task(dir, env, ["loop:worker:add", "pk"]);
 
     expect(clash.status, "同じポートへ落ちる名前を通している").not.toBe(0);
-    expect(`${clash.stdout}${clash.stderr}`, "何と衝突したのかが出ていない").toContain("s");
+    expect(`${clash.stdout}${clash.stderr}`, "何と衝突したのかが出ていない").toContain("nn");
+  });
+
+  it("他の作業場のポートを読めなければ、足さない", () => {
+    // **「読めない」を「衝突なし」に倒さない**（#195 のレビュー）。**倒すと、
+    // 読めなかっただけで足してしまい、2 人目が動き出したときに初めて落ちる**
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:worker:add", "a"]).status).toBe(0);
+    // **2 回目の digest だけ落とす。** 1 回目は足そうとしている名前ぶんで、
+    // **落としたいのは「既にある作業場を読む」ほう**である
+    const real = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      join(dir, "stub", "git"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "hash-object" ]]; then',
+        `  count="$(cat ${JSON.stringify(join(dir, "hash.count"))} 2>/dev/null || echo 0)"`,
+        `  printf '%s' "$((count + 1))" > ${JSON.stringify(join(dir, "hash.count"))}`,
+        "  if ((count + 1 >= 2)); then echo '読めない' >&2; exit 1; fi",
+        "fi",
+        `exec ${JSON.stringify(real)} "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const added = task(dir, env, ["loop:worker:add", "b"]);
+
+    expect(added.status, "読めていないのに足している").not.toBe(0);
+    expect(existsSync(`${dir}-worker-b`), "作業場ができている").toBe(false);
+  });
+
+  it("worktree の一覧を取れなければ、足さない", () => {
+    // **プロセス置換の中の終了コードは、呼び出し側に伝わらない**——
+    // **落ちるとループが 0 回回り、「衝突なし」と同じ見え方になる**（#190 と同じ形）
+    const { dir, env } = repo();
+    const real = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      join(dir, "stub", "git"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "worktree" && $2 == "list" ]]; then echo "壊れている" >&2; exit 1; fi',
+        `exec ${JSON.stringify(real)} "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const added = task(dir, env, ["loop:worker:add", "a"]);
+
+    expect(added.status, "一覧を取れていないのに足している").not.toBe(0);
+    expect(existsSync(`${dir}-worker-a`), "作業場ができている").toBe(false);
   });
 
   it("remove で、作業場もコンテナも残らない", () => {
@@ -255,6 +316,25 @@ describe("./task loop:worker:add / remove", () => {
     expect(readFileSync(log, "utf8"), "コンテナを落としていない").toContain(
       `compose -p ${basename(dir)}-worker-a down`,
     );
+  });
+
+  it("未コミットの変更があれば、remove は消さずに止まる", () => {
+    // **`--force` は「dirty でも locked でも消す」**である。**worker の作業場は
+    // ほぼ常に dirty** なので、**commit していない実装が確認なしに消える。戻せない。**
+    //
+    // **`up` が落ちるのは、少なくとも落ちる。消えた実装は、消えたことすら出ない。**
+    const { dir, log, env } = repo();
+    expect(task(dir, env, ["loop:worker:add", "a"]).status).toBe(0);
+    writeFileSync(join(`${dir}-worker-a`, "まだ commit していない.txt"), "しごとの途中\n");
+
+    const removed = task(dir, env, ["loop:worker:remove", "a"]);
+
+    expect(removed.status, "dirty な作業場を消している").not.toBe(0);
+    expect(existsSync(`${dir}-worker-a`), "作業場が消えている").toBe(true);
+    expect(`${removed.stdout}${removed.stderr}`, "どうすればよいかが出ていない").toContain(
+      "--force",
+    );
+    expect(readFileSync(log, "utf8"), "コンテナだけ落として作業場を残している").toContain("down");
   });
 
   it("知らない名前を remove しても、黙って成功しない", () => {
