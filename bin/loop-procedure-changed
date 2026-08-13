@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# master が実行するものが、この周回の間に入れ替わったかを判定する。
+# その役が実行するものが、この周回の間に入れ替わったかを判定する。
+#
+#   bin/loop-procedure-changed [--role master|worker] <前の SHA> [<後の SHA>]
 #
 #   exit 0 = 変わった (**この周回は捨てる**)
 #   exit 1 = 変わっていない (そのまま進んでよい)
@@ -43,21 +45,44 @@ set -uo pipefail
 #
 # **本体（拡張子なし）は残す。** 判定を緩めて「変わっていない」に倒すと、
 # **master が古いスクリプトで走り続ける**——**空振りより危険**である（#93）。
-readonly WATCHED=(
+#
+# **役ごとに違うのは、読む手順書だけ**である (#227)。**両方を見ると、相手の手順書を
+# 直しただけの PR で周回が空振りする**——**その役が実行しないものは、入れ替わっても
+# 実行内容を変えない**（`src/` だけの PR で捨てないのと同じ理由）。
+readonly COMMON=(
   "AGENTS.md"
-  ".claude/commands/loop-master.md"
   "bin/"
   ":(exclude)bin/*.test.ts"
   "task"
   "loop/README.md"
 )
 
+
+
 usage() {
-  echo "使い方: bin/loop-procedure-changed <前の SHA> [<後の SHA>]" >&2
+  echo "使い方: bin/loop-procedure-changed [--role master|worker] <前の SHA> [<後の SHA>]" >&2
   echo "       後の SHA を省くと HEAD と比べる" >&2
-  echo "       bin/loop-procedure-changed --list   対象の一覧を出す" >&2
+  echo "       bin/loop-procedure-changed [--role …] --list   対象の一覧を出す" >&2
   exit 2
 }
+
+# **既定は master。** **既存の呼び出しを変えない**ためで、
+# **worker 側は `--role worker` を明示する**。
+ROLE="master"
+if [[ ${1-} == "--role" ]]; then
+  [[ $# -ge 2 ]] || usage
+  ROLE="$2"
+  shift 2
+fi
+case "$ROLE" in
+  master | worker) ;;
+  *)
+    echo "[FAIL] 役は master か worker です: $ROLE" >&2
+    exit 2
+    ;;
+esac
+readonly ROLE
+readonly WATCHED=(".claude/commands/loop-${ROLE}.md" "${COMMON[@]}")
 
 # 指定された rev を解決する。**解決できないものを黙って通さない。**
 resolve() {

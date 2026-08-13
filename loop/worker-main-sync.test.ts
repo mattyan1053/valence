@@ -43,9 +43,24 @@ function syncBlock(): string {
 function placeSyncScript(workspace: string): void {
   const bin = join(workspace, "bin");
   mkdirSync(bin, { recursive: true });
-  const target = join(bin, "loop-sync-main");
-  copyFileSync(join(REPO_ROOT, "bin/loop-sync-main"), target);
-  chmodSync(target, 0o755);
+  // **このブロックが呼ぶものを、すべて実物で置く** (#227)。**偽物にすると、
+  // 「呼んでいるのに何も見ていない」形が緑になる。**
+  for (const name of ["loop-sync-main", "loop-procedure-changed", "loop-stall"]) {
+    const target = join(bin, name);
+    copyFileSync(join(REPO_ROOT, "bin", name), target);
+    chmodSync(target, 0o755);
+  }
+}
+
+/**
+ * 同期のブロックの終了コード。
+ *
+ * **最後に走るのは `bin/loop-procedure-changed`** なので、**0（入れ替わった）と
+ * 1（変わっていない）のどちらも「同期そのものは通った」**である
+ * ——**落ちた場合（2 以上）と分ける。**
+ */
+function syncRan(status: number | null, stderr: string): void {
+  expect([0, 1], `同期のブロックが落ちている: ${stderr}`).toContain(status);
 }
 
 /**
@@ -127,7 +142,7 @@ describe("worker の main 最新化", () => {
 
     const synced = runSync(second);
 
-    expect(synced.status, synced.stderr).toBe(0);
+    syncRan(synced.status, synced.stderr);
     const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: second, encoding: "utf8" }).stdout;
     const upstream = spawnSync("git", ["rev-parse", "origin/main"], {
       cwd: first,
@@ -143,7 +158,7 @@ describe("worker の main 最新化", () => {
 
     const synced = runSync(first);
 
-    expect(synced.status, synced.stderr).toBe(0);
+    syncRan(synced.status, synced.stderr);
   });
 
   it("もう一方の作業場に fetch を競り負けても、通る", () => {
@@ -210,7 +225,7 @@ describe("worker の main 最新化", () => {
       env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` },
     });
 
-    expect(synced.status, synced.stderr).toBe(0);
+    syncRan(synced.status, synced.stderr);
     const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: second, encoding: "utf8" }).stdout;
     // **上流そのものと比べる。** 共有 ref と比べると、**更新できていなくても一致する**
     const upstream = spawnSync("git", ["--git-dir", origin, "rev-parse", "main"], {

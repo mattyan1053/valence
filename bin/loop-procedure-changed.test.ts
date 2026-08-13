@@ -159,4 +159,37 @@ describe("bin/loop-procedure-changed", () => {
 
     expect(run(before, "0000000000000000000000000000000000000000").status).toBe(2);
   });
+
+  /**
+   * **役ごとに読む手順書が違う** (#227)。**両方を見ると、相手の手順書を直しただけの
+   * PR で周回が空振りする**——**その役が実行しないものは、入れ替わっても実行内容を
+   * 変えない**（`src/` だけの PR で捨てないのと同じ理由）。
+   */
+  describe("役ごとの対象", () => {
+    it("既定は master の手順書を見る", () => {
+      // **既定を変えない。** **既存の呼び出しが、黙って別のものを見るようになる**
+      const listed = run("--list");
+
+      expect(listed.stdout).toContain(".claude/commands/loop-master.md");
+      expect(listed.stdout).not.toContain(".claude/commands/loop-worker.md");
+    });
+
+    it("worker を指すと、worker の手順書を見る", () => {
+      const listed = run("--role", "worker", "--list");
+
+      expect(listed.stdout).toContain(".claude/commands/loop-worker.md");
+      expect(listed.stdout, "相手の手順書まで見ている").not.toContain(
+        ".claude/commands/loop-master.md",
+      );
+    });
+
+    it("知らない役は受けない", () => {
+      // **黙って既定へ倒すと、worker のつもりで master を見る**
+      expect(run("--role", "nobody", "HEAD").status).toBe(2);
+    });
+
+    it("役だけ書いて中身が無ければ、使い方の誤りにする", () => {
+      expect(run("--role").status).toBe(2);
+    });
+  });
 });

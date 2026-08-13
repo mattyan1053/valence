@@ -174,3 +174,43 @@ describe("周回を捨てるかの判定", () => {
     expect(section).not.toMatch(/担保/);
   });
 });
+
+/**
+ * **worker 側にも、版ずれで打ち切る経路がある** (#227)。
+ *
+ * **同期そのものが手順書に書かれている**ので、**同期する前は 1 つ前の版の手順書を
+ * 読んでいる**——**同期したあとは「古い手順書 + 新しいスクリプト」で走る。**
+ *
+ * **master 側にだけ仕組みがあると、気づいた側が忘れた時点でそのまま残る。**
+ */
+describe("worker の版ずれ", () => {
+  const doc = readFileSync(
+    fileURLToPath(new URL("../.claude/commands/loop-worker.md", import.meta.url)),
+    "utf8",
+  );
+  const sync = doc.split("### 1.0")[1]?.split("\n## ")[0] ?? "";
+
+  it("同期のあとに、入れ替わったかを確かめる", () => {
+    expect(sync).toMatch(/bin\/loop-procedure-changed --role worker/);
+    // **比べる相手は、同期の前後**である。**片方でも取り違えると必ず
+    // 「変わっていない」になり、古い手順のまま進む**
+    expect(sync).toMatch(/before="\$\(git rev-parse HEAD\)"/);
+    expect(sync).toMatch(/bin\/loop-procedure-changed --role worker "\$before" "\$after"/);
+  });
+
+  it("捨てる側へ倒す条件が書いてある", () => {
+    // **`exit 1` だけが「続けてよい」**（1 以外はすべて捨てる。master と同じ扱い）
+    expect(sync).toMatch(/1 以外/);
+  });
+
+  it("捨てすぎない理由も書いてある", () => {
+    // **倒す先は 2 つある。** **毎周回 1 歩目で終わる形になっていないこと**が、
+    // 読む人に分かる必要がある
+    expect(sync).toMatch(/呼び直/);
+  });
+
+  it("版ずれだと読める形になっている", () => {
+    // **`No such file or directory` は症状であって、版ずれとは読めない**
+    expect(sync).toMatch(/No such file or directory/);
+  });
+});

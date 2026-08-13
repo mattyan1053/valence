@@ -55,8 +55,25 @@ bin/loop-lease acquire worker      # 出力された token を控える
 `origin/main` の先端へ移る。**ブランチとして `main` を掴まない** (#196)。
 
 ```bash
-bin/loop-sync-main          # 移った先の SHA を出す
+before="$(git rev-parse HEAD)"
+if ! after="$(bin/loop-sync-main)"; then
+  bin/loop-stall main-sync-failed
+  exit
+fi
+bin/loop-procedure-changed --role worker "$before" "$after"
 ```
+
+**同期で、手順書とスクリプトが入れ替わる** (#227)。**この周回が読んでいる手順書は
+同期する前の版**なので、**同期したあとは「古い手順書 + 新しいスクリプト」で走る**こと
+になる——**呼べと書いてあるものが無い**、**渡し方が変わっている**、どちらも起きうる。
+
+**`exit 1` だけが「続けてよい」**（**1 以外はすべて捨てる**。master と同じ扱い）。
+**捨てるなら、その場で `/loop-worker` を呼び直す**——**呼び直した回は新しい手順書を
+読むので、そこでは変わっていない**（**毎周回 1 歩目で終わる形にはならない**）。
+
+**`bin/loop-sync-main: No such file or directory` と言われたら、それが版ずれである。**
+**症状はファイルが無いことだが、原因は「手順書のほうが新しい」**——
+**`git switch --detach origin/main` で版を揃えてから呼び直す。**
 
 **`main` は 1 つの作業場にしか checkout できない。** **掴むと、2 人目は
 `fatal: 'main' is already checked out at …` でここを通れず**、**毎周回止まって
