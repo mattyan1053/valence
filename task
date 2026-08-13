@@ -22,7 +22,63 @@ HOST_GID="$(id -g)"
 DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999)"
 export HOST_UID HOST_GID DOCKER_GID
 
-compose() { docker compose "$@"; }
+# **作業場ごとに、compose の project とポートを分ける** (#82)。
+#
+# **worktree を分けただけでは足りない。** `compose.yaml` は project 名とポートを
+# 固定していたので、**2 人目が同じコンテナを掴む**——**後から起きたほうが、
+# 相手のコンテナを別の `working_dir` で作り直す**。**master の worktree も同じ**である。
+#
+# **名前から決める。空きを探さない。** 空き探しは**起動のたびに値が変わる**ので
+# 人が繋ぎ直せず、**2 つの `add` が同じ空きを掴む競合**を新しく作る（#74 で塞いだ形）。
+workspace_name() { basename -- "$PWD"; }
+
+# 作業場の名前として使えるか。**名前は識別子**なので、**パスに化ける形を通さない**。
+worker_name_ok() {
+  if [[ $1 =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    return 0
+  fi
+  echo "==> 名前は英小文字・数字・ハイフンで、英数字から始めること: ${1:-（空）}" >&2
+  return 1
+}
+
+# そのポートを既に使っている作業場（同じ親の下の worktree を見る）。**無ければ空**。
+workspace_with_port() {
+  local want="$1" p other
+  while read -r p; do
+    [[ -n $p && $p != "$PWD" ]] || continue
+    other="$(workspace_port "$(basename -- "$p")")" || return 1
+    [[ $other != "$want" ]] || { printf '%s' "$(basename -- "$p")"; return 0; }
+  done < <(git worktree list --porcelain | awk '/^worktree /{print $2}')
+  printf ''
+}
+
+# 既定の作業場は動かさない（**設定を足さなくても、1 人運用はこれまでどおり**）。
+readonly DEFAULT_WORKSPACE=valence
+readonly DEFAULT_APP_PORT=3000
+# 3001..3999 を作業場に割り当てる（既定の 3000 とぶつからない範囲）。
+readonly WORKSPACE_PORT_BASE=3001
+readonly WORKSPACE_PORT_SPAN=999
+
+# 名前から決まるポート。**同じ名前なら常に同じ値**（人が繋ぎ直せる）。
+workspace_port() {
+  local name digest
+  name="${1:-$(workspace_name)}"
+  if [[ $name == "$DEFAULT_WORKSPACE" ]]; then
+    printf '%s' "$DEFAULT_APP_PORT"
+    return 0
+  fi
+  if ! digest="$(printf '%s' "$name" | sha256sum)"; then
+    echo "[FAIL] 作業場のポートを決められません: $name" >&2
+    return 1
+  fi
+  printf '%s' "$((WORKSPACE_PORT_BASE + 16#${digest:0:8} % WORKSPACE_PORT_SPAN))"
+}
+
+compose() {
+  local port
+  port="$(workspace_port)" || return 1
+  VALENCE_APP_PORT="$port" docker compose -p "$(workspace_name)" "$@"
+}
 
 # 非対話用。CI や AI エージェントからは TTY がないため -T を付ける。
 exec_app() { compose exec -T app "$@"; }
@@ -122,6 +178,15 @@ supabase_cli() {
   [[ -t 0 ]] || tty_flag=(-T)
   compose run --rm --quiet-pull "${tty_flag[@]}" supabase-cli "$@"
 }
+
+# **`./task db:*` は worker が叩かない** (#82)。**作業場ごとに分けても、直列化もしない。**
+#
+# **理由: DB を触るコードもテストも 1 件も無い。** **壊れる経路が無いので、
+# 分けても直列化しても、効いているかを検証できない**——**検証できない設定を入れない**
+# (`AGENTS.md` §5)。**Supabase のスタックは 1 つのまま、全作業場で共有する。**
+#
+# **引き金:** **DB を使うテストを書き始めるときに、分けるか直列化するかを決める。**
+# **いまは触るコードが無いので決めない。**
 
 # Supabase ローカルスタックを起動する
 cmd_db_up() { ensure_up; supabase_cli pnpm supabase start; }
@@ -258,6 +323,45 @@ cmd_loop_stop() {
 # loop/STOP の置き場所を 1 行ずつ出す (bin/loop-stall が撤去に使う。読むだけ)
 cmd_loop_stop_paths() {
   loop_stop_paths
+}
+
+# worker の作業場を増やす 例: ./task loop:worker:add b
+cmd_loop_worker_add() {
+  local name="${1:-}" wt port existing
+  if ! worker_name_ok "$name"; then return 1; fi
+  wt="${PWD}-worker-${name}"
+  if [[ -e $wt ]]; then
+    echo "==> 既にあります: $wt（名前が識別子なので、重複は誤りです）" >&2
+    return 1
+  fi
+  port="$(workspace_port "$(basename -- "$wt")")" || return 1
+  # **ポートが重なる名前は、足す前に弾く** (#82)。**名前は決定論的にポートへ写る**ので、
+  # **別の名前が同じポートへ落ちることはある**——**足したあとに `up` が
+  # 「アドレス使用中」で落ちる形にすると、原因が名前だと分からない。**
+  if existing="$(workspace_with_port "$port")" && [[ -n $existing ]]; then
+    echo "==> ポート $port が $existing と重なります。別の名前にしてください" >&2
+    return 1
+  fi
+  # **detached で作る。** ブランチとして main を掴むと、他の作業場が main を
+  # checkout できなくなる（master の worktree と同じ理由）。
+  git worktree add --detach "$wt" HEAD || return 1
+  echo "==> 作業場を作成: $wt (compose project=$(basename -- "$wt") port=$port)"
+}
+
+# worker の作業場を減らす 例: ./task loop:worker:remove b
+cmd_loop_worker_remove() {
+  local name="${1:-}" wt
+  if ! worker_name_ok "$name"; then return 1; fi
+  wt="${PWD}-worker-${name}"
+  if [[ ! -d $wt ]]; then
+    echo "==> そんな作業場はありません: $wt" >&2
+    return 1
+  fi
+  # **コンテナを先に落とす。** worktree を消してから落とそうとすると、
+  # **compose がファイルを読めず、コンテナだけが残る**
+  (cd "$wt" && compose down --remove-orphans) || return 1
+  git worktree remove --force "$wt" || return 1
+  echo "==> 作業場を削除: $wt"
 }
 
 # 停止を解除する
