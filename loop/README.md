@@ -121,8 +121,9 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
 master が実装に手を出さないのは、権限の話ではなく**判定の独立性**のためである。
 自分が書いたものを自分で通すと、ゲートは形だけになる。
 
-**どちらのループも毎周回の冒頭で `origin/main` へ追随する。** worker は `main` を
-fast-forward し、master は worktree を `origin/main` へ detach し直す。これが無いと
+**どちらのループも毎周回の冒頭で `origin/main` へ detach し直す。** **`main` を
+ブランチとして掴まない**——**`main` は 1 つの作業場にしか checkout できない**ので、
+掴むと **2 人目の worker がそこを通れない**（#196）。これが無いと
 worktree は作った時点の commit に貼り付き、**マージした改善が master 自身に届かない**
 （手順書もスクリプトも古い版のまま動き続ける）。
 

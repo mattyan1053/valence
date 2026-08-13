@@ -269,9 +269,9 @@ printf '%s\n' "$head_prs"
 ## 3. レビュー指摘に対応する
 
 **先に対象 PR の head ブランチへ切り替える。** ステップ 1 で `origin/main` の先端
-（detached）にいるので、
-そのまま直すと `main` 上で作業することになり、push しても PR は更新されないか、
-禁止している `main` への直接 push を試みる。
+（detached）にいるので、**そのまま直すと、どのブランチにも載らない commit ができる**
+——**push する先が無く、PR は更新されない**（**次に切り替えた時点で、その commit は
+どこからも辿れなくなる**）。
 
 ```bash
 gh pr checkout <PR番号>
