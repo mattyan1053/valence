@@ -70,6 +70,41 @@ describe("入口を飛ばした記録", () => {
     }
   });
 
+  it("周回が飛ばしたとは書かない（診断で叩いたものが混ざる）", () => {
+    // **数えているのは「lease 無しでスクリプトが動いた」**であって、
+    // **「周回が入口を飛ばした」ではない**（#192）。**診断のために人が
+    // `bin/loop-gate` を手で叩くと、そのまま記録される**——**実測で 18 件中 7 件**。
+    //
+    // **コマンド名を残しても見分けは付かない。** **飛ばした周回も、診断の人も、
+    // 同じ `bin/loop-gate` を叩く**——**違うのは呼び手の役**で、
+    // **それを知る唯一の手段が lease**である。**その lease が無いときの話**なので、
+    // **見分けは原理的に取れない。だから、名前を数えているものへ合わせる。**
+    const workspace = mkdtempSync(join(tmpdir(), "lease-missing-"));
+    try {
+      expect(spawnSync("git", ["init", "--quiet", workspace]).status).toBe(0);
+      appendFileSync(
+        join(workspace, ".git", "valence-loop-lease-missing"),
+        "2026-08-13T01:27:28Z\t別の周回が保持中: master\t/somewhere\n",
+      );
+
+      const shown = execFileSync(
+        "bash",
+        [
+          "-c",
+          `source ${JSON.stringify(join(REPO_ROOT, "task"))} >/dev/null 2>&1; ` +
+            `cd ${JSON.stringify(workspace)}; show_missing_lease`,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(shown, "周回が飛ばしたと言い切っている").not.toContain("入口を飛ばした周回");
+      expect(shown, "診断で叩いたものが混ざることが書かれていない").toContain("診断");
+      expect(shown, "件数が消えている").toContain("1 件");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("./task help から、記録を見せるコマンドの説明が読める", () => {
     // **この PR の理由が、この PR 自身に当たった。** 記録を `loop:status` へ出すと決めた
     // のに、**同じ変更で「`loop:status` が何をするコマンドなのか」が一覧から読めなく

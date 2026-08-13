@@ -372,18 +372,18 @@ read_lease() {
 record_missing() {
   local record="$common_dir/valence-loop-lease-missing" kept
   exec 8>"$record.lock" || {
-    echo "[WARN] 飛ばした記録のロックを作れません: $record.lock" >&2
+    echo "[WARN] lease 無しの実行の記録のロックを作れません: $record.lock" >&2
     echo "       この周回のぶんは ./task loop:status に出ません（数え直せません）" >&2
     return 0
   }
   if ! flock -w "$LOCK_WAIT_SEC" 8; then
-    echo "[WARN] 飛ばした記録のロックを取れません（${LOCK_WAIT_SEC} 秒待機）: $record.lock" >&2
+    echo "[WARN] lease 無しの実行の記録のロックを取れません（${LOCK_WAIT_SEC} 秒待機）: $record.lock" >&2
     echo "       この周回のぶんは ./task loop:status に出ません（数え直せません）" >&2
     exec 8>&-
     return 0
   fi
   if ! printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$PWD" >>"$record"; then
-    echo "[WARN] 飛ばした記録を残せません: $record" >&2
+    echo "[WARN] lease 無しの実行の記録を残せません: $record" >&2
     echo "       この周回のぶんは ./task loop:status に出ません（数え直せません）" >&2
     exec 8>&-
     return 0
@@ -397,7 +397,7 @@ record_missing() {
     || ! printf '%s\n' "$kept" >"$record.tmp.$$" \
     || ! mv -f "$record.tmp.$$" "$record"; then
     rm -f "$record.tmp.$$" 2>/dev/null
-    echo "[WARN] 飛ばした記録を畳めません: $record" >&2
+    echo "[WARN] lease 無しの実行の記録を畳めません: $record" >&2
     echo "       この記録は ${MISSING_KEEP} 件を超えて増え続けます" >&2
   fi
   exec 8>&-
