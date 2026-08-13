@@ -67,11 +67,14 @@ worktree の commit を人が見るまで気づけなかった。
 
 ```bash
 before="$(git rev-parse HEAD)"
-git fetch origin main && git switch --detach origin/main
-git rev-parse HEAD          # before と比べる
+bin/loop-sync-main          # 移った先の SHA を出す（before と比べる）
 ```
 
-どちらかに失敗したら `bin/loop-stall main-sync-failed` を通して停止する。
+**やり直すかどうかは、回数ではなく理由で決まる** (#217)。**判断はスクリプトが持つ**
+ので、ここに条件を書き写さない（**worker も同じものを通る**）。**`cannot lock ref` は
+1 度やり直し、それ以外の理由では投げ直さない**——**認証で落ちたものは何回投げても同じ**である。
+
+失敗したら `bin/loop-stall main-sync-failed` を通して停止する。
 **古い手順で走り続けるより止まるほうがよい。**
 
 **HEAD が動いただけでは終わらない。** 打ち切るのは、**master が実行するものが
