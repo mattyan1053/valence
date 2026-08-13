@@ -33,12 +33,10 @@ function commandLines(): string[] {
     .filter((line) => line.length > 0 && !line.startsWith("#"));
 }
 
-/** **落ちた周回のブランチへ入る**ブロック（ステップ 2.2）。 */
+/** **落ちた周回の続きへ入る**ブロック（ステップ 2.2）。 */
 function resumeBlock(): string {
-  const found = bashBlocks().filter(
-    (block) => block.includes("git switch") && block.includes("<ブランチ>"),
-  );
-  expect(found, "落ちた周回のブランチへ入るブロックが 1 つに絞れない").toHaveLength(1);
+  const found = bashBlocks().filter((block) => block.includes("loop-keep-branch --enter"));
+  expect(found, "落ちた周回の続きへ入るブロックが 1 つに絞れない").toHaveLength(1);
   return found[0] ?? "";
 }
 
@@ -105,6 +103,7 @@ describe("落ちた作業場のブランチを引き継ぐ", () => {
   }
 
   function runResume(cwd: string) {
+    withScripts(cwd);
     return spawnSync("bash", ["-c", resumeBlock().replaceAll("<ブランチ>", BRANCH)], {
       cwd,
       encoding: "utf8",
@@ -282,6 +281,51 @@ describe("落ちた作業場のブランチを引き継ぐ", () => {
       }).stdout.trim(),
       "引き継いだ作業が上流に載っていない",
     ).toBe(tip);
+  });
+
+  it("引き継いだ周回が積んだ commit も、次の周回から辿れる", () => {
+    // **引き継ぎの場面にだけ、網が無かった**（#202 のレビュー 2 周目）——
+    // **掴まれているブランチは worktree 排他で進められない**ので、
+    // **その周回の commit を指すものが 1 つも無くなる。**
+    //
+    // **相手が既に 1 度落ちている、いちばん壊れやすい場面**である。
+    // **置く側と読む側を 1 組で見る**——**置いただけで誰も見ないなら、置いていないのと同じ。**
+    const { taker } = workspaces();
+    expect(runResume(taker).status).toBe(0);
+    expect(
+      git(["commit", "--allow-empty", "--quiet", "-m", "引き継いで直した"], taker).status,
+    ).toBe(0);
+    const made = git(["rev-parse", "HEAD"], taker).stdout.trim();
+    const env = withFailingPush(taker);
+
+    for (const pair of pushPairs()) {
+      const ran = spawnSync("bash", ["-c", pair.replaceAll("<ブランチ>", BRANCH)], {
+        cwd: taker,
+        encoding: "utf8",
+        env,
+      });
+      expect(ran.status, `push が落ちていない: ${pair}`).not.toBe(0);
+    }
+    // **次の周回のふり**をする（冒頭で `origin/main` へ移り、2.2 から入り直す）
+    expect(git(["switch", "--detach", "--quiet", "origin/main"], taker).status).toBe(0);
+
+    expect(runResume(taker).status, "引き継いだ周回の続きへ入れない").toBe(0);
+    expect(git(["rev-parse", "HEAD"], taker).stdout.trim(), "積んだ commit へ戻れない").toBe(made);
+  });
+
+  it("checkout した先が PR の head かを、機械で確かめている", () => {
+    // **`headRefOid` は手順書のどこにも出てこない値**である——**「一致することを
+    // 確認する」と書いても、比べる相手がその場に無ければ実行されない**（#202 のレビュー）。
+    // **判定は `bin/loop-head` が持っている**（2 箇所に持たない）。
+    const checkout = bashBlocks().filter((block) => block.includes("gh pr checkout --detach"));
+    expect(checkout.length, "PR へ入るブロックが無い").toBeGreaterThan(0);
+
+    const compared = checkout.filter((block) => block.includes("bin/loop-head same"));
+
+    expect(
+      compared.length,
+      "checkout した先が PR の head かを、機械で確かめていない",
+    ).toBeGreaterThan(0);
   });
 
   it("PR を作るとき、head を明示している", () => {

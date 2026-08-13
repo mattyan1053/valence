@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # detached で作った commit を、ブランチ名の側から辿れるようにする。
 #
-#   bin/loop-keep-branch <ブランチ>
+#   bin/loop-keep-branch <ブランチ>            置く (push の前)
+#   bin/loop-keep-branch --enter <ブランチ>    読む (2.2。辿れるほうへ detached で入る)
 #
-#   exit 0 = そのブランチが HEAD を指している (進めた / 既に指していた)
-#   exit 1 = 進める必要が無いのに進められない。**push は続けてよい**
+#   exit 0 = 辿れる (ブランチが HEAD を指している / 回収用 ref に置いた / 入った)
+#   exit 1 = 置くものが無い / 入る先が無い。**push は続けてよい**
 #   exit 2 = 失われる / 使い方の誤り / git を読めない
+#
+# **掴まれているブランチには置けない** (worktree 排他)。**引き継いだ周回が commit を
+# 足した場合がそれで**、**相手が既に 1 度落ちている、いちばん壊れやすい場面**である——
+# **別の名前空間 (`refs/loop/keep/`) へ置く**。**`git update-ref` をブランチに使うのは
+# 退けた** (掴んでいる作業場の HEAD を黙って動かす) が、**ブランチでなければ当たらない**。
+#
+# **置く側と読む側は 1 組である。** **置いただけで誰も見ないなら、置いていないのと同じ。**
 #
 # **worker はブランチを掴まない** (#102)。**掴まないと、push が落ちたときに、その周回の
 # commit を指すものが 1 つも無い**——**次の周回は冒頭で `origin/main` へ移る**ので、
@@ -22,15 +30,59 @@
 set -uo pipefail
 
 usage() {
-  echo "使い方: bin/loop-keep-branch <ブランチ>" >&2
-  echo "        exit 0 = ブランチが HEAD を指している / exit 1 = 進める必要が無い" >&2
+  echo "使い方: bin/loop-keep-branch <ブランチ>            この周回の commit を辿れるようにする" >&2
+  echo "        bin/loop-keep-branch --enter <ブランチ>    辿れるほうへ detached で入る" >&2
+  echo "        exit 0 = 辿れる / exit 1 = 置くものが無い・入る先が無い" >&2
   echo "        exit 2 = 失われる / 使い方の誤り / 読めない" >&2
   exit 2
 }
 
+ENTER=0
+if [[ ${1-} == "--enter" ]]; then
+  ENTER=1
+  shift
+fi
+readonly ENTER
 [[ $# -eq 1 ]] || usage
 readonly BRANCH="$1"
 [[ -n $BRANCH ]] || usage
+
+# **回収用 ref。** **ブランチではない**ので、掴まれていても置ける。
+readonly KEEP_REF="refs/loop/keep/$BRANCH"
+
+# その ref が指す commit（無ければ空）。
+sha_of() {
+  git rev-parse --verify --quiet "$1" 2>/dev/null || true
+}
+
+# **`--enter`: 辿れるほうへ入る。** **片方がもう片方を含んでいるなら、含むほう**——
+# **古いほうへ入ると、その後に積んだものがまた置き去りになる。**
+if ((ENTER == 1)); then
+  branch_sha="$(sha_of "refs/heads/$BRANCH")"
+  keep_sha="$(sha_of "$KEEP_REF")"
+  target=""
+  if [[ -z $branch_sha && -z $keep_sha ]]; then
+    echo "[INFO] $BRANCH も回収用 ref も見つかりません。入る先がありません" >&2
+    exit 1
+  elif [[ -z $keep_sha ]]; then
+    target="$branch_sha"
+  elif [[ -z $branch_sha ]]; then
+    target="$keep_sha"
+  elif git merge-base --is-ancestor "$keep_sha" "$branch_sha" 2>/dev/null; then
+    target="$branch_sha"
+  elif git merge-base --is-ancestor "$branch_sha" "$keep_sha" 2>/dev/null; then
+    target="$keep_sha"
+  else
+    echo "[FAIL] $BRANCH と回収用 ref が分かれています（$branch_sha / $keep_sha）" >&2
+    echo "       どちらが続きなのかを機械では決められません" >&2
+    exit 2
+  fi
+  if ! git switch --detach --quiet "$target" 2>/dev/null; then
+    echo "[FAIL] $target へ入れません" >&2
+    exit 2
+  fi
+  exit 0
+fi
 
 if ! head="$(git rev-parse HEAD 2>/dev/null)" || [[ -z $head ]]; then
   echo "[FAIL] いまの HEAD を読み取れません" >&2
@@ -57,13 +109,19 @@ if [[ -z $current ]]; then
   exit 2
 fi
 
-# **祖先なら、失うものが無い。** **ブランチの側が既にこの commit を含んでいる**ので、
+# **祖先なら、置くものが無い。** **ブランチの側が既にこの commit を含んでいる**ので、
 # **進めなくても辿れる**（引き継いだ周回で、掴んでいる作業場が先にいる形）。
 if git merge-base --is-ancestor "$head" "$current" 2>/dev/null; then
   echo "[INFO] $BRANCH は別の作業場が掴んでいます。既にこの commit を含むので、進めません"
   exit 1
 fi
 
-echo "[FAIL] $BRANCH を進められません（別の作業場が掴んでいます）" >&2
-echo "       この周回の commit ($head) は、ブランチの側から辿れません" >&2
-exit 2
+# **掴まれていて、しかも置く必要がある。** **ブランチではない ref へ置く**——
+# **掴んでいる作業場の HEAD は動かない。**
+if ! git update-ref "$KEEP_REF" "$head" 2>/dev/null; then
+  echo "[FAIL] $BRANCH も回収用 ref も進められません" >&2
+  echo "       この周回の commit ($head) は、どこからも辿れません" >&2
+  exit 2
+fi
+echo "[INFO] $BRANCH は別の作業場が掴んでいます。$KEEP_REF に置きました"
+exit 0
