@@ -12,10 +12,14 @@ function read(path: string): string {
 
 /** 対象の一覧の正は **スクリプト**。手順書に書き写さない。 */
 function watched(): string[] {
-  return execFileSync(join(REPO_ROOT, "bin/loop-procedure-changed"), ["--list"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  })
+  return execFileSync(
+    join(REPO_ROOT, "bin/loop-procedure-changed"),
+    ["--role", "master", "--list"],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    },
+  )
     .split("\n")
     .filter((line) => line !== "");
 }
@@ -172,5 +176,76 @@ describe("周回を捨てるかの判定", () => {
     // **切り替えたあとは「変わっていない」と答える**ので、
     // **読んでいる版が古いことは検出できない**（確かめられないものを担保と呼ばない）
     expect(section).not.toMatch(/担保/);
+  });
+});
+
+/**
+ * **worker 側にも、版ずれで打ち切る経路がある** (#227)。
+ *
+ * **同期そのものが手順書に書かれている**ので、**同期する前は 1 つ前の版の手順書を
+ * 読んでいる**——**同期したあとは「古い手順書 + 新しいスクリプト」で走る。**
+ *
+ * **master 側にだけ仕組みがあると、気づいた側が忘れた時点でそのまま残る。**
+ */
+describe("worker の版ずれ", () => {
+  const doc = readFileSync(
+    fileURLToPath(new URL("../.claude/commands/loop-worker.md", import.meta.url)),
+    "utf8",
+  );
+  const sync = doc.split("### 1.0")[1]?.split("\n## ")[0] ?? "";
+
+  it("同期のあとに、入れ替わったかを確かめる", () => {
+    expect(sync).toMatch(/bin\/loop-procedure-changed --role worker/);
+    // **比べる相手は、同期の前後**である。**片方でも取り違えると必ず
+    // 「変わっていない」になり、古い手順のまま進む**
+    expect(sync).toMatch(/before="\$\(git rev-parse HEAD\)"/);
+    expect(sync).toMatch(/bin\/loop-procedure-changed --role worker "\$before" "\$after"/);
+  });
+
+  it("捨てる側へ倒す条件が書いてある", () => {
+    // **`exit 1` だけが「続けてよい」**（1 以外はすべて捨てる。master と同じ扱い）
+    expect(sync).toMatch(/1 以外/);
+  });
+
+  it("捨てるときは、消してから返して呼び直す", () => {
+    // **ここはステップ 5 を通らずに周回を終える唯一の経路**で、**すぐ上で
+    // `main-sync-failed` を積む**——**消し忘れると、成功した周回を挟んでいるのに
+    // 3 周連続と数えて全ループを止める。**
+    //
+    // **握ったまま呼び直すと、呼び直された周回が 1.0 で自分自身に阻まれる。**
+    // **1.0 でも lease を返す**ので、**捨てる段のところから先だけを見る**
+    const reset = sync.indexOf("bin/loop-stall --reset");
+    expect(reset, "カウンタを消していない").toBeGreaterThanOrEqual(0);
+    const tail = sync.slice(reset);
+    const release = tail.indexOf("bin/loop-lease release worker");
+    const reinvoke = tail.indexOf("/loop-worker を呼び直す");
+
+    expect(release, "lease を返していない").toBeGreaterThan(0);
+    expect(reinvoke, "返す前に呼び直している").toBeGreaterThan(release);
+  });
+
+  it("呼び直しても届く保証は無い、と書いてある", () => {
+    // **断定しない** (#228 のレビュー)。**実測で 2 回中 1 回は「instructions unchanged」で
+    // 古い版のまま走った**（#94）——**呼び直した回は `before == after` になるので、
+    // 届かなかったことは検出できない。** **それでも呼び直す**（届けば早い）。
+    expect(sync, "保証が無いことを書いていない").toMatch(/保証は無い/);
+    expect(sync, "検出できないことを書いていない").toMatch(/検出する手立ては無い/);
+    expect(sync, "それでも呼び直す理由が無い").toMatch(/cron や人の起動/);
+  });
+
+  it("呼び直しは 1 回だけだと書いてある", () => {
+    // **入れ替わりは追随した時点で収束する**ので、**2 回続けて起きるのは異常**である
+    expect(sync).toMatch(/呼び直しは 1 回だけ/);
+  });
+
+  it("捨てすぎない理由も書いてある", () => {
+    // **倒す先は 2 つある。** **毎周回 1 歩目で終わる形になっていないこと**が、
+    // 読む人に分かる必要がある
+    expect(sync).toMatch(/呼び直/);
+  });
+
+  it("版ずれだと読める形になっている", () => {
+    // **`No such file or directory` は症状であって、版ずれとは読めない**
+    expect(sync).toMatch(/No such file or directory/);
   });
 });
