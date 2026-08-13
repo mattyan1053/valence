@@ -90,19 +90,19 @@ export async function githubLoginUrl(callbackUrl: string): Promise<string> {
  * 落ちると、ログインしているのに何も見えない**（#184 の形）。
  */
 export async function completeGithubLogin(code: string): Promise<LoginResult> {
+  // **設定は交換より先に読む。** **交換が済むと認証の Cookie は置かれている**ので、
+  // **そのあとで設定の不備に気づいても、畳む手間がひとつ増えるだけ**である
+  // ——**落ちる経路は、作らずに済むなら作らない**（#224 のレビュー）。
+  const credentials = readOAuthCredentials(process.env);
   const client = await sessionClient();
   const provider = await exchangeCodeForProviderTokens(client, code);
-  const store = await storeForCurrentUser(client);
-  if (store === undefined) {
-    // **交換は通ったのに本人が読めない。** **ここで「入れた」にしない。**
-    return { kind: "needs-login" };
-  }
-  const credentials = readOAuthCredentials(process.env);
   return completeLogin({
-    store,
+    store: await storeForCurrentUser(client),
     provider,
     refresh: (refreshToken) =>
       refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+    // **入れられなかったら、作りかけのセッションを畳む。**
+    abandonSession: () => endSession(client),
   });
 }
 

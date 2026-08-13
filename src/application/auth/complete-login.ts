@@ -33,23 +33,49 @@ export type ProviderTokens = {
 export type LoginResult = { readonly kind: "signed-in" } | { readonly kind: "needs-login" };
 
 export type CompleteLoginInput = {
-  readonly store: UserTokenStore;
+  /** 本人として開けた置き場。**開けなければ `undefined`。** */
+  readonly store: UserTokenStore | undefined;
   readonly refresh: RefreshUserTokens;
   readonly provider: ProviderTokens;
+  /**
+   * 作りかけのセッションを畳む口。
+   *
+   * **交換が済んだ時点で、認証の Cookie は置かれている**——**そこから先で落ちて
+   * 「入口へ戻す」とだけ返すと、画面は入口なのに認証だけ済んだ状態が残る**
+   * （#224 のレビュー）。**上に書いた不変条件が、そこで破れる。**
+   */
+  readonly abandonSession: () => Promise<void>;
 };
+
+/**
+ * 入れられなかった。**セッションも畳んでから戻す。**
+ *
+ * **畳めなかったら投げる。** **「入口へ戻した」とだけ返すと、
+ * ログイン済みのまま残ったことが消える**（`signOut` と同じ判断）。
+ */
+async function abandon(abandonSession: () => Promise<void>): Promise<LoginResult> {
+  await abandonSession();
+  return { kind: "needs-login" };
+}
 
 export async function completeLogin({
   store,
   refresh,
   provider,
+  abandonSession,
 }: CompleteLoginInput): Promise<LoginResult> {
+  if (store === undefined) {
+    // **交換は通ったのに、置き場を本人として開けない。**
+    return abandon(abandonSession);
+  }
+
   let usable: Awaited<ReturnType<RefreshUserTokens>>;
   try {
     usable = await refresh(provider.refreshToken);
   } catch {
     // **期限の分からない 1 組を入れない。** **入れると、「いつまで使えるか」を
     // 誰も知らないまま使い続けることになる**——**入口へ戻すほうが安い。**
-    return { kind: "needs-login" };
+    return abandon(abandonSession);
   }
 
   try {
@@ -57,7 +83,7 @@ export async function completeLogin({
   } catch {
     // **保存できていないのに「入れた」と言わない。** **次の要求で必ず失敗する**
     // ——**その場では動いて見え、次で壊れる。**
-    return { kind: "needs-login" };
+    return abandon(abandonSession);
   }
   return { kind: "signed-in" };
 }

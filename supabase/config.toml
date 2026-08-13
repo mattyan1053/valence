@@ -171,7 +171,18 @@ site_url = "http://localhost:3000"
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
 # 127.0.0.1 で開いた場合にも通るよう、こちらも許可しておく。
-additional_redirect_urls = ["http://127.0.0.1:3000"]
+#
+# 根っこだけでは足りない。渡すのは /auth/callback 付きで、この一覧は「*exact* URLs」
+# なので当たらない (当たらないと GoTrue は site_url へ落として戻し、コールバックの
+# Route Handler が呼ばれないままになる)。
+#
+# localhost 側は site_url と同じ host なので通る実装もありうるが、明示しておけば
+# どちらの実装でも同じ結果になる ——「たまたま通っていた」を残さない。
+#
+# 広げるのはパスだけ。scheme / host / port は固定なので、開いた転送にはならない
+# (この一覧は最後の砦で、そもそもアプリ側は戻り先を外から受け取らない)。
+# 一致することは src/app/auth/redirect-allowlist.test.ts が見る。
+additional_redirect_urls = ["http://localhost:3000/**", "http://127.0.0.1:3000/**"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
