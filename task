@@ -22,7 +22,110 @@ HOST_GID="$(id -g)"
 DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999)"
 export HOST_UID HOST_GID DOCKER_GID
 
-compose() { docker compose "$@"; }
+# **作業場ごとに、compose の project とポートを分ける** (#82)。
+#
+# **worktree を分けただけでは足りない。** `compose.yaml` は project 名とポートを
+# 固定していたので、**2 人目が同じコンテナを掴む**——**後から起きたほうが、
+# 相手のコンテナを別の `working_dir` で作り直す**。**master の worktree も同じ**である。
+#
+# **名前から決める。空きを探さない。** 空き探しは**起動のたびに値が変わる**ので
+# 人が繋ぎ直せず、**2 つの `add` が同じ空きを掴む競合**を新しく作る（#74 で塞いだ形）。
+# **compose が受け付ける形へ正規化する** (#195 のレビュー 2 周目)。**project 名は
+# 「小文字英数字・ハイフン・アンダースコアで、英数字から始まる」**に限られる——
+# **`compose.yaml` が `name:` を持っていた間は clone 先に依存しなかった**ので、
+# **ここが入れて初めて壊れる**（**`compose()` は入口**なので、`Valence/` へ clone した
+# 人は `./task` が 1 つも通らない）。
+#
+# **弾かずに正規化する。** 弾くと、**そのディレクトリでは何もできなくなる**。
+#
+# **正規化した名前を、project にもポートにも使う。** 片方だけだと
+# **「同じ project は同じポート」が崩れる**。**`Valence` と `valence` が同じ値へ落ちる**
+# のは承知のうえ——**`name: valence` を固定していたときは全員が同じだった**ので、
+# **退行ではない**。
+normalize_workspace_name() {
+  local name="$1"
+  name="${name,,}"
+  name="${name//[^a-z0-9_-]/-}"
+  [[ $name =~ ^[a-z0-9] ]] || name="v$name"
+  printf '%s' "$name"
+}
+
+workspace_name() { normalize_workspace_name "$(basename -- "$PWD")"; }
+
+# 作業場の名前として使えるか。**名前は識別子**なので、**パスに化ける形を通さない**。
+worker_name_ok() {
+  if [[ $1 =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    return 0
+  fi
+  echo "==> 名前は英小文字・数字・ハイフンで、英数字から始めること: ${1:-（空）}" >&2
+  return 1
+}
+
+# そのポートを既に使っている作業場。
+#
+#   exit 0 = 見つかった（名前を出す） / exit 1 = 無い / exit 2 = 読めない
+#
+# **「読めない」を「無い」に倒さない** (#195 のレビュー)。**倒すと、読めなかっただけで
+# 「衝突なし」になり、そのまま足してしまう**——**弾く仕組みを入れたなら、
+# 弾けなかったときに何が起きるかまで見る**（#190 で塞いだのと同じ形）。
+workspace_with_port() {
+  local want="$1" p other listed
+  # **プロセス置換にしない。** **中の終了コードは呼び出し側に伝わらない**ので、
+  # **`git worktree list` が落ちるとループが 0 回回り、「無い」と同じ見え方になる**
+  if ! listed="$(git worktree list --porcelain)"; then
+    return 2
+  fi
+  while read -r p; do
+    [[ -n $p && $p != "$PWD" ]] || continue
+    other="$(workspace_port "$(basename -- "$p")")" || return 2
+    [[ $other != "$want" ]] || { printf '%s' "$(basename -- "$p")"; return 0; }
+  done < <(printf '%s\n' "$listed" | awk '/^worktree /{print $2}')
+  # **master の作業場は、登録されていなくても予約する** (#195 のレビュー 2 周目)。
+  # **`cmd_loop_setup` は検査を持たない**ので、**`add` を先に、`loop:setup` を後に打つと、
+  # master が同じポートで作られる**——**1 人で、順番に踏める**。
+  # **登録の有無で見ない**ぶん、**setup 以外の経路で作られても効く。**
+  other="$(workspace_port "$(basename -- "${PWD}-master")")" || return 2
+  [[ $other != "$want" ]] || { printf '%s' "$(basename -- "${PWD}-master")"; return 0; }
+  return 1
+}
+
+# 既定の作業場は動かさない（**設定を足さなくても、1 人運用はこれまでどおり**）。
+readonly DEFAULT_WORKSPACE=valence
+readonly DEFAULT_APP_PORT=3000
+# 3001..3999 を作業場に割り当てる（既定の 3000 とぶつからない範囲）。
+readonly WORKSPACE_PORT_BASE=3001
+readonly WORKSPACE_PORT_SPAN=999
+
+# 名前から決まるポート。**同じ名前なら常に同じ値**（人が繋ぎ直せる）。
+# **正規化はここでやる** (#195 のレビュー 3 周目)。**渡す側で正規化すると、
+# 増えた 4 箇所目が漏れる**——**実際に 3 箇所とも生の値を渡していて、
+# 検査どうしは辻褄が合っているのに、検査と実行の間が合っていなかった。**
+#
+# **正規化は多対一**なので、**生の名前がぶつからなくても正規化した名前はぶつかりうる**
+# ——**そのとき `add` は通り、`up` が「アドレス使用中」で落ちる。**
+workspace_port() {
+  local name digest
+  name="$(normalize_workspace_name "${1:-$(basename -- "$PWD")}")"
+  if [[ $name == "$DEFAULT_WORKSPACE" ]]; then
+    printf '%s' "$DEFAULT_APP_PORT"
+    return 0
+  fi
+  # **digest は `git` で取る** (#195 のレビュー)。**`sha256sum` はホスト標準ではない**
+  # ——**このファイルは 8 行上で「`readlink -f` は GNU 依存なので使わない」と書いている**
+  # のに、**入口の `compose()` が GNU 前提**になっていた。**`git` は既に必須**である
+  # （このコマンド自身が `git worktree` を使う）。
+  if ! digest="$(printf '%s' "$name" | git hash-object --stdin)"; then
+    echo "[FAIL] 作業場のポートを決められません: $name" >&2
+    return 1
+  fi
+  printf '%s' "$((WORKSPACE_PORT_BASE + 16#${digest:0:8} % WORKSPACE_PORT_SPAN))"
+}
+
+compose() {
+  local port
+  port="$(workspace_port)" || return 1
+  VALENCE_APP_PORT="$port" docker compose -p "$(workspace_name)" "$@"
+}
 
 # 非対話用。CI や AI エージェントからは TTY がないため -T を付ける。
 exec_app() { compose exec -T app "$@"; }
@@ -122,6 +225,15 @@ supabase_cli() {
   [[ -t 0 ]] || tty_flag=(-T)
   compose run --rm --quiet-pull "${tty_flag[@]}" supabase-cli "$@"
 }
+
+# **`./task db:*` は worker が叩かない** (#82)。**作業場ごとに分けても、直列化もしない。**
+#
+# **理由: DB を触るコードもテストも 1 件も無い。** **壊れる経路が無いので、
+# 分けても直列化しても、効いているかを検証できない**——**検証できない設定を入れない**
+# (`AGENTS.md` §5)。**Supabase のスタックは 1 つのまま、全作業場で共有する。**
+#
+# **引き金:** **DB を使うテストを書き始めるときに、分けるか直列化するかを決める。**
+# **いまは触るコードが無いので決めない。**
 
 # Supabase ローカルスタックを起動する
 cmd_db_up() { ensure_up; supabase_cli pnpm supabase start; }
@@ -258,6 +370,68 @@ cmd_loop_stop() {
 # loop/STOP の置き場所を 1 行ずつ出す (bin/loop-stall が撤去に使う。読むだけ)
 cmd_loop_stop_paths() {
   loop_stop_paths
+}
+
+# worker の作業場を増やす 例: ./task loop:worker:add b
+cmd_loop_worker_add() {
+  local name="${1:-}" wt port existing found
+  if ! worker_name_ok "$name"; then return 1; fi
+  wt="${PWD}-worker-${name}"
+  if [[ -e $wt ]]; then
+    echo "==> 既にあります: $wt（名前が識別子なので、重複は誤りです）" >&2
+    return 1
+  fi
+  port="$(workspace_port "$(basename -- "$wt")")" || return 1
+  # **ポートが重なる名前は、足す前に弾く** (#82)。**名前は決定論的にポートへ写る**ので、
+  # **別の名前が同じポートへ落ちることはある**——**足したあとに `up` が
+  # 「アドレス使用中」で落ちる形にすると、原因が名前だと分からない。**
+  # **`set -e` があるので、非ゼロを受けるときは `||` で受ける**（そうしないと、
+  # **「衝突なし」を返した瞬間にコマンドごと落ちる**）
+  local found=0
+  existing="$(workspace_with_port "$port")" || found=$?
+  case $found in
+    0)
+      echo "==> ポート $port が $existing と重なります。別の名前にしてください" >&2
+      return 1
+      ;;
+    1) ;;
+    *)
+      # **読めなかったなら足さない。** **待つ必要は無い**——**足してから
+      # 「アドレス使用中」で落ちるより、足さないほうが戻せる**
+      echo "==> 他の作業場のポートを読めないので、足しません（同じポートかもしれません）" >&2
+      return 1
+      ;;
+  esac
+  # **detached で作る。** ブランチとして main を掴むと、他の作業場が main を
+  # checkout できなくなる（master の worktree と同じ理由）。
+  git worktree add --detach "$wt" HEAD || return 1
+  echo "==> 作業場を作成: $wt (compose project=$(basename -- "$wt") port=$port)"
+}
+
+# worker の作業場を減らす 例: ./task loop:worker:remove b
+cmd_loop_worker_remove() {
+  local name="${1:-}" wt
+  if ! worker_name_ok "$name"; then return 1; fi
+  wt="${PWD}-worker-${name}"
+  if [[ ! -d $wt ]]; then
+    echo "==> そんな作業場はありません: $wt" >&2
+    return 1
+  fi
+  # **コンテナを先に落とす。** worktree を消してから落とそうとすると、
+  # **compose がファイルを読めず、コンテナだけが残る**
+  (cd "$wt" && compose down --remove-orphans) || return 1
+  # **`--force` を付けない** (#195 のレビュー)。**`--force` は「dirty でも locked でも
+  # 消す」**で、**worker の作業場はほぼ常に dirty**——**commit していない実装が、
+  # 確認なしに消える。戻せない。**
+  #
+  # **`git worktree remove` は dirty なら自分で拒む。** **拒まれたら、何をすればよいかを出す。**
+  if ! git worktree remove "$wt"; then
+    echo "==> 消せませんでした: $wt" >&2
+    echo "    未コミットの変更が残っているなら、commit するか、了解のうえで" >&2
+    echo "    git worktree remove --force $wt を手で叩くこと" >&2
+    return 1
+  fi
+  echo "==> 作業場を削除: $wt"
 }
 
 # 停止を解除する
