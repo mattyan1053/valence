@@ -522,6 +522,11 @@ snapshot_epochs() {
 
 # **全 scope が、自分の前回より進んだか。** 1 つでも同じ周回の中なら数えない。
 # **前回に無かった scope は「進んだ」**として扱う（**その作業場は周回を始めている**）。
+#
+#   0 = 全部進んだ / 1 = 進んでいない / 2 = **読めない**（前の版が書いた形）
+#
+# **「読めない」を「進んでいない」と混ぜない。** 混ぜると印が書き換わらないまま
+# 同じところへ落ち続け、**その識別子は二度と数えられない**（第 4 層が黙って死ぬ）。
 all_scopes_advanced() {
   local previous="$1" pair scope epoch
   declare -A before=()
@@ -529,7 +534,7 @@ all_scopes_advanced() {
   for pair in $previous; do
     scope="${pair%%=*}"
     epoch="${pair#*=}"
-    [[ $scope != "$pair" && $epoch =~ ^[0-9]+$ ]] || return 1
+    [[ $scope != "$pair" && $epoch =~ ^[0-9]+$ ]] || return 2
     before["$scope"]="$epoch"
   done
   unset IFS
@@ -554,11 +559,14 @@ worker_rounding=0
 
 counted="yes"
 if ((worker_rounding == 1 && worker_fixes_this == 1)); then
-  if [[ -z $prev_epoch ]]; then
-    # この識別子を、この周回で初めて見た。**印だけ覚えて数えない。**
+  advanced=0
+  [[ -n $prev_epoch ]] && { all_scopes_advanced "$prev_epoch" || advanced=$?; }
+  if [[ -z $prev_epoch ]] || ((advanced == 2)); then
+    # この識別子を、この周回で初めて見た（**前の版が書いた形も、ここへ倒す**）。
+    # **印だけ覚えて数えない。** 1 周落ちるが、次の周回から数え始められる。
     counted="first"
     prev_epoch="$(snapshot_epochs)"
-  elif all_scopes_advanced "$prev_epoch"; then
+  elif ((advanced == 0)); then
     count=$((count + 1))
     prev_epoch="$(snapshot_epochs)"
   else

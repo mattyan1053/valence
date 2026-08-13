@@ -1021,6 +1021,35 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(stall().stdout, "死んだ作業場が数を止めている").toContain("count=1");
   });
 
+  it("前の版が書いた記録が残っていても、そこから数え始められる", () => {
+    // **記録は `--git-common-dir` にあり、版をまたいで共有される**（#200 のレビュー
+    // 2 周目）——**入れ替わる直前の周回で、前の版が 1 つの数値を書いている。**
+    //
+    // **「読めない」を「進んでいない」と同じ扱いにすると、その識別子は二度と
+    // 数えられない**（印が書き換わらないので、何周進めても同じところへ落ちる）。
+    // **第 4 層が黙って死ぬ**——**count が出続けるので、読む人は数えていると思う。**
+    //
+    // **入力は「前の版が書いた状態」である**（**今日 6 回目。今回は「差が無い入力」
+    // ではなく、「古い入力が無い」**——**版をまたぐものは、古い側の入力も要る**）
+    const now = Math.floor(Date.now() / 1000);
+    writeFileSync(
+      join(repo, ".git", "valence-loop-stall"),
+      `1\t${WORKER_FIXES_ID}\t${now - 900}\n`,
+    );
+    workerState({ activityAgo: 10, startedAt: now - 700, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 600, activityAgo: 10 });
+
+    // **1 周落ちる**（読めない形は「初めて見た」として扱う）
+    expect(stall().stdout, "古い記録のまま数えている").toContain("count=1");
+
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
+
+    expect(stall().stdout, "古い記録を書き換えていないので、二度と数えられない").toContain(
+      "count=2",
+    );
+  });
+
   it("人が `./task` を叩いても、使われなくなった作業場は生き返らない", () => {
     // **活動の記録は生存に使えない**（このファイルの上のほうに書いてある）——
     // **`./task` は lease の有無に関係なく毎回 heartbeat を打つ**ので、
