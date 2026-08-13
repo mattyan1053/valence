@@ -970,6 +970,24 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(stall().stdout, "無関係な周回で数が進んでいる").toContain("count=0");
   });
 
+  it("開始時刻がずれていても、全部の作業場が進むまで数えない", () => {
+    // **最小値では足りない**（#200 のレビュー）。**最小値を持っていた作業場が動けば、
+    // それだけで動く**——**A が 2 周、B が 1 周しか始めていないのに 3 まで達する。**
+    //
+    // **入力を「ずれている」側にする。** **同じ開始時刻だと、最小値と「全員」が
+    // 一致してしまう**（差が無いので、最小値は両方が動いたときにしか動かない）——
+    // **今日 5 回目の「差が無い入力」**である
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 700, longestRound: 600 });
+    otherWorkspace({ longestRound: 600, startedAgo: 600, activityAgo: 10 });
+    expect(stall().stdout, "1 周目は印を覚えるだけ").toContain("count=0");
+
+    // **こちらだけが新しい周回を始めた**（もう一方は同じ周回の中にいる）
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+
+    expect(stall().stdout, "片方だけで数が進んでいる").toContain("count=0");
+  });
+
   it("どの作業場も新しい周回を始めたら、数える", () => {
     // **混ざらなくすることは、数えなくすることではない**（#47 で塞いだ
     // 「正常に動きながら何も進まない」が、ここに開き直る）。
