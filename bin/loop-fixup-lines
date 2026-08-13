@@ -220,8 +220,20 @@ fi
 # これで決まる。別の呼び出しにすると、**2 回の間に積まれた commit で食い違う**。
 # compare が返す commits は 250 件で切られるが、切られたぶんは除外に使われないだけなので
 # **数え過ぎる側 (止まる側) に倒れる**。
+# **この窓で作られたファイル ("N") と、ファイルごとの差分 ("D") も同じ 1 回で受け取る。**
+# **新しいファイルにはスレッドが付きようがない**ので、**要求ぶんとして外れない**
+# ——**規約どおりまとめると「広がった」に数えられる** (#204。#202 で踏んだ)。
+#
+# **「呼ばれている」は機械的に見える。** **要求されたファイルが、その名前を書いているか**
+# である——**散文から「作れ」を読み取らない** (弱い) し、**`bin/loop-triage` の側に
+# 「抽象化なら通す」を持たせない** (同じ判断が 2 箇所になる)。
+#
+# **判定は --jq に置かない** (#208 のレビュー)。**差し替えた gh は --jq を実行しない**
+# (**コンテナに jq が無い**) ので、**式の中に意味を置くと、試験がその判定を 1 度も
+# 通らない**——**「境界を見る」を外しても緑のまま**になる。**生の値だけを出させ、
+# 数え方と同じく bash で判定する。**
 if ! out="$(gh api "repos/{owner}/{repo}/compare/${REVIEWED}...${HEAD_SHA}" \
-  --jq '"T\t\(.files | type)", (.commits[]? | "C\t\(.sha)"), (.files[]? | "F\t\(.filename | endswith(".test.ts"))\t\(.filename | @base64)\t\(.additions)\t\(.deletions)")' \
+  --jq '"T\t\(.files | type)", (.commits[]? | "C\t\(.sha)"), (.files[]? | "F\t\(.filename | endswith(".test.ts"))\t\(.filename | @base64)\t\(.additions)\t\(.deletions)"), (.files[]? | select(.status == "added") | "N\t\(.filename | @base64)"), (.files[]? | "D\t\(.filename | @base64)\t\((.patch // "") | @base64)")' \
   2>/dev/null)"; then
   echo "[FAIL] レビュー済み commit から head までの差分を取得できません" >&2
   exit 1
@@ -240,6 +252,79 @@ while IFS= read -r row; do
   window["$sha"]=1
 done <<<"$out"
 
+# **この窓で作られたファイルと、ファイルごとの差分を集める。** 数える走査より前に読む
+# (順序に頼らない。窓の commit と同じ形)。
+declare -A added_files=()
+declare -A patch_of=()
+while IFS= read -r row; do
+  case "$row" in
+    N$'\t'*)
+      [[ $row =~ ^N$'\t'([A-Za-z0-9+/=]+)$ ]] || {
+        echo "[FAIL] 新しいファイルの名前を読めません: $row" >&2
+        exit 1
+      }
+      added_files["${BASH_REMATCH[1]}"]=1
+      ;;
+    D$'\t'*)
+      [[ $row =~ ^D$'\t'([A-Za-z0-9+/=]+)$'\t'([A-Za-z0-9+/=]*)$ ]] || {
+        echo "[FAIL] 差分の中身を読めません: $row" >&2
+        exit 1
+      }
+      patch_of["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+      ;;
+  esac
+done <<<"$out"
+
+# 符号化された値を戻す。**行の解析には生の値を持ち込まない** (区切りで数が狂う) が、
+# **突き合わせるときだけは中身が要る**。
+decode() {
+  printf '%s' "$1" | base64 -d 2>/dev/null
+}
+
+# **その差分の「追加行」が、このパスを呼んでいるか。**
+#
+# **部分文字列では足りない** (#208 のレビュー)。**patch は削除行もコンテキストも
+# コメントも含む**ので、**`a` のような短い名前は、要求ファイルの差分に文字 `a` が
+# 1 度出るだけで外れる**——**名前を短くするだけで第 3 層を抜けられる。**
+#
+# **2 つ重ねる。** **追加行だけを見る** (削除やコンテキストの言及は、呼んでいる証拠に
+# ならない) のと、**境界を見る** (`x.ts` が `xats` に当たらない)。**片方では足りない。**
+#
+# **正規表現のメタ文字は escape しない。** **引用した部分は文字列として照合される**
+# ので、`.` を含むパスでも当たらない (bash の `[[ =~ ]]` の性質)。
+patch_mentions() {
+  local path="$1" patch="$2" line
+  while IFS= read -r line; do
+    [[ $line == +* ]] || continue
+    [[ $line == +++* ]] && continue
+    line="${line#+}"
+    [[ $line =~ (^|[^A-Za-z0-9._/-])"$path"($|[^A-Za-z0-9._/-]) ]] && return 0
+  done <<<"$patch"
+  return 1
+}
+
+# **要求されたファイルから呼ばれているか。** **呼び手が要求されていなければ数える**
+# ——**そうしないと、無関係なファイルが名前を書くだけで外せる**
+# (**網を外して緑にしない**)。
+requested_by_reference() {
+  local added="$1" by path
+  [[ -n ${added_files[$added]-} ]] || return 1
+  # **`$( )` は末尾の改行を全部落とす** (#208 のレビュー)。**git はファイル名に改行を
+  # 許す**ので、**落とすとそこが抜け道になる**——**`large\n` が `large` に化けて、
+  # 単語 `large` に当たる**。**番人を足して戻す。**
+  path="$(
+    decode "$added"
+    printf x
+  )"
+  path="${path%x}"
+  [[ -n $path ]] || return 1
+  for by in "${!requested[@]}"; do
+    [[ $by != "$added" ]] || continue
+    patch_mentions "$path" "$(decode "${patch_of[$by]-}")" && return 0
+  done
+  return 1
+}
+
 # 除外に使うスレッドを決める。**レビュー済み commit そのものは compare の commits に
 # 含まれない** (base は返らない) ので、明示的に含める。
 # **前方一致で見る。** 会話コメント由来のレビュー済み SHA は短縮形である。
@@ -254,8 +339,8 @@ for i in "${!thread_paths[@]}"; do
   fi
 done
 
-# 集計は bash だけで行う。外部コマンドを足すと、テストが PATH を絞れなくなり
-# 「gh を呼ぶ前に落ちること」のような確認が書けなくなる。
+# 集計は bash で行う。**外部コマンドは `base64` だけ**——**符号化を戻すのに要る**
+# (コンテナに jq は無いので、判定を --jq へ寄せると試験が通らない。上記)。
 counted=0
 excluded_tests=0
 excluded_requested=0
@@ -271,8 +356,10 @@ while IFS= read -r row; do
     seen_type=1
     continue
   fi
-  # 窓の commit は上の走査で読み終えている。
+  # 窓の commit と、新しいファイル・差分の中身は上の走査で読み終えている。
   [[ $row != C$'\t'* ]] || continue
+  [[ $row != N$'\t'* ]] || continue
+  [[ $row != D$'\t'* ]] || continue
   # 行ごと正規表現で受ける。IFS=タブ の read はタブが IFS の空白文字なので
   # **連続が 1 区切りに畳まれ、列が足りない行を正常な行として読む**。
   # 読めない行を 0 として数えると、**取得の壊れが「手直しが小さい」に化けて素通りする**。
@@ -287,7 +374,7 @@ while IFS= read -r row; do
   deletions="${BASH_REMATCH[4]}"
   if [[ $is_test == "true" ]]; then
     ((counted += 10#$deletions, excluded_tests += 10#$additions))
-  elif [[ -n ${requested[$path_b64]-} ]]; then
+  elif [[ -n ${requested[$path_b64]-} ]] || requested_by_reference "$path_b64"; then
     ((excluded_requested += 10#$additions + 10#$deletions))
   else
     ((counted += 10#$additions + 10#$deletions))

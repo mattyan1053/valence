@@ -82,6 +82,8 @@ type Fake = {
 function runWithLines(fake: Fake): Run {
   const dir = mkdtempSync(join(tmpdir(), "loop-fixup-fake-"));
   symlinkSync("/usr/bin/bash", join(dir, "bash"));
+  // **符号化を戻すのに要る**（判定を `--jq` へ寄せられないため。#208 のレビュー）
+  symlinkSync("/usr/bin/base64", join(dir, "base64"));
   const emit = (lines: string[]): string[] =>
     // %b で渡す。%s だと JSON.stringify が付けた \t が **タブに戻らず**、
     // 列の分かれていない行を渡してしまう
@@ -113,7 +115,9 @@ function runWithLines(fake: Fake): Run {
       // ここを見ないと **@base64 を外しても緑のまま**になる
       // **判定の式まで見る。** テストかどうかを決めているのは gh 側の --jq なので、
       // ここを見ないと **判定を外しても緑のまま**になる
-      '    require "--jq" ".filename" \'endswith(".test.ts")\' "@base64" ".additions" ".deletions" ".commits"',
+      // **新しいファイルと、それを呼んでいるファイル**も同じ 1 回で受け取る（#204）。
+      // **`.status` と `.patch` を尋ねていること**まで見る——**外しても緑のまま**にしない
+      '    require "--jq" ".filename" \'endswith(".test.ts")\' "@base64" ".additions" ".deletions" ".commits" ".status" ".patch"',
       ...emit(fake.files).map((line) => `    ${line}`),
       `    exit ${fake.compareExit ?? 0}`,
       "    ;;",
@@ -143,6 +147,22 @@ function row(path: string, isTest: boolean, additions: number, deletions: number
   return `F\t${isTest}\t${b64(path)}\t${additions}\t${deletions}`;
 }
 
+/** `N\t<符号化したパス>` の 1 行（**この窓で作られたファイル**）。 */
+function newFile(path: string): string {
+  return `N\t${b64(path)}`;
+}
+
+/**
+ * `D\t<符号化したパス>\t<符号化した差分>` の 1 行。
+ *
+ * **生の差分をここへ渡す。** **「呼ばれている」の判定は本体（bash）が持つ**ので、
+ * **加工済みの答えを渡すと、判定を 1 度も通らない**（#208 のレビュー。
+ * **差し替えた gh は `--jq` を実行しない**ので、式の中に意味を置けない）。
+ */
+function patchOf(path: string, patch: string): string {
+  return `D\t${b64(path)}\t${b64(patch)}`;
+}
+
 /**
  * レビュースレッドの 1 行。
  *
@@ -155,12 +175,158 @@ function thread(path: string, onCommit: string = REVIEWED, author: string = BOT_
 }
 
 /** files が配列だったとき（正常）の出力を作る。 */
-function runWithFiles(rows: string[], threads: string[] = [], commits: string[] = []): Run {
+function runWithFiles(
+  rows: string[],
+  threads: string[] = [],
+  commits: string[] = [],
+  mentions: string[] = [],
+): Run {
   return runWithLines({
-    files: ["T\tarray", ...commits.map((sha) => `C\t${sha}`), ...rows],
+    files: ["T\tarray", ...commits.map((sha) => `C\t${sha}`), ...rows, ...mentions],
     threads: ["T\tarray", ...threads],
   });
 }
+
+describe("要求に応えて作った新しいファイル", () => {
+  // **`AGENTS.md` §5 は「重複は 3 回目に抽象化する」と言い、第 3 層は抽象化を
+  // 「広がった」と数える**——**規約どおり直すと機械が止める**（#204。#202 で踏んだ）。
+  //
+  // **新しいファイルにはスレッドが付きようがない**ので、**要求ぶんとして外れない。**
+  // **要求されたファイルが、その名前を書いているか**で見る——**呼び出しは機械的に見える。**
+
+  it("要求されたファイルの追加行が呼んでいれば、数えない", () => {
+    // **入力に 2 つ要る**（#204 の完了条件）——**新しいファイルが 1 つだけだと、
+    // 「全部の新しいファイルを外す」でも緑になる。**
+    const result = runWithFiles(
+      [
+        row(".claude/commands/loop-worker.md", false, 12, 4),
+        row("bin/loop-keep-branch", false, 75, 0),
+        row("bin/loop-unrelated", false, 30, 0),
+      ],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [
+        newFile("bin/loop-keep-branch"),
+        newFile("bin/loop-unrelated"),
+        patchOf(
+          ".claude/commands/loop-worker.md",
+          "@@ -1 +1 @@\n-git push origin\n+bin/loop-keep-branch <ブランチ>\n",
+        ),
+      ],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    // **要求されたファイル 16 行と、そこから呼ばれる 75 行が外れる。**
+    // **無関係な 30 行は、これまでどおり数える**（外しすぎない）
+    expect(result.stdout.trim()).toBe("30\t0\t91");
+  });
+
+  it("短い名前が偶然含まれても、数える", () => {
+    // **部分文字列では足りない**（#208 のレビュー）——**`a` のような名前は、
+    // 要求ファイルの差分に文字 `a` が 1 度出るだけで外れる**。
+    // **名前を短くするだけで第 3 層を抜けられる**なら、網ではない。
+    const result = runWithFiles(
+      [row(".claude/commands/loop-worker.md", false, 2, 0), row("a", false, 500, 0)],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [newFile("a"), patchOf(".claude/commands/loop-worker.md", "@@ -1 +1 @@\n+bash の話をする\n")],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "短い名前で抜けられている").toBe("500\t0\t2");
+  });
+
+  it("メタ文字を含む名前でも、似た綴りには当たらない", () => {
+    // **`x.ts` が `xats` に当たる**形にしない（正規表現に生のまま渡さない）
+    const result = runWithFiles(
+      [row(".claude/commands/loop-worker.md", false, 2, 0), row("x.ts", false, 40, 0)],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [newFile("x.ts"), patchOf(".claude/commands/loop-worker.md", "@@ -1 +1 @@\n+xats を足す\n")],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "メタ文字が当たっている").toBe("40\t0\t2");
+  });
+
+  it("末尾に改行を持つ名前でも、単語だけの一致では数える", () => {
+    // **`$( )` は末尾の改行を全部落とす**（#208 のレビュー 2 周目）——
+    // **`large\n` が `large` に化けて、単語 `large` に当たる。**
+    // **境界を見るようにしたから効くようになった**（部分文字列のころは結果が同じだった）。
+    //
+    // **git はファイル名に改行を許す。** **名前は PR 側で決められる**ので、
+    // **復号が変形すると、そこが抜け道になる**——**第 3 層は緩い側へ倒さない。**
+    const result = runWithFiles(
+      [row(".claude/commands/loop-worker.md", false, 2, 0), row("bin/large\n", false, 300, 0)],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [
+        newFile("bin/large\n"),
+        patchOf(".claude/commands/loop-worker.md", "@@ -1 +1 @@\n+bin/large を足す\n"),
+      ],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "復号が名前を変形している").toBe("300\t0\t2");
+  });
+
+  it("削除行にしか無ければ、数える", () => {
+    // **消した行の言及は、呼んでいる証拠にならない**
+    const result = runWithFiles(
+      [
+        row(".claude/commands/loop-worker.md", false, 0, 2),
+        row("bin/loop-keep-branch", false, 75, 0),
+      ],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [
+        newFile("bin/loop-keep-branch"),
+        patchOf(
+          ".claude/commands/loop-worker.md",
+          "@@ -1 +1 @@\n-bin/loop-keep-branch <ブランチ>\n",
+        ),
+      ],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "削除行の言及で外れている").toBe("75\t0\t2");
+  });
+
+  it("要求されていないファイルから呼ばれていても、数える", () => {
+    // **網を外して緑にしない。** **要求と無関係なファイルが名前を書いただけで
+    // 外れるなら、第 3 層は自分で無効にできる。**
+    const result = runWithFiles(
+      [row("bin/loop-other", false, 5, 0), row("bin/loop-keep-branch", false, 75, 0)],
+      [],
+      [],
+      [
+        newFile("bin/loop-keep-branch"),
+        patchOf("bin/loop-other", "@@ -1 +1 @@\n+bin/loop-keep-branch を呼ぶ\n"),
+      ],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("80\t0\t0");
+  });
+
+  it("差分が来ていなければ、これまでどおり数える", () => {
+    // **外れるのは「この窓で作られたファイル」だけ**である——**既にあったものは、
+    // 要求されたファイルが名前を書いただけで丸ごと外れてはいけない。**
+    //
+    // **「作られたファイルだけ」を選んでいるのは gh 側の `--jq`**（`.status`）なので、
+    // **ここでは「言及元が来ない」ことしか作れない**——**式そのものは
+    // 「判定式が想定どおりであること」が留めている**（テストかどうかの判定と同じ扱い）。
+    const result = runWithFiles(
+      [row(".claude/commands/loop-worker.md", false, 12, 4), row("bin/loop-stall", false, 40, 0)],
+      [thread(".claude/commands/loop-worker.md")],
+      [],
+      [],
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("40\t0\t16");
+  });
+});
 
 describe("bin/loop-fixup-lines の数え方", () => {
   it("本体の変更は追加も削除も数える", () => {
@@ -509,7 +675,7 @@ describe("bin/loop-fixup-lines が gh に渡す判定式", () => {
    * 代わりに、**式を書き換えたら必ずこのテストの更新が要る**形にしてある。
    * 「気づかないうちに反転していた」は起きない。
    */
-  const EXPECTED_FILES_JQ = `"T\\t\\(.files | type)", (.commits[]? | "C\\t\\(.sha)"), (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)")`;
+  const EXPECTED_FILES_JQ = `"T\\t\\(.files | type)", (.commits[]? | "C\\t\\(.sha)"), (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)"), (.files[]? | select(.status == "added") | "N\\t\\(.filename | @base64)"), (.files[]? | "D\\t\\(.filename | @base64)\\t\\((.patch // "") | @base64)")`;
 
   /** レビュースレッドの側も同じ理由で固定する。 */
   const EXPECTED_THREADS_JQ = `"T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\((.comments.nodes[0].originalCommit.oid) // "-")\\t\\((.comments.nodes[0].author.login) // "-")\\t\\(.path | @base64)")`;
