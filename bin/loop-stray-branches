@@ -65,10 +65,21 @@ case "$busy_status" in
       [[ -n $workspace ]] || continue
       # **読めなければ、どちらへも倒さない。** 走っているのに触っているブランチが
       # 分からない状態で「宙に浮いている」と言えば誤報、黙れば見落としである。
-      if ! branch="$(git -C "$workspace" symbolic-ref --short HEAD 2>/dev/null)"; then
-        fail_unknown "走っている作業場のブランチ ($workspace)"
-      fi
-      working["$branch"]=1
+      #
+      # **ただし detached は「読めない」ではない** (#198)。**掴んでいるブランチが
+      # 無い**だけで、**その作業場は、どのブランチも抑えない**。
+      # **#197 で worker が `origin/main` へ detach するようになった**ので、
+      # **手が空いている worker は常にここへ入る**——**丸めると、見張りが毎周回
+      # 「読めない」で終わり、宙に浮いたブランチが誰にも見られなくなる。**
+      #
+      # **`--quiet` が 2 つを分ける**（detached なら exit 1、壊れていれば 128）。
+      # `bin/loop-commit-guard` と同じ形である。
+      branch="$(git -C "$workspace" symbolic-ref --quiet --short HEAD 2>/dev/null)"
+      case "$?" in
+        0) working["$branch"]=1 ;;
+        1) ;; # detached。抑えるブランチが無い
+        *) fail_unknown "走っている作業場のブランチ ($workspace)" ;;
+      esac
     done <<<"$busy_out"
     ;;
   1) ;; # 走っていない

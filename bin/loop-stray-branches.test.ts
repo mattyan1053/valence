@@ -90,14 +90,19 @@ describe("bin/loop-stray-branches", () => {
         ),
         "  exit 0",
         "fi",
-        // **走っている作業場で、いま checkout されているブランチ**を答える
+        // **走っている作業場で、いま checkout されているブランチ**を答える。
+        //
+        // **`""` は detached**（`git symbolic-ref --quiet` は**何も出さずに exit 1**）、
+        // **`"?"` は本当に読めない**（壊れたリポジトリ。exit 128）——**この 2 つは別物**で、
+        // **同じ非ゼロに丸めると、detached を「読めない」と扱ってしまう**（#198）
         'if [[ $* == *"symbolic-ref"* ]]; then',
-        // **空のものは答えない**（＝そのブランチを読めない状態を作る）
         ...busyBranches.flatMap((branch, index) =>
           branch === ""
             ? []
             : [
-                `  [[ $* == *"/workspace-${index}"* ]] && { printf '%s\\n' ${JSON.stringify(branch)}; exit 0; }`,
+                branch === "?"
+                  ? `  [[ $* == *"/workspace-${index}"* ]] && exit 128`
+                  : `  [[ $* == *"/workspace-${index}"* ]] && { printf '%s\\n' ${JSON.stringify(branch)}; exit 0; }`,
               ],
         ),
         "  exit 1",
@@ -466,11 +471,41 @@ describe("bin/loop-stray-branches", () => {
     const result = run({
       branches: [{ name: "feat/x" }],
       prs: [],
-      // **走ってはいるが、どのブランチを触っているか読めない**
-      busyBranches: [""],
+      // **走ってはいるが、本当に読めない**（壊れたリポジトリ。detached とは別物）
+      busyBranches: ["?"],
     });
 
     expect(result.status).toBe(2);
+  });
+
+  it("detached の作業場は、どのブランチも抑えない", () => {
+    // **detached は「読めない」ではなく「掴んでいるブランチが無い」**である（#198）。
+    // **#197 で worker が `origin/main` へ detach するようになった**ので、
+    // **手が空いている worker は常にここへ入る**——**見張りが毎周回「読めない」で終わり、
+    // 宙に浮いたブランチが誰にも見られなくなる**（**倒れる向きが「黙って通す」側**）
+    const result = run({
+      branches: [{ name: "feat/lost-long-ago" }],
+      prs: [],
+      busyBranches: [""],
+    });
+
+    expect(result.status, "detached を「読めない」と扱っている").toBe(1);
+    expect(result.stdout, "宙に浮いたブランチを挙げていない").toContain("feat/lost-long-ago");
+  });
+
+  it("detached の作業場があっても、ブランチを掴んでいる側は抑える", () => {
+    // **入力を 2 つ用意する**（#195 / #196 / #197 で 3 回続けて踏んだ形）。
+    // **detached だけだと「抑える側」の経路を 1 度も通らない**——
+    // **片方だけ直すと、走っている worker の作業中ブランチを「宙に浮いている」と誤報する**
+    const result = run({
+      branches: [{ name: "feat/just-pushed" }, { name: "feat/lost-long-ago" }],
+      prs: [],
+      busyBranches: ["", "feat/just-pushed"],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout, "作業中のブランチを挙げている").not.toContain("feat/just-pushed");
+    expect(result.stdout, "無関係なブランチを隠している").toContain("feat/lost-long-ago");
   });
 
   it("読めなければ、0 件と同じ顔をしない", () => {
