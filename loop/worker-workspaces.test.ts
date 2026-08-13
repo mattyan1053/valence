@@ -116,6 +116,32 @@ describe("作業場ごとに、compose project とポートを分ける", () => 
     expect(asked[0]).toBe(asked[1]);
   });
 
+  it("compose が受け付ける project 名にする", () => {
+    // **`docker compose` は project 名を「小文字英数字・ハイフン・アンダースコアで、
+    // 英数字から始まる」に限る**（#195 のレビュー 2 周目で実測）。**`compose.yaml` が
+    // `name:` を持っていた間は clone 先に依存しなかった**——**この PR が入れて初めて
+    // 壊れる**。**`compose()` は入口**なので、**`Valence/` へ clone した人は
+    // `./task` が 1 つも通らない**（`sha256sum` と同じ場所・同じ落ち方）
+    const { dir, log } = workspace("Valence.Fork");
+
+    up(dir);
+
+    expect(projectIn(log), "compose が弾く名前を渡している").toMatch(/^[a-z0-9][a-z0-9_-]*$/);
+  });
+
+  it("正規化した名前が、project にもポートにも使われる", () => {
+    // **片方だけ正規化すると、`-p` は `valence` なのにポートは `Valence` の digest
+    // から決まる**——**「同じ project は同じポート」が崩れる**（#195 のレビュー 2 周目）
+    const upper = workspace("Valence");
+    const lower = workspace("valence");
+
+    up(upper.dir);
+    up(lower.dir);
+
+    expect(projectIn(upper.log)).toBe(projectIn(lower.log));
+    expect(portIn(upper.log), "project は同じなのにポートが違う").toBe(portIn(lower.log));
+  });
+
   it("既定の 1 人運用は、これまでどおり", () => {
     // **設定を足さなくても壊れない。** `valence` は project も port も動かさない
     const { dir, log } = workspace("valence");
@@ -278,6 +304,29 @@ describe("./task loop:worker:add / remove", () => {
 
     expect(added.status, "読めていないのに足している").not.toBe(0);
     expect(existsSync(`${dir}-worker-b`), "作業場ができている").toBe(false);
+  });
+
+  it("master の作業場と同じポートへ落ちる名前は、まだ作られていなくても弾く", () => {
+    // **`cmd_loop_setup` は検査を 1 つも持たない**（#195 のレビュー 2 周目）。
+    // **`add` を先に、`loop:setup` を後に打つと、master が同じポートで作られる**——
+    // **1 人で、順番に踏める**（同時実行の競合とは別物である）。
+    //
+    // **登録の有無で見ない。** **`${PWD}-master` は予約**として扱う——
+    // **setup 以外の経路で作られても効く**。
+    //
+    // ---8<--- master と衝突する名前の探し方 ---
+    //   source ./task >/dev/null 2>&1
+    //   m="$(workspace_port valence-master)"
+    //   for a in {a..z}{a..z}{a..z}; do
+    //     [[ "$(workspace_port "valence-worker-$a")" == "$m" ]] && { echo "$a"; break; }
+    //   done
+    // ---8<--- ここまで ---
+    const { dir, env } = repo();
+
+    const clash = task(dir, env, ["loop:worker:add", "cgo"]);
+
+    expect(clash.status, "master と同じポートへ落ちる名前を通している").not.toBe(0);
+    expect(`${clash.stdout}${clash.stderr}`, "何と衝突したのかが出ていない").toContain("master");
   });
 
   it("worktree の一覧を取れなければ、足さない", () => {

@@ -30,7 +30,26 @@ export HOST_UID HOST_GID DOCKER_GID
 #
 # **名前から決める。空きを探さない。** 空き探しは**起動のたびに値が変わる**ので
 # 人が繋ぎ直せず、**2 つの `add` が同じ空きを掴む競合**を新しく作る（#74 で塞いだ形）。
-workspace_name() { basename -- "$PWD"; }
+# **compose が受け付ける形へ正規化する** (#195 のレビュー 2 周目)。**project 名は
+# 「小文字英数字・ハイフン・アンダースコアで、英数字から始まる」**に限られる——
+# **`compose.yaml` が `name:` を持っていた間は clone 先に依存しなかった**ので、
+# **ここが入れて初めて壊れる**（**`compose()` は入口**なので、`Valence/` へ clone した
+# 人は `./task` が 1 つも通らない）。
+#
+# **弾かずに正規化する。** 弾くと、**そのディレクトリでは何もできなくなる**。
+#
+# **正規化した名前を、project にもポートにも使う。** 片方だけだと
+# **「同じ project は同じポート」が崩れる**。**`Valence` と `valence` が同じ値へ落ちる**
+# のは承知のうえ——**`name: valence` を固定していたときは全員が同じだった**ので、
+# **退行ではない**。
+workspace_name() {
+  local name
+  name="$(basename -- "$PWD")"
+  name="${name,,}"
+  name="${name//[^a-z0-9_-]/-}"
+  [[ $name =~ ^[a-z0-9] ]] || name="v$name"
+  printf '%s' "$name"
+}
 
 # 作業場の名前として使えるか。**名前は識別子**なので、**パスに化ける形を通さない**。
 worker_name_ok() {
@@ -60,6 +79,12 @@ workspace_with_port() {
     other="$(workspace_port "$(basename -- "$p")")" || return 2
     [[ $other != "$want" ]] || { printf '%s' "$(basename -- "$p")"; return 0; }
   done < <(printf '%s\n' "$listed" | awk '/^worktree /{print $2}')
+  # **master の作業場は、登録されていなくても予約する** (#195 のレビュー 2 周目)。
+  # **`cmd_loop_setup` は検査を持たない**ので、**`add` を先に、`loop:setup` を後に打つと、
+  # master が同じポートで作られる**——**1 人で、順番に踏める**。
+  # **登録の有無で見ない**ぶん、**setup 以外の経路で作られても効く。**
+  other="$(workspace_port "$(basename -- "${PWD}-master")")" || return 2
+  [[ $other != "$want" ]] || { printf '%s' "$(basename -- "${PWD}-master")"; return 0; }
   return 1
 }
 
