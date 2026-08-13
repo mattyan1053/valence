@@ -55,12 +55,18 @@ bin/loop-lease acquire worker      # 出力された token を控える
 `origin/main` の先端へ移る。**ブランチとして `main` を掴まない** (#196)。
 
 ```bash
-git fetch origin main && git switch --detach origin/main
+{ git fetch origin main || git fetch origin main; } && git switch --detach origin/main
 ```
 
 **`main` は 1 つの作業場にしか checkout できない。** **掴むと、2 人目は
 `fatal: 'main' is already checked out at …` でここを通れず**、**毎周回止まって
 3 周で `loop/STOP` を配る**——**1 人目まで巻き添えで止まる**（master も同じ形で動いている）。
+
+**競り負けたら 1 度だけやり直す。** **`refs/remotes/origin/main` は
+`--git-common-dir` にある**ので、**worktree を分けても共有**である——**2 人が同じ周回の
+冒頭で fetch すると、後から書く側が `cannot lock ref` で落ちる**（実測で 25/25）。
+**そのとき ref は既に目的の値**なので、**やり直すと「更新するものが無い」で成功する**
+——**直っているのに赤**にしない。**2 度とも落ちたら、そこは本当に失敗である。**
 
 **detached でよい。** **ブランチを切るのはステップ 4 で、起点は `origin/main` の先端**である。
 

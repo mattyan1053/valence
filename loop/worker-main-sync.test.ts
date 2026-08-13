@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,7 +46,7 @@ describe("worker の main 最新化", () => {
   });
 
   /** `origin/main` を持つ使い捨てのリポジトリと、その 2 人目の作業場。 */
-  function workspaces(): { first: string; second: string } {
+  function workspaces(): { first: string; second: string; origin: string } {
     const parent = mkdtempSync(join(tmpdir(), "worker-main-sync-"));
     roots.push(parent);
     const origin = join(parent, "origin.git");
@@ -89,7 +89,7 @@ describe("worker の main 最新化", () => {
       ]).status,
     ).toBe(0);
     expect(git(["push", "--quiet", "origin", "main"]).status).toBe(0);
-    return { first, second };
+    return { first, second, origin };
   }
 
   function runSync(cwd: string) {
@@ -118,6 +118,79 @@ describe("worker の main 最新化", () => {
     const synced = runSync(first);
 
     expect(synced.status, synced.stderr).toBe(0);
+  });
+
+  it("もう一方の作業場に fetch を競り負けても、通る", () => {
+    // **`refs/remotes/origin/main` は `--git-common-dir` にある**ので、
+    // **worktree を分けても共有**である。**2 人が同じ周回の冒頭で fetch すると、
+    // 後から書く側が `cannot lock ref` で落ちる**（master の実測で 25/25）。
+    //
+    // **そのとき ref は既に目的の値**である——**「壊れているのに緑」の逆で、
+    // 直っているのに赤**になり、`main-sync-failed` を記録して止まる。
+    // **両方の worker が周回の冒頭で同期する**ので、**マージ直後の周回は必ずここで揃う。**
+    //
+    // **競りそのものは試験にしない**（時間に依存する）。**負けた側の入力**——
+    // **1 度目の fetch が `cannot lock ref` で落ちる**——を作って、そこから先を見る。
+    //
+    // **上流だけを進めておく**（別の clone から push する）。**共有 ref が既に
+    // 目的の値だと、「失敗を握りつぶして進む」形も緑になる**——**2 度目の fetch が
+    // 要る状態でなければ、やり直しを押さえられない。**
+    const { first, second, origin } = workspaces();
+    const pusher = `${first}-pusher`;
+    expect(spawnSync("git", ["clone", "--quiet", origin, pusher]).status).toBe(0);
+    expect(
+      spawnSync(
+        "git",
+        [
+          "-c",
+          "user.email=loop@example.invalid",
+          "-c",
+          "user.name=loop",
+          "commit",
+          "--allow-empty",
+          "--quiet",
+          "-m",
+          "もう一方が進めた",
+        ],
+        { cwd: pusher },
+      ).status,
+    ).toBe(0);
+    expect(spawnSync("git", ["push", "--quiet", "origin", "main"], { cwd: pusher }).status).toBe(0);
+
+    const real = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const stubs = join(second, "stub");
+    mkdirSync(stubs);
+    writeFileSync(
+      join(stubs, "git"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "fetch" ]]; then',
+        `  count="$(cat ${JSON.stringify(join(second, "fetch.count"))} 2>/dev/null || echo 0)"`,
+        `  printf '%s' "$((count + 1))" > ${JSON.stringify(join(second, "fetch.count"))}`,
+        "  if ((count == 0)); then",
+        "    echo \"error: cannot lock ref 'refs/remotes/origin/main'\" >&2",
+        "    exit 1",
+        "  fi",
+        "fi",
+        `exec ${JSON.stringify(real)} "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const synced = spawnSync("bash", ["-c", syncBlock()], {
+      cwd: second,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` },
+    });
+
+    expect(synced.status, synced.stderr).toBe(0);
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: second, encoding: "utf8" }).stdout;
+    // **上流そのものと比べる。** 共有 ref と比べると、**更新できていなくても一致する**
+    const upstream = spawnSync("git", ["--git-dir", origin, "rev-parse", "main"], {
+      encoding: "utf8",
+    }).stdout;
+    expect(head.trim(), "上流の先端にいない").toBe(upstream.trim());
   });
 
   it("落ちたブランチを探すとき、origin/main と比べる", () => {
