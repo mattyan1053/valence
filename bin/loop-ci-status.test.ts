@@ -691,6 +691,63 @@ describe("bin/loop-ci-status", () => {
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
     });
 
+    it("宣言が 2 つ以上あれば、止める", () => {
+      // **位置で決めない。** **「最初に当たったほう」を採ると、`if false; then` や
+      // here-doc へ旧一覧を置いた PR が、本物へ `gamma` を足したうえで
+      // ゲートには旧一覧だけを要求させられる**——**`gamma` が赤でも exit 0** になり、
+      // **#218 の穴が別の入口から戻る。**
+      //
+      // **「最後に当たったほう」でも同じ**である——**囮を後ろへ置けばよい。**
+      // **位置で決める限り、決め方を知っている側が選べる。数えて 1 つでなければ止める。**
+      const decoy = ["if false; then", 'readonly DEFAULT_REQUIRED_CHECKS="alpha', 'beta"', "fi"];
+      const real = ['readonly DEFAULT_REQUIRED_CHECKS="alpha', "beta", 'gamma"'];
+      // **どちらの順でも止める。** **囮が先なら「最初を採る」が、後なら「最後を採る」が
+      // 通ってしまう**——**片方だけ試すと、もう片方へ倒した直しが緑のまま入る。**
+      const orders: [string, string[]][] = [
+        ["囮が先", [...decoy, ...real]],
+        ["囮が後", [...real, ...decoy]],
+      ];
+
+      for (const [label, lines] of orders) {
+        headScriptBody = ["#!/usr/bin/env bash", ...lines, ""].join("\n");
+
+        const result = run({
+          checks: [
+            { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+            { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+            { name: "gamma", status: "completed", conclusion: "failure", startedAgo: 10 },
+          ],
+        });
+
+        expect(result.status, `${label}: ${result.stdout}${result.stderr}`).toBe(2);
+      }
+    });
+
+    it("宣言が 1 つだけなら、周りに別の readonly があっても和を取る", () => {
+      // **止める側へ倒しすぎない。** **数えるのは「この宣言」だけ**で、
+      // **似た行が並んでいるだけの head を止めない。**
+      headScriptBody = [
+        "#!/usr/bin/env bash",
+        'readonly OK_CONCLUSIONS="success skipped neutral"',
+        'readonly DEFAULT_REQUIRED_CHECKS="alpha',
+        "beta",
+        'gamma"',
+        "readonly DEFAULT_TIMEOUT_MIN=360",
+        "",
+      ].join("\n");
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "gamma", status: "completed", conclusion: "failure", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(1);
+      expect(result.stdout).toContain("gamma");
+    });
+
     it("一覧の引用符が閉じていなければ、止める", () => {
       // **途中で切れた応答を「そこまで」で拾わない。** **拾うと名前が黙って減る。**
       headScriptBody = ['readonly DEFAULT_REQUIRED_CHECKS="alpha', "beta"].join("\n");

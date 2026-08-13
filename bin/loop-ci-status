@@ -128,22 +128,33 @@ fi
 # **閉じていない引用符を「そこまで」で拾わない。** **途中で切れた応答を
 # 一覧として使うと、名前が黙って減る**——**このスクリプトが直しに来たものと同じ形。**
 extract_required_checks() {
-  local line rest in_list=0
+  local line rest in_list=0 found=0 out=""
   while IFS= read -r line; do
     if ((in_list == 0)); then
       [[ $line == 'readonly DEFAULT_REQUIRED_CHECKS="'* ]] || continue
+      # **数える。位置で決めない。** **「最初に当たったほう」を採ると、
+      # `if false; then` や here-doc へ旧一覧を置いた PR が、本物へ検査を足したうえで、
+      # ゲートには旧一覧だけを要求させられる**——**新しい検査が赤でも exit 0** になり、
+      # **#218 の穴が別の入口から戻る。** **「最後」でも同じ**で、**囮を後ろへ置けばよい**
+      # ——**位置で決める限り、決め方を知っている側が選べる。**
+      ((++found == 1)) || return 1
       in_list=1
       rest="${line#readonly DEFAULT_REQUIRED_CHECKS=\"}"
     else
       rest="$line"
     fi
+    # **閉じたら、そこで終わり**（ここから先に同じ宣言が出れば 2 つ目として数える）。
     if [[ $rest == *'"' ]]; then
-      printf '%s\n' "${rest%\"}"
-      return 0
+      in_list=0
+      out+="${rest%\"}"$'\n'
+      continue
     fi
-    printf '%s\n' "$rest"
+    out+="$rest"$'\n'
   done <<<"$1"
-  return 1
+  # **1 つを、閉じた形で読めたときだけ返す。** **途中まで読めた分を返さない**
+  # ——**名前が黙って減る**（この判定が直しに来たのと同じ形）。
+  ((found == 1 && in_list == 0)) || return 1
+  printf '%s' "$out"
 }
 
 if head_script="$(gh api -H "Accept: application/vnd.github.raw" \
