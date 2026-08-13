@@ -13,7 +13,7 @@
  * **散文で片方にだけ書くと、もう片方が同じところで詰まる。**
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,15 +37,83 @@ type Pending = {
 
 describe("bin/loop-review-reply", () => {
   let sandbox: string;
+  /** ロックを握らせておく相手（`lockHeld` のときだけ起こす）。 */
+  let holder: ReturnType<typeof spawn> | undefined;
 
   beforeEach(() => {
     sandbox = mkdtempSync(join(tmpdir(), "loop-review-reply-"));
   });
 
   afterEach(() => {
+    holder?.kill();
+    holder = undefined;
     // **毎回捨てる。** 残すと、次の試験が前の答えを読む
     rmSync(sandbox, { recursive: true, force: true });
   });
+
+  /**
+   * `gh` の差し替え。**本物と同じところで落ちる形にしておく**——
+   * **`-F b=@…` はファイル読み込みとして解釈され、API を叩く前に落ちる。**
+   */
+  function ghStub(
+    options: { pendings?: Pending[]; me?: string },
+    paths: { outcomes: string; deleted: string; posts: string; passed: string },
+  ): string {
+    return [
+      "#!/usr/bin/env bash",
+      'args="$*"',
+      // **誰が投稿しているか**
+      'if [[ $args == "api user"* ]]; then',
+      `  printf '%s\\n' ${JSON.stringify(options.me ?? "me")}`,
+      "  exit 0",
+      "fi",
+      // **pending review の一覧。** **`--jq` は列を取り出すだけ**で、
+      // **選ぶのはスクリプト側**——**そこを試験から動かせるようにしてある**
+      // （`jq` が無いので、スタブは式を解釈できない。#135 と同じ形）
+      'if [[ $args == *"/reviews"* && $args != *"/reviews/"* ]]; then',
+      '  for frag in ".id" ".state" ".user.login" ".body"; do',
+      '    if [[ $args != *"$frag"* ]]; then',
+      '      echo "スタブ: $frag を問い合わせていない: $args" >&2',
+      "      exit 1",
+      "    fi",
+      "  done",
+      ...(options.pendings ?? []).map(
+        (pending) =>
+          `  printf '%s\\t%s\\t%s\\t%s\\n' ${pending.id} PENDING ${JSON.stringify(pending.login)} ${(pending.body ?? "").length}`,
+      ),
+      "  exit 0",
+      "fi",
+      // **その pending が持つ提出済みコメントの件数**
+      ...(options.pendings ?? []).map(
+        (pending) =>
+          `if [[ $args == *"/reviews/${pending.id}/comments"* ]]; then printf '%s\\n' ${pending.comments ?? 0}; exit 0; fi`,
+      ),
+      // **削除**（何を消したかを残す）
+      'if [[ $args == *"--method DELETE"* || $args == *"-X DELETE"* ]]; then',
+      `  printf '%s\\n' "$args" >> ${JSON.stringify(paths.deleted)}`,
+      "  exit 0",
+      "fi",
+      // **返信の投稿**
+      'if [[ $args == *"addPullRequestReviewThreadReply"* ]]; then',
+      `  printf '%s\\n' "$args" >> ${JSON.stringify(paths.passed)}`,
+      '  if [[ $args == *"-F b=@"* || $args == *"-F t=@"* ]]; then',
+      '    echo "could not open file" >&2',
+      "    exit 1",
+      "  fi",
+      `  printf 'x\\n' >> ${JSON.stringify(paths.posts)}`,
+      `  outcome="$(head -1 ${JSON.stringify(paths.outcomes)})"`,
+      `  sed -i '1d' ${JSON.stringify(paths.outcomes)}`,
+      '  case "$outcome" in',
+      "    ok) printf '%s\\n' \"https://example.test/pull/1#discussion_r1\"; exit 0 ;;",
+      `    blocked) echo ${JSON.stringify(BLOCKED)} >&2; exit 1 ;;`,
+      '    *) echo "べつの理由" >&2; exit 1 ;;',
+      "  esac",
+      "fi",
+      'echo "スタブ: 想定外の呼び出し: $args" >&2',
+      "exit 1",
+      "",
+    ].join("\n");
+  }
 
   function run(options: {
     /** 投稿の結果を、呼ばれた順に並べる。`ok` は成功、`blocked` は 422。 */
@@ -54,72 +122,45 @@ describe("bin/loop-review-reply", () => {
     pendings?: Pending[];
     /** `gh api user` が返す login。 */
     me?: string;
-  }): { status: number; stdout: string; stderr: string; deleted: string; posts: number } {
+    /** 返信の本文。**渡し方を見るために差し替える。** */
+    body?: string;
+    /** ロックを別の周回が握っている状態にする。 */
+    lockHeld?: boolean;
+  }): {
+    status: number;
+    stdout: string;
+    stderr: string;
+    deleted: string;
+    posts: number;
+    passed: string;
+  } {
     const stub = join(sandbox, "stub");
     mkdirSync(stub, { recursive: true });
     const body = join(sandbox, "reply.md");
-    writeFileSync(body, "直しました。\n");
+    writeFileSync(body, `${options.body ?? "直しました。"}\n`);
+    const passed = join(sandbox, "passed");
     const outcomes = join(sandbox, "outcomes");
     writeFileSync(outcomes, `${options.replies.join("\n")}\n`);
     const deleted = join(sandbox, "deleted");
     const posts = join(sandbox, "posts");
-    writeFileSync(
-      join(stub, "gh"),
-      [
-        "#!/usr/bin/env bash",
-        'args="$*"',
-        // **誰が投稿しているか**
-        'if [[ $args == "api user"* ]]; then',
-        `  printf '%s\\n' ${JSON.stringify(options.me ?? "me")}`,
-        "  exit 0",
-        "fi",
-        // **pending review の一覧。** **`--jq` は列を取り出すだけ**で、
-        // **選ぶのはスクリプト側**——**そこを試験から動かせるようにしてある**
-        // （`jq` が無いので、スタブは式を解釈できない。#135 と同じ形）
-        'if [[ $args == *"/reviews"* && $args != *"/reviews/"* ]]; then',
-        '  for frag in ".id" ".state" ".user.login" ".body"; do',
-        '    if [[ $args != *"$frag"* ]]; then',
-        '      echo "スタブ: $frag を問い合わせていない: $args" >&2',
-        "      exit 1",
-        "    fi",
-        "  done",
-        ...(options.pendings ?? []).map(
-          (pending) =>
-            `  printf '%s\\t%s\\t%s\\t%s\\n' ${pending.id} PENDING ${JSON.stringify(pending.login)} ${(pending.body ?? "").length}`,
-        ),
-        "  exit 0",
-        "fi",
-        // **その pending が持つ提出済みコメントの件数**
-        ...(options.pendings ?? []).map(
-          (pending) =>
-            `if [[ $args == *"/reviews/${pending.id}/comments"* ]]; then printf '%s\\n' ${pending.comments ?? 0}; exit 0; fi`,
-        ),
-        // **削除**（何を消したかを残す）
-        'if [[ $args == *"--method DELETE"* || $args == *"-X DELETE"* ]]; then',
-        `  printf '%s\\n' "$args" >> ${JSON.stringify(deleted)}`,
-        "  exit 0",
-        "fi",
-        // **返信の投稿**
-        'if [[ $args == *"addPullRequestReviewThreadReply"* ]]; then',
-        `  printf 'x\\n' >> ${JSON.stringify(posts)}`,
-        `  outcome="$(head -1 ${JSON.stringify(outcomes)})"`,
-        `  sed -i '1d' ${JSON.stringify(outcomes)}`,
-        '  case "$outcome" in',
-        "    ok) printf '%s\\n' \"https://example.test/pull/1#discussion_r1\"; exit 0 ;;",
-        `    blocked) echo ${JSON.stringify(BLOCKED)} >&2; exit 1 ;;`,
-        '    *) echo "べつの理由" >&2; exit 1 ;;',
-        "  esac",
-        "fi",
-        'echo "スタブ: 想定外の呼び出し: $args" >&2',
-        "exit 1",
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
+    writeFileSync(join(stub, "gh"), ghStub(options, { outcomes, deleted, posts, passed }), {
+      mode: 0o755,
+    });
 
+    const lock = join(sandbox, "reply.lock");
+    if (options.lockHeld === true) {
+      // **別の周回が握っている状態**を作る。**待っても取れない。**
+      writeFileSync(lock, "");
+      holder = spawn("flock", ["-x", lock, "sleep", "30"], { stdio: "ignore" });
+    }
     const result = spawnSync(SCRIPT, ["42", THREAD, body], {
       encoding: "utf8",
-      env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+      env: {
+        ...process.env,
+        PATH: `${stub}:${process.env.PATH}`,
+        LOOP_REVIEW_REPLY_LOCK: lock,
+        LOOP_REVIEW_REPLY_LOCK_WAIT_SEC: "1",
+      },
     });
     return {
       status: result.status ?? -1,
@@ -127,6 +168,7 @@ describe("bin/loop-review-reply", () => {
       stderr: result.stderr,
       deleted: existsSync(deleted) ? readFileSync(deleted, "utf8") : "",
       posts: existsSync(posts) ? readFileSync(posts, "utf8").trim().split("\n").length : 0,
+      passed: existsSync(passed) ? readFileSync(passed, "utf8") : "",
     };
   }
 
@@ -198,6 +240,51 @@ describe("bin/loop-review-reply", () => {
 
     expect(result.status).toBe(2);
     expect(result.deleted).toBe("");
+  });
+
+  it("本文は、型を変えずに渡す", () => {
+    // **`-F` は型を変える。** **`@` で始まる本文はファイル名として読まれ**、
+    // **`false` や整数だけの本文は別の型になる**——**渡すのは利用者が書いた文字列**で、
+    // **変えてよいものではない。**
+    //
+    // **「投稿できた」だけを見ない。** **通ったことだけ見ると、`-F` に戻しても緑**である。
+    const result = run({ replies: ["ok"] });
+
+    expect(result.passed, "-F で渡している（型が変わる）").not.toContain("-F b=");
+    expect(result.passed).toContain("-f b=");
+    expect(result.passed, "スレッド ID も型を変えて渡している").not.toContain("-F t=");
+  });
+
+  it("`@` で始まる本文でも投稿できる", () => {
+    // **落ちると、症状は「pending review が原因ではありません」**になる
+    // ——**原因は本文の 1 文字目なのに、そう読める文面はどこにも出ない。**
+    // **このスクリプトが塞ごうとしている形そのもの**である。
+    const result = run({ replies: ["ok"], body: "@codex の指摘に答えます" });
+
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("ロックを取れなければ、消さない", () => {
+    // **確かめてから消すまでの間に、下書きが 1 件入ると、それごと消える。**
+    // **GitHub は 1 人 1 つしか pending を持たせない**ので、**master と worker が
+    // 同じアカウントで見ているのは同じ 1 つ**である（#174）。
+    //
+    // **取れなかったら消さない。** **「取れた」経路の緑では、ここは見えない。**
+    const result = run({
+      replies: ["blocked"],
+      pendings: [{ id: 7, login: "me", body: "", comments: 0 }],
+      lockHeld: true,
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.deleted, "ロックを取れないまま消している").toBe("");
+  });
+
+  it("塞がれていない投稿は、ロックを待たない", () => {
+    // **錠は広く取らない。** **普通の返信が、別の周回の始末を待つ理由は無い。**
+    const result = run({ replies: ["ok"], lockHeld: true });
+
+    expect(result.status, result.stderr).toBe(0);
   });
 
   it("投げ直しても塞がれていたら、繰り返さない", () => {

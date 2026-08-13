@@ -64,8 +64,16 @@ fi
 trap 'rm -f "$errfile"' EXIT
 
 # 返信を 1 回投げる。**落ちた理由は `$errfile` に残す**（それで分岐する）。
+#
+# **`-f` で渡す。`-F` は型を変える。** **`gh` は `@` をファイル読み込みの印として
+# 扱う**ので、**`@` で始まる本文は API を叩く前に落ちる**——**`false` や整数だけの
+# 本文も別の型になる。** **渡すのは利用者が書いた文字列**で、**変えてよいものではない。**
+#
+# **落ちても、このスクリプトは「pending review が原因ではありません」と出す**
+# ——**原因は本文の 1 文字目なのに、そう読める文面はどこにも出ない。**
+# **このスクリプトが塞ごうとしている形そのもの**である。
 post_reply() {
-  gh api graphql -f query="$REPLY_QUERY" -F t="$THREAD" -F b="$body" \
+  gh api graphql -f query="$REPLY_QUERY" -f t="$THREAD" -f b="$body" \
     --jq '.data.addPullRequestReviewThreadReply.comment.url' 2>"$errfile"
 }
 
@@ -85,6 +93,46 @@ if [[ $reason != *"$BLOCKED_BY_PENDING"* ]]; then
 fi
 
 # ここから先は「1 つ目が空のまま残っている」を疑う経路である。
+#
+# **確かめてから消すまでを、1 つの錠に入れる。** **GitHub は 1 人 1 つしか pending を
+# 持たせない**（それがこのスクリプトの前提でもある）ので、**master と worker が同じ
+# アカウントで見ているのは同じ 1 つ**である（#174）——**確かめた後・消す前に下書きが
+# 1 件入ると、それごと消える。**
+#
+# **錠は広く取らない。** **最初の 1 回の投稿は錠の外**である——**塞がれていない
+# 普通の返信が、別の周回の始末を待つ理由は無い。**
+#
+# **これで閉まるのはループ同士だけである。** **同じアカウントは人もブラウザで使い、
+# その人は錠を取らない**——**「錠を入れたので安全になった」ではない。**
+# **残る約束は「消す直前まで空だったものを消す」**である。
+#
+# **取れなければ消さない。** **他の「消さない」分岐と揃える。**
+lock_path="${LOOP_REVIEW_REPLY_LOCK:-}"
+if [[ -z $lock_path ]]; then
+  if ! common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    || [[ -z $common_dir ]]; then
+    echo "[FAIL] ロックの置き場を決められません (git リポジトリの中で実行すること)" >&2
+    exit 2
+  fi
+  lock_path="$common_dir/valence-loop-review-reply.lock"
+fi
+
+lock_wait="${LOOP_REVIEW_REPLY_LOCK_WAIT_SEC:-10}"
+if ! [[ $lock_wait =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_REVIEW_REPLY_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+
+exec 9>"$lock_path" || {
+  echo "[FAIL] ロックを作成できません: $lock_path" >&2
+  exit 2
+}
+if ! flock -w "$lock_wait" 9; then
+  echo "[FAIL] 別の周回が pending review を始末しています（${lock_wait} 秒待機）" >&2
+  echo "       消さずに終わります。次の周回で同じ状態ならそこで片付きます" >&2
+  exit 2
+fi
+
 if ! me="$(gh api user --jq '.login' 2>/dev/null)" || [[ -z $me ]]; then
   echo "[FAIL] 投稿している利用者を確かめられません (消してよいかを決められません)" >&2
   exit 2
@@ -153,6 +201,8 @@ if [[ $pending_body_length != "0" || $comment_count != "0" ]]; then
   echo "[FAIL] pending review ($pending_id) に書きかけが入っています。消しません" >&2
   echo "       本文 ${pending_body_length} 文字 / コメント ${comment_count} 件" >&2
   echo "       提出するか、内容を確かめて人が消してください" >&2
+  echo "       ブラウザで書きかけていないか、この PR の Files changed を見ること" >&2
+  echo "       (同じアカウントを人も使う。人は錠を取らないので、ここでは止められない)" >&2
   exit 1
 fi
 
