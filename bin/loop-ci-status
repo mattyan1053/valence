@@ -3,7 +3,10 @@
 #
 #   bin/loop-ci-status <PR番号>
 #   bin/loop-ci-status --fingerprint <PR番号>   決着の別だけを、必須の並び順で返す
-#   bin/loop-ci-status --required-checks        必須チェック名を並べる (定数の問い合わせ)
+#   bin/loop-ci-status --required-checks        `main` 側の必須チェック名を並べる
+#
+# **PR を見るときの必須は、`main` の一覧と PR の head の一覧の**和**である** (#219)。
+# **`--required-checks` は PR 番号を取らない**ので、**答えるのは `main` 側だけ**である。
 #
 #   exit 0 = 必須がすべて決着して成功
 #   exit 1 = 決着して失敗 / 必須が見つからない (worker に直させる)
@@ -96,6 +99,61 @@ if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/nu
   || [[ -z $head_sha || $head_sha == "null" ]]; then
   echo "[FAIL] PR #$PR の head を読み取れません" >&2
   exit 2
+fi
+
+# **必須の一覧は、`main` と PR の head の**和**である** (#219)。
+#
+# **master は checkout しない**ので、**このスクリプトはいつでも `main` の版**である
+# ——**PR が足した名前は入っていない**ので、**その検査が赤でもゲートは
+# 「必須はすべて成功」と言う**（#218 で実際に起きた。`database policies` が赤だった）。
+#
+# **#207（予算）と同じ「head から読む」だが、向きが逆である。**
+# **予算は最大を取るので、head 側が短くても安全側**へ倒れる。**一覧は逆**で、
+# **head をそのまま使うと、一覧から名前を消した PR が自分のゲートを通る**——
+# **和にする。足す側はすぐ効き、減らす側はマージされて初めて効く。**
+#
+# **中身を取り出すだけで、実行しない。** **head の版はレビュー前のコード**なので、
+# **走らせると、ゲートを持つ側で PR の中身が動くことになる。**
+#
+# **読めなければ `main` の一覧で判定する。** **判定不能を「通す」へ倒さない**が、
+# **読めないだけで全部止めるのも違う**（#207 の「読めなければ止めない」と揃える）。
+
+# `readonly DEFAULT_REQUIRED_CHECKS="..."` の中身だけを取り出す。
+#
+#   exit 0 = 取り出せた / exit 1 = 見つからない・閉じていない
+#
+# **閉じていない引用符を「そこまで」で拾わない。** **途中で切れた応答を
+# 一覧として使うと、名前が黙って減る**——**このスクリプトが直しに来たものと同じ形。**
+extract_required_checks() {
+  local line rest in_list=0
+  while IFS= read -r line; do
+    if ((in_list == 0)); then
+      [[ $line == 'readonly DEFAULT_REQUIRED_CHECKS="'* ]] || continue
+      in_list=1
+      rest="${line#readonly DEFAULT_REQUIRED_CHECKS=\"}"
+    else
+      rest="$line"
+    fi
+    if [[ $rest == *'"' ]]; then
+      printf '%s\n' "${rest%\"}"
+      return 0
+    fi
+    printf '%s\n' "$rest"
+  done <<<"$1"
+  return 1
+}
+
+if head_script="$(gh api -H "Accept: application/vnd.github.raw" \
+  "repos/{owner}/{repo}/contents/bin/loop-ci-status?ref=$head_sha" 2>/dev/null)"; then
+  if head_required="$(extract_required_checks "$head_script")"; then
+    while IFS= read -r name; do
+      [[ -n ${name//[[:space:]]/} ]] || continue
+      for known in "${required[@]}"; do
+        [[ $known == "$name" ]] && continue 2
+      done
+      required+=("$name")
+    done <<<"$head_required"
+  fi
 fi
 
 # **`gh pr checks` を使わない。** **`bucket` は `status` から導かれる**ので、

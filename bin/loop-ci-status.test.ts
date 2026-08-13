@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +43,7 @@ describe("bin/loop-ci-status", () => {
     workflowJobs = undefined;
     unreadableWorkflow = undefined;
     oddlyNamedWorkflow = undefined;
+    headScriptBody = undefined;
   });
 
   afterEach(() => {
@@ -76,6 +85,25 @@ describe("bin/loop-ci-status", () => {
     );
   }
 
+  /**
+   * PR の head にある `bin/loop-ci-status` の中身。`undefined` は**読めない**。
+   *
+   * **必須の一覧は、`main` と head の**和**である** (#219)。**足す側はすぐ効き、
+   * 減らす側は効かない**——**head をそのまま使うと、名前を消した PR が自分の
+   * ゲートを通る。**
+   */
+  let headScriptBody: string | undefined;
+
+  /** head の版が、その一覧を持っている状態にする。 */
+  function headRequires(names: string[], extra: string[] = []): void {
+    headScriptBody = [
+      "#!/usr/bin/env bash",
+      ...extra,
+      `readonly DEFAULT_REQUIRED_CHECKS="${names.join("\n")}"`,
+      'echo "ここから先は実行されてはならない"',
+    ].join("\n");
+  }
+
   /** その workflow の中身（`gh api` の raw が返すもの）。 */
   function workflowBody(jobs: (number | null)[]): string {
     return [
@@ -93,6 +121,89 @@ describe("bin/loop-ci-status", () => {
     ].join("\n");
   }
 
+  /**
+   * head にある `bin/loop-ci-status` を返す枝（#219）。
+   *
+   * **中身はファイルから流す。** **スタブへ埋め込むと、`$` や `` ` `` が
+   * シェルに展開される**——**本物のスクリプトを食わせた瞬間に別物になる。**
+   */
+  function headScriptBranch(path: string): string[] {
+    return [
+      'if [[ $args == *"contents/bin/loop-ci-status?ref=deadbeef"* ]]; then',
+      ...(headScriptBody === undefined
+        ? ["  exit 1"]
+        : [`  cat ${JSON.stringify(path)}`, "  exit 0"]),
+      "fi",
+    ];
+  }
+
+  /**
+   * `.github/workflows/` の一覧と中身を返す枝。
+   *
+   * **head を指して問い合わせているか**を見る（`?ref=<sha>`）——
+   * **手元の作業ツリーを読む実装では、この分岐に来ない。**
+   */
+  function workflowBranches(): string[] {
+    const names = (workflowJobs ?? []).map((_jobs, index) =>
+      index === oddlyNamedWorkflow ? `w${index} と 名前.yml` : `w${index}.yml`,
+    );
+    return [
+      'if [[ $args == *"contents/.github/workflows?ref=deadbeef"* ]]; then',
+      ...(workflowJobs === undefined
+        ? ["  exit 1"]
+        : [...names.map((name) => `  printf '%s\\n' ".github/workflows/${name}"`), "  exit 0"]),
+      "fi",
+      ...(workflowJobs ?? []).map((jobs, index) =>
+        index === unreadableWorkflow
+          ? `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then exit 1; fi`
+          : `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then printf '%b\\n' ${JSON.stringify(workflowBody(jobs))}; exit 0; fi`,
+      ),
+    ];
+  }
+
+  /**
+   * check-runs を返す枝。
+   *
+   * **`--jq` の式まで見る**（#135 と同じ理由）——**スタブが「取り出し済みの値」を
+   * 返すだけだと、問い合わせる列を変えても緑のまま**になる。
+   *
+   * **符号化するのは gh 側の `--jq` である。** **スタブが常に符号化すると、
+   * 実装から `@base64` を外す変異が緑のまま通る**——**式に `@base64` があるかを
+   * 見て、無ければ生の名前を返す。**
+   */
+  function checkRunsBranch(checks: Check[], fails: boolean): string[] {
+    const now = Math.floor(Date.now() / 1000);
+    const tail = (check: Check) =>
+      [
+        check.status,
+        check.conclusion ?? "",
+        check.startedAgo === undefined
+          ? ""
+          : new Date((now - check.startedAgo) * 1000).toISOString(),
+      ].join("\\u001f");
+    const row = (name: string, check: Check) =>
+      `    printf '%b\\n' ${JSON.stringify(`${name}\\u001f${tail(check)}`)}`;
+    return [
+      'if [[ $args == *"check-runs"* ]]; then',
+      ...(fails ? ["  exit 1"] : []),
+      '  if [[ $args != *".conclusion"* ]]; then',
+      '    echo "スタブ: conclusion を問い合わせていない: $args" >&2',
+      "    exit 1",
+      "  fi",
+      '  if [[ $args != *".status"* ]]; then',
+      '    echo "スタブ: status を問い合わせていない: $args" >&2',
+      "    exit 1",
+      "  fi",
+      '  if [[ $args == *"@base64"* ]]; then',
+      ...checks.map((check) => row(Buffer.from(check.name, "utf8").toString("base64"), check)),
+      "  else",
+      ...checks.map((check) => row(check.name, check)),
+      "  fi",
+      "  exit 0",
+      "fi",
+    ];
+  }
+
   function run(options: {
     checks?: Check[];
     /** `gh` が落ちる。 */
@@ -104,22 +215,10 @@ describe("bin/loop-ci-status", () => {
   }): { status: number; stdout: string; stderr: string } {
     const stub = join(sandbox, "stub");
     mkdirSync(stub, { recursive: true });
-    const now = Math.floor(Date.now() / 1000);
-    const tail = (check: Check) =>
-      [
-        check.status,
-        check.conclusion ?? "",
-        check.startedAgo === undefined
-          ? ""
-          : new Date((now - check.startedAgo) * 1000).toISOString(),
-      ].join("\\u001f");
-    // **符号化するのは gh 側の `--jq` である。** **スタブが常に符号化すると、
-    // 実装から `@base64` を外す変異が緑のまま通る**（#135 と同じ理由）——
-    // **式に `@base64` があるかを見て、無ければ生の名前を返す。**
-    const encoded = (options.checks ?? []).map(
-      (check) => `${Buffer.from(check.name, "utf8").toString("base64")}\\u001f${tail(check)}`,
-    );
-    const raw = (options.checks ?? []).map((check) => `${check.name}\\u001f${tail(check)}`);
+    const headScriptPath = join(sandbox, "head-script");
+    if (headScriptBody !== undefined) {
+      writeFileSync(headScriptPath, headScriptBody);
+    }
     writeFileSync(
       join(stub, "gh"),
       [
@@ -127,48 +226,14 @@ describe("bin/loop-ci-status", () => {
         'args="$*"',
         // **何を尋ねたかを残す。** **尋ねていないことを確かめる**のに要る
         `printf '%s\\n' "$args" >> ${JSON.stringify(join(sandbox, "gh.calls"))}`,
-        // **`--jq` の式まで見る**（#135 と同じ理由）——**スタブが「取り出し済みの値」を
-        // 返すだけだと、問い合わせる列を変えても緑のまま**になる
         'if [[ $args == *"headRefOid"* ]]; then',
         ...(options.headFails === true ? ["  exit 1"] : []),
         `  printf '%s\\n' "deadbeef"`,
         "  exit 0",
         "fi",
-        // **head を指して問い合わせているか**を見る（`?ref=<sha>`）——
-        // **手元の作業ツリーを読む実装では、この分岐に来ない**
-        'if [[ $args == *"contents/.github/workflows?ref=deadbeef"* ]]; then',
-        ...(workflowJobs === undefined
-          ? ["  exit 1"]
-          : [
-              ...workflowJobs.map(
-                (_jobs, index) =>
-                  `  printf '%s\\n' ".github/workflows/${index === oddlyNamedWorkflow ? `w${index} と 名前.yml` : `w${index}.yml`}"`,
-              ),
-              "  exit 0",
-            ]),
-        "fi",
-        ...(workflowJobs ?? []).map((jobs, index) =>
-          index === unreadableWorkflow
-            ? `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then exit 1; fi`
-            : `if [[ $args == *"contents/.github/workflows/w${index}.yml?ref=deadbeef"* ]]; then printf '%b\\n' ${JSON.stringify(workflowBody(jobs))}; exit 0; fi`,
-        ),
-        'if [[ $args == *"check-runs"* ]]; then',
-        ...(options.ghFails === true ? ["  exit 1"] : []),
-        '  if [[ $args != *".conclusion"* ]]; then',
-        '    echo "スタブ: conclusion を問い合わせていない: $args" >&2',
-        "    exit 1",
-        "  fi",
-        '  if [[ $args != *".status"* ]]; then',
-        '    echo "スタブ: status を問い合わせていない: $args" >&2',
-        "    exit 1",
-        "  fi",
-        '  if [[ $args == *"@base64"* ]]; then',
-        ...encoded.map((row) => `    printf '%b\\n' ${JSON.stringify(row)}`),
-        "  else",
-        ...raw.map((row) => `    printf '%b\\n' ${JSON.stringify(row)}`),
-        "  fi",
-        "  exit 0",
-        "fi",
+        ...headScriptBranch(headScriptPath),
+        ...workflowBranches(),
+        ...checkRunsBranch(options.checks ?? [], options.ghFails === true),
         "exit 1",
         "",
       ].join("\n"),
@@ -565,5 +630,121 @@ describe("bin/loop-ci-status", () => {
     const result = run({ headFails: true });
 
     expect(result.status).toBe(2);
+  });
+
+  /**
+   * **必須の一覧を `main` と head の**和**で決める** (#219)。
+   *
+   * **#218 で踏んだ。** **master は checkout しない**ので一覧はいつでも `main` の版で、
+   * **PR が足した名前は入っていない**——**その検査が赤でも「必須はすべて成功」と言う。**
+   *
+   * **#207（予算）と同じ「head から読む」だが、向きが逆である。**
+   * **予算は最大を取るので head 側が短くても安全側**だが、**一覧は head をそのまま
+   * 使うと、名前を消した PR が自分のゲートを通る**——**和にする。**
+   */
+  describe("必須の一覧は main と head の和", () => {
+    it("PR が足した必須チェックが赤なら、その PR のゲートが落ちる", () => {
+      headRequires(["alpha", "beta", "gamma"]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "gamma", status: "completed", conclusion: "failure", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(1);
+      expect(result.stdout).toContain("gamma");
+    });
+
+    it("PR が一覧から名前を消しても、その PR では必須のまま", () => {
+      // **置き換えにすると、ここが緑になる。** **減らす側は、マージされて
+      // `main` に入って初めて効く。**
+      headRequires(["alpha"]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "failure", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(1);
+      expect(result.stdout).toContain("beta");
+    });
+
+    it("head を読めなければ、main の一覧で判定する", () => {
+      // **判定不能を「通す」へ倒さない**が、**読めないだけで全部止めるのも違う**
+      //（#207 の「読めなければ止めない」と揃える）。**gamma は `main` の一覧に
+      // 無いので、赤くても必須ではない。**
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "gamma", status: "completed", conclusion: "failure", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+    });
+
+    it("指紋も、和で数える", () => {
+      // **指紋がゲートより短いと、ゲートを決めている検査が動いても指紋は動かない**
+      // ——**マージできるようになった瞬間に黙る**（#173 / #207 と同じ形）。
+      headRequires(["alpha", "beta", "gamma"]);
+
+      const result = run({
+        fingerprint: true,
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "gamma", status: "in_progress", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("ok,ok,pending");
+    });
+
+    it("本物の `bin/loop-ci-status` から、一覧を取り出せる", () => {
+      // **作り物だけで試すと、書式や置き場が変わったときに気づけない**——
+      // **黙って `main` の一覧へ落ちる**ので、**#218 の穴がそのまま戻る。**
+      // **本物を head の中身として食わせ、その名前が必須になることを見る。**
+      headScriptBody = readFileSync(SCRIPT, "utf8");
+      const names = spawnSync(SCRIPT, ["--required-checks"], { encoding: "utf8" })
+        .stdout.split("\n")
+        .filter((line) => line !== "");
+      expect(names.length).toBeGreaterThan(1);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(1);
+      for (const name of names) {
+        expect(result.stdout, `${name} が必須になっていない`).toContain(name);
+      }
+    });
+
+    it("head の中身を実行しない", () => {
+      // **一覧だけを取り出す。** **実行すると、PR の中身を master が走らせる**
+      // ——**ゲートを持つ側で、レビュー前のコードが動くことになる。**
+      const marker = join(sandbox, "executed");
+      headRequires(["alpha", "beta"], [`touch ${JSON.stringify(marker)}`]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+      expect(existsSync(marker), "head の版が実行された").toBe(false);
+    });
   });
 });
