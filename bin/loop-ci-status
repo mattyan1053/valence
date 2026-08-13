@@ -68,6 +68,9 @@ usage() {
   exit 2
 }
 
+# **`LOOP_REQUIRED_CHECKS` が差し替えるのは `main` 側の一覧だけ**である (#219)。
+# **PR を見るときの必須は、これと PR の head の一覧の**和**なので、
+# ここを上書きしても「最終的な必須」にはならない**——**head 側は head 側で読む。**
 mapfile -t REQUIRED_CHECKS <<<"${LOOP_REQUIRED_CHECKS:-$DEFAULT_REQUIRED_CHECKS}"
 required=()
 for name in "${REQUIRED_CHECKS[@]}"; do
