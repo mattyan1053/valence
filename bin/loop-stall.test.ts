@@ -1216,6 +1216,143 @@ describe("人が再開したことを受け取る", () => {
   });
 });
 
+describe("止まっていないのに、止めたと言わない", () => {
+  // **止める仕組みが、止めずに「止めた」と言う経路がある** (#190)。**2 層ある。**
+  //
+  //   1. `cmd_loop_stop` が**プロセス置換**で置き場所を読む——**取得の失敗が
+  //      `while` へ伝わらない**ので、**1 つも作らずに最終行だけを出して 0 で終わる**
+  //   2. `bin/loop-stall` が**その戻り値を見ていない**——**片方だけ直しても素通りする**
+  //
+  // **ここは第 4 層そのもの**である。**同じ状態が 3 周続き、人を呼ぶと決めた瞬間**に
+  // 黙って失敗すると、**`[STOP]` は出るのにどのループも止まらない**——
+  // **人は「止まった、あとで見よう」と読む。**
+
+  let repo: string;
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("置き場所を取れなければ、止めたと言わない", () => {
+    // **git の外に置く。** `loop_stop_paths` の `git worktree list` が落ちる
+    // ——**cwd にも親にもリポジトリが無い**状態である
+    repo = mkdtempSync(join(tmpdir(), "loop-stop-nogit-"));
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+
+    const stopped = spawnSync("./task", ["loop:stop", "ためし"], { cwd: repo, encoding: "utf8" });
+
+    expect(stopped.status, "1 つも作れていないのに成功している").not.toBe(0);
+    expect(stopped.stdout, "止めたと言っている").not.toContain(
+      "全ループが次の周回の冒頭で停止する",
+    );
+  });
+
+  it("取得が失敗したら、出力があっても使わない", () => {
+    // **「1 つも作れなかった」と「取得に失敗した」は別である。** 出力が空になる形だけを
+    // 見ていると、**どちらの見張りが効いているのか分からない**——**出力があるまま失敗する
+    // 形**を作って、**受けた値の状態を見ているほう**を押さえる
+    repo = mkdtempSync(join(tmpdir(), "loop-stop-partial-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+    const stubs = join(repo, "stub");
+    mkdirSync(stubs);
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      join(stubs, "git"),
+      [
+        "#!/usr/bin/env bash",
+        // **並べたあとで落ちる。** 途中まで出す git は実在する（壊れた worktree など）
+        'if [[ $1 == "worktree" && $2 == "list" ]]; then',
+        `  printf 'worktree %s\\n' "${repo}"`,
+        "  exit 1",
+        "fi",
+        `exec "${realGit}" "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const stopped = spawnSync("./task", ["loop:stop", "ためし"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` },
+    });
+
+    expect(stopped.status, "取れていないのに成功している").not.toBe(0);
+    expect(existsSync(join(repo, "loop", "STOP")), "取れていない値で止めている").toBe(false);
+  });
+
+  it("並んだ結果が 1 つも無ければ、止めたと言わない", () => {
+    // **取得は成功しても、置き場所が 1 つも出ないことはある**——**porcelain の書式が
+    // 変われば `awk` が 1 行も拾わない**。**そのときも、止めたことにはならない**
+    repo = mkdtempSync(join(tmpdir(), "loop-stop-empty-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+    const stubs = join(repo, "stub");
+    mkdirSync(stubs);
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      join(stubs, "git"),
+      [
+        "#!/usr/bin/env bash",
+        // **成功するが、拾える行が 1 つも無い**（書式が変わった形）
+        'if [[ $1 == "worktree" && $2 == "list" ]]; then',
+        "  echo 'path /somewhere'",
+        "  exit 0",
+        "fi",
+        `exec "${realGit}" "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const stopped = spawnSync("./task", ["loop:stop", "ためし"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` },
+    });
+
+    expect(stopped.status, "1 つも止めていないのに成功している").not.toBe(0);
+    expect(stopped.stdout, "止めたと言っている").not.toContain(
+      "全ループが次の周回の冒頭で停止する",
+    );
+  });
+
+  it("止められなかったら、bin/loop-stall が [FAIL] を出す", () => {
+    // **[STOP] だけで終わると、人は止まったと読む。** **`task` を非ゼロで返すように
+    // しても、呼ぶ側が見ていなければ素通りする**——**両方を見る**
+    repo = mkdtempSync(join(tmpdir(), "loop-stop-fails-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    mkdirSync(join(repo, "bin"));
+    copyFileSync(join(REPO_ROOT, "bin", "loop-stall"), join(repo, "bin", "loop-stall"));
+    chmodSync(join(repo, "bin", "loop-stall"), 0o755);
+    // **止められない `task`。** 失敗を隠さずに返す
+    writeFileSync(
+      join(repo, "task"),
+      '#!/usr/bin/env bash\nif [[ $1 == "loop:stop" ]]; then echo "止められない" >&2; exit 1; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
+
+    let result = spawnSync(join(repo, "bin", "loop-stall"), ["dirty"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    for (let index = 0; index < 2; index += 1) {
+      result = spawnSync(join(repo, "bin", "loop-stall"), ["dirty"], {
+        cwd: repo,
+        encoding: "utf8",
+      });
+    }
+
+    expect(result.stdout, "上限に達していない").toContain("[STOP]");
+    expect(result.stderr, "止められなかったことが出ていない").toContain("[FAIL]");
+    expect(result.status).toBe(1);
+  });
+});
+
 describe("再開の順番", () => {
   // **カウンタを消すことと STOP を消すことは、同じ排他区間で行う** (#151)。
   //

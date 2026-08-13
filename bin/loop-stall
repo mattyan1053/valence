@@ -555,7 +555,14 @@ if ((count >= MAX_REPEATS)); then
     echo "[STOP] 同じ状態が $count 回記録された (間に前進なし)。全ループを止める"
   fi
   if [[ -n $script_common_dir && $script_common_dir == "$common_dir" && -x $TASK ]]; then
-    "$TASK" loop:stop "$ID: 同じ状態が $count 回記録されたため停止。人の判断が要る"
+    # **戻り値を見る** (#190)。**見ないと、止められなかったことが `[STOP]` の後ろに
+    # 隠れる**——**人は「止まった、あとで見よう」と読む**。**呼ばれる側を直しても、
+    # ここが見ていなければ素通りする。**
+    "$TASK" loop:stop "$ID: 同じ状態が $count 回記録されたため停止。人の判断が要る" || {
+      echo "[FAIL] loop:stop が失敗しました。どのループも止まっていません" >&2
+      echo "       カウンタ: $STATE" >&2
+      echo "       止めるには、この作業ツリーで ./task loop:stop を手で叩くこと" >&2
+    }
   else
     # 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい。
     echo "[FAIL] ループを止められません" >&2

@@ -225,12 +225,29 @@ loop_stop_paths() {
 
 # 全ループを次の周回の冒頭で停止させる
 cmd_loop_stop() {
-  local reason="${1:-手動停止}" p
+  local reason="${1:-手動停止}" p paths found=0
+  # **先に受けて、取れたことを確かめる** (#190)。**プロセス置換の終了状態は `while` へ
+  # 伝わらない**ので、`done < <(...)` のままだと**取得の失敗が 0 件と区別できない**——
+  # **1 つも作らずに最終行だけを出して、終了コード 0 で終わる**。
+  # **ここは第 4 層が人を呼ぶ経路**なので、**黙って失敗すると誰も止まらないまま
+  # 「止めた」だけが残る。**
+  if ! paths="$(loop_stop_paths)"; then
+    echo "==> 停止の置き場所を取得できません。どのループも止めていません" >&2
+    return 1
+  fi
   while read -r p; do
+    [[ -n $p ]] || continue
     mkdir -p "$(dirname "$p")"
     printf '%s\n' "$reason" > "$p"
     echo "==> 作成: $p"
-  done < <(loop_stop_paths)
+    found=1
+  done <<<"$paths"
+  # **1 つも作れなかったら、止めたと言わない。** 取得が成功しても、
+  # **worktree が 1 つも返らなければ結果は同じ**である
+  if ((found == 0)); then
+    echo "==> 止める先が 1 つもありません。どのループも止めていません" >&2
+    return 1
+  fi
   echo "全ループが次の周回の冒頭で停止する"
 }
 
