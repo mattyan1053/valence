@@ -31,7 +31,17 @@ export type RefreshUserTokens = (refreshToken: string) => Promise<UserTokens>;
  */
 export type UsableToken =
   | { readonly kind: "usable"; readonly accessToken: string }
-  | { readonly kind: "needs-login" };
+  /** **入り直せば直る。** 失効していて、更新もできなかった。 */
+  | { readonly kind: "needs-login" }
+  /**
+   * **入り直しても直らない** (#214)。**置き場が落ちている / 読めない / 書けない。**
+   *
+   * **「使えない」を 1 つにまとめない**のは、**行き先が違う**からである——
+   * **入り直しへ誘うと、直らない道へ送る。** **元の版が 1 つにまとめていたのは
+   * 「呼ぶ側が要るのは入口へ戻すかどうかだけ」**だったが、
+   * **その前提が崩れた**（#213 のレビュー）。
+   */
+  | { readonly kind: "unavailable" };
 
 export type EnsureUsableTokenInput = {
   readonly store: UserTokenStore;
@@ -51,7 +61,8 @@ async function usableFromStore(store: UserTokenStore, now: Date): Promise<Usable
   try {
     current = await store.load();
   } catch {
-    return { kind: "needs-login" };
+    // **置き場の障害は、入り直しても直らない** (#214)
+    return { kind: "unavailable" };
   }
   if (isUsable(current, now)) {
     return { kind: "usable", accessToken: (current as UserTokens).accessToken };
@@ -64,7 +75,14 @@ export async function ensureUsableToken({
   refresh,
   now,
 }: EnsureUsableTokenInput): Promise<UsableToken> {
-  const saved = await store.load();
+  let saved: UserTokens | undefined;
+  try {
+    saved = await store.load();
+  } catch {
+    // **読めないことを「期限切れ」に化けさせない** (#214)——
+    // **入り直しても直らない**ので、そう案内させない
+    return { kind: "unavailable" };
+  }
   if (isUsable(saved, now)) {
     // `isUsable` が真なら `saved` は在る。**型の側でもそれを言う**
     return { kind: "usable", accessToken: (saved as UserTokens).accessToken };
@@ -98,7 +116,9 @@ export async function ensureUsableToken({
   try {
     await store.save(renewed);
   } catch {
-    return { kind: "needs-login" };
+    // **保存し損ねたまま「使える」とは言わない**のは変えない——
+    // **倒す先を「入り直し」から「いま出せない」へ移す** (#214)
+    return { kind: "unavailable" };
   }
   return { kind: "usable", accessToken: renewed.accessToken };
 }

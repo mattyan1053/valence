@@ -53,10 +53,17 @@ export async function listVisibleRepositories({
   }
 
   const usable = await ensure(store);
-  if (usable.kind === "needs-login") {
-    // **使えないトークンで叩きに行かない。** **症状が「権限が無い」と混ざる**
-    return { kind: "needs-login" };
+  switch (usable.kind) {
+    case "needs-login":
+      // **使えないトークンで叩きに行かない。** **症状が「権限が無い」と混ざる**
+      return { kind: "needs-login" };
+    case "unavailable":
+      // **開けたあとに落ちる経路も、開ける前と同じ行き先へ倒す** (#214)。
+      // **`kind` を並べて書くのは、次に増えたときここで型が落ちるため**
+      // ——**`if` 1 本だと、増えた `kind` が「使える」側へ流れる**
+      // （**トークンを持たないまま `list` を呼ぶ**）
+      return { kind: "unavailable" };
+    case "usable":
+      return { kind: "listed", listing: await repositories.list(usable.accessToken) };
   }
-
-  return { kind: "listed", listing: await repositories.list(usable.accessToken) };
 }

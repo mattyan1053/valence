@@ -72,6 +72,22 @@ describe("見られるリポジトリを画面へ渡す", () => {
     expect(listing.seen, "使えないトークンで叩きに行っている").toEqual([]);
   });
 
+  it("読み書きに失敗したときも、期限切れと区別する", async () => {
+    // **開けたあとに落ちる経路が残っていた** (#214)——**`ensure` の中で
+    // 置き場が読めなかった場合**である。**開ける前だけを見ていたので、
+    // ここは `needs-login` に化けていた**（**入り直しても直らない**）。
+    const listing = repositories();
+
+    const result = await listVisibleRepositories({
+      openStore: async () => ({}) as never,
+      ensure: async (): Promise<UsableToken> => ({ kind: "unavailable" }),
+      repositories: listing,
+    });
+
+    expect(result).toEqual({ kind: "unavailable" });
+    expect(listing.seen, "使えないトークンで叩きに行っている").toEqual([]);
+  });
+
   it("置き場を開けなかったら、期限切れと区別する", async () => {
     // **「開けなかった」を「1 件も見えない」に化けさせない**——
     // **静かに空を出すと、ログインしているのに何も見えない画面が正常に見える。**
