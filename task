@@ -289,10 +289,19 @@ cmd_db_up() { with_db_lock db_up; }
 # （**この Issue が塞ぎに来た状態が、恒久的に隠れる**）。
 # **起動の前後でスタックを見比べる**——**判定は `--unless` の側が持つ。**
 db_up() {
-  local before=""
-  before="$(./bin/db-config-drift stack-id)" || before=""
+  # **「停まっている」と「読めない」を潰さない** (#282 のレビュー 2 周目)。
+  # **`|| before=""` は両方を空にする**ので、**前だけ `docker ps` が落ちて後で復旧すると、
+  # 「already running」の成功のあとに、実在の ID が空文字と食い違って上書きする**
+  # ——**スクリプト側で塞いだ穴が、呼ぶ側から開く。**
+  local before="" seen=0
+  before="$(./bin/db-config-drift stack-id)" || seen=$?
   ensure_up
   supabase_cli pnpm supabase start
+  if ((seen > 1)); then
+    # **判定できないなら控えない**——**倒れる向きが安全**である（スクリプトと同じ判断）
+    echo "[WARN] 起動前のスタックを読めませんでした。設定は控えません" >&2
+    return 0
+  fi
   ./bin/db-config-drift record --unless "$before"
 }
 

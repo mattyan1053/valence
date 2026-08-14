@@ -150,10 +150,20 @@ value_of() {
 }
 
 # **値そのものは持たない。** **指紋だけ**を持つので、**記録にも出力にも値が出ない。**
+#
+# **`sha256sum` を使わない** (#282 のレビュー 2 周目)。**このスクリプトはホストで走る**
+# ので、**GNU coreutils を前提にすると、入っていない機械では `record` が exit 2 になり、
+# `set -euo pipefail` の下で `./task db:up` ごと落ちる**（`AGENTS.md` §2
+# 「ホストには何もインストールしない」。**#220 の `flock` と同じ形**）。
+# **`git` は既に必須**である（`./task` 自身が `git worktree` を使う。`workspace_port` が
+# 同じ理由で `git hash-object` を選んでいる）。
+#
+# **衝突は気にしない。** **見ているのは「同じかどうか」**で、**攻撃者が選ぶ入力ではない。**
 fingerprint() {
   local value="$1" digest
-  digest="$(printf '%s' "$value" | sha256sum)" || return 1
-  printf '%s' "${digest%% *}"
+  digest="$(printf '%s' "$value" | git hash-object --stdin)" || return 1
+  [[ -n $digest ]] || return 1
+  printf '%s' "$digest"
 }
 
 # **いまの `.env` から作る指紋の一覧。** `record` はこれを書き、`check` はこれと比べる。
@@ -268,11 +278,22 @@ while IFS=$'\t' read -r name print; do
 done <"$RECORD"
 
 drifted=()
+declare -A now=()
 while IFS=$'\t' read -r name print; do
   [[ -n $name ]] || continue
+  now["$name"]=1
   # **記録に無い変数は、起動より後に足された**ので、**そのコンテナには入っていない**
   [[ ${started[$name]-} == "$print" ]] || drifted+=("$name")
 done <<<"$prints"
+
+# **記録にだけ残っている名前も数える** (#282 のレビュー 2 周目)。
+# **`config.toml` から `env(...)` を消した／コメントアウトした**とき、
+# **走っているコンテナには、消したはずの設定が生きたまま**である——
+# **いまの名前だけを走査すると、その差分が丸ごと落ちて「一致」と答える**
+# （**この Issue が塞ぎに来た形そのもの**）。
+for name in "${!started[@]}"; do
+  [[ -z ${now[$name]-} ]] && drifted+=("$name")
+done
 
 ((${#drifted[@]} > 0)) || exit 0
 

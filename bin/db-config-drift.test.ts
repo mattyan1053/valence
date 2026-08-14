@@ -70,7 +70,11 @@ describe("bin/db-config-drift", () => {
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     path = join(repo, "path");
     mkdirSync(path, { recursive: true });
-    for (const command of ["bash", "git", "sha256sum", "grep", "cat", "rm", "mv"]) {
+    // **`sha256sum` は置かない** (#282 のレビュー 2 周目)。**このスクリプトはホストで走る**
+    // ので、**GNU coreutils を前提にすると `./task db:up` ごと落ちる**（`AGENTS.md` §2。
+    // #220 の `flock` と同じ形）——**指紋は `git hash-object` で取る**（`git` は既に必須）。
+    // **一覧から外すことが、そのまま試験になっている**（要れば全部が落ちる）
+    for (const command of ["bash", "git", "grep", "cat", "rm", "mv"]) {
       const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
       if (found !== "") {
         spawnSync("ln", ["-s", found, join(path, command)]);
@@ -249,9 +253,83 @@ describe("bin/db-config-drift", () => {
     expect(run("stack-id").status, "別プロジェクトを自分のものと答えている").toBe(1);
   });
 
+  it("記録にだけ残っている変数も、食い違いとして数える", () => {
+    // **`config.toml` から `env(...)` を消した／コメントアウトした**とき、
+    // **走っているコンテナには消したはずの設定が生きたまま**である
+    // ——**いまの名前だけを走査すると、記録にしか無い名前が差分から落ちる**
+    run("record");
+    writeFileSync(
+      join(repo, "supabase", "config.toml"),
+      ['project_id = "valence"', "[auth.external.github]", ""].join("\n"),
+    );
+
+    const checked = run("check");
+
+    expect(checked.status).toBe(1);
+    expect(checked.stdout).toContain("GITHUB_APP_CLIENT_ID");
+  });
+
   it("使い方の誤りは 2 で落ちる", () => {
     expect(run("").status).toBe(2);
     expect(run("checkk").status).toBe(2);
+  });
+
+  /**
+   * `db:up` を、**本物の `task` の関数として**走らせる。
+   *
+   * **`task` を写経しない。** **写した側だけが古くなる**ので、**実物をコピーして
+   * `source` し、外から見えるところ（`bin/db-config-drift` の呼ばれ方）だけを見る。**
+   */
+  function runDbUp(stackId: { out: string; status: number }): string {
+    const box = join(repo, "box");
+    mkdirSync(join(box, "bin"), { recursive: true });
+    writeFileSync(join(box, "task"), readFileSync(join(REPO_ROOT, "task"), "utf8"), {
+      mode: 0o755,
+    });
+    const log = join(box, "calls.log");
+    writeFileSync(
+      join(box, "bin", "db-config-drift"),
+      [
+        "#!/usr/bin/env bash",
+        `printf '%s\\n' "$*" >>${JSON.stringify(log)}`,
+        'if [[ $1 == "stack-id" ]]; then',
+        `  printf '%s' ${JSON.stringify(stackId.out)}`,
+        `  exit ${stackId.status}`,
+        "fi",
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(log, "");
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        // **起動そのものは差し替える。** **実物のコンテナへは触らない**（§5）
+        `source ./task >/dev/null 2>&1; ensure_up() { :; }; supabase_cli() { :; }; db_up`,
+      ],
+      { cwd: box, encoding: "utf8", timeout: 20_000 },
+    );
+    expect(result.status, `db_up が落ちた: ${result.stderr}`).toBe(0);
+    return readFileSync(log, "utf8");
+  }
+
+  it("db:up は、起動前のスタックを見て record へ渡す", () => {
+    expect(runDbUp({ out: "c1", status: 0 })).toContain("record --unless c1");
+  });
+
+  it("db:up は、停まっていたことも record へ渡す", () => {
+    // **停まっていた**＝**この `supabase start` が本当に起動した**ので、控えてよい
+    expect(runDbUp({ out: "", status: 1 })).toContain("record --unless");
+  });
+
+  it("db:up は、起動前を読めなかったら控えさせない", () => {
+    // **これが本題** (#282 のレビュー 2 周目)。**`stack-id` は「停まっている」(1) と
+    // 「読めない」(2) を分けている**のに、**呼ぶ側が両方を空文字へ潰す**と、
+    // **前だけ `docker ps` が落ちて後で復旧したとき**、**「already running」の成功のあとに
+    // 実在の ID が空文字と食い違い、`record` が上書きする**——
+    // **スクリプト側で塞いだ穴が、呼ぶ側から開く。**
+    expect(runDbUp({ out: "", status: 2 })).not.toContain("record");
   });
 
   it("./task が、毎回通る場所で check を、db:up で record を通す", () => {
