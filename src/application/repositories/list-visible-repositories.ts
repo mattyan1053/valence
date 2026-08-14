@@ -18,6 +18,11 @@ export type VisibleRepositoriesResult =
   | { readonly kind: "signed-out" }
   /** 失効していて、更新もできなかった。**入口へ戻す。** */
   | { readonly kind: "needs-login" }
+  /**
+   * **置き場を開けなかった** (#213 のレビュー)。**期限切れと分ける**——
+   * **入り直しても直らない故障**を、**認証切れとして隠さない。**
+   */
+  | { readonly kind: "unavailable" }
   | { readonly kind: "listed"; readonly listing: VisibleRepositoryListing };
 
 export type ListVisibleRepositoriesInput = {
@@ -39,8 +44,9 @@ export async function listVisibleRepositories({
   try {
     store = await openStore();
   } catch {
-    // **開けなかったことを「見えない」に化けさせない。** **入口へ戻す**
-    return { kind: "needs-login" };
+    // **開けなかったことを「見えない」にも「期限切れ」にも化けさせない。**
+    // **入り直しても直らない**ので、**そう案内しない**
+    return { kind: "unavailable" };
   }
   if (store === undefined) {
     return { kind: "signed-out" };

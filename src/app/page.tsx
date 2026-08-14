@@ -59,10 +59,15 @@ export default async function Home() {
         <p className="text-sm">
           {result.kind === "signed-out"
             ? "GitHub でログインすると、見られるリポジトリが並びます。"
-            : "ログインの期限が切れました。入り直してください。"}{" "}
-          <a className="underline" href="/auth/login">
-            ログインへ
-          </a>
+            : result.kind === "unavailable"
+              ? // **入り直しても直らない。** **再ログインへ案内すると、故障を認証切れとして隠す**
+                "いま取得できませんでした。しばらくしてから読み込み直してください。"
+              : "ログインの期限が切れました。入り直してください。"}{" "}
+          {result.kind === "unavailable" ? undefined : (
+            <a className="underline" href="/auth/login">
+              ログインへ
+            </a>
+          )}
         </p>
       )}
     </main>

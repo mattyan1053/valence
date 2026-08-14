@@ -72,9 +72,12 @@ describe("見られるリポジトリを画面へ渡す", () => {
     expect(listing.seen, "使えないトークンで叩きに行っている").toEqual([]);
   });
 
-  it("置き場を開けなかったら、ログインへ戻す", async () => {
+  it("置き場を開けなかったら、期限切れと区別する", async () => {
     // **「開けなかった」を「1 件も見えない」に化けさせない**——
-    // **静かに空を出すと、ログインしているのに何も見えない画面が正常に見える**
+    // **静かに空を出すと、ログインしているのに何も見えない画面が正常に見える。**
+    //
+    // **再ログインへ案内しない** (#213 のレビュー)——**置き場の障害は入り直しても
+    // 直らない**ので、**「期限が切れました」と出すと、直らない故障を認証切れとして隠す。**
     const listing = repositories();
 
     const result = await listVisibleRepositories({
@@ -85,7 +88,7 @@ describe("見られるリポジトリを画面へ渡す", () => {
       repositories: listing,
     });
 
-    expect(result).toEqual({ kind: "needs-login" });
+    expect(result).toEqual({ kind: "unavailable" });
     expect(listing.seen).toEqual([]);
   });
 });
