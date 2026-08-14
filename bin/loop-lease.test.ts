@@ -262,6 +262,83 @@ describe("bin/loop-lease", () => {
     expect(run(["release", "worker", stale]).status).toBe(1);
   });
 
+  describe("check の案内は、そのまま貼れる", () => {
+    // **踏むのはいちばん困っているとき**である（**入口を飛ばした周回**）。
+    // **場所取り (`<役>`) をそのまま出すと、bash がリダイレクトとして読み、
+    // `loop-lease` 自体が走らない**——**usage で落ちるより分かりにくい** (#257 のレビュー)。
+    //
+    // **表示された文字列を、置き換えずに bash へ通す。** **argv へ組み立て直すと、
+    // 「貼れない」が検査の外に出る**——**前の版はそこを隠していた。**
+
+    /** 案内に出てくる行を、表示されたまま取り出す。 */
+    function suggested(stderr: string): string[] {
+      const lines = stderr
+        .split("\n")
+        .map((row) => row.trim())
+        .filter((row) => row.startsWith("bin/loop-lease acquire"));
+      expect(lines.length, `案内が出ていない: ${stderr}`).toBeGreaterThan(0);
+      return lines;
+    }
+
+    /** **貼る。** cwd は使い捨てのリポジトリで、スクリプトは実物を指す。 */
+    function paste(line: string): Run {
+      const result = spawnSync("bash", ["-c", line.replace(/^bin\/loop-lease/, SCRIPT)], {
+        cwd: sandbox,
+        encoding: "utf8",
+        env: { ...process.env },
+      });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
+
+    it("貼っても構文で壊れず、スクリプトまで届く", () => {
+      // **`<役>` を出していた版はここで落ちる**（`syntax error near unexpected token`）。
+      // **bash の構文エラーも usage も終了コードは 2** なので、**番号では分けない**
+      // ——**「走ったか」は、スクリプトの出力が返っているかで見る。**
+      for (const line of suggested(run(["check"]).stderr)) {
+        const pasted = paste(line);
+
+        expect(pasted.stderr, `貼ると壊れる: ${line}`).not.toMatch(/syntax error/);
+        // **答えは「印が違う」で構わない**（場所取りを埋めていないので当然である）
+        // ——**見たいのは「スクリプトが答えたか」**であって、通ったかではない
+        expect(pasted.stderr, `スクリプトまで届いていない: ${line}`).toMatch(/^(\[NG\]|使い方:)/m);
+      }
+    });
+
+    it("印は実値で埋めない", () => {
+      // **印は「読んだ側が申告する」ことに意味がある** (#243。#257 のレビュー)。
+      // **ディスクから計算して渡すと突き合わせは必ず一致し、古い手順書で
+      // 走っている周回がそのまま取れてしまう**——**この案内が出るのは、
+      // まさにその周回**である。
+      const stamp = stampFor("worker");
+
+      for (const line of suggested(run(["check"]).stderr)) {
+        expect(line, `印を実値で埋めている: ${line}`).not.toContain(stamp);
+        expect(line, `埋める場所が無い: ${line}`).toMatch(/"<[^"]*印[^"]*>"/);
+      }
+    });
+
+    it("何が起きたのかを、印を付けて言う", () => {
+      // **このスクリプトは `[FAIL]` / `[WARN]` / `[NG]` で状態を告げる。**
+      // **印が無いと、出力を印で拾う読み手からは一件も見えない** (#257 のレビュー)。
+      // **案内だけが残ると、先頭は空白で始まる「いま取り直してください」**になり、
+      // **何が起きたのかを言う行が無くなる。**
+      const advice = run(["check"]);
+
+      expect(advice.stderr, "持っていないことを告げる行が無い").toMatch(
+        /^\[WARN\].*lease を持っていません/m,
+      );
+    });
+
+    it("役の両方を出す（ここでは役が分からない）", () => {
+      // **この検査は役を受け取らない。** **片方だけ出すと、もう片方の周回は
+      // 自分で組み立てることになる**——**その組み立てが、いま直している当のもの**
+      const lines = suggested(run(["check"]).stderr);
+
+      expect(lines.some((line) => line.includes(" worker "))).toBe(true);
+      expect(lines.some((line) => line.includes(" master "))).toBe(true);
+    });
+  });
+
   describe("held — 周回が lease を持っているか", () => {
     // **入口は散文の指示のままだった。** 「冒頭で呼べ」と書いてあるだけなので、
     // **呼ばずに進める**——実際に飛ばした（通知で始めた周回で 2 回中 2 回）。
