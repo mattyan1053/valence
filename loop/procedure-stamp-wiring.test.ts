@@ -293,10 +293,22 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
     // 対象つきを打ち**、**マージのあとに消すべきほかの記録が残る。**
     //
     // **参照をやめれば、次に 1.1 が変わっても壊れない**（AGENTS.md §5）。
+    // **範囲を絞る**（#272 のレビュー）。**1.1 にも「全部消すと」がある**ので、
+    // **手順書全体で見ると、マージ後の経路から指示を消しても通ってしまう。**
     const body = readFileSync(join(REPO_ROOT, ".claude/commands/loop-master.md"), "utf8");
+    // **1.1 と同じ錨は使えない**——**`bin/loop-procedure-changed --role` は
+    // 1.1 にも 3.1 にもあり、`indexOf` は 1.1 を先に見つける。**
+    // **切り方も `\n### `**（`\n## ` だと次の `## 4.` まで飲み込む）。
+    const from = body.indexOf("### exit 0 — マージする");
+    expect(from, "マージの節が見つからない").toBeGreaterThanOrEqual(0);
+    const section = body.slice(from).split("\n### ")[0] ?? "";
 
     expect(body, "参照の言い回しが残っている").not.toMatch(/捨てるなら 1\.1 と同じ/);
-    expect(body, "その場でしていることが書いていない").toMatch(/全部消す/);
+    // **語形まで合わせる。** **全体で見ていたときは、1.1 の「全部消すと」に
+    // 当たって通っていた**——**節を絞ると、この経路には 1 文字も無いことが出る。**
+    expect(section, "その場でしていることが書いていない").toMatch(/カウンタを全部消して/);
+    // **対象なしであること**——**対象つきを打つと、消すべき記録が残る**
+    expect(section, "対象なしの --reset が書いていない").toMatch(/bin\/loop-stall --reset(?![ -])/);
   });
 
   it("止まる先が、識別子の一覧にある", () => {
