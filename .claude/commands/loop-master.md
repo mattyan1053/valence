@@ -1,4 +1,4 @@
-<!-- 版: bb63eaff049d -->
+<!-- 版: b75a7f5eca12 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -1236,12 +1236,18 @@ bin/loop-claim audit
 bin/loop-claim idle
 ```
 
-- **exit 0** → **着手からの経過が長いのに、実装が出ていない Issue が並ぶ**
-  （`<Issue番号><TAB><着手からの秒数>`）。**並んだ Issue ごとに 1 回ずつ**
-  `bin/loop-stall "implementation-stalled:<Issue番号>"` を通す
+- **exit 0** → **種別ごとに 1 行ずつ並ぶ。行ごとに 1 回積む**
+  - `stalled<TAB><Issue番号><TAB><着手からの秒数>` → **実装が出ていない。**
+    `bin/loop-stall "implementation-stalled:<Issue番号>"` を通す
+  - `unowned<TAB><Issue番号>` → **着手中なのに、誰が取ったかの記録が無い**
+    （`take` が label を付けた直後に落ちた形）。
+    `bin/loop-stall "claim-record-missing:<Issue番号>"` を通す
 - **exit 1** → 無い。**実装は出ている / まだ早い**
 - **exit 2** → 判定できない。**「0 件」と読まない**——
   `bin/loop-stall issue-lookup-failed` を通して終わる
+
+**種別を混ぜない。** **原因が違い、人が次にやることも違う**——**前者は尽きた worker を見る**、
+**後者は持ち主のいない着手を戻す**（`head-moved` と `head-lookup-failed` を分けたのと同じ）。
 
 **判定を写さない。** **どれくらい経ったら「出ていない」か**も、**`blocked` と
 「閉じる open PR がある Issue」を外すこと**も `bin/loop-claim` が持っている——

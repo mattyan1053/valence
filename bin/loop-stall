@@ -55,6 +55,15 @@ readonly STOP_IDS=(
   # **Issue 番号を入れる。** **変われば前へ進んだ**ことを表す（時刻のように毎回
   # 変わる値ではない）。
   "implementation-stalled:<Issue番号>|master: 着手したまま実装が出ていない (worker が尽きた / 落ちた)"
+  # **着手中なのに、誰が取ったかの記録が無い状態** (#281 のレビュー)。**`take` は
+  # label を先に付ける**ので、**その間に落ちれば必ずこうなる**（`write_record` の
+  # 失敗も同じ）。**上と分ける**——**原因が違い、人が次にやることも違う**
+  # （**尽きた worker を見る**のか、**持ち主のいない着手を戻す**のか）。
+  #
+  # **測れないことを、健全と同じ出口にしない。** 名前が無いと、**この状態は
+  # 「実装は出ている / まだ早い」と同じ答えになる**（`head-lookup-failed` を
+  # `head-moved` と分けたのと同じ理由）。
+  "claim-record-missing:<Issue番号>|master: 着手中なのに着手の記録が無い (take が途中で落ちた)"
   "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
   "too-many-ready:<件数>|両方: ready の Issue が 3 件以上ある (上限は 2 件)"
   "procedure-stale|両方: 配られた手順書がディスクより古い (呼び直しても直らなかった)"

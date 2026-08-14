@@ -980,22 +980,20 @@ describe("bin/loop-claim", () => {
 
     const NOW = Math.floor(Date.now() / 1000);
 
-    /** 記録を置く。**`taken` を省くと、前の書式（2 列）になる。** */
+    /** 記録を置く。**`taken` を省くと、前の書式（1 行だけ）になる。** */
     function writeClaim(
       number: number,
       options: { touched: number; taken?: number; owner?: string },
     ): void {
-      const fields = [options.owner ?? repo, String(options.touched)];
-      if (options.taken !== undefined) {
-        fields.push(String(options.taken));
-      }
-      writeFileSync(join(repo, ".git", `valence-loop-claim-${number}`), `${fields.join("\t")}\n`);
+      const head = `${options.owner ?? repo}\t${options.touched}\n`;
+      const tail = options.taken === undefined ? "" : `${options.taken}\n`;
+      writeFileSync(join(repo, ".git", `valence-loop-claim-${number}`), `${head}${tail}`);
     }
 
-    function claimFields(number: number): string[] {
+    function claimLines(number: number): string[] {
       return readFileSync(join(repo, ".git", `valence-loop-claim-${number}`), "utf8")
         .trimEnd()
-        .split("\t");
+        .split("\n");
     }
 
     it("着手から長く経っても実装が出ていない Issue を並べる", () => {
@@ -1005,7 +1003,13 @@ describe("bin/loop-claim", () => {
       const idle = run(["idle"]);
 
       expect(idle.status).toBe(0);
-      expect(idle.stdout).toContain("264");
+      // **種別を出す。** **「実装が出ていない」と「測れない」は原因が違う**ので、
+      // **積む識別子も違う**——**呼ぶ側が読み分けられる形で返す**
+      // **秒数は進む。** **時刻そのものを固定できる場所ではない**ので、
+      // **種別と番号を突き合わせ、経過は「閾値を超えている」だけを見る**
+      const [kind, number, elapsed] = (idle.stdout.split("\n")[0] ?? "").split("\t");
+      expect([kind, number]).toEqual(["stalled", "264"]);
+      expect(Number(elapsed)).toBeGreaterThanOrEqual(9000);
     });
 
     it("着手して間もない Issue は並べない", () => {
@@ -1051,20 +1055,27 @@ describe("bin/loop-claim", () => {
 
       expect(run(["resume", "264"]).status).toBe(0);
 
-      const resumed = claimFields(264);
-      expect(Number(resumed[1]), "触った時刻は新しくなる").toBeGreaterThan(NOW - 60);
+      const resumed = claimLines(264);
+      expect(Number(resumed[0]?.split("\t")[1]), "触った時刻は新しくなる").toBeGreaterThan(
+        NOW - 60,
+      );
       expect(run(["idle"]).status).toBe(0);
     });
 
-    it("take は着手した時刻を残す", () => {
+    it("take は着手した時刻を、次の行に残す", () => {
       // **足す場所を決めたのがこの Issue である。** 残さなければ、どこにも測る値が無い
       withGh({ labels: ["ready"], viewDelay: "0" });
 
       expect(run(["take", "264"]).status).toBe(0);
 
-      const fields = claimFields(264);
-      expect(fields).toHaveLength(3);
-      expect(Number(fields[2])).toBeGreaterThan(NOW - 60);
+      const lines = claimLines(264);
+      // **1 行目を増やさない。** **記録は版をまたいで共有される**——**前の版は
+      // `read` で 1 行目だけを読み、2 列目が数字でなければ「読めません」で
+      // exit 2**（実測。#281 の周回が、自分で書いた記録を main の版で読めなかった）。
+      // **止まるのは判定できないほうへ倒れた経路すべて**（`pr` / `resume` / `audit`）で、
+      // **その PR が自分自身で詰む**（#262 と同じ形）。
+      expect(lines[0]?.split("\t")).toHaveLength(2);
+      expect(Number(lines[1])).toBeGreaterThan(NOW - 60);
     });
 
     it("前の書式で書かれた記録は、触った時刻から数える", () => {
@@ -1082,14 +1093,22 @@ describe("bin/loop-claim", () => {
       expect(run(["idle"]).status).toBe(1);
     });
 
-    it("記録が無い Issue は、測れないと言って並べない", () => {
-      // **黙って飛ばさない。** 測れないものがあることは、出力にだけ残る
+    it("着手中なのに記録が無い Issue を、健全と同じ出口にしない", () => {
+      // **これが壊れた状態そのものである** (#281 のレビュー)。**`take` は label を
+      // 先に付ける**ので、**その間に落ちれば「`in-progress` なのに記録が無い」**
+      // ——**`write_record` が失敗した場合も同じ**。**この Issue が捕まえたい状態**である。
+      //
+      // **飛ばすと exit 1 になり、手順書は「無い」と読む**——**測れないことが、
+      // 健全と同じ答えになる**（**この PR 自身が 2 度書いている原則に反する**）。
+      //
+      // **`stalled` と混ぜない。** **原因が違い、人が次にやることも違う**
+      // （**尽きた worker を見る**のか、**持ち主のいない着手を戻す**のか）。
       withIdle({ inProgress: [{ number: 264 }] });
 
       const idle = run(["idle"]);
 
-      expect(idle.status).toBe(1);
-      expect(idle.stderr).toContain("264");
+      expect(idle.status).toBe(0);
+      expect(idle.stdout.split("\n")[0]).toBe(`unowned\t264`);
     });
 
     it("着手中の一覧を読めなければ 2 で落ちる", () => {
