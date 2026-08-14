@@ -128,6 +128,26 @@ describe("Supabase のユーザートークン置き場", () => {
     expect(headers.prefer).toBe("resolution=merge-duplicates");
   });
 
+  it("消すときも、自分の行だけを狙う", async () => {
+    const { store, calls } = storeWith(() => new Response(null, { status: 204 }));
+    await store.clear();
+    expect(calls[0]?.init.method).toBe("DELETE");
+    expect(calls[0]?.url).toContain(`user_id=eq.${USER_ID}`);
+  });
+
+  it("消す行が無くても成功にする", async () => {
+    // **ログアウトは何度でも押せる。** 2 度目を失敗にすると、
+    // **「消えていない」と読めてしまう。**
+    const { store } = storeWith(() => new Response(null, { status: 204 }));
+    await expect(store.clear()).resolves.toBeUndefined();
+  });
+
+  it("消せなかったら投げる", async () => {
+    // **黙って成功にすると、「消えた」と思ったまま残る。**
+    const { store } = storeWith(() => jsonResponse({ message: "だめ" }, 403));
+    await expect(store.clear()).rejects.toThrow(/削除できません \(HTTP 403\)/);
+  });
+
   it("保存が失敗したら投げる", async () => {
     const { store } = storeWith(() => jsonResponse({ message: "だめ" }, 403));
     await expect(store.save(TOKENS)).rejects.toThrow(/保存できません \(HTTP 403\)/);
