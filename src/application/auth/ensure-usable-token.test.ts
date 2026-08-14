@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { UserTokens } from "../ports/user-token-store";
+import type { UserTokenStore, UserTokens } from "../ports/user-token-store";
 import { ensureUsableToken } from "./ensure-usable-token";
 
 /**
@@ -163,8 +163,9 @@ describe("使えるトークンを用意する", () => {
     expect(result).toEqual({ kind: "needs-login" });
   });
 
-  it("読み直しに失敗したら、再ログインへ戻す", async () => {
-    // **読めないことを「使える」へ倒さない**
+  it("読み直しに失敗したら、いま出せないと言う", async () => {
+    // **読めないことを「使える」へ倒さない。** **倒す先は「入り直し」ではない**
+    // ——**置き場が読めないのは、入り直しても直らない** (#214)
     let loads = 0;
     const store = {
       async load() {
@@ -188,7 +189,7 @@ describe("使えるトークンを用意する", () => {
       now: at(1),
     });
 
-    expect(result).toEqual({ kind: "needs-login" });
+    expect(result).toEqual({ kind: "unavailable" });
   });
 
   it("そもそも保存されていなければ、再ログインへ戻す", async () => {
@@ -233,6 +234,61 @@ describe("使えるトークンを用意する", () => {
       now: at(1),
     });
 
-    expect(result).toEqual({ kind: "needs-login" });
+    expect(result).toEqual({ kind: "unavailable" });
+  });
+});
+
+describe("置き場の障害を、期限切れと分ける", () => {
+  // **#214 の 3 つ目。** **`needs-login` が 3 つの別物を運んでいた**——
+  // **「入り直せば直る」「入り直さなくても直る」「入り直しても直らない」**が
+  // **同じ 1 つの値**だった。**置き場の障害は、入り直しても直らない。**
+
+  it("読めなかったら unavailable（needs-login ではない）", async () => {
+    const store: UserTokenStore = {
+      load: async () => {
+        throw new Error("置き場が落ちている");
+      },
+      save: async () => undefined,
+      clear: async () => undefined,
+    };
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: async () => {
+        throw new Error("呼ばれてはいけない");
+      },
+      now: new Date(),
+    });
+
+    expect(result).toEqual({ kind: "unavailable" });
+  });
+
+  it("保存できなかったら unavailable", async () => {
+    // **保存し損ねたまま「使える」とは言わない**のは変えない——
+    // **倒す先を「入り直し」から「いま出せない」へ移すだけ**である
+    const saved = {
+      accessToken: "old",
+      refreshToken: "r",
+      expiresAt: new Date("2020-01-01T00:00:00.000Z"),
+    };
+    const store: UserTokenStore = {
+      load: async () => saved,
+      save: async () => {
+        throw new Error("書けない");
+      },
+      clear: async () => undefined,
+    };
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: async () => ({
+        accessToken: "new",
+        refreshToken: "r2",
+        expiresAt: new Date("2999-01-01T00:00:00.000Z"),
+      }),
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    expect(result).toEqual({ kind: "unavailable" });
   });
 });
