@@ -187,9 +187,7 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
       const section = staleSection();
 
       expect(section, "枝へ入る手が書いていない").toContain("gh pr checkout --detach");
-      expect(section, "入ったあとに取り直すことが書いていない").toMatch(
-        /bin\/loop-lease acquire worker/,
-      );
+      expect(section, "入る前に PR を取っていない").toContain("bin/loop-claim pr");
     });
 
     it("素通りではないと書いてある（揃わなければ、また止まる）", () => {
@@ -207,13 +205,42 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
       expect(staleSection(), "同期で枝から降ろされることに触れていない").toContain("--fetch-only");
     });
 
-    it("走っている周回があるなら、木を触らないと書いてある", () => {
-      // **ここは lease を持っていない**（取れなかったから来ている）。
-      // **確かめずに checkout すると、走っている周回の足元から木を抜く**——
-      // **#68 の形**である
-      expect(staleSection(), "走っている周回を確かめていない").toMatch(
-        /bin\/loop-lease (held|busy) worker/,
+    it("木を触る前に、原子的に押さえると書いてある", () => {
+      // **読むだけの確認では足りない**（#268 のレビュー）。**`held` を見てから
+      // `gh pr checkout` を打つまでの間に、別の周回が普通の `acquire` を通せる**——
+      // **その直後に checkout すると、走っている周回の HEAD と作業ツリーを入れ替える**
+      // （#68 の形）。**確かめて空けたままにせず、その場で決着させる。**
+      const section = staleSection();
+
+      expect(section, "原子的に押さえていない").toContain("bin/loop-lease recover worker");
+      expect(section, "読むだけの確認に戻っている").not.toContain("bin/loop-lease held worker");
+    });
+
+    it("押さえたあと、揃ったかを確かめると書いてある", () => {
+      // **押さえることは、進んでよいという意味ではない。**
+      // **判定は `bin/loop-procedure-stamp` が 1 箇所で持つ**
+      expect(staleSection(), "揃ったかを確かめていない").toContain(
+        "bin/loop-procedure-stamp worker",
       );
+    });
+
+    it("揃わなかったら、押さえたぶんを返すと書いてある", () => {
+      // **返さずに終わると、この作業場は期限が切れるまで動けない**——
+      // **入れた道が、次の周回を閉じ込める**
+      expect(staleSection(), "押さえたぶんを返していない").toContain(
+        "bin/loop-lease release worker",
+      );
+    });
+
+    it("比較先を空にしない、と書いてある", () => {
+      // **`--fetch-only` は SHA を出さない**（#268 のレビュー）。**空のまま渡すと、
+      // `${2:-HEAD}` で HEAD に既定されて「HEAD と HEAD を比べる」になる**——
+      // **答えは正しいが、比べていない。** **黙って既定に落ちる形を残さない。**
+      const section = staleSection();
+      const fetchOnly = section.indexOf("--fetch-only");
+
+      expect(fetchOnly, "--fetch-only に触れていない").toBeGreaterThanOrEqual(0);
+      expect(section.slice(fetchOnly), "比較先を明示していない").toContain("git rev-parse HEAD");
     });
   });
 

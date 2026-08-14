@@ -55,6 +55,7 @@ readonly RECENT_ROUNDS=5
 
 usage() {
   echo "使い方: bin/loop-lease acquire <役> <手順書の印>" >&2
+  echo "        bin/loop-lease recover <役> <手順書の印>  印がずれた周回が、木を入れ替える前に押さえる" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
   echo "        bin/loop-lease held <役>        その役を誰かが持っているか（読むだけ）" >&2
   echo "        bin/loop-lease check            この周回が持っていなければ言って記録する（止めない）" >&2
@@ -645,6 +646,34 @@ if [[ $ACTION == "acquire" ]]; then
   esac
 fi
 
+# **回復のために押さえる** (#268 のレビュー)。
+#
+# **読むだけの確認では足りない。** **`held` を見てから `gh pr checkout` を打つまでの間に、
+# 別の周回が普通の `acquire` を通せる**——**その直後に checkout すると、走っている周回の
+# HEAD と作業ツリーを入れ替える**（#68 の形）。**確かめて空けたままにせず、その場で決着させる。**
+#
+# **素通りの口にはしない。** **印が揃っているならここは使えない**（exit 3）——
+# **回復は「ずれている」状態のためだけのもの**である。
+#
+# **押さえることは、進んでよいという意味ではない。** **揃ったかどうかは、checkout した
+# あとに `bin/loop-procedure-stamp` で確かめる**（判定はそこ 1 箇所が持つ。ここには写さない）。
+if [[ $ACTION == "recover" ]]; then
+  [[ $# -eq 3 ]] || usage
+  probe="$("${BASH_SOURCE[0]%/*}/loop-procedure-stamp" "$ROLE" "$3" 2>&1)"
+  case "$?" in
+    0)
+      echo "[NG] 印は揃っています。回復ではなく acquire を使ってください" >&2
+      exit 3
+      ;;
+    1) ;; # ずれている。ここの出番である
+    *)
+      printf '%s\n' "$probe" >&2
+      echo "[FAIL] 手順書の版を確かめられません。この周回は何もしません" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 set_role_paths "$ROLE" || exit 2
 lock_state || exit 2
 if [[ $ACTION == "held" ]]; then
@@ -662,9 +691,12 @@ held)
   [[ $# -eq 2 ]] || usage
   [[ -n $held_token ]] || exit 1
   ;;
-acquire)
+acquire | recover)
   # **引数の数は、上の入口で見ている**（印を受けるところ）。**ここには届かない**
   # ので置かない——**残すと、上を外す変異が赤くならない**（#243 のレビュー）。
+  #
+  # **`recover` も同じ口から取る** (#268 のレビュー)。**違うのは入口の条件だけ**で、
+  # **押さえ方・token・返し方は 1 つ**である（**2 箇所に持つと片方だけ直して食い違う**）。
   if [[ -n $held_token ]]; then
     # **「走っている」と「返し忘れ」を、この 1 行で見分けられるようにする。**
     # 手順書は「何周も取れないなら返し忘れ」と読ませるが、**活動が見えないと
