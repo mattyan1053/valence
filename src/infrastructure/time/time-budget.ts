@@ -33,7 +33,12 @@ export type TimeBudgetOptions = {
 
 export function createTimeBudget({
   budgetMs,
-  now = () => Date.now(),
+  // **単調時計を使う。** **ここが取るのは時刻ではなく「差」**である——
+  // **壁時計（`Date.now()`）は前にも後ろにも飛ぶ**（NTP 補正・ホストの時刻変更）。
+  // **戻れば残りが増え、共有しているはずの上限を大きく超える**（**1 往復ずつ
+  // 置き場の制限まで待つ**）。**進めば、勝った側の保存を待たずに諦める。**
+  // **`Date.now()` へ戻さないこと。**
+  now = () => performance.now(),
 }: TimeBudgetOptions): TimeBudget {
   let startedAt: number | undefined;
 
