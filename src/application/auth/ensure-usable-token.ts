@@ -7,7 +7,8 @@
  * **止まった状態から出られるところまでを 1 組にする** (#184)。
  *
  *   失効した            → 更新して復帰する
- *   更新にも失敗した     → **再ログインへ戻す**（「何も見えない画面」で終わらせない）
+ *   更新に負けた         → **勝った側が保存するのを、限りのある回数だけ待つ** (#214)
+ *   それでも駄目だった   → **再ログインへ戻す**（「何も見えない画面」で終わらせない）
  *
  * **いまの時刻を引数で受ける。** **8 時間待たずに確かめられる**（#131 / #137）。
  */
@@ -25,9 +26,9 @@ export type RefreshUserTokens = (refreshToken: string) => Promise<UserTokens>;
 /**
  * 用意できたか、再ログインが要るか。
  *
- * **「使えない」を 1 つの形にまとめない。** 呼ぶ側が要るのは
- * **「この人を入口へ戻すかどうか」**だけなので、理由の別は持たせない——
- * **持たせると、呼ぶ側がそれぞれ分岐を書き、片方だけ古くなる。**
+ * **「使えない」を 1 つにまとめない** (#214)。**行き先が違う**——
+ * **入り直せば直るもの**と、**入り直しても直らないもの**を混ぜると、
+ * **直らない道へ人を送る。**
  */
 export type UsableToken =
   | { readonly kind: "usable"; readonly accessToken: string }
@@ -43,10 +44,22 @@ export type UsableToken =
    */
   | { readonly kind: "unavailable" };
 
+/**
+ * 負けた側が、**勝った側の保存を待つ間合い**。
+ *
+ * **`attempt` 回目の読み直しの前に呼ばれる。** **`false` を返したら打ち切る**——
+ * **待ちの長さも回数も、ここを渡す側が持つ**（**この関数は時間を知らない**）。
+ *
+ * **既定値を置かない。** **置くと、配線し忘れた呼び出しが「待たない」まま
+ * 静かに動く**——**症状は「たまに再ログインさせられる」**で、**再現できない。**
+ */
+export type WaitForWinnersSave = (attempt: number) => Promise<boolean>;
+
 export type EnsureUsableTokenInput = {
   readonly store: UserTokenStore;
   readonly refresh: RefreshUserTokens;
   readonly now: Date;
+  readonly waitForWinnersSave: WaitForWinnersSave;
 };
 
 /**
@@ -70,10 +83,45 @@ async function usableFromStore(store: UserTokenStore, now: Date): Promise<Usable
   return { kind: "needs-login" };
 }
 
+/**
+ * 勝った側の保存が現れるまで、**限りのある回数だけ読み直す** (#214)。
+ *
+ * **窓は `save` 1 回ぶん**（DB へ 1 往復）。**負けた側の失敗は GitHub へ 1 往復した
+ * あと**なので**普通は勝った側が先に終わっている**が、**順序は保証されていない。**
+ *
+ * **錠は採らない。** **本番はインスタンスが複数ある**ので、**プロセス内の錠は
+ * 別インスタンスの要求に効かない**——**効かない錠は、効いていることを
+ * 確かめられないぶん無いより悪い。**
+ *
+ * **倒す先は 2 つある。** **待たなければ、切れる必要が無かった人を入口へ送る。**
+ * **待ちすぎれば、画面が止まる**——**だから間合いは有限で、尽きたら諦める。**
+ *
+ * **`unavailable` は待たない。** **置き場が読めないのは、勝った側の保存とは
+ * 別の障害**である——**待っても現れない。**
+ */
+async function usableFromStoreEventually(
+  store: UserTokenStore,
+  now: Date,
+  waitForWinnersSave: WaitForWinnersSave,
+): Promise<UsableToken> {
+  let attempt = 0;
+  for (;;) {
+    const result = await usableFromStore(store, now);
+    if (result.kind !== "needs-login") {
+      return result;
+    }
+    attempt += 1;
+    if (!(await waitForWinnersSave(attempt))) {
+      return result;
+    }
+  }
+}
+
 export async function ensureUsableToken({
   store,
   refresh,
   now,
+  waitForWinnersSave,
 }: EnsureUsableTokenInput): Promise<UsableToken> {
   let saved: UserTokens | undefined;
   try {
@@ -107,7 +155,8 @@ export async function ensureUsableToken({
     // 確かめられないぶん無いより悪い。**
     //
     // **繰り返さない。** **`refresh` を呼び直すと、同じ競合をもう一度開く。**
-    return await usableFromStore(store, now);
+    // **待つのは保存のほうである** (#214)。
+    return await usableFromStoreEventually(store, now, waitForWinnersSave);
   }
 
   // **保存できなければ「使える」とは言わない。** **GitHub 側で refresh token は

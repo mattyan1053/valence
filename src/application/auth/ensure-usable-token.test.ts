@@ -49,6 +49,8 @@ describe("使えるトークンを用意する", () => {
         throw new Error("更新してはいけない");
       },
       now: at(0),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     }).then((result) => {
       expect(result).toEqual({ kind: "usable", accessToken: "fresh-access" });
       expect(store.calls, "使えるのに保存し直している").toHaveLength(0);
@@ -70,6 +72,8 @@ describe("使えるトークンを用意する", () => {
         return renewed;
       },
       now: at(1),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "usable", accessToken: "new-access" });
@@ -89,6 +93,8 @@ describe("使えるトークンを用意する", () => {
         throw new Error("refresh token が使えません");
       },
       now: at(1),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "needs-login" });
@@ -131,6 +137,8 @@ describe("使えるトークンを用意する", () => {
         throw new Error("refresh token は使用済みです");
       },
       now: at(1),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "usable", accessToken: "winner-access" });
@@ -158,6 +166,8 @@ describe("使えるトークンを用意する", () => {
         throw new Error("refresh token は使用済みです");
       },
       now: at(1),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "needs-login" });
@@ -187,6 +197,8 @@ describe("使えるトークンを用意する", () => {
         throw new Error("refresh token は使用済みです");
       },
       now: at(1),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "unavailable" });
@@ -204,6 +216,8 @@ describe("使えるトークンを用意する", () => {
         throw new Error("呼ばれてはいけない");
       },
       now: at(0),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "needs-login" });
@@ -232,6 +246,8 @@ describe("使えるトークンを用意する", () => {
         expiresAt: at(28800),
       }),
       now: at(1),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "unavailable" });
@@ -258,6 +274,8 @@ describe("置き場の障害を、期限切れと分ける", () => {
         throw new Error("呼ばれてはいけない");
       },
       now: new Date(),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "unavailable" });
@@ -287,8 +305,141 @@ describe("置き場の障害を、期限切れと分ける", () => {
         expiresAt: new Date("2999-01-01T00:00:00.000Z"),
       }),
       now: new Date("2026-01-01T00:00:00.000Z"),
+      // **既定値は無い。** **待たない、をこの試験が選んでいる**
+      waitForWinnersSave: async () => false,
     });
 
     expect(result).toEqual({ kind: "unavailable" });
+  });
+});
+
+describe("更新に負けた側は、勝った側の保存を待つ", () => {
+  // **#214 の 2 つ目。** **勝った側が `save` を終える前に負けた側が読み直すと、
+  // まだ古いものを読む**——**切れる必要が無かった人を、入口へ送っていた。**
+  //
+  // **時間の経過に依存させない**（#131 / #137）。**待つのは「間合い」を渡された
+  // ときだけ**で、**その間合いは試験が持つ**——**本物の時計を回さない。**
+
+  const at = (seconds: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, seconds));
+  const stale: UserTokens = {
+    accessToken: "stale-access",
+    refreshToken: "used-refresh",
+    expiresAt: at(0),
+  };
+  const winners: UserTokens = {
+    accessToken: "winners-access",
+    refreshToken: "winners-refresh",
+    expiresAt: at(3600),
+  };
+
+  /** 読むたびに違うものを返す置き場。**勝った側の `save` が遅れている様子。** */
+  function storeReturning(reads: (UserTokens | undefined)[]) {
+    let index = 0;
+    return {
+      count: () => index,
+      store: {
+        async load() {
+          const current = reads[Math.min(index, reads.length - 1)];
+          index += 1;
+          return current;
+        },
+        async save() {},
+        async clear() {},
+      } satisfies UserTokenStore,
+    };
+  }
+
+  /** 何回待てるかだけを持つ間合い。**時間は測らない。** */
+  function waits(times: number) {
+    const asked: number[] = [];
+    return {
+      asked,
+      wait: async (attempt: number) => {
+        asked.push(attempt);
+        return attempt <= times;
+      },
+    };
+  }
+
+  const lost = async () => {
+    throw new Error("refresh token は使用済みです");
+  };
+
+  it("勝った側が保存済みなら、待たない", async () => {
+    // **速い道を塞がない**——**普通はこちらである**
+    const { store } = storeReturning([stale, winners]);
+    const { asked, wait } = waits(3);
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: lost,
+      now: at(1),
+      waitForWinnersSave: wait,
+    });
+
+    expect(result).toEqual({ kind: "usable", accessToken: "winners-access" });
+    expect(asked, "待つ必要が無いのに待っている").toEqual([]);
+  });
+
+  it("保存が遅れていても、現れたら使える", async () => {
+    // **これが #214 の 2 つ目そのもの**——**待たなければ `needs-login` になっていた**
+    const { store } = storeReturning([stale, stale, stale, winners]);
+    const { asked, wait } = waits(3);
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: lost,
+      now: at(1),
+      waitForWinnersSave: wait,
+    });
+
+    expect(result).toEqual({ kind: "usable", accessToken: "winners-access" });
+    expect(asked, "待った回数が合わない").toEqual([1, 2]);
+  });
+
+  it("現れなければ、いつまでも待たない", async () => {
+    // **倒す先は 2 つある**——**待ちすぎて画面が止まらない。**
+    // **打ち切ったあとは入り直してもらう**（**使い切った refresh token しか無い**）
+    const { store, count } = storeReturning([stale]);
+    const { asked, wait } = waits(2);
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: lost,
+      now: at(1),
+      waitForWinnersSave: wait,
+    });
+
+    expect(result).toEqual({ kind: "needs-login" });
+    expect(asked, "打ち切りが効いていない").toEqual([1, 2, 3]);
+    // **最初の 1 回 + 読み直し 3 回**（**間合いが尽きた時点で止まる**）
+    expect(count()).toBe(4);
+  });
+
+  it("待っている間に置き場が落ちたら、期限切れと分けたまま返す", async () => {
+    // **1 本目で分けたものを、ここで混ぜ直さない**
+    let reads = 0;
+    const store: UserTokenStore = {
+      async load() {
+        reads += 1;
+        if (reads === 1) {
+          return stale;
+        }
+        throw new Error("読めません");
+      },
+      async save() {},
+      async clear() {},
+    };
+    const { asked, wait } = waits(3);
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: lost,
+      now: at(1),
+      waitForWinnersSave: wait,
+    });
+
+    expect(result).toEqual({ kind: "unavailable" });
+    expect(asked, "読めない置き場を待ち続けている").toEqual([]);
   });
 });
