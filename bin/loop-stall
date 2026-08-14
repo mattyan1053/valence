@@ -136,7 +136,8 @@ readonly WORKER_FIXES=(
 
 usage() {
   echo "使い方: bin/loop-stall <停止識別子>" >&2
-  echo "       bin/loop-stall --reset        周回が前へ進んだときに呼ぶ" >&2
+  echo "       bin/loop-stall --reset [<識別子>]  周回が前へ進んだときに呼ぶ" >&2
+  echo "                                     識別子を渡すと、そのぶんだけ消す" >&2
   echo "       bin/loop-stall --resumed      人が再開したときに呼ぶ（./task loop:resume が通す）" >&2
   echo "       bin/loop-stall --list         使える識別子を一覧する" >&2
   echo "  識別子は一覧にあるものだけ。書式まで一致しないと受け付けない" >&2
@@ -184,8 +185,10 @@ id_is_known() {
   return 1
 }
 
-[[ $# -eq 1 ]] || usage
+# **`--reset` だけは 2 つ目を取る** (#266)。**消す対象を、前へ進んだぶんに限る**ため。
+[[ $# -eq 1 || ($# -eq 2 && $1 == "--reset") ]] || usage
 readonly ID="$1"
+readonly RESET_ID="${2-}"
 
 if [[ $ID == "--list" ]]; then
   print_stop_ids
@@ -209,6 +212,15 @@ fi
 
 # 綴りの検査はカウンタを触る前に行う。ゆれた識別子で 1 度でも書き込むと、
 # そこで連続回数が切れてしまう。
+# **消す対象も、綴りを先に見る** (#266)。**ゆれた識別子で「消えたつもり」を作らない**
+# ——**消せていないのに進むと、次の周回が古い数から続ける。**
+if [[ -n $RESET_ID ]] && ! id_is_known "$RESET_ID"; then
+  echo "[FAIL] 未知の停止識別子: $RESET_ID" >&2
+  echo "       使えるのは次のものだけ:" >&2
+  print_stop_ids | sed 's/^/       /' >&2
+  exit 2
+fi
+
 if [[ $ID != "--reset" && $ID != "--resumed" ]] && ! id_is_known "$ID"; then
   echo "[FAIL] 未知の停止識別子: $ID" >&2
   echo "       使えるのは次のものだけ:" >&2
@@ -298,8 +310,38 @@ readonly script_common_dir
 # 進捗があった周回は数え直す。これが無いと、同じエラーが 2 回起きたあと何周
 # 正常に進んでも、後日の独立した 1 回を「3 周連続」と数えて全ループを止める。
 if [[ $ID == "--reset" ]]; then
-  rm -f "$STATE"
-  echo "stall reset"
+  # **識別子を渡さなければ、これまでどおり全部消す**（ステップ 5 の
+  # 「何であれ状態が動いたら呼ぶ」はそのまま）。
+  #
+  # **渡されたら、そのぶんだけ消す** (#266)。**前へ進んだ証拠で消えるのは、
+  # 前へ進んだぶんだけ**である——**1.1 の打ち切りは `--reset` を通してから呼び直す**ので、
+  # **呼び直した先が印ずれで積んだぶんまで、次の周回が消していた**
+  # （**count は 1 を超えず、同じ障害が何周続いても人が呼ばれない**）。
+  #
+  # **記録は既に識別子ごとの行**なので、**残す行を書き戻すだけでよい**
+  # ——**カウンタを 1 つに保ったまま解ける**（#239 に触れない）。
+  if [[ -z $RESET_ID ]]; then
+    rm -f "$STATE"
+    echo "stall reset"
+    exit 0
+  fi
+  kept=()
+  if [[ -f $STATE ]]; then
+    while IFS=$'\t' read -r prev_count prev_id prev_id_epoch; do
+      [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
+      [[ $prev_id == "$RESET_ID" ]] && continue
+      kept+=("$prev_count"$'\t'"$prev_id"$'\t'"$prev_id_epoch")
+    done < "$STATE"
+  fi
+  if ((${#kept[@]} == 0)); then
+    rm -f "$STATE"
+  else
+    printf '%s\n' "${kept[@]}" > "$STATE" || {
+      echo "[FAIL] カウンタを書き戻せません: $STATE" >&2
+      exit 2
+    }
+  fi
+  echo "stall reset id=$RESET_ID"
   exit 0
 fi
 

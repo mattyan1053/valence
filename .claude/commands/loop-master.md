@@ -1,4 +1,4 @@
-<!-- 版: 2760eb56c75c -->
+<!-- 版: 7fb09a945615 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -123,8 +123,12 @@ bin/loop-procedure-changed --role master "$before"
 **古い手順で走り続けるより止まるほうがよい**、が元の判断である。
 
 ```bash
-bin/loop-stall --reset      # 打ち切る場合だけ。終える前に必ず通す
+bin/loop-stall --reset main-sync-failed   # 打ち切る場合だけ。終える前に必ず通す
 ```
+
+**消すのは、同期の失敗のぶんだけ** (#266)。**前へ進んだ証拠は「HEAD が動いた」＝同期が
+成功したこと**なので、**消せるのもそのぶんだけ**である——**全部消すと、呼び直した先が
+印ずれで積んだぶんまで次の周回が消し**、**同じ障害が何周続いても人が呼ばれない**。
 
 **終える前にカウンタを消す。** ここはステップ 7 を通らずに周回を終える唯一の経路で、
 消し忘れると「同期に 2 回失敗 → 成功して HEAD が動く → もう 1 回失敗」で
@@ -149,7 +153,7 @@ HEAD が動いたことは前へ進んだ証拠なので、ここで数え直す
 **呼び直す前に、カウンタを消して lease を返す。**
 
 ```bash
-bin/loop-stall --reset
+bin/loop-stall --reset main-sync-failed
 bin/loop-lease release master "<token>"
 # ここで /loop-master を呼び直す
 ```

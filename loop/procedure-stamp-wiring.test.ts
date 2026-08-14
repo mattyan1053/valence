@@ -244,6 +244,29 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
     });
   });
 
+  for (const role of ROLES) {
+    it(`${role} の打ち切りは、同期の失敗のぶんだけ消す`, () => {
+      // **前へ進んだ証拠は「HEAD が動いた」＝同期が成功したこと**なので、
+      // **消せるのもそのぶんだけ**である（#266）。**全部消すと、呼び直した先が
+      // 印ずれで積んだぶんまで次の周回が消し**、**count は 1 を超えない**——
+      // **1.0 が名指しで禁じている害が、隣の経路で起きていた。**
+      //
+      // **見るのは 1.1 の節だけ**である。**マージのあとに捨てる経路は別**で、
+      // **あちらの証拠は「マージが入った」**——**ループ全体が前へ進んでいる。**
+      const body = readFileSync(join(REPO_ROOT, `.claude/commands/loop-${role}.md`), "utf8");
+      const from = body.indexOf("bin/loop-procedure-changed --role");
+      expect(from, "1.1 の節が見つからない").toBeGreaterThanOrEqual(0);
+      const section = body.slice(from).split("\n## ")[0] ?? "";
+
+      expect(section, "打ち切りの --reset に消す対象が書いていない").toContain(
+        "bin/loop-stall --reset main-sync-failed",
+      );
+      expect(section, "1.1 に、全部消す --reset が残っている").not.toMatch(
+        /bin\/loop-stall --reset\n/,
+      );
+    });
+  }
+
   it("止まる先が、識別子の一覧にある", () => {
     // **識別子を勝手に作らない。** 一覧の正は `bin/loop-stall --list` である
     const listed = spawnSync(join(REPO_ROOT, "bin/loop-stall"), ["--list"], {
