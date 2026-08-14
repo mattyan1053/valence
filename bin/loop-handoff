@@ -585,9 +585,17 @@ elif [[ -n $changes_requested ]]; then
 elif [[ -n $gateable ]]; then
   to="master"
   reason="PR #${gateable} のゲートを回せる"
-elif ((ready == 1 && in_progress == 0)); then
+elif ((ready >= 1 && in_progress == 0)); then
+  # **件数で絞らない** (#267)。**等号だと 2 件でどの枝にも入らず、
+  # 「相手に持ち物が無い」と読まれて終わる**——**いちばん渡したい瞬間に落ちる。**
+  # **`in-progress` が 0 になるのは「実装が終わった直後」**で、
+  # **そのとき `ready` が 2 件溜まっているのは普通**である（master は 2 件まで満たす）。
+  #
+  # **重複の抑止は指紋が別に持っている**ので、**緩めても 2 通目は出ない。**
+  # **`in-progress` の条件はそのまま**——**取ったあとに止まった状態を起こすのは #264** で、
+  # **あちらは「そもそも数えていない」ところから**である。
   to="worker"
-  reason="ready の Issue が 1 件ある"
+  reason="ready の Issue が ${ready} 件ある"
 elif ((backlog > 0 && ready == 0)); then
   to="master"
   reason="backlog はあるが ready が 0 件（昇格の番）"
