@@ -151,7 +151,16 @@ export async function signOutCurrentUser(): Promise<void> {
  * **いまログインしている人が見られるリポジトリ**を返す。
  *
  * **束ねるのはここだけ**（§3）——**画面は port の結果しか知らない。**
- * **失効していても更新できれば出る**（`ensureUsableToken` が持っている経路）。
+ *
+ * **更新した Cookie は、この経路では持続しない** (#213 のレビュー)。
+ * **`nextCookies` は書けなかったことを黙って飲む**が、**書ける境界
+ * （middleware / Route Handler）がこのリポジトリにまだ無い**——**画面から呼ぶ限り、
+ * 更新されたセッションは返らず、次の要求で切れる。**
+ *
+ * **なので、この PR が言えるのは「失効したら入り直してもらう」までである。**
+ * **「失効していても更新できれば出る」とは書かない**——**インメモリの port では
+ * 通るが、実物では通らない**（**呼ばれ方まで写していない**）。
+ * **書ける境界を用意する話は、同じ層の #214 とまとめて見る。**
  */
 export async function visibleRepositoriesForCurrentUser(): Promise<VisibleRepositoriesResult> {
   const { credentials, connection, key } = settings();

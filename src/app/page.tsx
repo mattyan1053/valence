@@ -9,6 +9,31 @@
 
 import { visibleRepositoriesForCurrentUser } from "../composition/auth";
 
+/**
+ * **要求ごとに描く。静的に生成させない** (#213 のレビュー)。
+ *
+ * **出すのは「いまログインしている人に何が見えるか」**である——**ビルドした瞬間の
+ * 状態を焼き付けたら、全テナントに同じものが出る**（`AGENTS.md` §1 の
+ * 「実行時に解決する。設定に固定しない」の逆）。
+ *
+ * **`next build` が落ちていたのは、env が足りないからではない。** **prerender が
+ * ビルド時に走り、合成ルートが秘密を読みに行っていた**——**環境変数をビルドへ渡すと
+ * 通るが、直っていない。** **直すべきは「このページが静的でよい」という前提である。**
+ *
+ * **外さないこと。** **速くはなるが、その速さは「誰にとっても同じ画面」と引き換え**である。
+ */
+export const dynamic = "force-dynamic";
+
+/**
+ * 読めなかったものの注記。**件数だけを出す** (#213 のレビュー)。
+ *
+ * **理由は画面へ出さない**——**Zod のメッセージには値が入りうる**
+ * （`app-credentials.ts` が「Zod のエラーを持ち上げない」としているのと同じ理由）。
+ */
+export function invalidNote(count: number): string | undefined {
+  return count === 0 ? undefined : `${count} 件は読めませんでした。`;
+}
+
 export default async function Home() {
   const result = await visibleRepositoriesForCurrentUser();
 
@@ -17,13 +42,19 @@ export default async function Home() {
       <h1 className="font-mono text-3xl font-bold tracking-tight">Valence</h1>
       <p className="text-lg">AI 時代の PR コントロールセンター</p>
       {result.kind === "listed" ? (
-        <ul className="flex flex-col gap-1 text-sm">
-          {result.listing.repositories.map((repository) => (
-            <li key={`${repository.owner}/${repository.name}`}>
-              {repository.owner}/{repository.name}
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="flex flex-col gap-1 text-sm">
+            {result.listing.repositories.map((repository) => (
+              <li key={`${repository.owner}/${repository.name}`}>
+                {repository.owner}/{repository.name}
+              </li>
+            ))}
+          </ul>
+          {/* **黙って捨てない。** **消すと「読めなかった」が「見えなかった」に化ける** */}
+          {result.listing.invalid.length > 0 ? (
+            <p className="text-sm opacity-70">{invalidNote(result.listing.invalid.length)}</p>
+          ) : undefined}
+        </>
       ) : (
         <p className="text-sm">
           {result.kind === "signed-out"
