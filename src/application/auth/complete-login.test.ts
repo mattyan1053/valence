@@ -10,6 +10,17 @@ const RENEWED: UserTokens = {
   expiresAt: new Date("2026-08-14T08:00:00.000Z"),
 };
 
+/** 記録された段と例外を集める。**呼ばれなかったことも見たい**ので、配列で持つ。 */
+function recorder() {
+  const reported: Array<{ stage: string; error: unknown }> = [];
+  return {
+    reported,
+    report: (stage: string, error: unknown) => {
+      reported.push({ stage, error });
+    },
+  };
+}
+
 function store(overrides: Partial<Record<"save" | "load" | "clear", () => Promise<never>>> = {}) {
   const saved: UserTokens[] = [];
   return {
@@ -38,8 +49,9 @@ describe("ログインを終える", () => {
         expect(refreshToken).toBe(PROVIDER.refreshToken);
         return RENEWED;
       },
-      provider: PROVIDER,
+      exchange: async () => PROVIDER,
       abandonSession: async () => {},
+      report: () => {},
     });
 
     expect(result).toEqual({ kind: "signed-in" });
@@ -54,8 +66,9 @@ describe("ログインを終える", () => {
     await completeLogin({
       openStore: async () => port,
       refresh: async () => RENEWED,
-      provider: PROVIDER,
+      exchange: async () => PROVIDER,
       abandonSession: async () => {},
+      report: () => {},
     });
 
     expect(saved[0]?.accessToken).not.toBe(PROVIDER.accessToken);
@@ -71,8 +84,9 @@ describe("ログインを終える", () => {
       refresh: async () => {
         throw new Error("だめ");
       },
-      provider: PROVIDER,
+      exchange: async () => PROVIDER,
       abandonSession: async () => {},
+      report: () => {},
     });
 
     expect(result).toEqual({ kind: "needs-login" });
@@ -91,8 +105,9 @@ describe("ログインを終える", () => {
     const result = await completeLogin({
       openStore: async () => port,
       refresh: async () => RENEWED,
-      provider: PROVIDER,
+      exchange: async () => PROVIDER,
       abandonSession: async () => {},
+      report: () => {},
     });
 
     expect(result).toEqual({ kind: "needs-login" });
@@ -127,8 +142,9 @@ describe("ログインを終える", () => {
       const result = await completeLogin({
         openStore: async () => undefined,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession,
+        report: () => {},
       });
 
       expect(result).toEqual({ kind: "needs-login" });
@@ -144,8 +160,9 @@ describe("ログインを終える", () => {
         refresh: async () => {
           throw new Error("だめ");
         },
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession,
+        report: () => {},
       });
 
       expect(result).toEqual({ kind: "needs-login" });
@@ -163,8 +180,9 @@ describe("ログインを終える", () => {
       const result = await completeLogin({
         openStore: async () => port,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession,
+        report: () => {},
       });
 
       expect(result).toEqual({ kind: "needs-login" });
@@ -180,8 +198,9 @@ describe("ログインを終える", () => {
       const result = await completeLogin({
         openStore: async () => port,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession,
+        report: () => {},
       });
 
       expect(result).toEqual({ kind: "signed-in" });
@@ -203,8 +222,9 @@ describe("ログインを終える", () => {
             throw new Error("鍵が設定されていません");
           },
           refresh: async () => RENEWED,
-          provider: PROVIDER,
+          exchange: async () => PROVIDER,
           abandonSession,
+          report: () => {},
         }),
       ).rejects.toThrow(/鍵が設定されていません/);
 
@@ -222,12 +242,145 @@ describe("ログインを終える", () => {
           refresh: async () => {
             throw new Error("だめ");
           },
-          provider: PROVIDER,
+          exchange: async () => PROVIDER,
           abandonSession: async () => {
             throw new Error("畳めません");
           },
+          report: () => {},
         }),
       ).rejects.toThrow(/畳めません/);
+    });
+  });
+
+  /**
+   * **落ちた段を残す** (#248)。
+   *
+   * **握り潰しているのは正しい判断**（例外に token が混ざりうる。§6）だが、
+   * **どこにも残らないと人が調べられない**——**実際に、`docker exec` で環境変数を
+   * 人が読むまで原因が分からなかった。**
+   *
+   * **4 つの段を 1 つずつ別の入力で見る**——**1 箇所だけ足して「直した」にすると、
+   * 残りは黙ったままになる。**
+   */
+  describe("落ちた段を残す", () => {
+    it("期限を聞けなかったら、refresh と例外を渡す", async () => {
+      const { reported, report } = recorder();
+      const { port } = store();
+      const failure = new Error("gho_secret を含みうる本文");
+
+      await completeLogin({
+        openStore: async () => port,
+        refresh: async () => {
+          throw failure;
+        },
+        exchange: async () => PROVIDER,
+        abandonSession: async () => {},
+        report,
+      });
+
+      // **例外そのものを渡す。** **種類を見たいのは記録する側**である
+      expect(reported).toEqual([{ stage: "refresh", error: failure }]);
+    });
+
+    it("保存できなかったら、save と例外を渡す", async () => {
+      const { reported, report } = recorder();
+      const failure = new Error("だめ");
+      const { port } = store({
+        save: async () => {
+          throw failure;
+        },
+      });
+
+      await completeLogin({
+        openStore: async () => port,
+        refresh: async () => RENEWED,
+        exchange: async () => PROVIDER,
+        abandonSession: async () => {},
+        report,
+      });
+
+      expect(reported).toEqual([{ stage: "save", error: failure }]);
+    });
+
+    it("本人がいなければ、session を残す", async () => {
+      // **落ちたわけではないが、段は残す**——**「入口へ戻された」だけが見える状態を
+      // 無くすのが目的**で、**例外の有無で分けると、ここだけ消える**
+      const { reported, report } = recorder();
+
+      await completeLogin({
+        openStore: async () => undefined,
+        refresh: async () => RENEWED,
+        exchange: async () => PROVIDER,
+        abandonSession: async () => {},
+        report,
+      });
+
+      expect(reported.map(({ stage }) => stage)).toEqual(["session"]);
+    });
+
+    it("置き場を開けなかったら、投げ直す前に session を残す", async () => {
+      // **投げ直す経路も通す。** **投げてから記録すると、この経路だけ何も残らない**
+      const { reported, report } = recorder();
+      const failure = new Error("鍵が設定されていません");
+
+      await expect(
+        completeLogin({
+          openStore: async () => {
+            throw failure;
+          },
+          refresh: async () => RENEWED,
+          exchange: async () => PROVIDER,
+          abandonSession: async () => {},
+          report,
+        }),
+      ).rejects.toThrow(/鍵が設定されていません/);
+
+      expect(reported).toEqual([{ stage: "session", error: failure }]);
+    });
+
+    it("交換に失敗したら、exchange を残して投げ直す", async () => {
+      // **交換はこの関数より前で起きていた** (#276 のレビュー)。**結果だけを受け取ると、
+      // 落ちたときにここへ一度も入らない**——**記録する側を消しても、誰も落ちない。**
+      // **`openStore` と同じ形にする**（**手続きごと受け取る**。#224 と同じ理由）
+      const { reported, report } = recorder();
+      const failure = new Error("交換できません");
+      let abandoned = 0;
+
+      await expect(
+        completeLogin({
+          openStore: async () => {
+            throw new Error("ここまで来てはいけない");
+          },
+          refresh: async () => RENEWED,
+          exchange: async () => {
+            throw failure;
+          },
+          abandonSession: async () => {
+            abandoned += 1;
+          },
+          report,
+        }),
+      ).rejects.toThrow(/交換できません/);
+
+      expect(reported).toEqual([{ stage: "exchange", error: failure }]);
+      // **畳まない。** **交換が落ちた時点で、畳む対象のセッションはまだ無い**
+      expect(abandoned, "作られていないセッションを畳んでいる").toBe(0);
+    });
+
+    it("入れたときは、何も残さない", async () => {
+      // **毎回鳴る警告にしない。** **成功した周回で 1 行でも出ると、そのうち読まれなくなる**
+      const { reported, report } = recorder();
+      const { port } = store();
+
+      await completeLogin({
+        openStore: async () => port,
+        refresh: async () => RENEWED,
+        exchange: async () => PROVIDER,
+        abandonSession: async () => {},
+        report,
+      });
+
+      expect(reported, "成功した周回で記録している").toEqual([]);
     });
   });
 });
