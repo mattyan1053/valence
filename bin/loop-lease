@@ -391,6 +391,24 @@ record_superseded() {
     || rm -f "$SUPERSEDED.tmp" 2>/dev/null || true
 }
 
+# 自分の跡を消す (#278 のレビュー)。**跡は 1 度だけ伝わればよい記録**である——
+# **`round_owner` はセッションの外側を印にする**ので、**同じセッションの周回は何周しても
+# 同じ値**で、**残したままだと後の健全な周回で誤報が出る。** **そして誤報の側で `exit 0`
+# するので、本当に入口を飛ばした周回が記録されない**——**「件数を汚さない」枝が、
+# 汚さない代わりに消すことになる**（§5「消す側を足したら、残る側の前提を見直す」）。
+forget_superseded() {
+  local kept token when owner_seen
+  [[ -n $1 && -f $SUPERSEDED ]] || return 0
+  kept=""
+  while IFS=$'\t' read -r token when owner_seen; do
+    [[ $owner_seen == "$1" ]] && continue
+    kept+="$token"$'\t'"$when"$'\t'"$owner_seen"$'\n'
+  done <"$SUPERSEDED"
+  printf '%s' "$kept" >"$SUPERSEDED.tmp" 2>/dev/null \
+    && mv -f "$SUPERSEDED.tmp" "$SUPERSEDED" 2>/dev/null \
+    || rm -f "$SUPERSEDED.tmp" 2>/dev/null || true
+}
+
 # 跡の中に、その token か持ち主があるか。**照合できる形で残してある**ので、
 # **返しに来た側にも、打ち直した側にも同じことを言える。**
 superseded_has() {
@@ -552,6 +570,14 @@ if [[ $ACTION == "check" ]]; then
         echo "       出口では、同じ token でそのまま返せます（期限切れだったと言われます）" >&2
         # **記録しない。** **飛ばしてはいない**ので、`./task loop:status` の
         # 「入口を飛ばした周回」に混ぜると、**数えているものが濁る。**
+        exit 0
+      fi
+      # **記録そのものが消えていても、跡は残っている** (#278 のレビュー)。
+      # **`expired_*` はプロセス内の変数**なので**この経路では必ず空**——
+      # **見にいく者がここにいないと、返した後の窓では誰も言えない。**
+      if [[ -n $owner ]] && superseded_has "" "$owner"; then
+        echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
+        echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
         exit 0
       fi
       continue
@@ -804,6 +830,9 @@ acquire | recover)
   # **引き継いだなら、跡を残す** (#278 のレビュー)。**前の持ち主が次に何かを打つのは、
   # 記録が上書きされた後**である——**ここで残さないと、そのとき言うものが無い。**
   [[ -z $expired_token ]] || record_superseded "$expired_token" "$expired_owner"
+  # **取り直したら、自分宛ての跡は役目を終える** (#278 のレビュー)。**足したあとに消す**
+  # ——**自分の期限切れを自分で引き継いだ跡は、誰にも伝える必要が無い。**
+  forget_superseded "$owner"
   # **周回を始めた印。** 失敗しても lease は取れているので止めない——
   # 読む側 (bin/loop-stall) は印が無ければ「分からない」として、これまでどおり数える。
   printf '%s\n' "$now" >"$ROUNDS.tmp" 2>/dev/null && mv -f "$ROUNDS.tmp" "$ROUNDS" 2>/dev/null || {
@@ -836,6 +865,12 @@ release)
     expired_release=1
   fi
   if [[ -z $held_token ]]; then
+    # **記録が消えていても、跡で答えられる** (#278 のレビュー)
+    if superseded_has "$3" ""; then
+      echo "[FAIL] $SCOPE_LABEL の lease は期限切れのあと、別の周回が取り直しています" >&2
+      echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
+      exit 1
+    fi
     echo "[FAIL] $SCOPE_LABEL の lease は誰も持っていません" >&2
     exit 1
   fi

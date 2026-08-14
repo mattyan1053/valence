@@ -866,14 +866,17 @@ describe("bin/loop-lease", () => {
         // **いちばん知りたいのは重なった後**である (#278 のレビュー)。
         // **記録は取り直した側が上書きしている**ので、**プロセス内の変数だけでは
         // 何も言えない**——**跡を残す側が要る。**
+        //
+        // **取り直すのは別の周回である。** **同じセッションから取ると、跡は取得時に
+        // 消費される**（**自分宛ての跡は、誰にも伝える必要が無い**）
         const mine = acquire().stdout.trim();
         ageLease(3600);
-        expect(acquire().status, "引き継げていない").toBe(0);
+        expect(acquireAsOtherRound().status, "引き継げていない").toBe(0);
 
         const released = run(["release", "worker", mine]);
 
         expect(released.status).toBe(1);
-        expect(released.stderr, "取り直されたことが読めない").toMatch(/取り直/);
+        expect(released.stderr, "取り直されたことが読めない").toMatch(/別の周回が取り直/);
       });
 
       /**
@@ -884,13 +887,13 @@ describe("bin/loop-lease", () => {
        * **`setsid` で切り離して、初めて別の周回になる**——**ここを間違えると、
        * 「別の周回が取り直した」つもりの入力が作れていない。**
        */
-      function acquireAsOtherRound(): number {
+      function acquireAsOtherRound(): Run {
         const taken = spawnSync(
           "setsid",
           ["--wait", SCRIPT, "acquire", "worker", stampFor("worker")],
           { cwd: sandbox, encoding: "utf8", env: { ...process.env } },
         );
-        return taken.status ?? -1;
+        return { status: taken.status ?? -1, stdout: taken.stdout, stderr: taken.stderr };
       }
 
       it("引き継がれた後も、入口の検査が言う", () => {
@@ -898,21 +901,21 @@ describe("bin/loop-lease", () => {
         // ——**切れてから重なるまでの窓を、待ったまま踏み越える**
         acquire();
         ageLease(3600);
-        expect(acquireAsOtherRound(), "引き継げていない").toBe(0);
+        expect(acquireAsOtherRound().status, "引き継げていない").toBe(0);
 
         const checked = run(["check"]);
 
-        expect(checked.stderr, "取り直されたことが読めない").toMatch(/取り直/);
+        expect(checked.stderr, "取り直されたことが読めない").toMatch(/別の周回が取り直/);
         expect(checked.stderr, "飛ばしたと誤診している").not.toContain("acquire を飛ばした");
       });
 
       it("引き継がれた跡は、増え続けない", () => {
         // **記録は溜まる一方にしない**（`record_missing` と同じ判断）
         for (let round = 0; round < 8; round += 1) {
-          acquire();
+          acquireAsOtherRound();
           ageLease(3600);
         }
-        acquire();
+        acquireAsOtherRound();
 
         const name = readdirSync(join(sandbox, ".git")).find((entry) =>
           entry.startsWith("valence-loop-superseded"),
@@ -930,7 +933,7 @@ describe("bin/loop-lease", () => {
         // **原因の違うものを混ぜると、読めなくなる**
         acquire();
         ageLease(3600);
-        expect(acquireAsOtherRound(), "引き継げていない").toBe(0);
+        expect(acquireAsOtherRound().status, "引き継げていない").toBe(0);
 
         run(["check"]);
 
@@ -939,6 +942,61 @@ describe("bin/loop-lease", () => {
         );
         const recorded = missing ? readFileSync(join(sandbox, ".git", missing), "utf8") : "";
         expect(recorded, "飛ばした周回として数えている").toBe("");
+      });
+
+      it("取り直した側が返した後も、返しに来た持ち主に言う", () => {
+        // **記録は B が返した時点で消える** (#278 のレビュー)。**跡はファイルに在るのに、
+        // 見にいく者がいない**——**プロセス内の変数だけを見ていた。**
+        const mine = acquire().stdout.trim();
+        ageLease(3600);
+        const other = acquireAsOtherRound();
+        expect(other.status, "引き継げていない").toBe(0);
+        expect(run(["release", "worker", other.stdout.trim()]).status).toBe(0);
+
+        const released = run(["release", "worker", mine]);
+
+        expect(released.status).toBe(1);
+        expect(released.stderr, "取り直されたことが読めない").toMatch(/別の周回が取り直/);
+      });
+
+      it("取り直した側が返した後も、入口の検査が言う", () => {
+        const mine = acquire().stdout.trim();
+        expect(mine).not.toBe("");
+        ageLease(3600);
+        const other = acquireAsOtherRound();
+        expect(run(["release", "worker", other.stdout.trim()]).status).toBe(0);
+
+        const checked = run(["check"]);
+
+        expect(checked.stderr, "取り直されたことが読めない").toMatch(/別の周回が取り直/);
+      });
+
+      it("次の周回で取り直したら、跡はもう当たらない", () => {
+        // **`round_owner` はセッションの外側を見る**ので、**同じセッションの周回は
+        // 何周しても同じ値**である——**跡が残ったままだと、後の健全な周回で誤報が出る。**
+        // **そのとき `exit 0` するので、本当に入口を飛ばした周回が記録されない**
+        // ——**「件数を汚さない」枝が、汚さない代わりに消すことになる**（§5）。
+        acquire();
+        ageLease(3600);
+        const other = acquireAsOtherRound();
+        expect(run(["release", "worker", other.stdout.trim()]).status).toBe(0);
+        // **取り直して、返す。** ここで跡は役目を終える
+        const again = acquire().stdout.trim();
+        expect(again, "取り直せていない").not.toBe("");
+        expect(run(["release", "worker", again]).status).toBe(0);
+
+        // **そのあと、本当に入口を飛ばした周回が来る**
+        const checked = run(["check"]);
+
+        expect(checked.stderr, "健全な周回で誤報している").not.toMatch(/別の周回が取り直/);
+        expect(checked.stderr, "飛ばした周回だと言えていない").toContain("acquire を飛ばした");
+        const missing = readdirSync(join(sandbox, ".git")).find((entry) =>
+          entry.startsWith("valence-loop-lease-missing"),
+        );
+        expect(
+          missing ? readFileSync(join(sandbox, ".git", missing), "utf8") : "",
+          "飛ばした周回が記録されていない",
+        ).not.toBe("");
       });
 
       it("返すときに、引き継ぎの案内を出さない", () => {
