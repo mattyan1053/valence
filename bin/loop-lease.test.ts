@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -168,14 +169,48 @@ describe("bin/loop-lease", () => {
       // **これが本題。** **印を渡さないまま素通りできない**
       const old = run(["acquire", "worker"]);
 
-      expect(old.status, "印を渡さずに取れてしまう").toBe(2);
+      expect(old.status, "印を渡さずに取れてしまう").toBe(3);
       expect(old.stdout, "取れたことにしている").toBe("");
+    });
+
+    it("印を渡さない版のぶんは、こちらで積む", () => {
+      // **その周回は自分では積めない** (#244)。**「印がずれたら procedure-stale」
+      // という行が、古い本文には無い**——**止まるだけで誰も呼ばれない。**
+      //
+      // **積むのは「印が無い」ときだけ。** **印がずれた側は、呼び直しを 1 回
+      // 挟んでから呼ぶ側が積む**（**ここで積むと 1 件が 2 つ数えられる**）。
+      run(["acquire", "worker"]);
+
+      const stalls = readdirSync(join(sandbox, ".git")).filter((entry) =>
+        entry.startsWith("valence-loop-stall"),
+      );
+      expect(stalls, "記録が積まれていない").not.toEqual([]);
+      expect(
+        readFileSync(join(sandbox, ".git", "valence-loop-stall"), "utf8"),
+        "procedure-stale として積んでいない",
+      ).toContain("procedure-stale");
+    });
+
+    it("本物の記録には触れない", () => {
+      // **#240 の顔。** **試験の誤った呼び出しが本物のカウンタを積み、
+      // `loop/STOP` を配りうる**——**使い捨てのリポジトリで走っている限り、
+      // 記録もそちらへ行く**ことを、ここで押さえる。
+      const real = join(REPO_ROOT, ".git", "valence-loop-stall");
+      const before = existsSync(real) ? readFileSync(real, "utf8") : undefined;
+
+      run(["acquire", "worker"]);
+
+      const after = existsSync(real) ? readFileSync(real, "utf8") : undefined;
+      expect(after, "本物のカウンタを積んでいる").toBe(before);
+      expect(existsSync(join(REPO_ROOT, "loop/STOP")), "STOP を配っている").toBe(false);
     });
 
     it("違う印なら取れない（配られたテキストが古い）", () => {
       const stale = run(["acquire", "worker", "0123456789ab"]);
 
-      expect(stale.status).toBe(2);
+      // **exit 2 と分ける** (#244)。**exit 2 は「設定か環境の誤り」**で、
+      // **行き先が違う**——**文言でしか見分けられない状態を残さない。**
+      expect(stale.status).toBe(3);
       expect(stale.stderr, "捨てて呼び直す先が書いていない").toMatch(/procedure-stale/);
     });
 
