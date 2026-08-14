@@ -39,8 +39,11 @@ import { createSupabaseUserTokenStore } from "../infrastructure/supabase/user-to
  * Next.js の Cookie 置き場を、細い口へ合わせる。
  *
  * **書けないと、更新されたセッションが返らない**——**次の要求でログインが切れる。**
- * **Route Handler の外では書けない**ので、**書けなかったことは黙って飲む**
- * （Supabase のクライアントはそれを前提にしている）。
+ * **画面（サーバコンポーネント）の文脈では書けない**ので、**ここでは黙って飲む。**
+ *
+ * **飲んでよいのは、書ける境界が別にあるから**である (#214)——**`src/middleware.ts`
+ * が要求のたびに更新し、Cookie を返す。** **ここが最後の砦だった頃は、飲んだ時点で
+ * 更新が消えていた。**
  */
 async function nextCookies(): Promise<SessionCookies> {
   const store = await cookies();
@@ -152,15 +155,12 @@ export async function signOutCurrentUser(): Promise<void> {
  *
  * **束ねるのはここだけ**（§3）——**画面は port の結果しか知らない。**
  *
- * **更新した Cookie は、この経路では持続しない** (#213 のレビュー)。
- * **`nextCookies` は書けなかったことを黙って飲む**が、**書ける境界
- * （middleware / Route Handler）がこのリポジトリにまだ無い**——**画面から呼ぶ限り、
- * 更新されたセッションは返らず、次の要求で切れる。**
+ * **更新した Cookie は、この経路では書けない**（`nextCookies` が飲む）。
+ * **書くのは `src/middleware.ts`** (#214)——**要求はそこを必ず通り、更新された
+ * セッションはブラウザと、この要求の続きの両方へ渡る。**
  *
- * **なので、この PR が言えるのは「失効したら入り直してもらう」までである。**
- * **「失効していても更新できれば出る」とは書かない**——**インメモリの port では
- * 通るが、実物では通らない**（**呼ばれ方まで写していない**）。
- * **書ける境界を用意する話は、同じ層の #214 とまとめて見る。**
+ * **ここが読むのは、その境界が置いた Cookie である。** **判断を持つのはこちらだけ**
+ * ——**境界は運ぶだけで、「誰が何を見られるか」を決めない。**
  */
 export async function visibleRepositoriesForCurrentUser(): Promise<VisibleRepositoriesResult> {
   const { credentials, connection, key } = settings();
