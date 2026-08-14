@@ -74,6 +74,24 @@ describe("worker の PR は、作業場ごとに数える", () => {
     expect(body, "数えるところで持ち主を確かめていない").toContain("bin/loop-claim mine");
   });
 
+  it("自分のものでない PR を、置き去りにしない", () => {
+    // **持ち主が二度と戻らなくても `mine` は exit 1 のまま**（#238 のレビュー）——
+    // **引き継ぐ経路は `bin/loop-claim pr` の中にあるのに、手前で落とすと辿り着けない。**
+    // **見分けるのはやめて、経路を通す**——**worker は周回の間 lease を持たない**ので、
+    // **寝ているのと死んだのは区別が付かない。**
+    // **数えている節の中を見る。** **別の節（ステップ 3）に `bin/loop-claim pr` が
+    // あるのは当たり前**なので、そこまで含めると、**何も書かなくても緑になる**
+    const body = read(".claude/commands/loop-worker.md");
+    const section = body.slice(
+      body.indexOf("### 2.1 master へ知らせる"),
+      body.indexOf("### 2.2 公開に失敗した周回を再開する"),
+    );
+
+    expect(section, "数えるところが見当たらない").toContain("bin/loop-claim mine");
+    expect(section, "自分のものでない PR を試す経路が無い").toContain("bin/loop-claim pr");
+    expect(section, "引き継げることが書いていない").toMatch(/引き継/);
+  });
+
   it("作った PR を、その場で自分のものにしている", () => {
     // **記録が無いと「誰の持ち物か」を後から決められない。**
     // **作った直後が、いちばん確かな場所**である
