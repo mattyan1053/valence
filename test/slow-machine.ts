@@ -87,13 +87,13 @@ export function budgetFor(spawns: number): number {
  * hook が起こすプロセスの数（いちばん重い `beforeEach`）。
  *
  * `bin/loop-claim.test.ts` の `beforeEach` が **git 2 回** と、PATH を絞るための
- * **`which` 14 回**を同期実行する。**本体の枠を伸ばしても、hook は別枠**なので、
+ * **`which` 17 回**を同期実行する。**本体の枠を伸ばしても、hook は別枠**なので、
  * ここを与えないと**本体へ到達する前に落ちる**（既定は 10 秒）。
  *
  * **写した数である。** 数え違いは起こす側で検出する——`bin/loop-claim.test.ts` の
  * `beforeEach` が自分の起こした回数を数え、この値と一致しなければ落ちる。
  */
-export const MODELLED_HOOK_SPAWNS = 16;
+export const MODELLED_HOOK_SPAWNS = 19;
 
 export type LoadContext = {
   /** 落ちた試験の名前。並んだ出力の中で、どれに付いた注記か分かるようにする。 */

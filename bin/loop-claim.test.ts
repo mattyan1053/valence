@@ -17,6 +17,7 @@ import { holdLock } from "../test/held-lock";
 import { MODELLED_HOOK_SPAWNS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-claim", import.meta.url));
+const LEASE = fileURLToPath(new URL("./loop-lease", import.meta.url));
 
 type Run = { status: number; stdout: string; stderr: string };
 
@@ -177,6 +178,11 @@ describe("bin/loop-claim", () => {
       "kill",
       "setsid",
       "touch",
+      // **lease を実際に取る**ために要る（#237 のレビュー。PR の記録は、
+      // **持ち主の周回が走っているか**で決まる）
+      "sha256sum",
+      "od",
+      "tr",
     ]) {
       const found = counted("which", [command]).stdout.trim();
       if (found !== "") {
@@ -328,6 +334,193 @@ describe("bin/loop-claim", () => {
 
       expect(overlapped()).toBe(true);
       expect(results.filter((result) => result.status === 0)).toHaveLength(1);
+    });
+  });
+
+  /**
+   * **#202 でブランチを掴まなくなり、git の worktree 排他が偶然かけていた錠が外れた**
+   * （#203）。**掴んでいたときは「同じ PR を 2 人が直す」を git が止めていた。**
+   *
+   * **Issue 側と同じ形にする。** 持ち主は作業場、記録は共通ディレクトリ、
+   * 譲るのは後から入った側——**語彙を増やさない。**
+   */
+  describe("pr — レビュー対応の前に PR を取る", () => {
+    /** 作業場で周回を始める。**PR の記録は、持ち主の周回が走っている間だけ効く。** */
+    function startRound(cwd: string): string {
+      const result = spawnSync(LEASE, ["acquire", "worker"], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    }
+
+    function endRound(cwd: string, token: string): void {
+      const result = spawnSync(LEASE, ["release", "worker", token], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+    }
+
+    /** 記録を、取ってから長く経った形にする。**時間で判定していれば、ここで奪われる。** */
+    function backdateRecord(pr: string, secondsAgo: number): void {
+      const record = join(repo, ".git", `valence-loop-claim-pr-${pr}`);
+      const [owner] = readFileSync(record, "utf8").trim().split("\t");
+      writeFileSync(record, `${owner}\t${Math.floor(Date.now() / 1000) - secondsAgo}\n`);
+    }
+
+    it("持ち主の周回が走っている間は、取れない", () => {
+      // **これが本題。** 両方が同じ SHA から直し始めると、**重複返信**と
+      // **片方の push が non-fast-forward で落ちる**
+      withGh({ labels: [] });
+      startRound(repo);
+      expect(run(["pr", "42"]).status, "1 人目が取れていない").toBe(0);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("second") });
+
+      expect(second.status).toBe(1);
+    });
+
+    it("取れなかった側は、黙って進まない", () => {
+      // **無言で飛ばすと、2 人居るのに 1 人で回っているように見える。**
+      // **判定不能が別の理由に化ける**のと同じ形である
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("second") });
+
+      // **`作業場` や `[WARN]` だけを見ない。** **`bin/loop-lease check` が
+      // 冒頭で同じ語を出している**ので、**排他を外しても緑のままになる**
+      // （実際に、変異させたらこの本だけ通った）。**この分岐だけが出す形で見る。**
+      expect(second.status, "取れてしまっている").toBe(1);
+      expect(second.stderr, "何の話か分からない").toContain("PR #42");
+    });
+
+    it("長い周回でも、動いている持ち主から奪わない", () => {
+      // **時間で測らない** (#237 のレビュー)。**レビュー対応は `./task check` を回すので
+      // 1800 秒を超えうる**——**測っているのは「取ってからの経過」だが、知りたいのは
+      // 「持ち主が生きているか」**である。**この PR が消しに来たものが、期限の側から戻ってくる。**
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+      backdateRecord("42", 100_000);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("second") });
+
+      expect(second.status, "動いている持ち主から奪っている").toBe(1);
+    });
+
+    it("同じ作業場なら、何周でも取れる", () => {
+      // **明日の朝いちで動くのは、いまと同じ 1 人の worker である。**
+      // **1 人で回している限り、これまでどおり通ること**
+      withGh({ labels: [] });
+      startRound(repo);
+
+      expect(run(["pr", "42"]).status).toBe(0);
+      expect(run(["pr", "42"]).status, "自分が取った PR に入れない").toBe(0);
+    });
+
+    it("別の PR は、取り合いにならない", () => {
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+
+      expect(run(["pr", "43"], { cwd: addWorkspace("other") }).status).toBe(0);
+    });
+
+    it("持ち主の周回が終わっていれば、引き継げる", () => {
+      // **落ちた周回の跡で、その PR が誰にも直せなくなってはいけない**
+      // （**`release` を作らない**判断は、これで成り立っている）。
+      // **黙って奪わない**ので、引き継いだことは残す
+      withGh({ labels: [] });
+      const token = startRound(repo);
+      run(["pr", "42"]);
+      endRound(repo, token);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("later") });
+
+      expect(second.status).toBe(0);
+      // **`[WARN]` だけを見ない**（`bin/loop-lease check` も出す。上記と同じ理由）。
+      // **`bin/loop-lease` の「lease が期限切れでした…引き継ぎます」とも重なる**ので、
+      // **PR 番号と一緒に見る**
+      expect(second.stderr, "黙って奪っている").toMatch(/PR #42.*引き継ぎます/);
+    });
+
+    it("持ち主の作業場に置かれたものを実行しない", () => {
+      // **訊きに行く先が、相手の版になっていた** (#237 のレビュー)。
+      // **相手の作業場は `gh pr checkout` で PR の head に入っている**ので、
+      // **その PR が書き換えた `bin/loop-lease` を実行しうる**——**#219 と同じ形**
+      // （**head の版を実行しない**）。**壊れ方は静かで、`busy` の答えを変える PR が
+      // 乗っていると、生きている持ち主を「走っていない」と読む。**
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+      // **持ち主の作業場に、違う答えを返す版を置く**（PR の head に入っている状態）
+      mkdirSync(join(repo, "bin"), { recursive: true });
+      writeFileSync(
+        join(repo, "bin", "loop-lease"),
+        "#!/usr/bin/env bash\nexit 1\n", // 「どこも走っていない」と答える版
+        { mode: 0o755 },
+      );
+
+      // **手順書と同じ呼び方（相対パス）で走らせる。**
+      // **絶対パスで呼ぶと `${BASH_SOURCE[0]%/*}` が絶対になり、この穴は再現しない**
+      // ——**呼ばれ方まで含めて写す**
+      const second = addWorkspace("second");
+      mkdirSync(join(second, "bin"), { recursive: true });
+      symlinkSync(SCRIPT, join(second, "bin", "loop-claim"));
+      symlinkSync(
+        fileURLToPath(new URL("./loop-lease", import.meta.url)),
+        join(second, "bin", "loop-lease"),
+      );
+      const result = spawnSync("bash", ["-c", "bin/loop-claim pr 42"], {
+        cwd: second,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+
+      expect(result.status, "持ち主の作業場の版を実行している").toBe(1);
+    });
+
+    it("走っているかどうかを読めないなら、取らない", () => {
+      // **判定不能は、取れなかった側でも取れた側でもない。**
+      // **作業場の入っていない lease** があると、`bin/loop-lease busy` は「読めない」を返す
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+      writeFileSync(
+        join(repo, ".git", "valence-loop-lease-worker-broken"),
+        `tok\t${Math.floor(Date.now() / 1000)}\n\n\n`,
+      );
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("unreadable") });
+
+      expect(second.status, "読めないのに取っている").toBe(2);
+    });
+
+    it("別の周回が取っている最中なら、譲る", () => {
+      // **判定不能に倒さない**（倒すと、取り合いのたびに周回が止まる）。
+      // `take` と同じ扱いである
+      withGh({ labels: [] });
+      const held = holdLock({ dir: repo, lock: join(repo, ".git", "valence-loop-claim.lock") });
+
+      try {
+        expect(run(["pr", "42"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } }).status).toBe(1);
+      } finally {
+        held.release();
+      }
+    });
+
+    it("使い方の誤りは、取れなかったと混ぜない", () => {
+      withGh({ labels: [] });
+
+      expect(run(["pr"]).status).toBe(2);
+      expect(run(["pr", "#42"]).status).toBe(2);
+      expect(run(["pr", "42", "余計な引数"]).status).toBe(2);
     });
   });
 

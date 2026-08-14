@@ -144,6 +144,11 @@ describe("./task check の終わりの印", () => {
         ].join("\n"),
         { mode: 0o755 },
       );
+      // **この節は `bin/loop-claim pr` も通る**（編集する前に取る。#203）——
+      // **偽物を置かないと、取れずにブロックの残りが走らない。**
+      writeFileSync(join(workspace, "bin", "loop-claim"), "#!/usr/bin/env bash\nexit 0\n", {
+        mode: 0o755,
+      });
       // **この節は `bin/loop-sync-main` も通る**（取ってくるだけの口）。
       // **無いと、そこで止まって以降が走らない**——見たいのはその先である
       writeFileSync(join(workspace, "bin", "loop-sync-main"), "#!/usr/bin/env bash\nexit 0\n", {
@@ -253,7 +258,7 @@ describe("./task check の終わりの印", () => {
         );
         // **`bin/` の偽物**（この節は落ちたときに記録を通す）
         mkdirSync(join(workspace, "bin"), { recursive: true });
-        for (const name of ["loop-stall", "loop-sync-main"]) {
+        for (const name of ["loop-stall", "loop-sync-main", "loop-claim"]) {
           writeFileSync(join(workspace, "bin", name), "#!/usr/bin/env bash\nexit 0\n", {
             mode: 0o755,
           });

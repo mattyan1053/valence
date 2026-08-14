@@ -128,7 +128,7 @@ describe("プロセスを起こす試験の枠", () => {
   it("hook にも同じ根拠の枠を与える", () => {
     // **本体だけ伸ばしても、本体へ到達する前に落ちる。**
     // `bin/loop-claim.test.ts` の `beforeEach` は `MODELLED_HOOK_SPAWNS` ぶんを
-    // 同期実行する（git 2 回と `which` 14 回）。既定の hookTimeout は 10 秒しかない
+    // 同期実行する（git 2 回と `which` 17 回）。既定の hookTimeout は 10 秒しかない
     expect(named("scripts")?.test.hookTimeout).toBe(budgetFor(MODELLED_HOOK_SPAWNS));
   });
 
