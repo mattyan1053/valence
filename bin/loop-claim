@@ -4,6 +4,7 @@
 #
 #   bin/loop-claim take   <Issue番号>   ready の Issue を取る
 #   bin/loop-claim resume <Issue番号>   着手中の Issue を、自分が続けてよいか尋ねる
+#   bin/loop-claim pr     <PR番号>      レビュー対応の前に、その PR を取る
 #
 #   exit 0 = 取れた / 続けてよい
 #   exit 1 = 取れなかった / 別の作業場が持っている → **次の Issue へ進む。待たない**
@@ -17,6 +18,13 @@
 # ステップ 2.2（着手中の Issue を再開する）からも実装へ入れる。
 # **2.2 は label しか見ていなかった**ので、`take` で取った直後——**ブランチができるまでの窓**——に
 # 別の作業場が 2.2 を通ると、そこから重複が入る。だから `resume` も同じ記録を見る。
+#
+# **PR も同じ形で取る** (#203)。**#202 で worker がどこでもブランチを掴まなくなり、
+# git の worktree 排他が偶然かけていた錠が外れた**——**掴んでいたときは、
+# 「同じ PR を 2 人が直す」を git が止めていた。** **外れた錠を、設計として引き受け直す。**
+#
+# **PR 側は GitHub を読まない。** **持ち主は手元にしか無い**（下記）ので、
+# **label のような GitHub 側の目印を足しても、取り合いは解けない。**
 #
 # **assignee では区別できない。** 周回はどれも同じ GitHub アカウントで動くので、
 # 「誰が取ったか」を GitHub 側の値で表せない。**取り合いを解けるのは手元だけ**である。
@@ -58,6 +66,7 @@ readonly TTL_SEC="${LOOP_CLAIM_TTL_SEC:-1800}"
 usage() {
   echo "使い方: bin/loop-claim take <Issue番号>     ready の Issue を取る" >&2
   echo "        bin/loop-claim resume <Issue番号>   着手中の Issue を続けてよいか尋ねる" >&2
+  echo "        bin/loop-claim pr <PR番号>          レビュー対応の前に PR を取る" >&2
   echo "        bin/loop-claim audit                label と実態の食い違いを見つける" >&2
   echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
   exit 2
@@ -70,7 +79,7 @@ if [[ $ACTION == "audit" ]]; then
 else
   [[ $# -eq 2 ]] || usage
   ISSUE="$2"
-  [[ $ACTION == "take" || $ACTION == "resume" ]] || usage
+  [[ $ACTION == "take" || $ACTION == "resume" || $ACTION == "pr" ]] || usage
   [[ $ISSUE =~ ^[0-9]+$ ]] || usage
 fi
 readonly ISSUE
@@ -101,7 +110,14 @@ toplevel="$(cd "$toplevel" 2>/dev/null && pwd -P)" || {
   exit 2
 }
 readonly OWNER="$toplevel"
-readonly RECORD="$common_dir/valence-loop-claim-$ISSUE"
+# **PR と Issue で置き場を分ける。** **同じ番号の Issue と PR は別のもの**で、
+# **混ぜると、Issue を取った作業場が同じ番号の PR を直せなくなる**（逆も同じ）。
+# **`audit` の走査は `valence-loop-claim-[0-9]*` を見る**ので、こちらは当たらない。
+if [[ $ACTION == "pr" ]]; then
+  readonly RECORD="$common_dir/valence-loop-claim-pr-$ISSUE"
+else
+  readonly RECORD="$common_dir/valence-loop-claim-$ISSUE"
+fi
 
 labels_of() {
   gh issue view "$ISSUE" --json labels --jq '.labels[].name'
@@ -257,6 +273,39 @@ exec 9>"$common_dir/valence-loop-claim.lock" || {
 if ! flock -w "$LOCK_WAIT_SEC" 9; then
   echo "[INFO] #$ISSUE: 別の周回が取っている最中です（${LOCK_WAIT_SEC} 秒待機）。譲ります" >&2
   exit 1
+fi
+
+# --- pr ------------------------------------------------------------------------
+# **GitHub を読まずに決める。** **持ち主は作業場**で、**それは手元にしか無い**——
+# **label を 1 つ足しても、同じアカウントの 2 つの作業場は区別できない。**
+#
+# **解放は要らない。** **記録は期限で切れる**（`TTL_SEC`）——**返す手順を足すと、
+# 落ちた周回のぶんが返らず、その PR が誰にも直せなくなる。**
+if [[ $ACTION == "pr" ]]; then
+  held_owner=""
+  held_since=""
+  if [[ -f $RECORD ]]; then
+    IFS=$'\t' read -r held_owner held_since <"$RECORD"
+    if ! [[ $held_since =~ ^[0-9]+$ ]]; then
+      echo "[FAIL] PR #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
+      exit 2
+    fi
+  fi
+
+  if [[ -n $held_owner && $held_owner != "$OWNER" ]]; then
+    now="$(date +%s)"
+    if ((now - held_since < TTL_SEC)); then
+      # **黙って飛ばさない。** **無言で譲ると、2 人居るのに 1 人で回っているように見える。**
+      echo "[INFO] PR #$ISSUE は別の作業場が直しています（$held_owner）。触りません" >&2
+      exit 1
+    fi
+    # **黙って奪わない。** 期限切れの引き継ぎは、落ちた周回の跡である。
+    echo "[WARN] PR #$ISSUE の持ち主（$held_owner）が $((now - held_since)) 秒前から動いていません。引き継ぎます" >&2
+  fi
+
+  # **自分のものでも書き直す**（動いていることの印である）。
+  write_record
+  exit 0
 fi
 
 # ここから先はロックの中。**読み・書き・確認がひとつながりになる。**

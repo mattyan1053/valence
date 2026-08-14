@@ -364,9 +364,22 @@ printf '%s\n' "$head_prs"
 どこからも辿れなくなる**）。
 
 ```bash
+bin/loop-claim pr <PR番号>                            # **編集する前に取る** (#203)
 gh pr checkout --detach <PR番号>
 bin/loop-head same <PR番号> "$(git rev-parse HEAD)"   # PR の head と一致するか
 ```
+
+**取ってから入る** (#203)。**#202 でブランチを掴まなくなり、git の worktree 排他が
+偶然かけていた錠が外れた**——**掴んでいたときは「同じ PR を 2 人が直す」を git が
+止めていた。** **両方が同じ SHA から直し始めると、返信が二重に付き、
+片方の push が non-fast-forward で落ちる。**
+
+- **exit 0** → 続ける
+- **exit 1** → **別の作業場が直している。その PR は飛ばす**（他に無ければこの周回は終わり）。
+  **待たない**——待っても向こうが直すだけである（ステップ 1.0 の lease と同じ判断）
+- **exit 2** → 判定できない。標準エラーに出た内容を報告して終わる
+
+**返す手順は無い。** **記録は期限で切れる**ので、**落ちた周回の PR も次の周回が拾える。**
 
 **exit 0 以外なら `bin/loop-stall "wrong-branch:<PR番号>"` を通して停止する。**
 **確認せずに編集しない。**
@@ -411,6 +424,7 @@ bin/loop-head same <PR番号> "$(git rev-parse HEAD)"   # PR の head と一致�
 指示する。**指示が来てから行う。** 自分の判断で rebase しない。
 
 ```bash
+bin/loop-claim pr <PR番号>    # **ここも編集する経路である** (#203)
 gh pr checkout --detach <PR番号>
 # **取ってくるだけ。** **切り替えると、いま入った PR の checkout を捨てる**
 # ——**やり直すかどうかの判断は、冒頭の同期と同じものが持つ** (#217)

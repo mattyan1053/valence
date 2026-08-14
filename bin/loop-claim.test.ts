@@ -331,6 +331,96 @@ describe("bin/loop-claim", () => {
     });
   });
 
+  /**
+   * **#202 でブランチを掴まなくなり、git の worktree 排他が偶然かけていた錠が外れた**
+   * （#203）。**掴んでいたときは「同じ PR を 2 人が直す」を git が止めていた。**
+   *
+   * **Issue 側と同じ形にする。** 持ち主は作業場、記録は共通ディレクトリ、
+   * 譲るのは後から入った側——**語彙を増やさない。**
+   */
+  describe("pr — レビュー対応の前に PR を取る", () => {
+    it("別の作業場が取った PR は、取れない", () => {
+      // **これが本題。** 両方が同じ SHA から直し始めると、**重複返信**と
+      // **片方の push が non-fast-forward で落ちる**
+      withGh({ labels: [] });
+      expect(run(["pr", "42"]).status, "1 人目が取れていない").toBe(0);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("second") });
+
+      expect(second.status).toBe(1);
+    });
+
+    it("取れなかった側は、黙って進まない", () => {
+      // **無言で飛ばすと、2 人居るのに 1 人で回っているように見える。**
+      // **判定不能が別の理由に化ける**のと同じ形である
+      withGh({ labels: [] });
+      run(["pr", "42"]);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("second") });
+
+      // **`作業場` や `[WARN]` だけを見ない。** **`bin/loop-lease check` が
+      // 冒頭で同じ語を出している**ので、**排他を外しても緑のままになる**
+      // （実際に、変異させたらこの本だけ通った）。**この分岐だけが出す形で見る。**
+      expect(second.status, "取れてしまっている").toBe(1);
+      expect(second.stderr, "何の話か分からない").toContain("PR #42");
+    });
+
+    it("同じ作業場なら、何周でも取れる", () => {
+      // **明日の朝いちで動くのは、いまと同じ 1 人の worker である。**
+      // **1 人で回している限り、これまでどおり通ること**
+      withGh({ labels: [] });
+
+      expect(run(["pr", "42"]).status).toBe(0);
+      expect(run(["pr", "42"]).status, "自分が取った PR に入れない").toBe(0);
+    });
+
+    it("別の PR は、取り合いにならない", () => {
+      withGh({ labels: [] });
+      run(["pr", "42"]);
+
+      expect(run(["pr", "43"], { cwd: addWorkspace("other") }).status).toBe(0);
+    });
+
+    it("期限を過ぎた記録は引き継ぐ", () => {
+      // **落ちた周回の跡で、その PR が誰にも直せなくなってはいけない。**
+      // **黙って奪わない**ので、引き継いだことは残す
+      withGh({ labels: [] });
+      run(["pr", "42"]);
+
+      const second = run(["pr", "42"], {
+        cwd: addWorkspace("later"),
+        env: { LOOP_CLAIM_TTL_SEC: "0" },
+      });
+
+      expect(second.status).toBe(0);
+      // **`[WARN]` だけを見ない**（`bin/loop-lease check` も出す。上記と同じ理由）。
+      // **`bin/loop-lease` の「lease が期限切れでした…引き継ぎます」とも重なる**ので、
+      // **PR 番号と一緒に見る**
+      expect(second.stderr, "黙って奪っている").toMatch(/PR #42.*引き継ぎます/);
+    });
+
+    it("別の周回が取っている最中なら、譲る", () => {
+      // **判定不能に倒さない**（倒すと、取り合いのたびに周回が止まる）。
+      // `take` と同じ扱いである
+      withGh({ labels: [] });
+      const held = holdLock({ dir: repo, lock: join(repo, ".git", "valence-loop-claim.lock") });
+
+      try {
+        expect(run(["pr", "42"], { env: { LOOP_CLAIM_LOCK_WAIT_SEC: "1" } }).status).toBe(1);
+      } finally {
+        held.release();
+      }
+    });
+
+    it("使い方の誤りは、取れなかったと混ぜない", () => {
+      withGh({ labels: [] });
+
+      expect(run(["pr"]).status).toBe(2);
+      expect(run(["pr", "#42"]).status).toBe(2);
+      expect(run(["pr", "42", "余計な引数"]).status).toBe(2);
+    });
+  });
+
   describe("audit — label と実態の食い違いを見つける", () => {
     /** open PR の本文と、Issue ごとの label を返す偽の `gh`。 */
     function withAudit(options: {
