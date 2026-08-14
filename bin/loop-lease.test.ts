@@ -22,6 +22,7 @@ import { budgetFor } from "../test/slow-machine";
  */
 const CONCURRENT_ACQUIRES = 16;
 
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = fileURLToPath(new URL("./loop-lease", import.meta.url));
 
 type Run = { status: number; stdout: string; stderr: string };
@@ -39,8 +40,17 @@ describe("bin/loop-lease", () => {
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
+  /** **ディスクの手順書の印。** `acquire` が受け取る (#243 のレビュー)。 */
+  function stampFor(role: string): string {
+    const result = spawnSync(join(REPO_ROOT, "bin/loop-procedure-stamp"), [role], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    return result.stdout.trim();
+  }
+
   function acquire(role = "worker", env: Record<string, string> = {}): Run {
-    return run(["acquire", role], env);
+    return run(["acquire", role, stampFor(role)], env);
   }
 
   beforeEach(() => {
@@ -142,6 +152,36 @@ describe("bin/loop-lease", () => {
 
       expect(run(["busy", "master"]).status).toBe(0);
       expect(run(["busy", "worker"]).status).toBe(1);
+    });
+  });
+
+  /**
+   * **配られた手順書が古いことに、入口で気づく** (#241 / #243 のレビュー)。
+   *
+   * **検査を、検査したい対象の中に置いてはいけない**——**古い版の本文には
+   * 「印を突き合わせよ」という行が無い**ので、**手順書に書いた検査は、古い版が
+   * 配られた周回では一度も走らない。** **`acquire` はどの版にも冒頭にあり、
+   * しかもスクリプト**なので、**ここで要求すれば古い版は落ちる。**
+   */
+  describe("手順書の印を入口で受ける", () => {
+    it("旧版と同じ呼び方（印を渡さない）では取れない", () => {
+      // **これが本題。** **印を渡さないまま素通りできない**
+      const old = run(["acquire", "worker"]);
+
+      expect(old.status, "印を渡さずに取れてしまう").toBe(2);
+      expect(old.stdout, "取れたことにしている").toBe("");
+    });
+
+    it("違う印なら取れない（配られたテキストが古い）", () => {
+      const stale = run(["acquire", "worker", "0123456789ab"]);
+
+      expect(stale.status).toBe(2);
+      expect(stale.stderr, "捨てて呼び直す先が書いていない").toMatch(/procedure-stale/);
+    });
+
+    it("同じ印なら、これまでどおり取れる", () => {
+      // **止めすぎていないこと**（正常な周回で鳴らない）
+      expect(run(["acquire", "worker", stampFor("worker")]).status).toBe(0);
     });
   });
 
@@ -273,7 +313,7 @@ describe("bin/loop-lease", () => {
   it("知らない役は受け付けない", () => {
     // **語彙を固定する。** 綴り違いで別の lease を取ると、直列化しているつもりで
     // 2 つ走る
-    const unknown = run(["acquire", "workers"]);
+    const unknown = run(["acquire", "workers", stampFor("worker")]);
 
     expect(unknown.status).toBe(2);
     expect(unknown.stderr).toMatch(/master/);
@@ -301,7 +341,7 @@ describe("bin/loop-lease", () => {
         "bash",
         [
           "-c",
-          `for _ in $(seq ${CONCURRENT_ACQUIRES}); do "${SCRIPT}" acquire worker && echo ok & done; wait`,
+          `for _ in $(seq ${CONCURRENT_ACQUIRES}); do "${SCRIPT}" acquire worker ${stampFor("worker")} && echo ok & done; wait`,
         ],
         { cwd: sandbox, encoding: "utf8" },
       );
@@ -344,7 +384,10 @@ describe("bin/loop-lease", () => {
     });
 
     function acquireIn(dir: string): Run {
-      const result = spawnSync(SCRIPT, ["acquire", "worker"], { cwd: dir, encoding: "utf8" });
+      const result = spawnSync(SCRIPT, ["acquire", "worker", stampFor("worker")], {
+        cwd: dir,
+        encoding: "utf8",
+      });
       return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
     }
 
@@ -368,10 +411,16 @@ describe("bin/loop-lease", () => {
       const second = addWorktree("second");
 
       expect(
-        spawnSync(SCRIPT, ["acquire", "master"], { cwd: sandbox, encoding: "utf8" }).status,
+        spawnSync(SCRIPT, ["acquire", "master", stampFor("master")], {
+          cwd: sandbox,
+          encoding: "utf8",
+        }).status,
       ).toBe(0);
       expect(
-        spawnSync(SCRIPT, ["acquire", "master"], { cwd: second, encoding: "utf8" }).status,
+        spawnSync(SCRIPT, ["acquire", "master", stampFor("master")], {
+          cwd: second,
+          encoding: "utf8",
+        }).status,
       ).toBe(1);
     });
 
@@ -429,7 +478,7 @@ describe("bin/loop-lease", () => {
     it("NAME_MAX を超える長さの作業場でも、取れて返せる", () => {
       const deep = deepWorkspace();
 
-      const held = runIn(deep, ["acquire", "worker"]);
+      const held = runIn(deep, ["acquire", "worker", stampFor("worker")]);
 
       expect(held.status, held.stderr).toBe(0);
       expect(runIn(deep, ["release", "worker", held.stdout.trim()]).status).toBe(0);
@@ -440,7 +489,7 @@ describe("bin/loop-lease", () => {
       // 同じところへ戻る**——**長さを入力に依存させない**ことが直したい性質である
       const deep = deepWorkspace();
       expect(acquire().status).toBe(0);
-      expect(runIn(deep, ["acquire", "worker"]).status).toBe(0);
+      expect(runIn(deep, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
 
       const shallowName = leaseFile(sandbox).replace(/^.*\//, "");
       const deepName = leaseFile(deep).replace(/^.*\//, "");
@@ -454,7 +503,7 @@ describe("bin/loop-lease", () => {
       // **固定長にしたついでに「誰が握っているか」を読めなくしても、
       // 名前の長さだけを見る試験は緑のまま通る**（#183 で直したのと同じ形）
       const deep = deepWorkspace();
-      expect(runIn(deep, ["acquire", "worker"]).status).toBe(0);
+      expect(runIn(deep, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
 
       expect(readFileSync(leaseFile(deep), "utf8")).toContain(deep);
     });
@@ -561,7 +610,7 @@ describe("bin/loop-lease", () => {
 
     it("heartbeat は別の役の lease を延命しない", () => {
       // 役が違えば別の周回である。**worker の活動で master の落ちた周回を生かさない**
-      expect(run(["acquire", "master"]).status).toBe(0);
+      expect(run(["acquire", "master", stampFor("master")]).status).toBe(0);
       const master = readdirSync(join(sandbox, ".git")).find(
         (entry) => entry === "valence-loop-lease-master",
       );
@@ -572,7 +621,7 @@ describe("bin/loop-lease", () => {
       );
 
       expect(run(["heartbeat", "worker"]).status).toBe(0);
-      const retaken = run(["acquire", "master"]);
+      const retaken = run(["acquire", "master", stampFor("master")]);
 
       expect(retaken.status).toBe(0);
       expect(retaken.stderr).toContain("引き継ぎます");

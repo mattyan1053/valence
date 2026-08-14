@@ -53,7 +53,7 @@ readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
 readonly RECENT_ROUNDS=5
 
 usage() {
-  echo "使い方: bin/loop-lease acquire <役>" >&2
+  echo "使い方: bin/loop-lease acquire <役> <手順書の印>" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
   echo "        bin/loop-lease held <役>        その役を誰かが持っているか（読むだけ）" >&2
   echo "        bin/loop-lease check            この周回が持っていなければ言って記録する（止めない）" >&2
@@ -539,6 +539,42 @@ if [[ $ACTION == "check" ]]; then
   exit 0
 fi
 
+# **配られた手順書が古くないかを、ここで受ける** (#241 / #243 のレビュー)。
+#
+# **検査を、検査したい対象の中に置いてはいけない。** **古い版の本文には
+# 「印を突き合わせよ」という行が無い**ので、**手順書の側に書いた検査は、
+# 古い版が配られた周回では一度も走らない**——**塞ぎたかった当の場面で黙る。**
+#
+# **`acquire` はどの版の手順書にも冒頭にあり、しかもスクリプト**である。
+# **配られたテキストが古くても、走るのは新しいコード**なので、**ここで要求すれば
+# 古い版は落ちる**（#228 が `--role` を必須にしたときと同じ形）。
+#
+# **`busy` / `release` / `check` / `held` へは広げない。** **`busy` は
+# `bin/loop-claim` と `bin/loop-stray-branches` が呼んでいる**——**手順書と関係ない
+# ところが落ちる。**
+#
+# **見ているのは「配られたテキスト」と「同期する前のディスク」**である
+# （`acquire` は同期より前）。**同期で入れ替わるほうは `bin/loop-procedure-changed`
+# の担当**——**2 つは別のものを見ている。**
+#
+# **`acquire` すら無いほど古い版が配られたら、何も走らない。** **中からは塞げない**
+# （**呼ばれなければ、どのスクリプトも動かない**）ので、**そこは受け入れる。**
+if [[ $ACTION == "acquire" ]]; then
+  [[ $# -eq 3 ]] || usage
+  "${BASH_SOURCE[0]%/*}/loop-procedure-stamp" "$ROLE" "$3"
+  case "$?" in
+    0) ;;
+    1)
+      echo "       捨てて呼び直すこと（1 回だけ）。2 回目は bin/loop-stall procedure-stale" >&2
+      exit 2
+      ;;
+    *)
+      echo "[FAIL] 手順書の版を確かめられません。この周回は何もしません" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 set_role_paths "$ROLE" || exit 2
 lock_state || exit 2
 if [[ $ACTION == "held" ]]; then
@@ -557,7 +593,7 @@ held)
   [[ -n $held_token ]] || exit 1
   ;;
 acquire)
-  [[ $# -eq 2 ]] || usage
+  [[ $# -eq 3 ]] || usage
   if [[ -n $held_token ]]; then
     # **「走っている」と「返し忘れ」を、この 1 行で見分けられるようにする。**
     # 手順書は「何周も取れないなら返し忘れ」と読ませるが、**活動が見えないと

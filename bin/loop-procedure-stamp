@@ -44,11 +44,12 @@ done
 ((known == 1)) || usage
 readonly ROLE
 
-readonly DOC=".claude/commands/loop-$ROLE.md"
+# **スクリプトの隣から辿る。** **cwd からではない**——**このスクリプトが属する
+# チェックアウトの手順書**と突き合わせたい（**呼ばれる場所は作業ツリーの中とは限らない**）。
+readonly DOC="${BASH_SOURCE[0]%/*}/../.claude/commands/loop-$ROLE.md"
 
 if [[ ! -f $DOC ]]; then
   echo "[FAIL] 手順書が見つかりません: $DOC" >&2
-  echo "       リポジトリの根で実行すること" >&2
   exit 2
 fi
 
@@ -61,10 +62,16 @@ if ! grep -qE "$STAMP_LINE" "$DOC"; then
   exit 2
 fi
 
-if ! body="$(sed -E "s/$STAMP_LINE/<!-- 版 -->/" "$DOC")"; then
+# **外の道具を増やさない。** **ここは周回の入口で毎回走る**ので、
+# **bash だけで書く**（`sed` は、道具を絞った試験の PATH に無いことがある）。
+body=""
+while IFS= read -r line || [[ -n $line ]]; do
+  [[ $line =~ ^"<!-- 版: "..*" -->"$ ]] && line="<!-- 版 -->"
+  body+="$line"$'\n'
+done <"$DOC" || {
   echo "[FAIL] 手順書を読めません: $DOC" >&2
   exit 2
-fi
+}
 
 if ! digest="$(printf '%s' "$body" | sha256sum)" || [[ -z ${digest%% *} ]]; then
   echo "[FAIL] 印を計算できません" >&2

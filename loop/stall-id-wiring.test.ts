@@ -104,10 +104,10 @@ describe("停止識別子", () => {
     // **`awaiting-worker` は `WORKER_FIXES` に入る**ので、**worker が解けない状態に
     // 打つと、worker の周回が動いている間ずっと数えられない**。
     expect(identifiersWithSection(".claude/commands/loop-master.md")).toEqual([
+      // **配られた手順書がディスクより古い**（#241 / #243）。**入口の `acquire` が受ける**
+      ["### 1.0 同じ役の周回が走っていないか確かめる", "procedure-stale"],
       ["### 1.0 同じ役の周回が走っていないか確かめる", "wrong-worktree"],
       ["### 1.1 手順とスクリプトを最新にする", "main-sync-failed"],
-      // **配られた手順書がディスクより古い**（#241）。**呼び直しても直らなかったとき**
-      ["### 1.1 手順とスクリプトを最新にする", "procedure-stale"],
       // **1 つは散文、1 つはブロックの中**（先に変数へ受ける形。#136）——
       // **同じ状態を 2 度書いているのではなく、読む場所と打つ場所**である
       ["## 2. open PR を見て、見る順番を決める", "pr-lookup-failed"],

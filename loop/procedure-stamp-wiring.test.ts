@@ -13,7 +13,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,13 +44,26 @@ function run(args: string[], cwd: string = REPO_ROOT): { status: number; stdout:
   return { status: result.status ?? -1, stdout: result.stdout.trim() };
 }
 
-/** 手順書を書き換えた作業場を作る。**実物を触らない。** */
-function sandboxWith(body: string): string {
+/**
+ * 手順書を書き換えた**チェックアウトの写し**を作る。**実物を触らない。**
+ *
+ * **スクリプトの隣から手順書を辿る**ので、**cwd を変えるだけでは足りない**
+ * ——**スクリプトごと写す**（実物と同じ置き方にする）。
+ */
+function checkoutWith(body: string): string {
   const dir = mkdtempSync(join(tmpdir(), "procedure-stamp-"));
   sandboxes.push(dir);
-  spawnSync("mkdir", ["-p", join(dir, ".claude", "commands")]);
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  mkdirSync(join(dir, ".claude", "commands"), { recursive: true });
+  copyFileSync(SCRIPT, join(dir, "bin", "loop-procedure-stamp"));
+  chmodSync(join(dir, "bin", "loop-procedure-stamp"), 0o755);
   writeFileSync(join(dir, ".claude", "commands", "loop-worker.md"), body);
-  return dir;
+  return join(dir, "bin", "loop-procedure-stamp");
+}
+
+function runIn(script: string, args: string[]): { status: number; stdout: string } {
+  const result = spawnSync(script, args, { encoding: "utf8" });
+  return { status: result.status ?? -1, stdout: result.stdout.trim() };
 }
 
 describe("配られた手順書の版を、ディスクと突き合わせる", () => {
@@ -82,18 +103,18 @@ describe("配られた手順書の版を、ディスクと突き合わせる", (
 
   it("ディスクの手順書に印が無ければ、判定できないと言う", () => {
     // **こちらは「古い」ではない**——**突き合わせる相手が無い**
-    const dir = sandboxWith("# 手順書\n\n印の無い版である。\n");
+    const script = checkoutWith("# 手順書\n\n印の無い版である。\n");
 
-    expect(run(["worker", "0123456789ab"], dir).status).toBe(2);
+    expect(runIn(script, ["worker", "0123456789ab"]).status).toBe(2);
   });
 
   it("印は中身から決まる（手で書いた値を信じない）", () => {
     // **印だけ書き換えても、中身が違えば違う印になる**——
     // **「印を足したが、中身と関係ない」を作らない**
     const stamp = run(["worker"]);
-    const changed = sandboxWith(`<!-- 版: ${stamp.stdout} -->\n\n# 別の中身\n`);
+    const script = checkoutWith(`<!-- 版: ${stamp.stdout} -->\n\n# 別の中身\n`);
 
-    expect(run(["worker"], changed).stdout, "中身が違うのに同じ印になる").not.toBe(stamp.stdout);
+    expect(runIn(script, ["worker"]).stdout, "中身が違うのに同じ印になる").not.toBe(stamp.stdout);
   });
 
   it("使い方の誤りは、古いと混ぜない", () => {
@@ -105,10 +126,14 @@ describe("配られた手順書の版を、ディスクと突き合わせる", (
 
 describe("ずれたときの行き先が、手順書に書いてある", () => {
   for (const role of ROLES) {
-    it(`${role} の手順書が、突き合わせを通っている`, () => {
+    it(`${role} の手順書が、入口で印を渡している`, () => {
       const body = readFileSync(join(REPO_ROOT, `.claude/commands/loop-${role}.md`), "utf8");
 
-      expect(body, "突き合わせていない").toContain("bin/loop-procedure-stamp");
+      // **入口で受ける** (#243 のレビュー)。**手順書の側に「印を突き合わせよ」と
+      // 書いても、古い版にはその行が無い**——**`acquire` に渡す形にする**
+      expect(body, "入口で印を渡していない").toMatch(
+        new RegExp(`bin/loop-lease acquire ${role} "`),
+      );
       // **2 回目の行き先まで書く**（#241 の完了条件）——**呼び直しても古い版が
       // 来たのが今回**である
       expect(body, "2 回目の行き先が書いていない").toContain("procedure-stale");
