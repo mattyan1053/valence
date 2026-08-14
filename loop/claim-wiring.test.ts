@@ -13,7 +13,7 @@ function read(path: string): string {
 /** 着手を決めている節。**文書全体で見ない**——別の節の同じ言い回しで満たされる。 */
 function claimSection(): string {
   const section = read(".claude/commands/loop-worker.md").split(
-    "## 4. `ready` の 1 件を実装する",
+    "## 4. `ready` から 1 件を取って実装する",
   )[1];
   if (section === undefined) {
     throw new Error("worker の手順書に着手の節がありません");
