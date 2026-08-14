@@ -262,42 +262,65 @@ describe("bin/loop-lease", () => {
     expect(run(["release", "worker", stale]).status).toBe(1);
   });
 
-  describe("check の案内は、そのまま打てる", () => {
+  describe("check の案内は、そのまま貼れる", () => {
     // **踏むのはいちばん困っているとき**である（**入口を飛ばした周回**）。
-    // **言われたとおり打って usage で落ちると、「取り直せない」と読める。**
+    // **場所取り (`<役>`) をそのまま出すと、bash がリダイレクトとして読み、
+    // `loop-lease` 自体が走らない**——**usage で落ちるより分かりにくい** (#257 のレビュー)。
     //
-    // **文字列を見比べない。** **書いてある通りに打って、通ることを見る**
-    // ——**引数の数が変わったときに、案内だけが古くなるのを止める** (#244)。
+    // **表示された文字列を、置き換えずに bash へ通す。** **argv へ組み立て直すと、
+    // 「貼れない」が検査の外に出る**——**前の版はそこを隠していた。**
 
-    /** 案内に出てくるコマンドを、そのまま取り出す。 */
+    /** 案内に出てくる行を、表示されたまま取り出す。 */
     function suggested(stderr: string): string[] {
-      const line = stderr.split("\n").find((row) => row.includes("いま取り直してください:"));
-      expect(line, "案内が出ていない").toBeDefined();
-      const command = (line as string).split("いま取り直してください:")[1]?.trim() ?? "";
-      expect(command.startsWith("bin/loop-lease "), `案内の形が違う: ${command}`).toBe(true);
-      return command
-        .split(/\s+/)
-        .slice(1)
-        .map((word) => (word === "<役>" ? "worker" : word));
+      const lines = stderr
+        .split("\n")
+        .map((row) => row.trim())
+        .filter((row) => row.startsWith("bin/loop-lease acquire"));
+      expect(lines.length, `案内が出ていない: ${stderr}`).toBeGreaterThan(0);
+      return lines;
     }
 
-    it("案内どおり打つと、usage で落ちない", () => {
-      const advice = run(["check"]);
-      const args = suggested(advice.stderr).map((word) =>
-        word === "<手順書の印>" ? stampFor("worker") : word,
-      );
+    /** **貼る。** cwd は使い捨てのリポジトリで、スクリプトは実物を指す。 */
+    function paste(line: string): Run {
+      const result = spawnSync("bash", ["-c", line.replace(/^bin\/loop-lease/, SCRIPT)], {
+        cwd: sandbox,
+        encoding: "utf8",
+        env: { ...process.env },
+      });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
 
-      const retry = run(args);
+    it("貼っても構文で壊れない", () => {
+      // **`<役>` を出していた版はここで落ちる**（`syntax error near unexpected token`）
+      for (const line of suggested(run(["check"]).stderr)) {
+        const pasted = paste(line);
 
-      // **exit 2 は「使い方の誤り」も含む。** **案内が通らない形なら、ここへ落ちる**
-      expect(retry.status, `案内どおりでは取り直せない: ${retry.stderr}`).not.toBe(2);
-      expect(retry.stderr).not.toContain("使い方:");
+        expect(pasted.stderr, `貼ると壊れる: ${line}`).not.toMatch(/syntax error/);
+        // **走らなかったときの bash の終了コード。** **走った上での 1 や 2 とは別**
+        expect(pasted.status, `走っていない: ${line}`).not.toBe(2);
+      }
     });
 
-    it("印を渡す形になっている（差し替える場所がある）", () => {
-      // **上の試験は、置き換えを増やせば通ってしまう**——**案内が印を求めていること
-      // そのものを見る**（**印なしで取れる版に戻ったら赤**）
-      expect(suggested(run(["check"]).stderr)).toContain("<手順書の印>");
+    it("貼れば取り直せる", () => {
+      // **「壊れない」だけでは足りない。** **usage で終わる案内も壊れてはいない**
+      // ——**この周回が本当に lease を取れるところまで見る。**
+      const lines = suggested(run(["check"]).stderr);
+      const worker = lines.find((line) => line.includes(" worker "));
+      expect(worker, "worker の行が無い").toBeDefined();
+
+      const pasted = paste(worker as string);
+
+      expect(pasted.status, `取り直せない: ${pasted.stderr}`).toBe(0);
+      expect(pasted.stdout.trim(), "token が返っていない").not.toBe("");
+    });
+
+    it("役の両方を出す（ここでは役が分からない）", () => {
+      // **この検査は役を受け取らない。** **片方だけ出すと、もう片方の周回は
+      // 自分で組み立てることになる**——**その組み立てが、いま直している当のもの**
+      const lines = suggested(run(["check"]).stderr);
+
+      expect(lines.some((line) => line.includes(" worker "))).toBe(true);
+      expect(lines.some((line) => line.includes(" master "))).toBe(true);
     });
   });
 
