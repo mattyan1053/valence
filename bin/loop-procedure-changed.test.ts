@@ -44,7 +44,8 @@ describe("bin/loop-procedure-changed", () => {
 
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "loop-procedure-"));
-    git("init", "--quiet", ".");
+    // **既定の枝名は環境で変わる。** **`main` を前提にする試験があるので、ここで固定する**
+    git("init", "--quiet", "-b", "main", ".");
     commit("README.md", "初期\n");
   });
 
@@ -169,6 +170,87 @@ describe("bin/loop-procedure-changed", () => {
     const before = commit("src/a.ts", "前\n");
 
     expect(run(before, "0000000000000000000000000000000000000000").status).toBe(2);
+  });
+
+  /**
+   * **居た場所と、動いた版を混ぜない** (#259)。
+   *
+   * **PR を checkout した翌周回は、必ず捨てていた。** **前の周回が PR の commit で
+   * 終わり、冒頭の同期で `origin/main` へ戻ると、その PR 自身の変更が差分に出る**
+   * ——**手順書もスクリプトも何も変わっていないのに**である。
+   *
+   * **入力は自分で書く側**（§5）——**「PR の commit に居る」状態は、
+   * 普通に走らせただけでは作られない。**
+   */
+  describe("枝の上に居ただけなら、入れ替わったとは言わない", () => {
+    /** `main` から枝を伸ばし、その先端（PR の head）を返す。 */
+    function branchOffMain(path: string): { main: string; head: string } {
+      const main = commit("bin/loop-gate", "main の版\n");
+      git("checkout", "--quiet", "-b", "feat/x");
+      const head = commit(path, "PR の版\n");
+      return { main, head };
+    }
+
+    it("PR の commit から main へ戻るだけなら、変わっていない", () => {
+      // **これが本題。** **その PR 自身の変更を「入れ替わった」と読んでいた**
+      const { main, head } = branchOffMain("bin/loop-gate");
+
+      expect(run(head, main).status, "自分の枝の変更を数えている").toBe(1);
+    });
+
+    it("手順書を直している PR でも、同じ", () => {
+      // **踏むのはレビュー対応の直後**——**手順書を直す PR ほど往復が続く**
+      const { main, head } = branchOffMain(".claude/commands/loop-master.md");
+
+      expect(run(head, main).status).toBe(1);
+    });
+
+    it("枝に居る間に main が動いていたら、変わったと言う", () => {
+      // **誤検知を消すために、本当の検知まで消さない。** **枝の分かれ目から見て
+      // `main` 側に入った変更は、これから実行するものが本当に入れ替わる**
+      const { head } = branchOffMain("src/a.ts");
+      git("checkout", "--quiet", "main");
+      const moved = commit("bin/loop-gate", "main が進んだ\n");
+
+      expect(run(head, moved).status, "main の動きまで見逃している").toBe(0);
+    });
+
+    it("枝に居る間に main が動いても、対象外なら変わっていない", () => {
+      const { head } = branchOffMain("src/a.ts");
+      git("checkout", "--quiet", "main");
+      const moved = commit("src/b.ts", "main が進んだ\n");
+
+      expect(run(head, moved).status).toBe(1);
+    });
+
+    it("同じ系譜の上なら、これまでどおり比べる", () => {
+      // **マージ直後の周回はここを通る。** **`origin/main` は作業場どうしで共有** なので、
+      // **もう一方が先に fetch した周回では、`origin/main` を基準にすると
+      // 「動いていない」に見える**——**そこを落とさないために、系譜の上では HEAD を使う**
+      const before = commit("src/a.ts", "前\n");
+      const after = commit("bin/loop-gate", "後\n");
+
+      expect(run(before, after).status).toBe(0);
+    });
+
+    it("枝分かれの跡が無ければ、判定できないと言う", () => {
+      // **黙って「変わっていない」に倒さない。** **共通の祖先が無いのは、
+      // 別のリポジトリを指しているとき**である
+      const orphan = spawnSync(
+        "bash",
+        [
+          "-c",
+          "git checkout --quiet --orphan lonely && git rm -rfq --cached . " +
+            "&& echo x > lonely.txt && git add -A " +
+            "&& git -c user.email=t@example.com -c user.name=t commit --quiet -m lonely " +
+            "&& git rev-parse HEAD",
+        ],
+        { cwd: repo, encoding: "utf8" },
+      );
+      expect(orphan.status, orphan.stderr).toBe(0);
+
+      expect(run(orphan.stdout.trim(), "main").status).toBe(2);
+    });
   });
 
   /**
