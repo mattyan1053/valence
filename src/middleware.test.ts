@@ -12,7 +12,10 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
+import type { SessionCookieSinks } from "./infrastructure/supabase/session-cookies";
+import { middleware, refreshedResponse, runtime } from "./middleware";
 
 const source = readFileSync(new URL("./middleware.ts", import.meta.url), "utf8");
 
@@ -89,5 +92,105 @@ describe("境界は、誰が何を見られるかを決めない", () => {
     // **判断を持つのは画面の側だけ** (#214)。**ここでも判断すると 2 か所になり、
     // 片方だけ古くなる**——**更新するのが境界、読むのが画面である**
     expect(source).not.toMatch(/redirect|rewrite/);
+  });
+});
+
+describe("更新された Cookie が、続きと応答の両方へ乗る", () => {
+  // **ここが主目的である** (#252 のレビュー)。**sink を単体で見るだけでは、
+  // `middleware.ts` の中の結線が誰にも実行されない**——**消しても緑になる。**
+
+  /** Supabase の代わり。**読んだときに更新が 1 回起きた、を演じる。** */
+  const updates =
+    (updated: { name: string; value: string }) => async (sinks: SessionCookieSinks) => {
+      seen.push(...sinks.read());
+      sinks.toRequest(updated);
+      sinks.renew();
+      sinks.toBrowser({ ...updated, options: { path: "/" } });
+    };
+
+  let seen: { name: string; value: string }[] = [];
+
+  const request = () => {
+    const built = new NextRequest(new URL("http://localhost/"));
+    built.cookies.set("sb-access", "old");
+    return built;
+  };
+
+  it("持ってきた Cookie を、更新する側へ渡す", async () => {
+    seen = [];
+
+    await refreshedResponse(request(), updates({ name: "sb-access", value: "new" }));
+
+    expect(seen).toEqual([{ name: "sb-access", value: "old" }]);
+  });
+
+  it("応答は、更新された Cookie をブラウザへ返す", async () => {
+    // **返らないと、次の要求でまた失効する**（#214 の 1 つ目の症状そのもの）
+    seen = [];
+
+    const response = await refreshedResponse(
+      request(),
+      updates({ name: "sb-access", value: "new" }),
+    );
+
+    expect(response.cookies.get("sb-access")?.value).toBe("new");
+  });
+
+  it("この要求の続きも、更新された Cookie を読む", async () => {
+    // **応答にだけ書くと、いま描いている画面が古いまま動く。**
+    // **`NextResponse.next({ request })` は作った時点の要求を写す**ので、
+    // **差し替えたあとに作り直しているかどうかが、ここに出る**
+    seen = [];
+    const incoming = request();
+
+    const response = await refreshedResponse(
+      incoming,
+      updates({ name: "sb-access", value: "new" }),
+    );
+
+    expect(incoming.cookies.get("sb-access")?.value, "続きが古い Cookie を読む").toBe("new");
+    // **応答が持って行くのは、作った時点の写し**である——**差し替えた後に
+    // 作り直していなければ、ここに古い値が残る**（`x-middleware-request-cookie`）
+    expect(
+      response.headers.get("x-middleware-request-cookie"),
+      "差し替える前の要求を応答へ写している",
+    ).toBe("sb-access=new");
+  });
+
+  it("更新が起きなければ、Cookie を足さない", async () => {
+    // **毎回書くと、更新していないのに `Set-Cookie` が付く**
+    const response = await refreshedResponse(request(), async () => {});
+
+    expect(response.cookies.getAll()).toEqual([]);
+  });
+});
+
+describe("Next.js が呼ぶ入口", () => {
+  it("Node.js で走る", () => {
+    // **既定の Edge では設定を読めない** (#252 のレビュー)——**`process.env` を
+    // オブジェクトごと渡した先の参照は静的に置き換えられず、Edge には注ぎ込まれない。**
+    // **外すと、要求のたびに落ちる**（**そして `next build` は通る**）
+    expect(runtime).toBe("nodejs");
+  });
+
+  it("更新する側が繋がっている（繋ぎ先を読む）", async () => {
+    // **`middleware` は結線だけ**だが、**その 1 行が抜けても上の試験は緑**である
+    // ——**実物を呼んで、繋ぎ先の設定まで届いていることを見る。**
+    //
+    // **繋ぎ先が無いときに落ちること**を確かめる（**黙って素通りしない**）。
+    // **`process.env` をオブジェクトごと渡している**ので、**渡し方が壊れたら
+    // 設定があっても落ちる**——**その向きもここに出る。**
+    const saved = process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_URL;
+
+    try {
+      await expect(middleware(new NextRequest(new URL("http://localhost/")))).rejects.toThrow(
+        /SUPABASE_URL/,
+      );
+    } finally {
+      if (saved !== undefined) {
+        process.env.SUPABASE_URL = saved;
+      }
+    }
   });
 });

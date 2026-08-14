@@ -13,11 +13,28 @@
 
 import { type NextRequest, NextResponse } from "next/server";
 import { refreshSession } from "./composition/session";
+import type { SessionCookieSinks } from "./infrastructure/supabase/session-cookies";
 
+/**
+ * セッションを更新する側。**差し替えるための引数であって、抽象ではない**（#64 と同じ形）。
+ *
+ * **`middleware` からは渡せない。** **Next.js が第 2 引数に `NextFetchEvent` を渡す**
+ * ので、**既定値のある引数を足すと、実物ではそちらが入る**——**分けてある。**
+ */
+export type SessionRefresher = (sinks: SessionCookieSinks) => Promise<void>;
+
+/** Next.js が呼ぶ入口。**結線だけを持つ。** */
 export async function middleware(request: NextRequest): Promise<NextResponse> {
+  return await refreshedResponse(request, refreshSession);
+}
+
+export async function refreshedResponse(
+  request: NextRequest,
+  refresh: SessionRefresher,
+): Promise<NextResponse> {
   let response = NextResponse.next({ request });
 
-  await refreshSession({
+  await refresh({
     read: () => request.cookies.getAll().map(({ name, value }) => ({ name, value })),
     toRequest: ({ name, value }) => {
       request.cookies.set(name, value);
@@ -34,6 +51,23 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   return response;
 }
+
+/**
+ * **Node.js で走らせる** (#252 のレビュー)。**既定の Edge では設定を読めない。**
+ *
+ * **Edge の `process.env` には、Next.js が注ぎ込んだものしか入らない。**
+ * **注ぎ込まれるのは `process.env.X` の形で書かれた参照だけ**で、
+ * **`readSupabaseConnection(process.env)` のようにオブジェクトごと渡した先の
+ * 参照は、名前が文字列のまま残る**——**ビルドした middleware の manifest を見ると、
+ * `env` に入っているのは Next.js 自身の鍵だけ**である（**`.env` に 3 つとも
+ * あるのに入らない**）。**そのまま出すと、要求のたびに「環境変数が設定されて
+ * いない」で落ちる。**
+ *
+ * **静的に読める形へ書き換えて Edge に留まる道もある**が、**環境変数の名前を
+ * `session.ts` の外にもう 1 組持つことになる**（§5。**片方だけ古くなる**）。
+ * **ここは速さより、設定を 1 か所に置くほうを採る。**
+ */
+export const runtime = "nodejs";
 
 export const config = {
   // **静的なファイルだけを外す。** **除外を足すと、その経路だけ古い Cookie で動く**
