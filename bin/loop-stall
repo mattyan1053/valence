@@ -33,7 +33,7 @@ readonly STOP_IDS=(
   "dirty|worker: 作業ツリーが dirty"
   "main-sync-failed|両方: origin/main への追随に失敗 (どちらも origin/main へ detach する)"
   "wrong-branch:<PR番号>|worker: PR の head ブランチに切り替わっていない"
-  "too-many-own-prs:<件数>|worker: 自分の open PR が 2 件以上"
+  "too-many-own-prs:<件数>|worker: この作業場の open PR が 2 件以上 (全体で 2 本・1 人 1 本)"
   "local-ci-failed:<PR番号>|worker: ./task check が通らない"
   # **「分からない」を「赤」と混ぜない** (#147)。`./task check` が途中で殺されると
   # **終了コードが取れないまま、出力だけが緑に見える**——**通らなかった**のではなく
@@ -45,7 +45,7 @@ readonly STOP_IDS=(
   "local-ci-unknown:<Issue番号>|worker: ./task check の合否が分からない (途中で殺された)"
   "implementation-blocked:<Issue番号>|worker: blocked にして人へ渡した (完了条件を満たせない / PR が人手で閉じられた)"
   "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
-  "too-many-ready:<件数>|両方: ready の Issue が 2 件以上ある (着手順が一意に決まらない)"
+  "too-many-ready:<件数>|両方: ready の Issue が 3 件以上ある (上限は 2 件)"
   "wrong-worktree|master: worker の作業ツリーにいる"
   # **どちらの役も打つ。** 「一覧の失敗を 0 件として読む」は master 側で 4 箇所直したが、
   # **worker の手順には残っていた** (#136)。**同じ状態には同じ名前**なので分けない

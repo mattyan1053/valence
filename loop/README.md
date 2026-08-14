@@ -254,12 +254,13 @@ gh pr edit <PR番号> --remove-label awaiting-human --remove-label parked
 **次の周回は誰も見ない**。`./task loop:status` と `bin/loop-handoff` が
 **`bin/loop-silent-park` で拾う**（判定は 1 箇所、呼ぶ場所は 2 つ）。
 
-**着手順は master が決める。** worker は `ready` の 1 件を取るだけで、順序を判断しない。
+**着手順は master が決める。** worker は `ready` から取れるものを取るだけで、順序を判断しない。
 `gh issue list` は新しい順に返すため、worker に選ばせると実質 LIFO になり、
 古い Issue が後回しになるうえ、割り込みを伝える手段も無くなる。
 
-`ready` が 2 件以上あると着手順が一意に決まらない。どちらのループも
-`bin/loop-stall "too-many-ready:<件数>"` を通して止める。
+`ready` の上限は 2 件である（#85。**worker は作業場ごとに 1 人、1 人 1 本**なので、
+**手が 2 つあるなら渡せる仕事も 2 つ**）。**3 件以上あれば運用が壊れている**ので、
+どちらのループも `bin/loop-stall "too-many-ready:<件数>"` を通して止める。
 
 ## ループの外から割り込む
 

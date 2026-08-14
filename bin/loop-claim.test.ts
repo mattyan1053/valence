@@ -126,6 +126,26 @@ describe("bin/loop-claim", () => {
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
+  /** 作業場で周回を始める（`describe` をまたいで使う）。 */
+  function startRoundOutside(cwd: string): string {
+    const result = spawnSync(LEASE, ["acquire", "worker"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: path },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    return result.stdout.trim();
+  }
+
+  function endRoundOutside(cwd: string, token: string): void {
+    const result = spawnSync(LEASE, ["release", "worker", token], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: path },
+    });
+    expect(result.status, result.stderr).toBe(0);
+  }
+
   function editCount(): number {
     return readFileSync(log, "utf8")
       .split("\n")
@@ -521,6 +541,55 @@ describe("bin/loop-claim", () => {
       expect(run(["pr"]).status).toBe(2);
       expect(run(["pr", "#42"]).status).toBe(2);
       expect(run(["pr", "42", "余計な引数"]).status).toBe(2);
+    });
+  });
+
+  /**
+   * **上限は「1 人あたり 1 本」のまま、全体で 2 本になる**（#85）。
+   * **`--author @me` は 2 人分を返す**ので、**そのまま数えると 1 人目が止まる**——
+   * **数えるのは自分の作業場のものだけ**である。
+   */
+  describe("mine — その PR を自分の作業場が持っているか", () => {
+    it("自分が取った PR は、自分のもの", () => {
+      withGh({ labels: [] });
+      run(["pr", "42"]);
+
+      expect(run(["mine", "42"]).status).toBe(0);
+    });
+
+    it("別の作業場が取った PR は、数えない", () => {
+      // **これが本題。** **数えると、2 人目が動いているだけで 1 人目が止まる**
+      withGh({ labels: [] });
+      run(["pr", "42"]);
+
+      expect(run(["mine", "42"], { cwd: addWorkspace("second") }).status).toBe(1);
+    });
+
+    it("記録が無ければ、自分のものとして数える", () => {
+      // **判定不能は、数えすぎる側へ倒す**——**数えれば止まるだけ**だが、
+      // **数えないと、未処理の指摘を残したまま新しい作業を始める**
+      withGh({ labels: [] });
+
+      expect(run(["mine", "42"]).status).toBe(0);
+    });
+
+    it("走っているかどうかは見ない", () => {
+      // **数えるのは周回をまたぐ**（PR は次の周回でレビュー対応する）ので、
+      // **`pr` の「持ち主が生きているか」とは別の判定**である
+      withGh({ labels: [] });
+      const token = startRoundOutside(repo);
+      run(["pr", "42"]);
+      endRoundOutside(repo, token);
+
+      expect(run(["mine", "42"]).status).toBe(0);
+      expect(run(["mine", "42"], { cwd: addWorkspace("third") }).status).toBe(1);
+    });
+
+    it("使い方の誤りは、持っていないと混ぜない", () => {
+      withGh({ labels: [] });
+
+      expect(run(["mine"]).status).toBe(2);
+      expect(run(["mine", "#42"]).status).toBe(2);
     });
   });
 
