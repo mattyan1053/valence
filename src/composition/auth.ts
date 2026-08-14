@@ -34,7 +34,10 @@ import {
   startGithubLogin,
 } from "../infrastructure/supabase/session";
 import { createSupabaseUserTokenStore } from "../infrastructure/supabase/user-token-store";
-import { createWaitForWinnersSave } from "../infrastructure/time/wait-for-winners-save";
+import {
+  createWaitForWinnersSave,
+  createWinnersSaveBudget,
+} from "../infrastructure/time/wait-for-winners-save";
 
 /**
  * Next.js の Cookie 置き場を、細い口へ合わせる。
@@ -91,6 +94,7 @@ async function storeForCurrentUser(
   client: SupabaseClient,
   connection: SupabaseConnection,
   key: EncryptionKey,
+  remainingMs?: () => number | undefined,
 ): Promise<UserTokenStore | undefined> {
   const [userId, accessToken] = await Promise.all([
     currentUserId(client),
@@ -106,6 +110,9 @@ async function storeForCurrentUser(
     userId,
     userAccessToken: accessToken,
     key,
+    // **待つ側の予算を分け合う** (#255)。**渡さなければ、置き場は自分の制限だけで
+    // 諦める**——**待ちの上限は、待ちだけでは守れない**（往復にも食われる）
+    remainingMs,
   });
 }
 
@@ -166,8 +173,11 @@ export async function signOutCurrentUser(): Promise<void> {
 export async function visibleRepositoriesForCurrentUser(): Promise<VisibleRepositoriesResult> {
   const { credentials, connection, key } = settings();
   const client = await sessionClient(connection);
+  // **待つ側と置き場で、1 つの予算を分け合う** (#255)。**別々に作ると、
+  // それぞれが自分の時刻から数え**——**合計は上限を超える。**
+  const budget = createWinnersSaveBudget();
   return listVisibleRepositories({
-    openStore: () => storeForCurrentUser(client, connection, key),
+    openStore: () => storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
     ensure: (store) =>
       ensureUsableToken({
         store,
@@ -177,7 +187,7 @@ export async function visibleRepositoriesForCurrentUser(): Promise<VisibleReposi
         // **更新に負けたら、勝った側の保存を短く待つ** (#214)——
         // **待たないと、切れる必要が無かった人を入口へ送る。**
         // **待つ長さを決めているのは、この adapter だけである**
-        waitForWinnersSave: createWaitForWinnersSave(),
+        waitForWinnersSave: createWaitForWinnersSave({ budget }),
       }),
     // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない。**
     repositories: createUserVisibleRepositories(),

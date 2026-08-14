@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { ensureUsableToken } from "../../application/auth/ensure-usable-token";
 import { encryptToken, readEncryptionKey } from "../crypto/token-cipher";
 import { createSupabaseUserTokenStore, type Fetcher } from "./user-token-store";
 
@@ -23,7 +24,12 @@ const TOKENS = {
 
 type Call = { url: string; init: RequestInit };
 
-function storeWith(respond: (call: Call) => Response) {
+type Extras = {
+  readonly timeoutMs?: number;
+  readonly remainingMs?: () => number | undefined;
+};
+
+function storeWith(respond: (call: Call) => Response | Promise<Response>, extras: Extras = {}) {
   const calls: Call[] = [];
   const fetcher: Fetcher = async (url, init) => {
     const call = { url, init };
@@ -38,8 +44,14 @@ function storeWith(respond: (call: Call) => Response) {
     key: KEY,
     fetcher,
     now: () => new Date("2026-08-14T00:00:00.000Z"),
+    ...extras,
   });
   return { store, calls };
+}
+
+/** **返ってこない置き場。** **時間制限が無ければ、呼んだ側は永久に止まる。** */
+function neverResponds(): Promise<Response> {
+  return new Promise<Response>(() => {});
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -151,5 +163,87 @@ describe("Supabase のユーザートークン置き場", () => {
   it("保存が失敗したら投げる", async () => {
     const { store } = storeWith(() => jsonResponse({ message: "だめ" }, 403));
     await expect(store.save(TOKENS)).rejects.toThrow(/保存できません \(HTTP 403\)/);
+  });
+});
+
+describe("返ってこない置き場を、決めた時間で諦める", () => {
+  // **#254 のレビュー。** **返ってこなければ、画面はそのまま止まる**——
+  // **落ちてはいないので、どこにも失敗が出ない**（**待っている画面だけが残る**）。
+
+  it("読みは、決めた時間で諦める", async () => {
+    const { store } = storeWith(neverResponds, { timeoutMs: 20 });
+    await expect(store.load()).rejects.toThrow(/取得できません \(20 ms/);
+  });
+
+  it("書きも、決めた時間で諦める", async () => {
+    // **止まるのは読みだけではない。** **保存が返らなければ、同じように止まる**
+    const { store } = storeWith(neverResponds, { timeoutMs: 20 });
+    await expect(store.save(TOKENS)).rejects.toThrow(/保存できません \(20 ms/);
+  });
+
+  it("消すのも、決めた時間で諦める", async () => {
+    const { store } = storeWith(neverResponds, { timeoutMs: 20 });
+    await expect(store.clear()).rejects.toThrow(/削除できません \(20 ms/);
+  });
+
+  it("諦めるとき、繋がっている口も閉じる", async () => {
+    // **投げるだけでは、往復はまだ生きている**——**応答を待つ socket が残る。**
+    // **`signal` を渡していなければ、閉じる手立てがそもそも無い**
+    const { store, calls } = storeWith(neverResponds, { timeoutMs: 20 });
+
+    await expect(store.load()).rejects.toThrow();
+    expect(calls[0]?.init.signal, "中断の口を渡していない").toBeDefined();
+    expect(calls[0]?.init.signal?.aborted, "諦めたのに、往復は生きたまま").toBe(true);
+  });
+
+  it("返る置き場では、時間制限に当たらない", async () => {
+    // **制限そのものが、普通の読みを壊していないこと**
+    const { store } = storeWith(() => jsonResponse([sealedRow()]), { timeoutMs: 20 });
+    expect(await store.load()).toEqual(TOKENS);
+  });
+});
+
+describe("分け合う予算のほうが短ければ、そちらで諦める", () => {
+  // **待つ側は「あとどれだけ待てるか」を持っている** (#255)。
+  // **置き場がそれより長く粘ると、待ちの上限が上限でなくなる**——
+  // **`wait-for-winners-save.ts` の予算は、往復にも食われる**からである。
+
+  it("残りが短ければ、残りで諦める", async () => {
+    const { store } = storeWith(neverResponds, { timeoutMs: 5_000, remainingMs: () => 20 });
+    await expect(store.load()).rejects.toThrow(/取得できません \(20 ms/);
+  });
+
+  it("残りのほうが長ければ、自分の制限で諦める", async () => {
+    // **短いほうを採る。** **予算が長いからといって、置き場が粘ってよいわけではない**
+    const { store } = storeWith(neverResponds, { timeoutMs: 20, remainingMs: () => 5_000 });
+    await expect(store.load()).rejects.toThrow(/取得できません \(20 ms/);
+  });
+
+  it("予算が始まっていなければ、自分の制限で諦める", async () => {
+    // **待つ前の 1 回目の読みがここ。** **待ちの予算はまだ動いていない**
+    const { store } = storeWith(neverResponds, { timeoutMs: 20, remainingMs: () => undefined });
+    await expect(store.load()).rejects.toThrow(/取得できません \(20 ms/);
+  });
+});
+
+describe("諦めたときの行き先", () => {
+  // **本物の置き場を、本物の `ensureUsableToken` に渡して見る**（`AGENTS.md` §4）。
+  // **投げたものがどう読まれるかは、置き場の側だけでは決まらない。**
+
+  it("時間制限で諦めても、入り直しへは送らない", async () => {
+    // **入り直しても直らない** (#214)。**「入り直してください」と言うと、
+    // 直らない道へ送るうえ、本当のログイン切れと混ざる**
+    const { store } = storeWith(neverResponds, { timeoutMs: 20 });
+
+    const result = await ensureUsableToken({
+      store,
+      refresh: async () => {
+        throw new Error("呼ばれてはいけない");
+      },
+      now: new Date(),
+      waitForWinnersSave: async () => false,
+    });
+
+    expect(result).toEqual({ kind: "unavailable" });
   });
 });

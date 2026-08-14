@@ -19,6 +19,7 @@
  */
 
 import type { WaitForWinnersSave } from "../../application/auth/ensure-usable-token";
+import { createTimeBudget, type TimeBudget } from "./time-budget";
 
 /**
  * **待ちに使ってよい上限。**
@@ -26,46 +27,48 @@ import type { WaitForWinnersSave } from "../../application/auth/ensure-usable-to
  * **数えているのは「訊かれた時刻の差」**である——**間合いそのものと、
  * その間に挟まる読み直しの往復**が入る。
  *
- * **数えていないものが 2 つある** (#254 のレビュー)。**待つと決める前に起きる
- * 1 回目の `load`** と、**返ってこない 1 回の往復**である——**測るのは呼ばれた
- * ときだけ**なので、**`store.load()` が 30 秒返らなければ 30 秒止まる。**
+ * **読み直しの往復も、この予算の中で切れる** (#255)。**置き場は残りを覗き、
+ * 自分の制限と短いほうで諦める**ので、**「返ってこない 1 回の往復」で
+ * 予算が破れることはない**（**渡すのは `createSupabaseUserTokenStore` の
+ * `remainingMs`**。束ねるのは合成ルート）。
  *
- * **`store.load()` に時間制限が無いのは、この経路に限らない**（**普通の読み出しも
- * 同じ**）。**中断の口は `UserTokenStore` の側の話**なので、ここには無い。
+ * **数えていないものが 1 つある** (#254 のレビュー)。**待つと決める前に起きる
+ * 1 回目の `load`** である——**測るのは呼ばれたときだけ**なので、そこは入らない。
+ * **止まったままにはならない**（**置き場が自分の時間制限で諦める**）が、
+ * **その時間はこの予算の外側で足される。**
  */
 const DEFAULT_BUDGET_MS = 500;
 
 /** 間合い。**予算が尽きれば、残っていても使わない。** */
 const DEFAULT_DELAYS_MS = [50, 150, 300];
 
+/**
+ * **待ちの予算を作る。**
+ *
+ * **外から作れるようにしてある** (#255)——**同じ 1 つを、置き場と分け合う**
+ * （**別々に作ると、それぞれが自分の時刻から数え、合計は上限を超える**）。
+ */
+export function createWinnersSaveBudget(now?: () => number): TimeBudget {
+  return createTimeBudget({ budgetMs: DEFAULT_BUDGET_MS, now });
+}
+
 export type WaitForWinnersSaveOptions = {
-  readonly budgetMs?: number;
+  /** **分け合う予算。** 既定は自分のぶんだけを持つ（誰とも分けない）。 */
+  readonly budget?: TimeBudget;
   readonly delaysMs?: readonly number[];
   /** **差し替えるための引数であって、抽象ではない**（#64 と同じ形）。 */
   readonly sleep?: (ms: number) => Promise<void>;
-  /**
-   * いまを測る口。**`sleep` と同じ扱いにする** (#131 / #137)——
-   * **差し替えられれば、試験は本物の時計を回さずに締切を確かめられる。**
-   */
-  readonly now?: () => number;
 };
 
 export function createWaitForWinnersSave({
-  budgetMs = DEFAULT_BUDGET_MS,
+  budget = createWinnersSaveBudget(),
   delaysMs = DEFAULT_DELAYS_MS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  now = () => Date.now(),
 }: WaitForWinnersSaveOptions = {}): WaitForWinnersSave {
-  // **最初に訊かれた時刻から数える。** **その前の 1 回目の `load` は、待つと
-  // 決める前に必ず起きる**ので、**「待ちのために止めた時間」には入れない。**
-  let startedAt: number | undefined;
-
   return async (attempt: number) => {
-    // **時計は 1 回だけ読む。** **2 回読むと、その間に進んだぶんが
-    // 「往復にかかった時間」に混ざる**——**測りたいのは呼ばれた時刻の差である。**
-    const askedAt = now();
-    startedAt ??= askedAt;
-    const remaining = budgetMs - (askedAt - startedAt);
+    // **訊いた時点から数え始まる。** **その前の 1 回目の `load` は、待つと
+    // 決める前に必ず起きる**ので、**「待ちのために止めた時間」には入れない。**
+    const remaining = budget.askRemainingMs();
     if (remaining <= 0) {
       // **予算を使い切った。** **間合いが残っていても待たない**——
       // **往復が遅い日は、ここで回数が自然に減る。**
