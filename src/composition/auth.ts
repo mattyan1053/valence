@@ -133,21 +133,13 @@ export async function completeGithubLogin(code: string): Promise<LoginResult> {
   const { credentials, connection, key } = settings();
   const client = await sessionClient(connection);
 
-  let provider: Awaited<ReturnType<typeof exchangeCodeForProviderTokens>>;
-  try {
-    provider = await exchangeCodeForProviderTokens(client, code);
-  } catch (error) {
-    // **交換はここでしか起きない**ので、**段の名前もここでしか付けられない** (#248)。
-    // **投げ直す。** **握り潰すと、設定の不備が「入口へ戻った」に化ける**
-    reportLoginFailure("exchange", error);
-    throw error;
-  }
-
   return completeLogin({
     // **開く手続きごと渡す。** **開いた結果だけを渡すと、開く手前で落ちたときに
     // `completeLogin` へ入らず、畳む経路を通らない。**
     openStore: () => storeForCurrentUser(client, connection, key),
-    provider,
+    // **交換も手続きごと渡す** (#276 のレビュー)。**結果だけを渡すと、交換で落ちた
+    // ときに `completeLogin` へ入らず、段を残す経路をまるごと外れる**
+    exchange: () => exchangeCodeForProviderTokens(client, code),
     refresh: (refreshToken) =>
       refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
     // **入れられなかったら、作りかけのセッションを畳む。**

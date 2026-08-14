@@ -86,7 +86,14 @@ export type CompleteLoginInput = {
    */
   readonly openStore: () => Promise<UserTokenStore | undefined>;
   readonly refresh: RefreshUserTokens;
-  readonly provider: ProviderTokens;
+  /**
+   * **`code` をセッションへ交換する手続き。**
+   *
+   * **開く手続きごと受け取る**のと同じ理由である (#224 / #276 のレビュー)——
+   * **交換した結果だけを受け取ると、交換で落ちたときにここへ一度も入らない**。
+   * **段を残すのはここ 1 箇所**なので、**外で落ちる経路があると、そこだけ黙る。**
+   */
+  readonly exchange: () => Promise<ProviderTokens>;
   /**
    * 作りかけのセッションを畳む口。
    *
@@ -113,10 +120,22 @@ async function abandon(abandonSession: () => Promise<void>): Promise<LoginResult
 export async function completeLogin({
   openStore,
   refresh,
-  provider,
+  exchange,
   abandonSession,
   report,
 }: CompleteLoginInput): Promise<LoginResult> {
+  let provider: ProviderTokens;
+  try {
+    provider = await exchange();
+  } catch (error) {
+    // **畳まない。** **交換が落ちた時点で、畳む対象のセッションはまだ無い**
+    // ——**認証の Cookie が置かれるのは、交換が済んだ瞬間**である。
+    //
+    // **投げ直す。** **握り潰すと、設定の不備が「入口へ戻った」に化ける。**
+    report("exchange", error);
+    throw error;
+  }
+
   let store: UserTokenStore | undefined;
   try {
     store = await openStore();

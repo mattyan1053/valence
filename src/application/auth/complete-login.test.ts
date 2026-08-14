@@ -49,7 +49,7 @@ describe("ログインを終える", () => {
         expect(refreshToken).toBe(PROVIDER.refreshToken);
         return RENEWED;
       },
-      provider: PROVIDER,
+      exchange: async () => PROVIDER,
       abandonSession: async () => {},
       report: () => {},
     });
@@ -66,7 +66,7 @@ describe("ログインを終える", () => {
     await completeLogin({
       openStore: async () => port,
       refresh: async () => RENEWED,
-      provider: PROVIDER,
+      exchange: async () => PROVIDER,
       abandonSession: async () => {},
       report: () => {},
     });
@@ -84,7 +84,7 @@ describe("ログインを終える", () => {
       refresh: async () => {
         throw new Error("だめ");
       },
-      provider: PROVIDER,
+      exchange: async () => PROVIDER,
       abandonSession: async () => {},
       report: () => {},
     });
@@ -105,7 +105,7 @@ describe("ログインを終える", () => {
     const result = await completeLogin({
       openStore: async () => port,
       refresh: async () => RENEWED,
-      provider: PROVIDER,
+      exchange: async () => PROVIDER,
       abandonSession: async () => {},
       report: () => {},
     });
@@ -142,7 +142,7 @@ describe("ログインを終える", () => {
       const result = await completeLogin({
         openStore: async () => undefined,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession,
         report: () => {},
       });
@@ -160,7 +160,7 @@ describe("ログインを終える", () => {
         refresh: async () => {
           throw new Error("だめ");
         },
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession,
         report: () => {},
       });
@@ -180,7 +180,7 @@ describe("ログインを終える", () => {
       const result = await completeLogin({
         openStore: async () => port,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession,
         report: () => {},
       });
@@ -198,7 +198,7 @@ describe("ログインを終える", () => {
       const result = await completeLogin({
         openStore: async () => port,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession,
         report: () => {},
       });
@@ -222,7 +222,7 @@ describe("ログインを終える", () => {
             throw new Error("鍵が設定されていません");
           },
           refresh: async () => RENEWED,
-          provider: PROVIDER,
+          exchange: async () => PROVIDER,
           abandonSession,
           report: () => {},
         }),
@@ -242,7 +242,7 @@ describe("ログインを終える", () => {
           refresh: async () => {
             throw new Error("だめ");
           },
-          provider: PROVIDER,
+          exchange: async () => PROVIDER,
           abandonSession: async () => {
             throw new Error("畳めません");
           },
@@ -273,7 +273,7 @@ describe("ログインを終える", () => {
         refresh: async () => {
           throw failure;
         },
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession: async () => {},
         report,
       });
@@ -294,7 +294,7 @@ describe("ログインを終える", () => {
       await completeLogin({
         openStore: async () => port,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession: async () => {},
         report,
       });
@@ -310,7 +310,7 @@ describe("ログインを終える", () => {
       await completeLogin({
         openStore: async () => undefined,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession: async () => {},
         report,
       });
@@ -329,13 +329,42 @@ describe("ログインを終える", () => {
             throw failure;
           },
           refresh: async () => RENEWED,
-          provider: PROVIDER,
+          exchange: async () => PROVIDER,
           abandonSession: async () => {},
           report,
         }),
       ).rejects.toThrow(/鍵が設定されていません/);
 
       expect(reported).toEqual([{ stage: "session", error: failure }]);
+    });
+
+    it("交換に失敗したら、exchange を残して投げ直す", async () => {
+      // **交換はこの関数より前で起きていた** (#276 のレビュー)。**結果だけを受け取ると、
+      // 落ちたときにここへ一度も入らない**——**記録する側を消しても、誰も落ちない。**
+      // **`openStore` と同じ形にする**（**手続きごと受け取る**。#224 と同じ理由）
+      const { reported, report } = recorder();
+      const failure = new Error("交換できません");
+      let abandoned = 0;
+
+      await expect(
+        completeLogin({
+          openStore: async () => {
+            throw new Error("ここまで来てはいけない");
+          },
+          refresh: async () => RENEWED,
+          exchange: async () => {
+            throw failure;
+          },
+          abandonSession: async () => {
+            abandoned += 1;
+          },
+          report,
+        }),
+      ).rejects.toThrow(/交換できません/);
+
+      expect(reported).toEqual([{ stage: "exchange", error: failure }]);
+      // **畳まない。** **交換が落ちた時点で、畳む対象のセッションはまだ無い**
+      expect(abandoned, "作られていないセッションを畳んでいる").toBe(0);
     });
 
     it("入れたときは、何も残さない", async () => {
@@ -346,7 +375,7 @@ describe("ログインを終える", () => {
       await completeLogin({
         openStore: async () => port,
         refresh: async () => RENEWED,
-        provider: PROVIDER,
+        exchange: async () => PROVIDER,
         abandonSession: async () => {},
         report,
       });
