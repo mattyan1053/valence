@@ -13,11 +13,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import type { LoginResult } from "../application/auth/complete-login";
 import { completeLogin } from "../application/auth/complete-login";
+import { ensureUsableToken } from "../application/auth/ensure-usable-token";
 import { signOut } from "../application/auth/sign-out";
 import type { UserTokenStore } from "../application/ports/user-token-store";
+import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
+import { listVisibleRepositories } from "../application/repositories/list-visible-repositories";
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
 import { readOAuthCredentials } from "../infrastructure/github/app-credentials";
 import { refreshUserTokens } from "../infrastructure/github/user-token";
+import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
 import {
   createSessionClient,
   currentAccessToken,
@@ -141,4 +145,27 @@ export async function signOutCurrentUser(): Promise<void> {
     return;
   }
   await signOut({ store, endSession: () => endSession(client) });
+}
+
+/**
+ * **いまログインしている人が見られるリポジトリ**を返す。
+ *
+ * **束ねるのはここだけ**（§3）——**画面は port の結果しか知らない。**
+ * **失効していても更新できれば出る**（`ensureUsableToken` が持っている経路）。
+ */
+export async function visibleRepositoriesForCurrentUser(): Promise<VisibleRepositoriesResult> {
+  const { credentials, connection, key } = settings();
+  const client = await sessionClient(connection);
+  return listVisibleRepositories({
+    openStore: () => storeForCurrentUser(client, connection, key),
+    ensure: (store) =>
+      ensureUsableToken({
+        store,
+        refresh: (refreshToken) =>
+          refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+        now: new Date(),
+      }),
+    // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない。**
+    repositories: createUserVisibleRepositories(),
+  });
 }
