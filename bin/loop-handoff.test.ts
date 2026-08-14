@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-handoff", import.meta.url));
+const STAMP = fileURLToPath(new URL("./loop-procedure-stamp", import.meta.url));
 const LEASE = fileURLToPath(new URL("./loop-lease", import.meta.url));
 
 /**
@@ -403,9 +404,13 @@ describe("bin/loop-handoff", () => {
       // **ループと関係なく叩く場合に邪魔しない**、の裏でもある——
       // 持っている周回には何も足さない
       withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
-      expect(spawnSync(LEASE, ["acquire", "master"], { cwd: repo, encoding: "utf8" }).status).toBe(
-        0,
-      );
+      expect(
+        spawnSync(
+          LEASE,
+          ["acquire", "master", spawnSync(STAMP, ["master"], { encoding: "utf8" }).stdout.trim()],
+          { cwd: repo, encoding: "utf8" },
+        ).status,
+      ).toBe(0);
 
       const handoff = run("master");
 

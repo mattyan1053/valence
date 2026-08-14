@@ -63,6 +63,12 @@ describe("入口を飛ばした周回", () => {
   }
 
   function lease(...args: string[]): { status: number; stdout: string; stderr: string } {
+    // **`acquire` は手順書の印を受け取る** (#243 のレビュー)。**入口で受けるので、
+    // 古い版が配られた周回はここで落ちる**——**試験の側も、実物と同じ呼び方にする**
+    if (args[0] === "acquire") {
+      const stamp = run(script("loop-procedure-stamp"), [args[1] ?? "worker"]);
+      return run(script("loop-lease"), [...args, stamp.stdout.trim()]);
+    }
     return run(script("loop-lease"), args);
   }
 
@@ -109,7 +115,14 @@ describe("入口を飛ばした周回", () => {
     const mine = owner();
 
     rmSync(leaseFile(), { force: true });
-    expect(run("setsid", [script("loop-lease"), "acquire", "worker"]).status).toBe(0);
+    expect(
+      run("setsid", [
+        script("loop-lease"),
+        "acquire",
+        "worker",
+        run(script("loop-procedure-stamp"), ["worker"]).stdout.trim(),
+      ]).status,
+    ).toBe(0);
 
     expect(mine, "自分の印が空である").not.toBe("");
     expect(owner(), "別のセッションでも同じ印になっている").not.toBe(mine);

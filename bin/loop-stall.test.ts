@@ -717,7 +717,14 @@ describe("worker が作業しているあいだは数えない", () => {
     repo = mkdtempSync(join(tmpdir(), "loop-stall-rounds-"));
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     mkdirSync(join(repo, "bin"));
-    for (const name of ["loop-stall", "loop-lease"]) {
+    // **`acquire` は手順書の印を受け取る** (#243 のレビュー)——**印を出す側と、
+    // 突き合わせる相手（手順書）も要る。** **本物の共通ディレクトリは向けない**
+    mkdirSync(join(repo, ".claude", "commands"), { recursive: true });
+    copyFileSync(
+      join(REPO_ROOT, ".claude/commands/loop-worker.md"),
+      join(repo, ".claude/commands/loop-worker.md"),
+    );
+    for (const name of ["loop-stall", "loop-lease", "loop-procedure-stamp"]) {
       copyFileSync(join(REPO_ROOT, "bin", name), join(repo, "bin", name));
       chmodSync(join(repo, "bin", name), 0o755);
     }
@@ -733,7 +740,17 @@ describe("worker が作業しているあいだは数えない", () => {
    */
   function workerScope(): string {
     const lease = join(repo, "bin", "loop-lease");
-    const held = spawnSync(lease, ["acquire", "worker"], { cwd: repo, encoding: "utf8" });
+    const held = spawnSync(
+      lease,
+      [
+        "acquire",
+        "worker",
+        spawnSync(join(REPO_ROOT, "bin/loop-procedure-stamp"), ["worker"], {
+          encoding: "utf8",
+        }).stdout.trim(),
+      ],
+      { cwd: repo, encoding: "utf8" },
+    );
     expect(held.status, `lease を取れない: ${held.stderr}`).toBe(0);
     const name = readdirSync(join(repo, ".git")).find((entry) =>
       entry.startsWith("valence-loop-rounds-worker"),
@@ -1240,7 +1257,14 @@ describe("人が再開したことを受け取る", () => {
     repo = mkdtempSync(join(tmpdir(), "loop-stall-resume-"));
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     mkdirSync(join(repo, "bin"));
-    for (const name of ["loop-stall", "loop-lease"]) {
+    // **`acquire` は手順書の印を受け取る** (#243 のレビュー)——**印を出す側と、
+    // 突き合わせる相手（手順書）も要る。** **本物の共通ディレクトリは向けない**
+    mkdirSync(join(repo, ".claude", "commands"), { recursive: true });
+    copyFileSync(
+      join(REPO_ROOT, ".claude/commands/loop-worker.md"),
+      join(repo, ".claude/commands/loop-worker.md"),
+    );
+    for (const name of ["loop-stall", "loop-lease", "loop-procedure-stamp"]) {
       copyFileSync(join(REPO_ROOT, "bin", name), join(repo, "bin", name));
       chmodSync(join(repo, "bin", name), 0o755);
     }
@@ -1343,7 +1367,14 @@ describe("人が再開したことを受け取る", () => {
     const real = mkdtempSync(join(tmpdir(), "loop-stall-resume-task-"));
     expect(spawnSync("git", ["init", "--quiet", real]).status).toBe(0);
     mkdirSync(join(real, "bin"));
-    for (const name of ["loop-stall", "loop-lease"]) {
+    // **`acquire` は手順書の印を受け取る** (#243 のレビュー)——**印を出す側と、
+    // 突き合わせる相手（手順書）も要る。** **本物の共通ディレクトリは向けない**
+    mkdirSync(join(repo, ".claude", "commands"), { recursive: true });
+    copyFileSync(
+      join(REPO_ROOT, ".claude/commands/loop-worker.md"),
+      join(repo, ".claude/commands/loop-worker.md"),
+    );
+    for (const name of ["loop-stall", "loop-lease", "loop-procedure-stamp"]) {
       copyFileSync(join(REPO_ROOT, "bin", name), join(real, "bin", name));
       chmodSync(join(real, "bin", name), 0o755);
     }
@@ -1474,7 +1505,14 @@ describe("止まっていないのに、止めたと言わない", () => {
     repo = mkdtempSync(join(tmpdir(), "loop-stop-partial-write-"));
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     mkdirSync(join(repo, "bin"));
-    for (const name of ["loop-stall", "loop-lease"]) {
+    // **`acquire` は手順書の印を受け取る** (#243 のレビュー)——**印を出す側と、
+    // 突き合わせる相手（手順書）も要る。** **本物の共通ディレクトリは向けない**
+    mkdirSync(join(repo, ".claude", "commands"), { recursive: true });
+    copyFileSync(
+      join(REPO_ROOT, ".claude/commands/loop-worker.md"),
+      join(repo, ".claude/commands/loop-worker.md"),
+    );
+    for (const name of ["loop-stall", "loop-lease", "loop-procedure-stamp"]) {
       copyFileSync(join(REPO_ROOT, "bin", name), join(repo, "bin", name));
       chmodSync(join(repo, "bin", name), 0o755);
     }

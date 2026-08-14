@@ -46,6 +46,7 @@ readonly STOP_IDS=(
   "implementation-blocked:<Issue番号>|worker: blocked にして人へ渡した (完了条件を満たせない / PR が人手で閉じられた)"
   "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
   "too-many-ready:<件数>|両方: ready の Issue が 3 件以上ある (上限は 2 件)"
+  "procedure-stale|両方: 配られた手順書がディスクより古い (呼び直しても直らなかった)"
   "wrong-worktree|master: worker の作業ツリーにいる"
   # **どちらの役も打つ。** 「一覧の失敗を 0 件として読む」は master 側で 4 箇所直したが、
   # **worker の手順には残っていた** (#136)。**同じ状態には同じ名前**なので分けない

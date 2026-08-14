@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# **配られた手順書が、ディスクより古くないかを見る** (#241)。
+#
+#   bin/loop-procedure-stamp <役>              ディスクの手順書の印を出す
+#   bin/loop-procedure-stamp <役> <読んだ印>   読んだ印と突き合わせる
+#
+#   exit 0 = 同じ（続けてよい）
+#   exit 1 = 違う / 印が無い → **配られたテキストが古い。捨てる**
+#   exit 2 = 判定できない（ディスクに印が無い / 使い方の誤り）
+#
+# **#227 の仕組みでは見えない。** **`bin/loop-procedure-changed` が比べているのは
+# git の commit** で、**「いま読んでいるテキストが何版か」は見ていない**——
+# **切り替えたあとは正しく「変わっていない」と答える**ので、**赤くならない。**
+#
+# **配る側は直せない**（リポジトリの外）ので、**気づけるようにする。**
+# **読んだ側が申告する**——**手順書の中に印を置き、読んだ印をここへ渡す。**
+#
+# **印が無い版が配られたら「古い」と読む。** **印を入れる前の版がそれ**であり、
+# **印を落として渡す誤りも、同じ側へ倒れる**（**止まる側へ倒す**）。
+#
+# **印は中身から決める。** **手で書いた値を信じると、「印を足したが中身と関係ない」が
+# 作れる**——**ディスク側の印が中身と合っているかは `./task check` が見る。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+readonly ROLES=(master worker)
+
+usage() {
+  echo "使い方: bin/loop-procedure-stamp <役>              ディスクの印を出す" >&2
+  echo "        bin/loop-procedure-stamp <役> <読んだ印>   読んだ印と突き合わせる" >&2
+  echo "        役: ${ROLES[*]}" >&2
+  echo "        exit 0 同じ / exit 1 古い（捨てる）/ exit 2 判定できない" >&2
+  exit 2
+}
+
+[[ $# -eq 1 || $# -eq 2 ]] || usage
+
+ROLE="$1"
+known=0
+for role in "${ROLES[@]}"; do
+  [[ $ROLE == "$role" ]] && known=1
+done
+((known == 1)) || usage
+readonly ROLE
+
+# **スクリプトの隣から辿る。** **cwd からではない**——**このスクリプトが属する
+# チェックアウトの手順書**と突き合わせたい（**呼ばれる場所は作業ツリーの中とは限らない**）。
+readonly DOC="${BASH_SOURCE[0]%/*}/../.claude/commands/loop-$ROLE.md"
+
+if [[ ! -f $DOC ]]; then
+  echo "[FAIL] 手順書が見つかりません: $DOC" >&2
+  exit 2
+fi
+
+# **印の行そのものは、印の材料から外す。** **入れた瞬間に自分を変えてしまう**ため。
+readonly STAMP_LINE='^<!-- 版: .* -->$'
+
+if ! grep -qE "$STAMP_LINE" "$DOC"; then
+  # **「古い」ではない。** **突き合わせる相手が無い**ので、判定できない
+  echo "[FAIL] ディスクの手順書に版の印がありません: $DOC" >&2
+  exit 2
+fi
+
+# **外の道具を増やさない。** **ここは周回の入口で毎回走る**ので、
+# **bash だけで書く**（`sed` は、道具を絞った試験の PATH に無いことがある）。
+body=""
+while IFS= read -r line || [[ -n $line ]]; do
+  [[ $line =~ ^"<!-- 版: "..*" -->"$ ]] && line="<!-- 版 -->"
+  body+="$line"$'\n'
+done <"$DOC" || {
+  echo "[FAIL] 手順書を読めません: $DOC" >&2
+  exit 2
+}
+
+if ! digest="$(printf '%s' "$body" | sha256sum)" || [[ -z ${digest%% *} ]]; then
+  echo "[FAIL] 印を計算できません" >&2
+  exit 2
+fi
+stamp="${digest:0:12}"
+
+if [[ $# -eq 1 ]]; then
+  printf '%s\n' "$stamp"
+  exit 0
+fi
+
+if [[ $2 == "$stamp" ]]; then
+  exit 0
+fi
+
+# **黙って進まない。** **どちらが古いかは、ここでは決まらない**——
+# **分かるのは「読んだものとディスクが違う」ことだけ**である。
+echo "[NG] 配られた手順書と、ディスクの手順書が違います（$DOC）" >&2
+echo "     読んだ印: ${2:-（無し）} / ディスク: $stamp" >&2
+exit 1

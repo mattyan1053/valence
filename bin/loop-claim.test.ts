@@ -18,6 +18,12 @@ import { MODELLED_HOOK_SPAWNS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-claim", import.meta.url));
 const LEASE = fileURLToPath(new URL("./loop-lease", import.meta.url));
+const STAMP = fileURLToPath(new URL("./loop-procedure-stamp", import.meta.url));
+
+/** **`acquire` は手順書の印を受け取る** (#243 のレビュー)。**実物と同じ呼び方にする。** */
+function workerStamp(): string {
+  return spawnSync(STAMP, ["worker"], { encoding: "utf8" }).stdout.trim();
+}
 
 type Run = { status: number; stdout: string; stderr: string };
 
@@ -128,7 +134,7 @@ describe("bin/loop-claim", () => {
 
   /** 作業場で周回を始める（`describe` をまたいで使う）。 */
   function startRoundOutside(cwd: string): string {
-    const result = spawnSync(LEASE, ["acquire", "worker"], {
+    const result = spawnSync(LEASE, ["acquire", "worker", workerStamp()], {
       cwd,
       encoding: "utf8",
       env: { ...process.env, PATH: path },
@@ -367,7 +373,7 @@ describe("bin/loop-claim", () => {
   describe("pr — レビュー対応の前に PR を取る", () => {
     /** 作業場で周回を始める。**PR の記録は、持ち主の周回が走っている間だけ効く。** */
     function startRound(cwd: string): string {
-      const result = spawnSync(LEASE, ["acquire", "worker"], {
+      const result = spawnSync(LEASE, ["acquire", "worker", workerStamp()], {
         cwd,
         encoding: "utf8",
         env: { ...process.env, PATH: path },
