@@ -789,6 +789,9 @@ describe("bin/loop-lease", () => {
 
       expect(second.status).toBe(1);
       expect(second.stderr).toMatch(/最後の活動/);
+      // **あとどれだけ待てばよいかを出す** (#251)。**「待てば済む」のか
+      // 「そうでない」のかが、その場で分かる**
+      expect(second.stderr, "残りが読めない").toMatch(/あと\s*-?\d+\s*秒/);
     });
 
     /**
@@ -1031,6 +1034,87 @@ describe("bin/loop-lease", () => {
         const checked = run(["check"]);
 
         expect(checked.stderr, "飛ばしたと誤診している").not.toContain("acquire を飛ばした");
+      });
+    });
+
+    /**
+     * **伸ばしてよいのは、持ち主の周回だけ** (#251)。
+     *
+     * **`./task` は周回の外からも打たれる**（人が手で叩く）——**打った人が持ち主で
+     * なくても同じように伸びていた。** **実測では、取り落とした lease が
+     * 「待てば切れる」と読めるのに切れず**、**worker は事実上いつまでも動けなかった。**
+     *
+     * **殺さない側は変えない。** **長い周回が途中で奪われるのを防ぐのが、この仕組みの
+     * 目的**である——**持ち主の心拍は、これまでどおり伸ばす。**
+     */
+    describe("伸ばすのは、持ち主の周回だけ", () => {
+      /** 別の周回として心拍を打つ。**`setsid` で切り離して初めて別の周回になる。** */
+      function heartbeatAsOtherRound(): number {
+        const beat = spawnSync("setsid", ["--wait", SCRIPT, "heartbeat", "worker"], {
+          cwd: sandbox,
+          encoding: "utf8",
+          env: { ...process.env },
+        });
+        return beat.status ?? -1;
+      }
+
+      it("別の周回が打っても、取り落とした lease は伸びない", () => {
+        // **これが本題。** **待っている間も伸びていた**ので、**いつまでも切れない**
+        expect(acquire().status).toBe(0);
+        ageLease(3600);
+
+        expect(heartbeatAsOtherRound(), "心拍そのものは落とさない").toBe(0);
+        const second = acquire();
+
+        expect(second.status, "取り落とした lease が伸び続けている").toBe(0);
+        expect(second.stderr).toContain("引き継ぎます");
+      });
+
+      it("持ち主の心拍は、これまでどおり伸ばす", () => {
+        // **走っている周回を殺さない。** **それがこの仕組みの目的**である
+        expect(acquire().status).toBe(0);
+        ageLease(3600);
+
+        expect(run(["heartbeat", "worker"]).status).toBe(0);
+        const second = acquire();
+
+        expect(second.status, "走っている周回を奪っている").toBe(1);
+        expect(second.stderr).not.toContain("引き継ぎます");
+      });
+
+      it("照合と書き込みを、同じロックの中で行う", () => {
+        // **「持ち主だ」と読んだ時点と、書く時点が別だと、間に `acquire` が入れる**
+        // ——**古い周回の心拍が、新しい持ち主の期限を伸ばす** (#280 のレビュー)。
+        //
+        // **競り自体は試験にしない**（時間に依存する。#131 で直した形を作り直すことになる）
+        // ——**代わりに、錠を開ける位置を見る。** **書き込みより前に開けていたら赤。**
+        const script = readFileSync(SCRIPT, "utf8");
+        const from = script.indexOf('if [[ $ACTION == "heartbeat" ]]; then');
+        expect(from, "心拍のブロックが見つからない").toBeGreaterThanOrEqual(0);
+        const block = script.slice(from).split("\nfi\n")[0] ?? "";
+        const opened = block.indexOf("lock_state");
+        const closed = block.indexOf("exec 9>&-");
+        const written = block.indexOf("$ACTIVITY.tmp");
+
+        expect(opened, "ロックを取っていない").toBeGreaterThanOrEqual(0);
+        expect(written, "書き込みが見つからない").toBeGreaterThan(opened);
+        if (closed >= 0) {
+          expect(closed, "照合と書き込みの間で錠を開けている").toBeGreaterThan(written);
+        }
+      });
+
+      it("持ち主が分からない記録は、伸ばす側へ倒す", () => {
+        // **前の版が書いた lease には持ち主の行が無い**——**記録は版をまたいで共有される。**
+        // **分からないものを殺しに行かない**（**偽の引き継ぎより、切れ残りのほうが安い**）
+        expect(acquire().status).toBe(0);
+        const file = stateFile();
+        const token = (readFileSync(file, "utf8").split("\t")[0] ?? "").trim();
+        writeFileSync(file, `${token}\t${Math.floor(Date.now() / 1000) - 3600}\n`);
+
+        expect(heartbeatAsOtherRound()).toBe(0);
+        const second = acquire();
+
+        expect(second.status, "持ち主が分からない周回を奪っている").toBe(1);
       });
     });
 
