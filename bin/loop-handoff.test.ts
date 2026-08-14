@@ -592,6 +592,43 @@ describe("bin/loop-handoff", () => {
     expect(run("master").stdout).toMatch(/^worker\t/);
   });
 
+  describe("ready が 2 件のとき", () => {
+    /**
+     * **いちばん渡したい瞬間に落ちていた**（#267）。
+     *
+     * **条件が `ready == 1` の等号**だったので、**2 件だとどの枝にも入らず exit 1**
+     * ——**「相手に持ち物が無い」と読まれて終わる。**
+     *
+     * **`in-progress` が 0 になるのは「実装が終わった直後」**で、
+     * **そのとき `ready` が 2 件溜まっているのは普通**である（master は 2 件まで満たす）。
+     * **2026-08-14 に実測した**——**worker は手が空き、渡す仕事は 2 件あり、
+     * それでも誰も起こさなかった。**
+     *
+     * **件数で絞る必要は無い。** **重複の抑止は指紋が別に持っている。**
+     */
+    it("着手されていなければ worker へ渡す", () => {
+      withState({ ready: 2 });
+
+      expect(run("master").stdout, "2 件だと誰も起こさない").toMatch(/^worker\t/);
+    });
+
+    it("同じ状態で 2 通目を送らない", () => {
+      // **緩めた瞬間に送り合いへ倒れても気づけない**ので、ここを見る（master の指摘）。
+      // **抑止は指紋（`informed`）が持っている**ので、**`>= 1` にしても増えない**
+      withState({ ready: 2 });
+      expect(cycle("master").status).toBe(0);
+
+      expect(run("master").status, "件数を緩めたら重複が増えた").toBe(1);
+    });
+
+    it("着手中があれば、これまでどおり送らない", () => {
+      // **`in-progress` の条件までは緩めない**（それは #264 の担当）
+      withState({ ready: 2, inProgress: 1 });
+
+      expect(run("master").status).toBe(1);
+    });
+  });
+
   it("backlog はあるが ready が 0 なら master へ渡す（昇格の番）", () => {
     withState({ backlog: 3 });
 
