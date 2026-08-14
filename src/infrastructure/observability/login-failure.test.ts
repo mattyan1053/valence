@@ -36,9 +36,9 @@ describe("落ちた段を残す", () => {
     expect(written.join("\n")).toContain("TypeError");
   });
 
-  it("4 つの段を、そのまま名前で出す", () => {
+  it("5 つの段を、そのまま名前で出す", () => {
     // **段が読めなければ、記録があっても人は動けない**
-    for (const stage of ["exchange", "session", "refresh", "save"] as const) {
+    for (const stage of ["setup", "exchange", "session", "refresh", "save"] as const) {
       const { written, write } = lines();
 
       reportLoginFailure(stage, LEAKY, write);
