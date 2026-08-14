@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { budgetFor } from "../test/slow-machine";
@@ -195,14 +195,32 @@ describe("bin/loop-lease", () => {
       // **#240 の顔。** **試験の誤った呼び出しが本物のカウンタを積み、
       // `loop/STOP` を配りうる**——**使い捨てのリポジトリで走っている限り、
       // 記録もそちらへ行く**ことを、ここで押さえる。
-      const real = join(REPO_ROOT, ".git", "valence-loop-stall");
-      const before = existsSync(real) ? readFileSync(real, "utf8") : undefined;
+      //
+      // **置き場は実装と同じ口で解く** (#261 のレビュー)。**`.git` は
+      // いつもディレクトリとは限らない**——**linked worktree では gitfile** なので、
+      // **`join(REPO_ROOT, ".git", …)` はファイルの下を指し、`existsSync` が
+      // 必ず false になる**（**`undefined` どうしの比較で、本物が積まれても緑**）。
+      // **`./task loop:setup` が作るのがその形**なので、**2 人目を起こした瞬間に
+      // 黙って守りが外れる。**
+      const common = spawnSync("git", ["-C", REPO_ROOT, "rev-parse", "--git-common-dir"], {
+        encoding: "utf8",
+      });
+      expect(common.status, `共通ディレクトリを解けない: ${common.stderr}`).toBe(0);
+      const commonDir = resolve(REPO_ROOT, common.stdout.trim());
+      expect(existsSync(commonDir), `共通ディレクトリが無い: ${commonDir}`).toBe(true);
+
+      // **「いまの状態」を直に見ない** (#186)。**ループが止まっている間ずっと赤に
+      // なると、止めた原因を調べている人のところで無関係に鳴る**——**前後で比べる。**
+      const real = join(commonDir, "valence-loop-stall");
+      const stop = join(REPO_ROOT, "loop/STOP");
+      const before = existsSync(real) ? readFileSync(real, "utf8") : "";
+      const stopBefore = existsSync(stop);
 
       run(["acquire", "worker"]);
 
-      const after = existsSync(real) ? readFileSync(real, "utf8") : undefined;
+      const after = existsSync(real) ? readFileSync(real, "utf8") : "";
       expect(after, "本物のカウンタを積んでいる").toBe(before);
-      expect(existsSync(join(REPO_ROOT, "loop/STOP")), "STOP を配っている").toBe(false);
+      expect(existsSync(stop), "STOP を配っている").toBe(stopBefore);
     });
 
     it("違う印なら取れない（配られたテキストが古い）", () => {
