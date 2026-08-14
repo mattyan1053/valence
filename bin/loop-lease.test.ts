@@ -491,6 +491,60 @@ describe("bin/loop-lease", () => {
       expect(run(["held", "master"]).status).toBe(0);
       expect(run(["held", "worker"]).status).toBe(1);
     });
+
+    it("誰も持っていないとき、どの範囲について答えたのかを出す", () => {
+      // **これが本題** (#250)。**worker の lease は作業場ごとに分かれている**ので、
+      // **別の作業場から呼ぶと、そこには誰も居ないぶん、いつでも exit 1 になる。**
+      // **master が「解放済み」と読んで worker へ伝え、実際は 7 分取れなかった**
+      // （2026-08-14。**答えは正しく、問いが違っていた**）。
+      //
+      // **exit 1 のときこそ出す**——**「誰も持っていない」と「この作業場には無い」が、
+      // 同じ顔をしているのが本体**である。
+      const answered = run(["held", "worker"]);
+
+      expect(answered.status).toBe(1);
+      expect(answered.stderr, "どの作業場について答えたのかが出ていない").toContain(sandbox);
+      expect(answered.stderr, "別の作業場を見る行き先が出ていない").toContain("busy");
+    });
+
+    it("持っているときも、どの範囲かを出す", () => {
+      acquire();
+
+      const answered = run(["held", "worker"]);
+
+      expect(answered.status).toBe(0);
+      expect(answered.stderr).toContain(sandbox);
+    });
+
+    it("master の答えは、範囲で分かれない", () => {
+      // **master の lease は作業場で分かれない**ので、**振る舞いを変えない**
+      // ——**作業場のパスを出すと、分かれているように読める**
+      const answered = run(["held", "master"]);
+
+      expect(answered.status).toBe(1);
+      expect(answered.stderr, "master は作業場で分かれない").not.toContain(sandbox);
+    });
+
+    it("master には、別の作業場の案内を出さない", () => {
+      // **役ごとに置き場所が違う** (#283 のレビュー)。**master の記録は 1 つだけ**なので、
+      // **`busy master` は `held master` と同じものを見る**——**「別の作業場も見るなら」と
+      // 案内しても、行き先が同じ**である。
+      //
+      // **#250 と同じ形をここで作らない**——**答えは正しいのに、問いの説明が違う。**
+      const answered = run(["held", "master"]);
+
+      expect(answered.status).toBe(1);
+      expect(answered.stderr, "master に worker 向けの案内が出ている").not.toContain("busy");
+    });
+
+    it("使い方の行に、答える範囲が書いてある", () => {
+      // **使い方を読んだだけで「呼んだ作業場のことだ」と分かること**（#250 の完了条件）
+      const usage = run([]).stderr;
+      const line = usage.split("\n").find((row) => row.includes("held")) ?? "";
+
+      expect(line, "held の行が無い").not.toBe("");
+      expect(line, "答える範囲が書かれていない").toContain("作業場");
+    });
   });
 
   it("知らない役は受け付けない", () => {

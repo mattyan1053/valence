@@ -57,7 +57,8 @@ usage() {
   echo "使い方: bin/loop-lease acquire <役> <手順書の印>" >&2
   echo "        bin/loop-lease recover <役> <手順書の印>  印がずれた周回が、木を入れ替える前に押さえる" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
-  echo "        bin/loop-lease held <役>        その役を誰かが持っているか（読むだけ）" >&2
+  echo "        bin/loop-lease held <役>        その lease を誰かが持っているか（worker は呼んだ作業場の分）" >&2
+  echo "                                        別の作業場の worker も見るなら busy（master は 1 つなので同じ）" >&2
   echo "        bin/loop-lease check            この周回が持っていなければ言って記録する（止めない）" >&2
   echo "        bin/loop-lease busy <役>        その役の周回がどこかで走っているか（読むだけ）" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
@@ -836,7 +837,29 @@ held)
   # **見るのは「その単位を誰かが持っているか」**である。**「呼んだ周回自身が
   # 持っているか」を見たいなら `check`**（そちらは周回の印を突き合わせる）。
   [[ $# -eq 2 ]] || usage
-  [[ -n $held_token ]] || exit 1
+  # **答えた範囲を、答えと一緒に出す** (#250)。**worker の lease は作業場ごとに
+  # 分かれている**ので、**別の作業場から呼ぶと、そこには誰も居ないぶん、いつでも
+  # exit 1 になる**——**master がそれを「解放された」と読んで worker へ伝え、
+  # 実際には 7 分ほど取れないままだった**（2026-08-14。**答えは正しく、問いが違っていた**）。
+  #
+  # **exit 1 のときこそ出す。** **「誰も持っていない」と「この作業場には無い」が、
+  # 同じ顔をしているのが本体**である——**終了コードだけでは、読む側が問いを取り違える。**
+  #
+  # **`SCOPE_LABEL` をそのまま使う。** **範囲の言い方を 2 箇所に持たない**
+  # （master は「master」、worker は「この作業場（<パス>）の worker」）。
+  if [[ -n $held_token ]]; then
+    echo "[INFO] $SCOPE_LABEL の lease を、いま誰かが持っています" >&2
+    exit 0
+  fi
+  echo "[INFO] $SCOPE_LABEL の lease は、誰も持っていません" >&2
+  # **行き先を出す** (#250)。**同じ問いに答える口を 2 つ作らない**——
+  # **作業場をまたいで見たいなら `busy`** で、そちらは共通ディレクトリを走査する。
+  #
+  # **worker のときだけ出す** (#283 のレビュー)。**master の記録は 1 つだけ**なので、
+  # **`busy master` は `held master` と同じものを見る**——**「別の作業場も見るなら」と
+  # 案内しても行き先が同じ**で、**#250 と同じ形（答えは正しく、説明が違う）になる。**
+  [[ $ROLE == "worker" ]] && echo "       別の作業場も見るなら: bin/loop-lease busy $ROLE" >&2
+  exit 1
   ;;
 acquire | recover)
   # **引数の数は、上の入口で見ている**（印を受けるところ）。**ここには届かない**
