@@ -262,6 +262,45 @@ describe("bin/loop-lease", () => {
     expect(run(["release", "worker", stale]).status).toBe(1);
   });
 
+  describe("check の案内は、そのまま打てる", () => {
+    // **踏むのはいちばん困っているとき**である（**入口を飛ばした周回**）。
+    // **言われたとおり打って usage で落ちると、「取り直せない」と読める。**
+    //
+    // **文字列を見比べない。** **書いてある通りに打って、通ることを見る**
+    // ——**引数の数が変わったときに、案内だけが古くなるのを止める** (#244)。
+
+    /** 案内に出てくるコマンドを、そのまま取り出す。 */
+    function suggested(stderr: string): string[] {
+      const line = stderr.split("\n").find((row) => row.includes("いま取り直してください:"));
+      expect(line, "案内が出ていない").toBeDefined();
+      const command = (line as string).split("いま取り直してください:")[1]?.trim() ?? "";
+      expect(command.startsWith("bin/loop-lease "), `案内の形が違う: ${command}`).toBe(true);
+      return command
+        .split(/\s+/)
+        .slice(1)
+        .map((word) => (word === "<役>" ? "worker" : word));
+    }
+
+    it("案内どおり打つと、usage で落ちない", () => {
+      const advice = run(["check"]);
+      const args = suggested(advice.stderr).map((word) =>
+        word === "<手順書の印>" ? stampFor("worker") : word,
+      );
+
+      const retry = run(args);
+
+      // **exit 2 は「使い方の誤り」も含む。** **案内が通らない形なら、ここへ落ちる**
+      expect(retry.status, `案内どおりでは取り直せない: ${retry.stderr}`).not.toBe(2);
+      expect(retry.stderr).not.toContain("使い方:");
+    });
+
+    it("印を渡す形になっている（差し替える場所がある）", () => {
+      // **上の試験は、置き換えを増やせば通ってしまう**——**案内が印を求めていること
+      // そのものを見る**（**印なしで取れる版に戻ったら赤**）
+      expect(suggested(run(["check"]).stderr)).toContain("<手順書の印>");
+    });
+  });
+
   describe("held — 周回が lease を持っているか", () => {
     // **入口は散文の指示のままだった。** 「冒頭で呼べ」と書いてあるだけなので、
     // **呼ばずに進める**——実際に飛ばした（通知で始めた周回で 2 回中 2 回）。
