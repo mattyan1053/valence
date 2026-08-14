@@ -34,6 +34,7 @@ import {
   startGithubLogin,
 } from "../infrastructure/supabase/session";
 import { createSupabaseUserTokenStore } from "../infrastructure/supabase/user-token-store";
+import { createWaitForWinnersSave } from "../infrastructure/time/wait-for-winners-save";
 
 /**
  * Next.js の Cookie 置き場を、細い口へ合わせる。
@@ -173,6 +174,10 @@ export async function visibleRepositoriesForCurrentUser(): Promise<VisibleReposi
         refresh: (refreshToken) =>
           refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
         now: new Date(),
+        // **更新に負けたら、勝った側の保存を短く待つ** (#214)——
+        // **待たないと、切れる必要が無かった人を入口へ送る。**
+        // **待つ長さを決めているのは、この adapter だけである**
+        waitForWinnersSave: createWaitForWinnersSave(),
       }),
     // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない。**
     repositories: createUserVisibleRepositories(),
