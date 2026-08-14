@@ -189,38 +189,21 @@ describe("bin/loop-lease", () => {
         readFileSync(join(sandbox, ".git", "valence-loop-stall"), "utf8"),
         "procedure-stale として積んでいない",
       ).toContain("procedure-stale");
+      // **積む先が使い捨ての作業場であることも、ここが同時に言っている**
+      // ——**本物のカウンタを読んで「変わっていない」を見る本は置かない** (#261 のレビュー)。
+      // **あれは他人の持ち物を合否に入れる形**で、**master が同じカウンタへ
+      // 正規の記録を書いた瞬間に赤くなる** (#186)。**自分の砂場を見れば足りる。**
     });
 
-    it("本物の記録には触れない", () => {
-      // **#240 の顔。** **試験の誤った呼び出しが本物のカウンタを積み、
-      // `loop/STOP` を配りうる**——**使い捨てのリポジトリで走っている限り、
-      // 記録もそちらへ行く**ことを、ここで押さえる。
-      //
-      // **置き場は実装と同じ口で解く** (#261 のレビュー)。**`.git` は
-      // いつもディレクトリとは限らない**——**linked worktree では gitfile** なので、
-      // **`join(REPO_ROOT, ".git", …)` はファイルの下を指し、`existsSync` が
-      // 必ず false になる**（**`undefined` どうしの比較で、本物が積まれても緑**）。
-      // **`./task loop:setup` が作るのがその形**なので、**2 人目を起こした瞬間に
-      // 黙って守りが外れる。**
-      const common = spawnSync("git", ["-C", REPO_ROOT, "rev-parse", "--git-common-dir"], {
-        encoding: "utf8",
-      });
-      expect(common.status, `共通ディレクトリを解けない: ${common.stderr}`).toBe(0);
-      const commonDir = resolve(REPO_ROOT, common.stdout.trim());
-      expect(existsSync(commonDir), `共通ディレクトリが無い: ${commonDir}`).toBe(true);
+    it("記録できなかったら、そこで止める", () => {
+      // **積めなかったことを飲まない** (#261 のレビュー)。**この枝は古い版の周回の
+      // ぶんを代わりに積むためにある**ので、**積めなければ目的を果たしていない。**
+      // **設定を壊して `bin/loop-stall` を exit 2 にする**（**ロックを取れない場合と
+      // 同じ行き先**）——**「記録できていない」は設定か環境の誤りの側である。**
+      const broken = run(["acquire", "worker"], { LOOP_STALL_LOCK_WAIT_SEC: "-1" });
 
-      // **「いまの状態」を直に見ない** (#186)。**ループが止まっている間ずっと赤に
-      // なると、止めた原因を調べている人のところで無関係に鳴る**——**前後で比べる。**
-      const real = join(commonDir, "valence-loop-stall");
-      const stop = join(REPO_ROOT, "loop/STOP");
-      const before = existsSync(real) ? readFileSync(real, "utf8") : "";
-      const stopBefore = existsSync(stop);
-
-      run(["acquire", "worker"]);
-
-      const after = existsSync(real) ? readFileSync(real, "utf8") : "";
-      expect(after, "本物のカウンタを積んでいる").toBe(before);
-      expect(existsSync(stop), "STOP を配っている").toBe(stopBefore);
+      expect(broken.status, "記録できていないのに、いつもの止まり方をしている").toBe(2);
+      expect(broken.stderr).toMatch(/記録できませんでした/);
     });
 
     it("違う印なら取れない（配られたテキストが古い）", () => {
