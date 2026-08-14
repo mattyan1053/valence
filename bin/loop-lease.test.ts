@@ -1082,6 +1082,27 @@ describe("bin/loop-lease", () => {
         expect(second.stderr).not.toContain("引き継ぎます");
       });
 
+      it("照合と書き込みを、同じロックの中で行う", () => {
+        // **「持ち主だ」と読んだ時点と、書く時点が別だと、間に `acquire` が入れる**
+        // ——**古い周回の心拍が、新しい持ち主の期限を伸ばす** (#280 のレビュー)。
+        //
+        // **競り自体は試験にしない**（時間に依存する。#131 で直した形を作り直すことになる）
+        // ——**代わりに、錠を開ける位置を見る。** **書き込みより前に開けていたら赤。**
+        const script = readFileSync(SCRIPT, "utf8");
+        const from = script.indexOf('if [[ $ACTION == "heartbeat" ]]; then');
+        expect(from, "心拍のブロックが見つからない").toBeGreaterThanOrEqual(0);
+        const block = script.slice(from).split("\nfi\n")[0] ?? "";
+        const opened = block.indexOf("lock_state");
+        const closed = block.indexOf("exec 9>&-");
+        const written = block.indexOf("$ACTIVITY.tmp");
+
+        expect(opened, "ロックを取っていない").toBeGreaterThanOrEqual(0);
+        expect(written, "書き込みが見つからない").toBeGreaterThan(opened);
+        if (closed >= 0) {
+          expect(closed, "照合と書き込みの間で錠を開けている").toBeGreaterThan(written);
+        }
+      });
+
       it("持ち主が分からない記録は、伸ばす側へ倒す", () => {
         // **前の版が書いた lease には持ち主の行が無い**——**記録は版をまたいで共有される。**
         // **分からないものを殺しに行かない**（**偽の引き継ぎより、切れ残りのほうが安い**）

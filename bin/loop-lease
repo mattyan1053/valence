@@ -483,6 +483,9 @@ if [[ $ACTION == "heartbeat" ]]; then
   # **読めなくても止めない。** **ここで落とすと、心拍そのものが打たれなくなる**
   # ——**「長い周回を殺さない」ほうが、この仕組みの目的**である。
   # **書けない状態なら、下の書き込みが理由つきで言う**（そちらが本来の口）。
+  # **照合と書き込みを、同じ区間の中で行う** (#280 のレビュー)。**読んだ時点と書く時点が
+  # 別だと、間に `acquire` / `recover` が入れる**——**古い周回の心拍が、新しい持ち主の
+  # 期限を伸ばす**。**この節が立てた保証が、そこだけ抜ける。**
   holder=""
   if lock_state 2>/dev/null; then
     # **期限切れの記録でも、持ち主なら伸ばす**（`expired_owner`）——**長い周回が
@@ -491,7 +494,6 @@ if [[ $ACTION == "heartbeat" ]]; then
       holder="$held_owner"
       [[ -n $holder ]] || holder="$expired_owner"
     fi
-    exec 9>&-
   fi
   beating="$(round_owner)" || beating=""
   if [[ -n $holder && -n $beating && $holder != "$beating" ]]; then
@@ -505,6 +507,7 @@ if [[ $ACTION == "heartbeat" ]]; then
     echo "       この周回は、取得時刻だけで期限を判定されます（長い周回は途中で奪われます）" >&2
     exit 1
   fi
+  # **錠は、書き終えるまで持ったまま**——**exit が閉じるので、ここでは開けない。**
   exit 0
 fi
 
