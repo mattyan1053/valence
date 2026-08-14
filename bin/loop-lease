@@ -634,9 +634,16 @@ if [[ $ACTION == "acquire" ]]; then
       # **道は「印を持つ木へ入る」ことである。** **その枝なら手順書もスクリプトも揃う**
       # ので、**噛み合わない組み合わせで走ることにはならない**——**素通りではない**
       # （**揃わなければ、ここはまた止まる**）。
-      echo "       その印が自分の open PR のものなら、その枝へ入ってから取り直せます:" >&2
-      echo "         bin/loop-lease held $ROLE   # 走っている周回があるなら、木を触らない" >&2
-      echo "         gh pr checkout --detach <PR番号> && bin/loop-lease acquire $ROLE \"$3\"" >&2
+      #
+      # **案内も、押さえてから入る形にそろえる** (#268 のレビュー 2 周目)。
+      # **読むだけの確認と checkout の間に、別の周回が普通の `acquire` を通せる**
+      # ——**この案内を実際に読むのは、古い手順書を配られた周回**なので、
+      # **ここに古い順序を残すと、直した先とは別の道からその競合が入る。**
+      echo "       その印が自分の open PR のものなら、その枝へ入ってから確かめられます:" >&2
+      echo "         bin/loop-lease recover $ROLE \"$3\"   # 先に作業場を押さえる（token を控える）" >&2
+      echo "         bin/loop-claim pr <PR番号> && gh pr checkout --detach <PR番号>" >&2
+      echo "         bin/loop-procedure-stamp $ROLE \"$3\"   # 揃ったか（判定はここ 1 箇所）" >&2
+      echo "       揃わなければ返して終わること: bin/loop-lease release $ROLE \"<token>\"" >&2
       exit 3
       ;;
     *)

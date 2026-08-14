@@ -230,6 +230,12 @@ describe("bin/loop-lease", () => {
 
       expect(stale.stderr, "印を持つ木へ入る道が書いていない").toMatch(/checkout/);
       expect(stale.stderr, "何を checkout すればよいのかが書いていない").toMatch(/PR|枝/);
+      // **案内も、押さえてから入る形にそろえる**（#268 のレビュー 2 周目）。
+      // **手順書は `recover` へ直したが、案内には `held` → checkout が残っていた**——
+      // **この案内を実際に読むのは、古い手順書を配られた周回**である。
+      // **読むだけの確認と checkout の間に、別の周回が `acquire` を通せる**（#68）。
+      expect(stale.stderr, "案内が、読むだけの確認のまま").toContain("recover");
+      expect(stale.stderr, "案内に古い順序が残っている").not.toMatch(/loop-lease held/);
     });
 
     it("同じ印なら、これまでどおり取れる", () => {
