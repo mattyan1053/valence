@@ -6,7 +6,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { createWaitForWinnersSave } from "./wait-for-winners-save";
+import { createTimeBudget } from "./time-budget";
+import { createWaitForWinnersSave, createWinnersSaveBudget } from "./wait-for-winners-save";
 
 /**
  * 差し替える `sleep` と時計。**頼んだぶんだけ時が進む**——
@@ -32,7 +33,11 @@ function sleeper(extraPerCallMs = 0) {
 describe("勝った側の保存を待つ間合い", () => {
   it("渡された順に待つ", async () => {
     const { asked, sleep, now } = sleeper();
-    const wait = createWaitForWinnersSave({ delaysMs: [10, 20, 30], sleep, now });
+    const wait = createWaitForWinnersSave({
+      budget: createWinnersSaveBudget(now),
+      delaysMs: [10, 20, 30],
+      sleep,
+    });
 
     expect(await wait(1)).toBe(true);
     expect(await wait(2)).toBe(true);
@@ -42,7 +47,11 @@ describe("勝った側の保存を待つ間合い", () => {
   it("尽きたら打ち切る", async () => {
     // **倒す先は 2 つある**——**待ちすぎて画面が止まらない**
     const { asked, sleep, now } = sleeper();
-    const wait = createWaitForWinnersSave({ delaysMs: [10], sleep, now });
+    const wait = createWaitForWinnersSave({
+      budget: createWinnersSaveBudget(now),
+      delaysMs: [10],
+      sleep,
+    });
 
     expect(await wait(1)).toBe(true);
     expect(await wait(2), "尽きているのに待たせている").toBe(false);
@@ -51,7 +60,11 @@ describe("勝った側の保存を待つ間合い", () => {
 
   it("間合いが空なら、一度も待たない", async () => {
     const { asked, sleep, now } = sleeper();
-    const wait = createWaitForWinnersSave({ delaysMs: [], sleep, now });
+    const wait = createWaitForWinnersSave({
+      budget: createWinnersSaveBudget(now),
+      delaysMs: [],
+      sleep,
+    });
 
     expect(await wait(1)).toBe(false);
     expect(asked).toEqual([]);
@@ -61,7 +74,7 @@ describe("勝った側の保存を待つ間合い", () => {
     // **既定を変えるとき、ここが「どれだけ待ってよいか」を見せる。**
     // **窓は `save` 1 回ぶん**（DB へ 1 往復）なので、**秒の単位では待たない**
     const { asked, sleep, now } = sleeper();
-    const wait = createWaitForWinnersSave({ sleep, now });
+    const wait = createWaitForWinnersSave({ budget: createWinnersSaveBudget(now), sleep });
 
     let attempt = 1;
     while (await wait(attempt)) {
@@ -82,7 +95,11 @@ describe("止まる時間そのものに上限がある", () => {
   it("読み直しが遅ければ、待てる回数が減る", async () => {
     // **1 回の往復に 200ms かかる置き場。** **予算 500ms は往復にも食われる**
     const { asked, sleep, now } = sleeper(200);
-    const wait = createWaitForWinnersSave({ budgetMs: 500, delaysMs: [50, 150, 300], sleep, now });
+    const wait = createWaitForWinnersSave({
+      budget: createTimeBudget({ budgetMs: 500, now }),
+      delaysMs: [50, 150, 300],
+      sleep,
+    });
 
     const answers = [await wait(1), await wait(2), await wait(3)];
 
@@ -93,7 +110,11 @@ describe("止まる時間そのものに上限がある", () => {
   it("最後の待ちは、予算からはみ出さない", async () => {
     // **残りが 100ms しか無いのに 300ms 待たない**
     const { asked, sleep, now } = sleeper(0);
-    const wait = createWaitForWinnersSave({ budgetMs: 100, delaysMs: [50, 300], sleep, now });
+    const wait = createWaitForWinnersSave({
+      budget: createTimeBudget({ budgetMs: 100, now }),
+      delaysMs: [50, 300],
+      sleep,
+    });
 
     expect(await wait(1)).toBe(true);
     expect(await wait(2)).toBe(true);
@@ -102,7 +123,11 @@ describe("止まる時間そのものに上限がある", () => {
 
   it("予算を使い切ったら、間合いが残っていても打ち切る", async () => {
     const { asked, sleep, now } = sleeper(1000);
-    const wait = createWaitForWinnersSave({ budgetMs: 500, delaysMs: [50, 150, 300], sleep, now });
+    const wait = createWaitForWinnersSave({
+      budget: createTimeBudget({ budgetMs: 500, now }),
+      delaysMs: [50, 150, 300],
+      sleep,
+    });
 
     expect(await wait(1), "1 回目は待てる").toBe(true);
     expect(await wait(2), "予算を超えているのに待っている").toBe(false);
