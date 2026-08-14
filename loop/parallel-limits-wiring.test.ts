@@ -11,7 +11,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -20,6 +20,22 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
+}
+
+/**
+ * 上限を語りうる文書を、**並べずに集める** (#238 のレビュー)。
+ *
+ * **3 回続けて抜けたのは、並べ方ではなく「どれを見るか」だった**——
+ * **`loop/README.md` を 1 つずつ別の本で見ていたので、足した検査が届かなかった。**
+ * **増えた文書が自動で入る**ようにする。
+ */
+function docs(): string[] {
+  const dirs = [".claude/commands", "loop"];
+  return dirs.flatMap((dir) =>
+    readdirSync(join(REPO_ROOT, dir))
+      .filter((name) => name.endsWith(".md"))
+      .map((name) => `${dir}/${name}`),
+  );
 }
 
 /** `bin/loop-stall --list` の説明。**上限の正はここではないが、嘘であってはいけない。** */
@@ -43,7 +59,7 @@ describe("`ready` の上限は 2 件", () => {
     expect(line, "止める件数が上限と噛み合っていない").toContain("3 件以上");
   });
 
-  for (const doc of [".claude/commands/loop-master.md", ".claude/commands/loop-worker.md"]) {
+  for (const doc of docs()) {
     it(`${doc} が、2 件を正常として扱っている`, () => {
       const body = read(doc);
 
@@ -58,11 +74,19 @@ describe("`ready` の上限は 2 件", () => {
     });
   }
 
-  it("loop/README.md も、2 件を正常として扱っている", () => {
-    expect(read("loop/README.md"), "2 件で止める説明が残っている").not.toMatch(
-      /`ready` が 2 件以上あると/,
-    );
-  });
+  for (const doc of docs()) {
+    it(`${doc} が、worker を 1 人だと言っていない`, () => {
+      // **「1 人が同時に持つ PR は 1 本」は、いまも正しい**（変わったのは全体の本数）——
+      // **嘘になったのは「全体で 1 本」と「worker は 1 人」のほう**である。
+      // **規則の名前として引用しているところ**（「同時に持つ PR は 1 本」）**は残してよい。**
+      const body = read(doc);
+
+      expect(body, "worker が 1 人だと書いてある").not.toMatch(/worker [はも] 1 人/);
+      expect(body, "全体で 1 本だと書いてある").not.toMatch(
+        /同時に open (な|にしてよい) PR は 1 本/,
+      );
+    });
+  }
 });
 
 describe("worker の PR は、作業場ごとに数える", () => {
@@ -90,6 +114,9 @@ describe("worker の PR は、作業場ごとに数える", () => {
     expect(section, "数えるところが見当たらない").toContain("bin/loop-claim mine");
     expect(section, "自分のものでない PR を試す経路が無い").toContain("bin/loop-claim pr");
     expect(section, "引き継げることが書いていない").toMatch(/引き継/);
+    // **空き枠のぶんだけ取る** (#238 のレビュー 2 周目)。**まとめて取ると、
+    // 「1 人が両方持って止まる」に置き換わるだけ**である
+    expect(section, "何本まで取るのかが書いていない").toMatch(/1 本だけ|空き枠/);
   });
 
   it("作った PR を、その場で自分のものにしている", () => {

@@ -565,28 +565,16 @@ describe("bin/loop-claim", () => {
       expect(run(["mine", "42"], { cwd: addWorkspace("second") }).status).toBe(1);
     });
 
-    it("記録が無ければ、その場で自分のものにする", () => {
-      // **数える前に持ち主を決める** (#238 のレビュー)。
-      // **「記録が無ければ自分のものとして数える」だけだと、記録の無い PR が 2 本
-      // あるとき、両方の作業場が「自分の PR が 2 本」で止まる**——
-      // **数えるのはステップ 2.1、記録を作るのはステップ 3** なので、
-      // **記録が永久に作られず、止まった状態が自分を再生産する**（#184）。
+    it("記録が無いものは、まだ誰のものでもない", () => {
+      // **数える側では取らない** (#238 のレビュー 2 周目)。**「数える前に持ち主を
+      // 決める」をそのまま当てると、先に走った作業場が記録の無い PR を全部取り、
+      // 「1 人が両方持って止まる」に置き換わるだけ**である（#184 の形が残る）。
+      // **取るのは空き枠のぶんだけ**で、**それは `bin/loop-claim pr` が 1 本ずつ行う。**
       withGh({ labels: [] });
 
-      expect(run(["mine", "42"]).status).toBe(0);
-      // **決めたなら、他所からはもう自分のものではない**
+      expect(run(["mine", "42"]).status).toBe(1);
+      // **記録も作らない**——**残しておけば、別の作業場が 1 本目として取れる**
       expect(run(["mine", "42"], { cwd: addWorkspace("other") }).status).toBe(1);
-    });
-
-    it("同時に数えても、持ち主は 1 つだけ", async () => {
-      // **書くのだから、取り合いになる。** **ロックが解く**（`take` と同じ形）
-      withGh({ labels: [] });
-      const second = addWorkspace("racer");
-
-      const results = await race([{ args: ["mine", "42"] }, { args: ["mine", "42"], cwd: second }]);
-
-      expect(results.filter((result) => result.status === 0)).toHaveLength(1);
-      expect(results.filter((result) => result.status === 1)).toHaveLength(1);
     });
 
     it("走っているかどうかは見ない", () => {
