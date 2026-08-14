@@ -1,0 +1,201 @@
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+const SCRIPT = fileURLToPath(new URL("./db-config-drift", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+type Run = { status: number; stdout: string; stderr: string };
+
+/** 起動時に置換された値。**試験の中でだけ使う**（本物には近づかない）。 */
+const STARTED_WITH = "started-value-8f2a";
+const EDITED_TO = "edited-value-b41c";
+
+describe("bin/db-config-drift", () => {
+  let repo: string;
+  let path: string;
+
+  /**
+   * 走っているコンテナを偽る `docker`。
+   *
+   * **実物へは触らない** (`AGENTS.md` §5)。**落として上げ直す形で確かめると、
+   * 走っているものと競る**——**#186 の確認手順が、配られた `loop/STOP` を消した**。
+   */
+  function withDocker(running: string[]): void {
+    writeFileSync(
+      join(path, "docker"),
+      ["#!/usr/bin/env bash", `printf '%s' ${JSON.stringify(running.join("\n"))}`, "exit 0"].join(
+        "\n",
+      ),
+      { mode: 0o755 },
+    );
+  }
+
+  function writeEnv(values: Record<string, string>): void {
+    const lines = Object.entries(values).map(([name, value]) => `${name}=${value}`);
+    writeFileSync(join(repo, ".env"), `${lines.join("\n")}\n`);
+  }
+
+  function run(action: string): Run {
+    const result = spawnSync(SCRIPT, [action], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, PATH: path },
+      timeout: 20_000,
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "db-config-drift-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    path = join(repo, "path");
+    mkdirSync(path, { recursive: true });
+    for (const command of ["bash", "git", "sha256sum", "grep", "cat", "rm", "mv"]) {
+      const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
+      if (found !== "") {
+        spawnSync("ln", ["-s", found, join(path, command)]);
+      }
+    }
+    chmodSync(path, 0o755);
+
+    mkdirSync(join(repo, "supabase"), { recursive: true });
+    writeFileSync(
+      join(repo, "supabase", "config.toml"),
+      [
+        "[auth.external.github]",
+        'client_id = "env(GITHUB_APP_CLIENT_ID)"',
+        // **コメント行は置換されない。** 見に行くと、**触っていない変数で毎回鳴る**
+        '# secret_key = "env(SECRET_VALUE)"',
+        "",
+      ].join("\n"),
+    );
+    writeEnv({ GITHUB_APP_CLIENT_ID: STARTED_WITH, SECRET_VALUE: "unused" });
+    withDocker(["supabase_auth_valence", "supabase_db_valence"]);
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("起動したときと同じなら、何も言わない", () => {
+    // **毎回鳴る警告にしない** (#248 と同じ判断)。**正常な状態で鳴るものは読まれなくなる**
+    expect(run("record").status).toBe(0);
+
+    const checked = run("check");
+
+    expect(checked.status).toBe(0);
+    expect(checked.stdout).toBe("");
+  });
+
+  it("起動したあとに .env を書き換えたら、その変数の名前を出す", () => {
+    // **これが本題。** **`config.toml` の `env()` は `supabase start` の瞬間にしか
+    // 置換されない**ので、**あとから直しても走っているコンテナには入らない**
+    // （5 日間、古い値で走っていたのに誰にも見えなかった）
+    expect(run("record").status).toBe(0);
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+
+    const checked = run("check");
+
+    expect(checked.status).toBe(1);
+    expect(checked.stdout).toContain("GITHUB_APP_CLIENT_ID");
+  });
+
+  it("出すのは名前まで。値は出さない", () => {
+    // **§6。** **`docker compose config` のように環境変数を平文で吐くものがある**——
+    // **どちらの値も出さない**（**古いほうも秘密である**）
+    expect(run("record").status).toBe(0);
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+
+    const checked = run("check");
+
+    expect(`${checked.stdout}${checked.stderr}`).not.toContain(STARTED_WITH);
+    expect(`${checked.stdout}${checked.stderr}`).not.toContain(EDITED_TO);
+  });
+
+  it("記録にも値を残さない", () => {
+    // **記録は共有ディレクトリに残る**ので、**そこに平文があれば同じこと**である
+    run("record");
+    const record = readFileSync(join(repo, ".git", "valence-db-config"), "utf8");
+
+    expect(record).toContain("GITHUB_APP_CLIENT_ID");
+    expect(record).not.toContain(STARTED_WITH);
+  });
+
+  it("直し方も出す", () => {
+    // **気づいても直し方が分からないと、同じ時間を使う**
+    run("record");
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+
+    expect(run("check").stdout).toContain("./task db:down && ./task db:up");
+  });
+
+  it("コメント行の env() は見ない", () => {
+    // **置換されないものを見ると、触っていない変数で毎回鳴る**
+    run("record");
+    writeEnv({ GITHUB_APP_CLIENT_ID: STARTED_WITH, SECRET_VALUE: "changed" });
+
+    expect(run("check").status).toBe(0);
+  });
+
+  it("コンテナが走っていなければ、何も言わない", () => {
+    // **古いまま走っているものが無い**ので、**言うことは無い**——
+    // **CI や、まだ起動していない手元で毎回鳴らせない**
+    run("record");
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+    withDocker([]);
+
+    const checked = run("check");
+
+    expect(checked.status).toBe(0);
+    expect(checked.stdout).toBe("");
+  });
+
+  it("docker が無ければ、走っていないものとして黙る", () => {
+    // **入っていない機械もある。** **そこで毎回鳴らせない**
+    rmSync(join(path, "docker"));
+    run("record");
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+
+    expect(run("check").status).toBe(0);
+  });
+
+  it("記録が無いまま走っていたら、分からないと言う", () => {
+    // **前の版で起動したコンテナ**である。**黙ると、この Issue が塞ぎに来た状態**
+    // （**古い値で走っているのに誰も知らない**）**がそのまま残る**——
+    // **「違う」ではなく「分からない」と言う**（次の起動で消える）
+    const checked = run("check");
+
+    expect(checked.status).toBe(1);
+    expect(checked.stdout).toContain("./task db:down && ./task db:up");
+  });
+
+  it("使い方の誤りは 2 で落ちる", () => {
+    expect(run("").status).toBe(2);
+    expect(run("checkk").status).toBe(2);
+  });
+
+  it("./task が、毎回通る場所で check を、db:up で record を通す", () => {
+    // **別のコマンドを覚えさせない**（Issue の「やること」）。**呼ぶ場所を散文で
+    // 並べると、経路が増えたときに漏れる**ので、**呼び出しの存在をここで押さえる**
+    const task = readFileSync(join(REPO_ROOT, "task"), "utf8");
+    // **呼ぶ側と、呼ばれる側の両方を見る。** **片方だけだと、
+    // 「関数はあるが誰も呼んでいない」「呼んでいるが中身が空」を通す**（#176 の形）
+    const main = task.slice(task.indexOf("\nmain() {"));
+    const caller = (/\nmain\(\) \{[\s\S]*?\n\}/.exec(task)?.[0] ?? "").match(/^ +(\w+)$/gm) ?? [];
+    const called = caller.map((line) => line.trim());
+    const checker = called.find((name) => {
+      const body = new RegExp(`\\n${name}\\(\\) \\{[\\s\\S]*?\\n\\}`).exec(task)?.[0] ?? "";
+      return body.includes("db-config-drift check");
+    });
+
+    expect(main, "main を読めていない").toContain("heartbeat");
+    expect(checker, "毎回通る場所から check を呼んでいない").toBeDefined();
+    expect(task, "db:up で record を通していない").toMatch(
+      /db_up\(\) \{[^\n]*db-config-drift record/,
+    );
+  });
+});

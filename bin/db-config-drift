@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# 走っているコンテナが、いまの `.env` と食い違っていないかを見る (#247)。
+#
+#   bin/db-config-drift record   起動した設定を控える（`./task db:up` が通す）
+#   bin/db-config-drift check    食い違っている変数の名前を出す（`./task` が毎回通す）
+#
+#   exit 0 = 食い違いなし（**何も出さない**）
+#   exit 1 = 食い違っている / 何で起動したか分からない（**名前と直し方**を出す）
+#   exit 2 = 判定できない / 使い方の誤り
+#
+# **`supabase/config.toml` の `env()` は `supabase start` の瞬間にしか置換されない。**
+# **あとから `.env` を直しても、走っているコンテナには入らない**——**5 日間、
+# `GOTRUE_EXTERNAL_GITHUB_CLIENT_ID=probe` のまま走っていて、誰にも見えなかった**
+# （2026-08-14。**症状は「GitHub が 404」**なので、**疑う先は実装・App の設定へ向かい、
+# 「走っているコンテナの中身が古い」は最後まで候補に挙がらない**）。
+#
+# **見るのは「食い違い」であって「正しさ」ではない。** **どの値が正しいかは、
+# ここでは決められない**——**`.env` と、起動したときが違うことだけを言えばよい。**
+#
+# **コンテナの中は覗かない。** **`docker inspect` も `docker compose config` も
+# 環境変数を平文で吐く**（`AGENTS.md` §6 の最後の項）ので、**そこを通ると、
+# 出力の扱いを 1 箇所ずつ決めることになる。** **起動したときの値の指紋だけを控え、
+# いまの `.env` の指紋と比べる**——**値はどこにも現れない**（記録にも出力にも）。
+#
+# **名前は出す。** **どの変数が食い違っているかが分からないと、直す側が
+# `.env` を全部読み直すことになる**——**名前は秘密ではない**（`config.toml` に書いてある）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+readonly FIX="./task db:down && ./task db:up"
+
+usage() {
+  echo "使い方: bin/db-config-drift record   起動した設定を控える" >&2
+  echo "        bin/db-config-drift check    食い違っている変数の名前を出す" >&2
+  echo "        exit 0 食い違いなし / exit 1 食い違い（名前を出す）/ exit 2 判定できない" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+readonly ACTION="$1"
+[[ $ACTION == "record" || $ACTION == "check" ]] || usage
+
+if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
+  echo "[FAIL] 作業ツリーの根を特定できません" >&2
+  exit 2
+fi
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+
+readonly CONFIG="$toplevel/supabase/config.toml"
+readonly ENV_FILE="$toplevel/.env"
+# **作業ツリーの外に置く。** **コミットされない**し、**worktree をまたいで同じものを指す**
+# （コンテナは 1 組しか無いので、記録も 1 つでよい）。
+readonly RECORD="$common_dir/valence-db-config"
+
+# **置換される変数の名前は `config.toml` から取る。** **一覧を書き写すと、
+# 変数が増えたときに片方だけ古くなる**（`bin/loop-stall` の停止識別子と同じ理由）。
+#
+# **コメント行は見ない。** **置換されないものを見ると、触っていない変数で毎回鳴る**
+# ——**毎回鳴る警告は、そのうち読まれなくなる。**
+substituted_names() {
+  local line name
+  while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]*# ]] && continue
+    while [[ $line =~ env\(([A-Za-z_][A-Za-z0-9_]*)\) ]]; do
+      name="${BASH_REMATCH[1]}"
+      printf '%s\n' "$name"
+      line="${line#*"${BASH_REMATCH[0]}"}"
+    done
+  done <"$CONFIG"
+}
+
+# `.env` の 1 行から値を取る。**`source` しない**——**任意のコードが走る**うえ、
+# **読み込んだ値が、この先のコマンドの環境へ漏れる。**
+value_of() {
+  local wanted="$1" line value
+  while IFS= read -r line; do
+    [[ $line == "$wanted="* ]] || continue
+    value="${line#*=}"
+    # 前後の引用符だけ外す。**中身は触らない**（値の解釈はここの仕事ではない）
+    [[ $value == \"*\" ]] && value="${value:1:-1}"
+    [[ $value == \'*\' ]] && value="${value:1:-1}"
+    printf '%s' "$value"
+    return 0
+  done <"$ENV_FILE"
+  return 1
+}
+
+# **値そのものは持たない。** **指紋だけ**を持つので、**記録にも出力にも値が出ない。**
+fingerprint() {
+  local value="$1" digest
+  digest="$(printf '%s' "$value" | sha256sum)" || return 1
+  printf '%s' "${digest%% *}"
+}
+
+# **いまの `.env` から作る指紋の一覧。** `record` はこれを書き、`check` はこれと比べる。
+#
+# **外の道具を増やさない。** **重複を落とすのに `sort -u` を通すと、
+# 道具を絞った環境で黙って空になる**（`bin/loop-procedure-stamp` が `sed` を避けたのと
+# 同じ理由）——**空の記録は「食い違いなし」に見える**ので、**検出器がそこで死ぬ。**
+current_prints() {
+  local name value print
+  declare -A seen=()
+  while IFS= read -r name; do
+    [[ -n $name ]] || continue
+    [[ -z ${seen[$name]-} ]] || continue
+    seen["$name"]=1
+    if value="$(value_of "$name")"; then
+      print="$(fingerprint "$value")" || return 1
+    else
+      # **未設定と、空の値を分ける。** **どちらも「食い違い」の材料になる**
+      print="-"
+    fi
+    printf '%s\t%s\n' "$name" "$print"
+  done < <(substituted_names)
+}
+
+if [[ ! -f $CONFIG ]]; then
+  echo "[FAIL] 設定が見つかりません: $CONFIG" >&2
+  exit 2
+fi
+
+if [[ $ACTION == "record" ]]; then
+  if [[ ! -f $ENV_FILE ]]; then
+    echo "[FAIL] .env が見つかりません: $ENV_FILE" >&2
+    exit 2
+  fi
+  if ! prints="$(current_prints)"; then
+    echo "[FAIL] いまの設定の指紋を作れません" >&2
+    exit 2
+  fi
+  # **原子的に置き換える。** **途中の状態を `check` が読むと、食い違っていないのに鳴る**
+  if ! printf '%s\n' "$prints" >"$RECORD.tmp" || ! mv -f "$RECORD.tmp" "$RECORD"; then
+    rm -f "$RECORD.tmp" 2>/dev/null || true
+    echo "[FAIL] 起動した設定を記録できません: $RECORD" >&2
+    exit 2
+  fi
+  exit 0
+fi
+
+# --- check ---------------------------------------------------------------------
+# **走っているものが無ければ、言うことも無い。** **CI や、まだ起動していない手元で
+# 毎回鳴らせない**——**`docker` が入っていない機械も同じ扱いにする。**
+if ! command -v docker >/dev/null 2>&1; then
+  exit 0
+fi
+if ! running="$(docker ps --filter name=supabase_ --format '{{.Names}}' 2>/dev/null)"; then
+  # **読めないことを「食い違い」にしない。** **docker が落ちているだけで毎回鳴る**
+  exit 0
+fi
+[[ -n $running ]] || exit 0
+
+if [[ ! -f $RECORD ]]; then
+  # **黙らない。** **前の版で起動したコンテナ**なので、**何で走っているか分からない**
+  # ——**この Issue が塞ぎに来たのは、まさにその状態**である。
+  # **「違う」とは言わない**（分かっていない）。**次の起動で消える。**
+  echo "[WARN] 走っているコンテナが、どの設定で起動したか分かりません"
+  echo "       いまの .env と同じとは限りません: $FIX"
+  exit 1
+fi
+
+if [[ ! -f $ENV_FILE ]]; then
+  echo "[FAIL] .env が見つかりません: $ENV_FILE" >&2
+  exit 2
+fi
+if ! prints="$(current_prints)"; then
+  echo "[FAIL] いまの設定の指紋を作れません" >&2
+  exit 2
+fi
+
+declare -A started=()
+while IFS=$'\t' read -r name print; do
+  [[ -n $name ]] || continue
+  started["$name"]="$print"
+done <"$RECORD"
+
+drifted=()
+while IFS=$'\t' read -r name print; do
+  [[ -n $name ]] || continue
+  # **記録に無い変数は、起動より後に足された**ので、**そのコンテナには入っていない**
+  [[ ${started[$name]-} == "$print" ]] || drifted+=("$name")
+done <<<"$prints"
+
+((${#drifted[@]} > 0)) || exit 0
+
+# **名前だけを出す。値は出さない**（§6）
+echo "[WARN] 走っているコンテナは、いまの .env と違う設定で起動しています"
+printf '       食い違っている変数: %s\n' "${drifted[*]}"
+echo "       入れ直す: $FIX"
+exit 1
