@@ -920,12 +920,19 @@ describe("bin/loop-claim", () => {
       /** open PR が閉じる予定の Issue。**別リポジトリのものも置ける。** */
       prs?: { closes: number[]; repo?: string }[];
       /**
+       * **いま直接読んだら返る label。** 省くと一覧と同じものが返る。
+       *
+       * **索引（`issue list`）は遅れる**ので、**一覧に居るのに、いまは着手中でない**
+       * という状態が実在する（マージ直後がいちばん踏みやすい）。
+       */
+      nowLabels?: Record<number, string[]>;
+      /**
        * この一覧だけが読めない。**「0 件」と読み違えないこと**を見る。
        *
        * **全部の `gh` を落とさない。** **手前の呼び出しで止まると、
        * 見たかった経路まで届かない**（届いていないのに緑になる）。
        */
-      failOn?: "issue list" | "pr list";
+      failOn?: "issue list" | "pr list" | "issue view";
     }): void {
       const issues = (options.inProgress ?? [])
         .map((issue) => `${issue.number}\t${(issue.labels ?? ["in-progress"]).join(",")}`)
@@ -936,10 +943,10 @@ describe("bin/loop-claim", () => {
       const labelsDir = join(repo, "labels-idle");
       mkdirSync(labelsDir, { recursive: true });
       for (const issue of options.inProgress ?? []) {
-        writeFileSync(
-          join(labelsDir, String(issue.number)),
-          `${(issue.labels ?? ["in-progress"]).join("\n")}\n`,
-        );
+        // **一覧と直読みは、別のものを返しうる**（索引は遅れる）。**既定では揃えて置き**、
+        // **`nowLabels` を渡した分だけ食い違わせる**
+        const now = options.nowLabels?.[issue.number] ?? issue.labels ?? ["in-progress"];
+        writeFileSync(join(labelsDir, String(issue.number)), `${now.join("\n")}\n`);
       }
 
       writeFileSync(
@@ -1109,6 +1116,49 @@ describe("bin/loop-claim", () => {
 
       expect(idle.status).toBe(0);
       expect(idle.stdout.split("\n")[0]).toBe(`unowned\t264`);
+    });
+
+    it("一覧が遅れていて、いまは着手中でないものを並べない", () => {
+      // **索引は遅れる** (#281 のレビュー 2 周目)。**同じ出口で `audit` が先に走り、
+      // 「着手中でない」と判断して記録を消す**——**その直後に一覧を読むと、
+      // 消えた記録の Issue がまだ並ぶ**（**マージした周回がいちばん踏みやすい**）。
+      //
+      // **鳴るのは毎回のマージ**なので、**次に来た人はまず検出器を疑う**——
+      // **偽陽性が「たまに」でなくなると、この仕組みは死ぬ。**
+      withIdle({
+        inProgress: [{ number: 264 }],
+        nowLabels: { 264: [] }, // マージして label が外れた直後
+      });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(1);
+    });
+
+    it("一覧が遅れていて記録も無いものを、持ち主のいない着手にしない", () => {
+      // **`unowned` の側も同じ**（**記録は `audit` が消し、一覧だけが残る**）
+      withIdle({ inProgress: [{ number: 264 }], nowLabels: { 264: [] } });
+
+      expect(run(["idle"]).status).toBe(1);
+    });
+
+    it("いま blocked が付いていれば、一覧が古くても並べない", () => {
+      // **止められた直後も、索引は遅れる。** **`blocked` は人の判断待ち**なので、
+      // **手が止まっているのが正しい状態**——**そこで鳴らすと、人が来るまで積み続ける**
+      withIdle({
+        inProgress: [{ number: 264 }],
+        nowLabels: { 264: ["in-progress", "blocked"] },
+      });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(1);
+    });
+
+    it("label を読み直せなければ 2 で落ちる", () => {
+      // **「着手中でない」へ倒さない。** 倒すと、**読めないあいだ検出器が黙る**
+      withIdle({ inProgress: [{ number: 264 }], failOn: "issue view" });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(2);
     });
 
     it("着手中の一覧を読めなければ 2 で落ちる", () => {

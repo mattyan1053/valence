@@ -256,6 +256,31 @@ if [[ $ACTION == "idle" ]]; then
     exit 2
   fi
 
+  # **報告に載せる直前に、直接読んで確かめる** (#281 のレビュー 2 周目)。
+  #
+  # **一覧（索引）は遅れる。** **同じ出口で `audit` が先に走り**、**「着手中でない」と
+  # 直接読んで判断し、記録を消す**——**その数コマンド後にこちらが一覧を読むと、
+  # 消えた記録の Issue がまだ並ぶ**（**マージした周回がいちばん踏みやすい**）。
+  #
+  # **偽陽性の代償は「人が来て、何も無い」だが、それは「たまに」の話**である。
+  # **マージのたびに鳴るなら、次に来た人はまず検出器を疑う**——**そこでこの仕組みは死ぬ。**
+  # **#264 が塞ぎに来たのは「気づけない」ほう**なので、**倒れる向きが逆になる。**
+  #
+  # **全件には投げない。** **絞ったあとの数件だけ**なので、往復は増えない。
+  #
+  # **読めなかったら「着手中でない」に倒さない。** **倒すと、読めないあいだ黙る**
+  # ——**一覧の失敗を exit 2 にしているのと同じ原則である。**
+  still_in_progress() {
+    local number="$1" fresh
+    if ! fresh="$(gh issue view "$number" --json labels --jq '.labels[].name')"; then
+      echo "[FAIL] #$number の label を読み直せません" >&2
+      exit 2
+    fi
+    has_label "in-progress" "$fresh" || return 1
+    # **`blocked` も見直す。** **止められた直後に鳴らせない**（人の判断待ちである）
+    ! has_label "blocked" "$fresh"
+  }
+
   now="$(date +%s)"
   idle_found=0
   while IFS=$'\t' read -r number labels; do
@@ -286,6 +311,7 @@ if [[ $ACTION == "idle" ]]; then
       #
       # **`stalled` と混ぜない。** **原因が違い、人が次にやることも違う**——
       # **尽きた worker を見る**のか、**持ち主のいない着手を戻す**のか。
+      still_in_progress "$number" || continue
       printf '%s\t%s\n' "unowned" "$number"
       idle_found=1
       continue
@@ -295,6 +321,7 @@ if [[ $ACTION == "idle" ]]; then
       exit 2
     fi
     ((now - held_taken >= IDLE_SEC)) || continue
+    still_in_progress "$number" || continue
     printf '%s\t%s\t%s\n' "stalled" "$number" "$((now - held_taken))"
     idle_found=1
   done <<<"$in_progress"
