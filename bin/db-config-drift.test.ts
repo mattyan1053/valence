@@ -24,12 +24,28 @@ describe("bin/db-config-drift", () => {
    * **実物へは触らない** (`AGENTS.md` §5)。**落として上げ直す形で確かめると、
    * 走っているものと競る**——**#186 の確認手順が、配られた `loop/STOP` を消した**。
    */
-  function withDocker(running: string[]): void {
+  function withDocker(
+    running: { name: string; id: string }[],
+    options: { fails?: boolean } = {},
+  ): void {
+    const rows = running.map(({ name, id }) => `${name}:${id}`).join("\n");
     writeFileSync(
       join(path, "docker"),
-      ["#!/usr/bin/env bash", `printf '%s' ${JSON.stringify(running.join("\n"))}`, "exit 0"].join(
-        "\n",
-      ),
+      [
+        "#!/usr/bin/env bash",
+        ...(options.fails === true ? ["exit 1"] : []),
+        // **`--filter name=` は部分一致**なので、**本物と同じく正規表現で照合する**
+        // ——**別プロジェクトの Supabase を拾わないこと**を、ここで試せるようにする
+        'pattern=""',
+        'for arg in "$@"; do case $arg in name=*) pattern="${arg#name=}" ;; esac; done',
+        `rows=${JSON.stringify(rows)}`,
+        "[[ -n $rows ]] || exit 0",
+        "while IFS=: read -r name id; do",
+        "  [[ -n $name ]] || continue",
+        "  [[ $name =~ $pattern ]] && printf '%s\\n' \"$id\"",
+        'done <<<"$rows"',
+        "exit 0",
+      ].join("\n"),
       { mode: 0o755 },
     );
   }
@@ -39,8 +55,8 @@ describe("bin/db-config-drift", () => {
     writeFileSync(join(repo, ".env"), `${lines.join("\n")}\n`);
   }
 
-  function run(action: string): Run {
-    const result = spawnSync(SCRIPT, [action], {
+  function run(...args: string[]): Run {
+    const result = spawnSync(SCRIPT, args, {
       cwd: repo,
       encoding: "utf8",
       env: { ...process.env, PATH: path },
@@ -66,6 +82,8 @@ describe("bin/db-config-drift", () => {
     writeFileSync(
       join(repo, "supabase", "config.toml"),
       [
+        // **コンテナの名前はここから決まる**（`supabase_db_valence`）
+        'project_id = "valence"',
         "[auth.external.github]",
         'client_id = "env(GITHUB_APP_CLIENT_ID)"',
         // **コメント行は置換されない。** 見に行くと、**触っていない変数で毎回鳴る**
@@ -74,7 +92,7 @@ describe("bin/db-config-drift", () => {
       ].join("\n"),
     );
     writeEnv({ GITHUB_APP_CLIENT_ID: STARTED_WITH, SECRET_VALUE: "unused" });
-    withDocker(["supabase_auth_valence", "supabase_db_valence"]);
+    withDocker([{ name: "supabase_db_valence", id: "c1" }]);
   });
 
   afterEach(() => {
@@ -173,6 +191,64 @@ describe("bin/db-config-drift", () => {
     expect(checked.stdout).toContain("./task db:down && ./task db:up");
   });
 
+  it("既に走っているところで控え直さない", () => {
+    // **これが本題** (#282 のレビュー)。**`supabase start` は既に走っていても成功する**
+    // ——**そのときコンテナは作り直されない**のに、**控え直すと記録だけ新しくなる。**
+    // **`.env` を直した人が `db:up` を打つと、中身は古いまま「一致」と答える**
+    // ——**この Issue が塞ぎに来た状態が、恒久的に隠れる。**
+    run("record");
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+
+    // 走っているのは、控えたときと同じスタック（`c1`）である
+    expect(run("record", "--unless", "c1").status).toBe(0);
+
+    expect(run("check").status, "食い違いが隠れている").toBe(1);
+  });
+
+  it("本当に起動し直したときは控える", () => {
+    run("record");
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+    // 落として上げ直したので、スタックが入れ替わっている
+    withDocker([{ name: "supabase_db_valence", id: "c2" }]);
+
+    expect(run("record", "--unless", "c1").status).toBe(0);
+
+    expect(run("check").status).toBe(0);
+  });
+
+  it("起動したか分からないなら控えない", () => {
+    // **判定できないなら控えない**——**倒れる向きが安全**である
+    run("record");
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+    withDocker([{ name: "supabase_db_valence", id: "c2" }], { fails: true });
+
+    run("record", "--unless", "c1");
+
+    withDocker([{ name: "supabase_db_valence", id: "c2" }]);
+    expect(run("check").status, "分からないまま控えている").toBe(1);
+  });
+
+  it("別のプロジェクトの Supabase は拾わない", () => {
+    // **`--filter name=` は部分一致**なので、**別プロジェクトが走っているだけで
+    // 誤警告する**（**記録があれば、存在しないスタックと比べる**）
+    run("record");
+    writeEnv({ GITHUB_APP_CLIENT_ID: EDITED_TO, SECRET_VALUE: "unused" });
+    withDocker([{ name: "supabase_db_other", id: "z9" }]);
+
+    expect(run("check").status).toBe(0);
+  });
+
+  it("stack-id は、走っているスタックだけに答える", () => {
+    const running = run("stack-id");
+
+    expect(running.status).toBe(0);
+    expect(running.stdout.trim()).toBe("c1");
+
+    withDocker([{ name: "supabase_db_other", id: "z9" }]);
+
+    expect(run("stack-id").status, "別プロジェクトを自分のものと答えている").toBe(1);
+  });
+
   it("使い方の誤りは 2 で落ちる", () => {
     expect(run("").status).toBe(2);
     expect(run("checkk").status).toBe(2);
@@ -194,8 +270,8 @@ describe("bin/db-config-drift", () => {
 
     expect(main, "main を読めていない").toContain("heartbeat");
     expect(checker, "毎回通る場所から check を呼んでいない").toBeDefined();
-    expect(task, "db:up で record を通していない").toMatch(
-      /db_up\(\) \{[^\n]*db-config-drift record/,
-    );
+    // **`--unless` を渡していること**まで見る (#282 のレビュー)。**渡さないと、
+    // 既に走っているところで控え直し、食い違いが恒久的に隠れる**
+    expect(task, "db:up で record を通していない").toMatch(/db-config-drift record --unless/);
   });
 });

@@ -282,7 +282,19 @@ cmd_db_up() { with_db_lock db_up; }
 #
 # **起動に失敗したら控えない。** **控えると、上がっていないコンテナの設定を
 # 「これで走っている」と記録する**——**次に上げたときに食い違いが消える。**
-db_up() { ensure_up && supabase_cli pnpm supabase start && ./bin/db-config-drift record; }
+#
+# **既に走っていたときも控えない** (#282 のレビュー)。**`supabase start` は
+# 既に走っていても成功する**——**そのときコンテナは作り直されない**ので、
+# **控え直すと記録だけが新しくなり、`.env` を直しただけの人には「一致」と答える**
+# （**この Issue が塞ぎに来た状態が、恒久的に隠れる**）。
+# **起動の前後でスタックを見比べる**——**判定は `--unless` の側が持つ。**
+db_up() {
+  local before=""
+  before="$(./bin/db-config-drift stack-id)" || before=""
+  ensure_up
+  supabase_cli pnpm supabase start
+  ./bin/db-config-drift record --unless "$before"
+}
 
 # Supabase ローカルスタックを停止する
 cmd_db_down() { with_db_lock supabase_cli pnpm supabase stop; }
