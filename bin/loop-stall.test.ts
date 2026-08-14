@@ -134,6 +134,70 @@ describe("bin/loop-stall の停止識別子", () => {
     expect(reset.status).toBe(0);
     expect(run(["wrong-branch:12"], sandbox).stdout).toContain("count=1");
   });
+
+  describe("消す対象を、前へ進んだぶんに限る", () => {
+    /**
+     * **前へ進んだ証拠で消えるのは、前へ進んだぶんだけ**である（#266）。
+     *
+     * **1.1（手順が入れ替わった → 打ち切る）は `--reset` を通してから呼び直す**ので、
+     * **呼び直した先が印ずれで `procedure-stale` を積んでも、次の周回の `--reset` が消す**
+     * ——**count は 1 を超えず、同じ障害が何周続いても `loop/STOP` は配られない**
+     * （2026-08-14 に worker が 2 周続けて踏んだ）。
+     *
+     * **カウンタは 1 つで、記録は既に識別子ごとの行**である。
+     * **消す対象を絞れば、#239 に触れずに解ける。**
+     */
+    it("識別子を渡すと、その識別子だけ消える", () => {
+      run(["--reset"], sandbox);
+
+      expect(run(["procedure-stale"], sandbox).stdout).toContain("count=1");
+      expect(run(["main-sync-failed"], sandbox).stdout).toContain("count=1");
+
+      expect(run(["--reset", "main-sync-failed"], sandbox).status).toBe(0);
+
+      // **同期の失敗は消えた**（もう一度積んで 1 に戻る）
+      expect(run(["main-sync-failed"], sandbox).stdout, "消えていない").toContain("count=1");
+      // **印ずれは残っている**——**ここが本題**
+      expect(run(["procedure-stale"], sandbox).stdout, "無関係な記録まで消えた").toContain(
+        "count=2",
+      );
+    });
+
+    it("印ずれは、打ち切りを挟んでも積み上がる", () => {
+      // **実測した並び**（周回 N / N+1）をそのまま置く。
+      // **`--reset` が全部消す形に戻したら、ここは count=1 のままになる**
+      run(["--reset"], sandbox);
+
+      for (const round of [1, 2, 3]) {
+        run(["--reset", "main-sync-failed"], sandbox);
+        expect(run(["procedure-stale"], sandbox).stdout, `${round} 周目`).toContain(
+          `count=${round}`,
+        );
+      }
+    });
+
+    it("識別子を渡さなければ、これまでどおり全部消える", () => {
+      // **ステップ 5 の「何であれ状態が動いたら呼ぶ」は、そのまま**である
+      run(["--reset"], sandbox);
+      run(["procedure-stale"], sandbox);
+      run(["main-sync-failed"], sandbox);
+
+      expect(run(["--reset"], sandbox).status).toBe(0);
+
+      expect(run(["procedure-stale"], sandbox).stdout).toContain("count=1");
+      expect(run(["main-sync-failed"], sandbox).stdout).toContain("count=1");
+    });
+
+    it("知らない識別子で消そうとしたら、何も消さずに落ちる", () => {
+      // **綴りのゆれで「消えたつもり」を作らない**——**消せていないのに進むと、
+      // 次の周回が古い数から続ける**
+      run(["--reset"], sandbox);
+      run(["procedure-stale"], sandbox);
+
+      expect(run(["--reset", "そんな識別子は無い"], sandbox).status).toBe(2);
+      expect(run(["procedure-stale"], sandbox).stdout, "落ちたのに消えている").toContain("count=2");
+    });
+  });
 });
 
 describe("上限に達したときに止める対象", () => {
