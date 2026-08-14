@@ -141,7 +141,7 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
       // **この経路で `--reset` を呼ばない** (#243 のレビュー)。**消すと、次の周回が
       // 積んだぶんも一緒に消える**——**毎周回 1 に戻り、3 周へ永久に届かない**
       // （**入れた escalation を、同じ段落の 1 行が消していた**）。
-      const from = body.indexOf("印がずれていたら、`acquire` は exit 2 で止まる");
+      const from = body.indexOf("印がずれていたら、`acquire` は exit 3 で止まる");
       const stale = body.indexOf("procedure-stale", from);
       expect(from, "印がずれたときの段落が無い").toBeGreaterThanOrEqual(0);
       const section = body.slice(from, stale);

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -11,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { budgetFor } from "../test/slow-machine";
@@ -168,14 +169,49 @@ describe("bin/loop-lease", () => {
       // **これが本題。** **印を渡さないまま素通りできない**
       const old = run(["acquire", "worker"]);
 
-      expect(old.status, "印を渡さずに取れてしまう").toBe(2);
+      expect(old.status, "印を渡さずに取れてしまう").toBe(3);
       expect(old.stdout, "取れたことにしている").toBe("");
+    });
+
+    it("印を渡さない版のぶんは、こちらで積む", () => {
+      // **その周回は自分では積めない** (#244)。**「印がずれたら procedure-stale」
+      // という行が、古い本文には無い**——**止まるだけで誰も呼ばれない。**
+      //
+      // **積むのは「印が無い」ときだけ。** **印がずれた側は、呼び直しを 1 回
+      // 挟んでから呼ぶ側が積む**（**ここで積むと 1 件が 2 つ数えられる**）。
+      run(["acquire", "worker"]);
+
+      const stalls = readdirSync(join(sandbox, ".git")).filter((entry) =>
+        entry.startsWith("valence-loop-stall"),
+      );
+      expect(stalls, "記録が積まれていない").not.toEqual([]);
+      expect(
+        readFileSync(join(sandbox, ".git", "valence-loop-stall"), "utf8"),
+        "procedure-stale として積んでいない",
+      ).toContain("procedure-stale");
+      // **積む先が使い捨ての作業場であることも、ここが同時に言っている**
+      // ——**本物のカウンタを読んで「変わっていない」を見る本は置かない** (#261 のレビュー)。
+      // **あれは他人の持ち物を合否に入れる形**で、**master が同じカウンタへ
+      // 正規の記録を書いた瞬間に赤くなる** (#186)。**自分の砂場を見れば足りる。**
+    });
+
+    it("記録できなかったら、そこで止める", () => {
+      // **積めなかったことを飲まない** (#261 のレビュー)。**この枝は古い版の周回の
+      // ぶんを代わりに積むためにある**ので、**積めなければ目的を果たしていない。**
+      // **設定を壊して `bin/loop-stall` を exit 2 にする**（**ロックを取れない場合と
+      // 同じ行き先**）——**「記録できていない」は設定か環境の誤りの側である。**
+      const broken = run(["acquire", "worker"], { LOOP_STALL_LOCK_WAIT_SEC: "-1" });
+
+      expect(broken.status, "記録できていないのに、いつもの止まり方をしている").toBe(2);
+      expect(broken.stderr).toMatch(/記録できませんでした/);
     });
 
     it("違う印なら取れない（配られたテキストが古い）", () => {
       const stale = run(["acquire", "worker", "0123456789ab"]);
 
-      expect(stale.status).toBe(2);
+      // **exit 2 と分ける** (#244)。**exit 2 は「設定か環境の誤り」**で、
+      // **行き先が違う**——**文言でしか見分けられない状態を残さない。**
+      expect(stale.status).toBe(3);
       expect(stale.stderr, "捨てて呼び直す先が書いていない").toMatch(/procedure-stale/);
     });
 
