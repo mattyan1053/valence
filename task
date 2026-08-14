@@ -277,7 +277,33 @@ with_db_lock() {
 
 # Supabase ローカルスタックを起動する
 cmd_db_up() { with_db_lock db_up; }
-db_up() { ensure_up; supabase_cli pnpm supabase start; }
+# **起動した設定を控える** (#247)。**置換が起きるのはこの瞬間だけ**なので、
+# **ここで控えないと、あとから「何で走っているか」を知る術が無い**。
+#
+# **起動に失敗したら控えない。** **控えると、上がっていないコンテナの設定を
+# 「これで走っている」と記録する**——**次に上げたときに食い違いが消える。**
+#
+# **既に走っていたときも控えない** (#282 のレビュー)。**`supabase start` は
+# 既に走っていても成功する**——**そのときコンテナは作り直されない**ので、
+# **控え直すと記録だけが新しくなり、`.env` を直しただけの人には「一致」と答える**
+# （**この Issue が塞ぎに来た状態が、恒久的に隠れる**）。
+# **起動の前後でスタックを見比べる**——**判定は `--unless` の側が持つ。**
+db_up() {
+  # **「停まっている」と「読めない」を潰さない** (#282 のレビュー 2 周目)。
+  # **`|| before=""` は両方を空にする**ので、**前だけ `docker ps` が落ちて後で復旧すると、
+  # 「already running」の成功のあとに、実在の ID が空文字と食い違って上書きする**
+  # ——**スクリプト側で塞いだ穴が、呼ぶ側から開く。**
+  local before="" seen=0
+  before="$(./bin/db-config-drift stack-id)" || seen=$?
+  ensure_up
+  supabase_cli pnpm supabase start
+  if ((seen > 1)); then
+    # **判定できないなら控えない**——**倒れる向きが安全**である（スクリプトと同じ判断）
+    echo "[WARN] 起動前のスタックを読めませんでした。設定は控えません" >&2
+    return 0
+  fi
+  ./bin/db-config-drift record --unless "$before"
+}
 
 # Supabase ローカルスタックを停止する
 cmd_db_down() { with_db_lock supabase_cli pnpm supabase stop; }
@@ -748,6 +774,24 @@ ensure_commit_guard() {
     || echo "[WARN] core.hooksPath を設定できません (main の上での commit を止められません)" >&2
 }
 
+# **走っているコンテナが古い設定のままなら言う** (#247)。
+#
+# **`config.toml` の `env()` は `supabase start` の瞬間にしか置換されない**ので、
+# **`.env` を直しても走っているコンテナには入らない**——**5 日間、古い値で動いていて
+# 誰にも見えなかった**（症状は「GitHub が 404」で、**疑う先が実装へ向かう**）。
+#
+# **別のコマンドを覚えさせない。** **`./task` は必ず通る**ので、ここで見る。
+# **正常なら何も出さない**（**毎回鳴る警告は、そのうち読まれなくなる**）。
+#
+# **コマンドは止めない。** `ensure_commit_guard` と同じ判断である——
+# **古い設定で走っていることと、いま打とうとしているコマンドが実行できないことは別。**
+#
+# **直さない** (#247 の「やらないこと」)。**`db:down` は DB の中身を消す**ので、
+# **走っている作業を巻き込む**——**気づかせるところまで**である。
+warn_stale_containers() {
+  ./bin/db-config-drift check || true
+}
+
 main() {
   local raw="${1:-help}"
   shift || true
@@ -764,6 +808,7 @@ main() {
 
   heartbeat
   ensure_commit_guard
+  warn_stale_containers
   "$fn" "$@"
 }
 
