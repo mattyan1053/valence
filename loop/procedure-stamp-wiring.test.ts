@@ -153,6 +153,70 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
     });
   }
 
+  describe("止まった状態から出る道", () => {
+    /**
+     * **印を変える PR を出した作業場は、次の周回から入れなくなる**（#262）。
+     *
+     * **その PR を直す周回にも入れない**ので、**PR は自分自身で詰む**——
+     * **レビュー指摘が残っていても手が動かせず、マージもされないので、印は違ったまま**である。
+     * **#261 で実測した**（`bin/loop-stall procedure-stale` が積まれ、3 周で `loop/STOP`）。
+     *
+     * **止まること自体は正しい。** **配られた手順書とディスクのスクリプトが噛み合って
+     * いないのは事実**で、**その組み合わせで走らせてはいけない。**
+     * **問題は「止まった状態から出る道が無いこと」**である（AGENTS.md §5。#184）。
+     *
+     * **道はある**——**その PR の枝へ入れば、手順書もスクリプトも揃う。**
+     * **検査を迂回していない**（**噛み合っている状態を実際に作っている**）。
+     * **足りなかったのは、その順序がどこにも書かれていないこと**である。
+     */
+    function worker(): string {
+      return readFileSync(join(REPO_ROOT, ".claude/commands/loop-worker.md"), "utf8");
+    }
+
+    /** 印がずれたときの段落。**入り方が書かれるべきところ**である。 */
+    function staleSection(): string {
+      const body = worker();
+      const from = body.indexOf("印がずれていたら、`acquire` は exit 3 で止まる");
+      expect(from, "印がずれたときの段落が無い").toBeGreaterThanOrEqual(0);
+      return body.slice(from).split("\n## ")[0] ?? "";
+    }
+
+    it("自分の PR の枝へ入って取り直す、と書いてある", () => {
+      // **`acquire` は周回の冒頭で、checkout はそれより後**なので、
+      // **普通に周回を始めるかぎり、この順序へは到達しない**
+      const section = staleSection();
+
+      expect(section, "枝へ入る手が書いていない").toContain("gh pr checkout --detach");
+      expect(section, "入ったあとに取り直すことが書いていない").toMatch(
+        /bin\/loop-lease acquire worker/,
+      );
+    });
+
+    it("素通りではないと書いてある（揃わなければ、また止まる）", () => {
+      // **「新しければ通す」で直さない**（Issue の「やらないこと」）。
+      // **方向を見て素通りさせると、まさに噛み合わない組み合わせで走る**
+      expect(staleSection(), "揃わなければ止まることが書いていない").toMatch(
+        /揃わなければ|揃っていなければ/,
+      );
+    });
+
+    it("その周回は `origin/main` へ移らない、と書いてある", () => {
+      // **入った先は PR の枝**である。**そのまま 1.1 で `origin/main` へ移すと、
+      // `bin/loop-procedure-changed` が入れ替わりを見つけて、その周回を捨てる**——
+      // **入れたばかりの道が、次の行で閉じる。**
+      expect(staleSection(), "同期で枝から降ろされることに触れていない").toContain("--fetch-only");
+    });
+
+    it("走っている周回があるなら、木を触らないと書いてある", () => {
+      // **ここは lease を持っていない**（取れなかったから来ている）。
+      // **確かめずに checkout すると、走っている周回の足元から木を抜く**——
+      // **#68 の形**である
+      expect(staleSection(), "走っている周回を確かめていない").toMatch(
+        /bin\/loop-lease (held|busy) worker/,
+      );
+    });
+  });
+
   it("止まる先が、識別子の一覧にある", () => {
     // **識別子を勝手に作らない。** 一覧の正は `bin/loop-stall --list` である
     const listed = spawnSync(join(REPO_ROOT, "bin/loop-stall"), ["--list"], {
