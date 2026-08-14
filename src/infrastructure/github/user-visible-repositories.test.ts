@@ -13,7 +13,7 @@ import { createUserVisibleRepositories } from "./user-visible-repositories";
 type Call = { url: string; init: RequestInit };
 
 /** 差し替える `fetch`。**呼ばれ方も見る**（何を持って行ったか）。 */
-function fetcher(pages: { body: unknown; status?: number }[]): {
+function fetcher(pages: { body: unknown; status?: number; next?: string }[]): {
   calls: Call[];
   fetchImpl: typeof fetch;
 } {
@@ -23,7 +23,9 @@ function fetcher(pages: { body: unknown; status?: number }[]): {
     calls.push({ url: String(url), init });
     const page = pages[index] ?? { body: [] };
     index += 1;
-    return new Response(JSON.stringify(page.body), { status: page.status ?? 200 });
+    // **続きは `Link` が教える**（件数では当てない）
+    const headers = page.next === undefined ? undefined : { link: `<${page.next}>; rel="next"` };
+    return new Response(JSON.stringify(page.body), { status: page.status ?? 200, headers });
   }) as unknown as typeof fetch;
   return { calls, fetchImpl };
 }
@@ -58,19 +60,37 @@ describe("ユーザートークンで見られるリポジトリを解決する"
     expect(calls.map((call) => call.url).join(" ")).not.toMatch(/access_tokens|app\/installations/);
   });
 
-  it("最後のページまで読む", async () => {
+  it("`Link` の next が無くなるまで読む", async () => {
     // **読み残すと「見えるべきものが返らない」。** **1 ページ目だけ見て終わると、
     // 見えるはずのリポジトリが黙って消える**
     const { calls, fetchImpl } = fetcher([
-      { body: Array.from({ length: 100 }, (_, i) => repo("acme", `r${i}`)) },
-      { body: [repo("acme", "last")] },
+      { body: [repo("acme", "one")], next: "https://api.github.com/user/repos?page=2" },
+      { body: [repo("acme", "two")], next: "https://api.github.com/user/repos?page=3" },
+      { body: [repo("acme", "three")] },
     ]);
 
     const listing = await createUserVisibleRepositories({ fetchImpl }).list("user-token");
 
-    expect(listing.repositories).toHaveLength(101);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]?.url, "2 ページ目を取りに行っていない").toContain("page=2");
+    expect(listing.repositories.map((r) => r.name)).toEqual(["one", "two", "three"]);
+    expect(calls).toHaveLength(3);
+    expect(calls[1]?.url, "Link が指す先を辿っていない").toBe(
+      "https://api.github.com/user/repos?page=2",
+    );
+  });
+
+  it("ページ数で打ち切らない", async () => {
+    // **固定の上限を置くと、それを超えて見られる人は一覧を一切使えない**
+    // ——**「見えるべきものが返らない」側で、しかも全滅**である（#245 のレビュー）。
+    // **件数で最後のページを当てるのも同じ**（満杯が続くと終わらない）
+    const pages = Array.from({ length: 25 }, (_, index) => ({
+      body: Array.from({ length: 100 }, (_, i) => repo("acme", `r${index}-${i}`)),
+      ...(index < 24 ? { next: `https://api.github.com/user/repos?page=${index + 2}` } : {}),
+    }));
+    const { fetchImpl } = fetcher(pages);
+
+    const listing = await createUserVisibleRepositories({ fetchImpl }).list("user-token");
+
+    expect(listing.repositories).toHaveLength(2500);
   });
 
   it("取得に失敗したら投げる（空を返さない）", async () => {

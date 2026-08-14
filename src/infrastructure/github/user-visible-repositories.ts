@@ -19,17 +19,12 @@ import type {
   VisibleRepository,
   VisibleRepositoryListing,
 } from "../../application/ports/visible-repositories";
+import { nextPageUrl } from "./link-pagination";
 
 const API_ORIGIN = "https://api.github.com";
 
-/** 1 ページの件数。**満たなければ最後のページ**である（Link ヘッダを解析しない）。 */
+/** 1 ページの件数。**GitHub の上限**である（**読み切る責務は変わらない**）。 */
 const PER_PAGE = 100;
-
-/**
- * **際限なく取りに行かない。** **GitHub が毎回満杯を返す**（あるいは応答が
- * 壊れている）とき、**止まらないループは「遅い」ではなく「終わらない」**になる。
- */
-const MAX_PAGES = 20;
 
 export type UserVisibleRepositoriesOptions = {
   /** **差し替えるための引数であって、抽象ではない**（#64 と同じ形）。 */
@@ -62,13 +57,17 @@ function responseError(status: number): Error {
   return new Error(`見られるリポジトリの応答を読めませんでした (HTTP ${status})`);
 }
 
-/** 1 ページ取ってくる。**持って行くのはユーザートークンだけ。** */
+/**
+ * 1 ページ取ってくる。**持って行くのはユーザートークンだけ。**
+ *
+ * **続きは `Link` が教える** (#245 のレビュー)——**件数で当てない。**
+ */
 async function fetchPage(
   fetchImpl: typeof fetch,
   userAccessToken: string,
-  page: number,
-): Promise<unknown[]> {
-  const response = await fetchImpl(`${API_ORIGIN}/user/repos?per_page=${PER_PAGE}&page=${page}`, {
+  url: string,
+): Promise<{ items: unknown[]; next: string | undefined }> {
+  const response = await fetchImpl(url, {
     headers: {
       authorization: `Bearer ${userAccessToken}`,
       accept: "application/vnd.github+json",
@@ -92,7 +91,10 @@ async function fetchPage(
   if (!items.success) {
     throw responseError(response.status);
   }
-  return items.data;
+  return {
+    items: items.data,
+    next: nextPageUrl(response.headers.get("link"), "見られるリポジトリ"),
+  };
 }
 
 /** 1 ページぶんを仕分ける。**読めなかったものは黙って捨てない。** */
@@ -124,19 +126,20 @@ export function createUserVisibleRepositories({
       const invalid: InvalidVisibleRepository[] = [];
       let seen = 0;
 
-      for (let page = 1; page <= MAX_PAGES; page += 1) {
-        const items = await fetchPage(fetchImpl, userAccessToken, page);
-        collect(items, seen, repositories, invalid);
-        seen += items.length;
-
-        // **満たなければ最後のページ**である
-        if (items.length < PER_PAGE) {
-          return { repositories, invalid };
-        }
+      // **`Link` の `next` が無くなるまで読む。** **固定のページ上限を置かない**
+      // ——**置くと、それを超えて見られる人は一覧を一切使えない**（#245 のレビュー）。
+      // **歯止めはここに置かない。** **必要になったら、共有した `nextPageUrl` の側に
+      // 1 つだけ置く**——**ここにも足すと、また 2 つになる**（**PR 一覧も同じ前提で
+      // 動いている**）。
+      let url: string | undefined = `${API_ORIGIN}/user/repos?per_page=${PER_PAGE}`;
+      while (url !== undefined) {
+        const page = await fetchPage(fetchImpl, userAccessToken, url);
+        collect(page.items, seen, repositories, invalid);
+        seen += page.items.length;
+        url = page.next;
       }
 
-      // **上限に当たったことを黙らない。** **「全部読んだ」と見分けが付かなくなる**
-      throw new Error(`見られるリポジトリが多すぎます (${MAX_PAGES} ページで打ち切りました)`);
+      return { repositories, invalid };
     },
   };
 }
