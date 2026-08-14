@@ -210,6 +210,9 @@ set_role_paths() {
   # **いちばん長かった周回の秒数。** 「周回が動いているか」を外から判断するのに使う
   # （bin/loop-stall）。**書き写した閾値を置かないため**に、実測を溜める形にしてある。
   ROUND_LEN="$common_dir/valence-loop-roundlen-$lease_scope"
+  # **引き継がれた跡** (#278 のレビュー)。**退避がプロセス内の変数だけだと、
+  # 取り直された後の持ち主に何も言えない**——**記録は上書きされている。**
+  SUPERSEDED="$common_dir/valence-loop-superseded-$lease_scope"
   # **活動は lease とは別のファイルに置く。** lease を持っていなくても記録できる
   # ようにするため (`./task` は周回の外でも走る)。
   ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
@@ -373,6 +376,33 @@ read_lease() {
   fi
 }
 
+# 引き継がれた lease の跡を 1 行足し、上限まで畳む (#278 のレビュー)。
+#
+# **`./task loop:status` の件数には混ぜない。** あれは**入口を飛ばした周回**を数えている
+# ——**原因の違うものを入れると、読めなくなる。**
+#
+# **落ちても止めない。** **これは案内のための記録**で、**直列化そのものは lease が持つ。**
+record_superseded() {
+  local kept
+  printf '%s\t%s\t%s\n' "$1" "$now" "$2" >>"$SUPERSEDED" 2>/dev/null || return 0
+  kept="$(tail -n "$RECENT_ROUNDS" "$SUPERSEDED" 2>/dev/null)" || return 0
+  printf '%s\n' "$kept" >"$SUPERSEDED.tmp" 2>/dev/null \
+    && mv -f "$SUPERSEDED.tmp" "$SUPERSEDED" 2>/dev/null \
+    || rm -f "$SUPERSEDED.tmp" 2>/dev/null || true
+}
+
+# 跡の中に、その token か持ち主があるか。**照合できる形で残してある**ので、
+# **返しに来た側にも、打ち直した側にも同じことを言える。**
+superseded_has() {
+  local token owner_seen when
+  [[ -f $SUPERSEDED ]] || return 1
+  while IFS=$'\t' read -r token when owner_seen; do
+    [[ -n $1 && $token == "$1" ]] && return 0
+    [[ -n $2 && -n $owner_seen && $owner_seen == "$2" ]] && return 0
+  done <"$SUPERSEDED"
+  return 1
+}
+
 # 飛ばした記録を 1 行足し、上限まで畳む。
 #
 # **この記録は役をまたいで共有される**（`$common_dir` に 1 つ）。**lease のロックは
@@ -527,6 +557,15 @@ if [[ $ACTION == "check" ]]; then
       continue
     fi
     taken="$SCOPE_LABEL"
+    # **重なった後こそ知りたい** (#278 のレビュー)。**待っている間に切れて取り直された
+    # 周回は、次に何かを打ったときここへ来る**——**記録は上書き済みなので、
+    # 跡と突き合わせないと「別の周回が持っている」としか見えない。**
+    if [[ -n $owner && -n $held_owner && $held_owner != "$owner" ]] && superseded_has "" "$owner"; then
+      echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
+      echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
+      # **飛ばしてはいない**ので、`./task loop:status` の件数には混ぜない
+      exit 0
+    fi
     # **印が片方でも無ければ、持ち主が自分かどうかは分からない。**
     # **測っているものが違う**（`p:` と `s:`）ときも同じで、**分からない**である。
     # **分からないものを飛ばしと呼ばない**——**偽の記録より取りこぼしのほうが安い**
@@ -712,7 +751,9 @@ fi
 
 set_role_paths "$ROLE" || exit 2
 lock_state || exit 2
-if [[ $ACTION == "held" ]]; then
+# **`release` は引き継がない** (#278 のレビュー)。**「引き継ぎます」の直後に
+# 「返します」が出る**と、**文言を直しに来て逆の文言を増やすことになる。**
+if [[ $ACTION == "held" || $ACTION == "release" ]]; then
   read_lease quiet || exit 2
 else
   read_lease || exit 2
@@ -760,6 +801,9 @@ acquire | recover)
     echo "[FAIL] lease を書き込めません: $STATE" >&2
     exit 2
   }
+  # **引き継いだなら、跡を残す** (#278 のレビュー)。**前の持ち主が次に何かを打つのは、
+  # 記録が上書きされた後**である——**ここで残さないと、そのとき言うものが無い。**
+  [[ -z $expired_token ]] || record_superseded "$expired_token" "$expired_owner"
   # **周回を始めた印。** 失敗しても lease は取れているので止めない——
   # 読む側 (bin/loop-stall) は印が無ければ「分からない」として、これまでどおり数える。
   printf '%s\n' "$now" >"$ROUNDS.tmp" 2>/dev/null && mv -f "$ROUNDS.tmp" "$ROUNDS" 2>/dev/null || {
@@ -798,6 +842,13 @@ release)
   # **他人の lease を返させない。** 引き継がれた後に返すと、走っている周回の
   # 直列化が崩れる（自分は終わったつもりで、相手はまだ走っている）。
   if [[ $held_token != "$3" ]]; then
+    # **重なりと、引き継がれた跡を分ける** (#278 のレビュー)。**どちらも「別の token」**
+    # だが、**前者は走っている相手**、**後者は自分が外れたこと**である
+    if superseded_has "$3" ""; then
+      echo "[FAIL] $SCOPE_LABEL の lease は期限切れのあと、別の周回が取り直しています" >&2
+      echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
+      exit 1
+    fi
     echo "[FAIL] $SCOPE_LABEL の lease は別の周回が持っています" >&2
     exit 1
   fi

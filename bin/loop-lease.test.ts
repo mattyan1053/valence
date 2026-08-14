@@ -862,6 +862,96 @@ describe("bin/loop-lease", () => {
         expect(released.stderr).toContain("別の周回が持っています");
       });
 
+      it("引き継がれた後も、返しに来た持ち主に言う", () => {
+        // **いちばん知りたいのは重なった後**である (#278 のレビュー)。
+        // **記録は取り直した側が上書きしている**ので、**プロセス内の変数だけでは
+        // 何も言えない**——**跡を残す側が要る。**
+        const mine = acquire().stdout.trim();
+        ageLease(3600);
+        expect(acquire().status, "引き継げていない").toBe(0);
+
+        const released = run(["release", "worker", mine]);
+
+        expect(released.status).toBe(1);
+        expect(released.stderr, "取り直されたことが読めない").toMatch(/取り直/);
+      });
+
+      /**
+       * **別の周回として取る。**
+       *
+       * **持ち主の印は、シェルを分けても変わらない**——**`round_owner` は
+       * セッションの外側を見る**（**1 周回が複数のシェルに分かれても同じ値**にするため）。
+       * **`setsid` で切り離して、初めて別の周回になる**——**ここを間違えると、
+       * 「別の周回が取り直した」つもりの入力が作れていない。**
+       */
+      function acquireAsOtherRound(): number {
+        const taken = spawnSync(
+          "setsid",
+          ["--wait", SCRIPT, "acquire", "worker", stampFor("worker")],
+          { cwd: sandbox, encoding: "utf8", env: { ...process.env } },
+        );
+        return taken.status ?? -1;
+      }
+
+      it("引き継がれた後も、入口の検査が言う", () => {
+        // **A は `bin/loop-await-review` で待っている間、何も打たない**（最大 480 秒）
+        // ——**切れてから重なるまでの窓を、待ったまま踏み越える**
+        acquire();
+        ageLease(3600);
+        expect(acquireAsOtherRound(), "引き継げていない").toBe(0);
+
+        const checked = run(["check"]);
+
+        expect(checked.stderr, "取り直されたことが読めない").toMatch(/取り直/);
+        expect(checked.stderr, "飛ばしたと誤診している").not.toContain("acquire を飛ばした");
+      });
+
+      it("引き継がれた跡は、増え続けない", () => {
+        // **記録は溜まる一方にしない**（`record_missing` と同じ判断）
+        for (let round = 0; round < 8; round += 1) {
+          acquire();
+          ageLease(3600);
+        }
+        acquire();
+
+        const name = readdirSync(join(sandbox, ".git")).find((entry) =>
+          entry.startsWith("valence-loop-superseded"),
+        );
+        const kept = name
+          ? readFileSync(join(sandbox, ".git", name), "utf8")
+              .trimEnd()
+              .split("\n")
+          : [];
+        expect(kept.length, "際限なく積んでいる").toBeLessThanOrEqual(5);
+      });
+
+      it("引き継がれた跡を、飛ばした周回として数えない", () => {
+        // **`./task loop:status` は「入口を飛ばした周回」を数えている。**
+        // **原因の違うものを混ぜると、読めなくなる**
+        acquire();
+        ageLease(3600);
+        expect(acquireAsOtherRound(), "引き継げていない").toBe(0);
+
+        run(["check"]);
+
+        const missing = readdirSync(join(sandbox, ".git")).find((entry) =>
+          entry.startsWith("valence-loop-lease-missing"),
+        );
+        const recorded = missing ? readFileSync(join(sandbox, ".git", missing), "utf8") : "";
+        expect(recorded, "飛ばした周回として数えている").toBe("");
+      });
+
+      it("返すときに、引き継ぎの案内を出さない", () => {
+        // **`release` は引き継いでいない** (#278 のレビュー)。
+        // **文言を直しに来て、逆の文言を 1 行増やしては元も子もない**
+        const token = acquire().stdout.trim();
+        ageLease(3600);
+
+        const released = run(["release", "worker", token]);
+
+        expect(released.stderr, "引き継ぐと言っている").not.toContain("引き継ぎます");
+      });
+
       it("走っている最中に切れたことを、入口の検査が言う", () => {
         // **気づく手立てが `release` だけだと、気づいたときには重なっている。**
         // **`bin/loop-*` を打つたびに通る検査**で言えば、**周回の途中で分かる**
