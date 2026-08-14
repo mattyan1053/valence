@@ -44,6 +44,26 @@ readonly STOP_IDS=(
   # **PR より前に起きる**ので Issue 番号で数える。
   "local-ci-unknown:<Issue番号>|worker: ./task check の合否が分からない (途中で殺された)"
   "implementation-blocked:<Issue番号>|worker: blocked にして人へ渡した (完了条件を満たせない / PR が人手で閉じられた)"
+  # **着手したのに実装が出ないまま時間が過ぎている状態** (#264)。**どの検査も健全と
+  # 答える**——**作業ツリーは clean、ブランチも PR も無く、`resume` も `audit` も通る**。
+  # **`no-work` とは違う**（**作業はある。手が動かないだけ**）ので、相乗りさせない。
+  #
+  # **`WORKER_FIXES` には入れない。** **塞ぎたいのは「worker が周回を回しながら
+  # 何も出さない」状態**なので、**worker の周回を猶予にすると、当の場面で永久に
+  # 数えられない**（`head-moved` とは主体が同じでも向きが逆である）。
+  #
+  # **Issue 番号を入れる。** **変われば前へ進んだ**ことを表す（時刻のように毎回
+  # 変わる値ではない）。
+  "implementation-stalled:<Issue番号>|master: 着手したまま実装が出ていない (worker が尽きた / 落ちた)"
+  # **着手中なのに、誰が取ったかの記録が無い状態** (#281 のレビュー)。**`take` は
+  # label を先に付ける**ので、**その間に落ちれば必ずこうなる**（`write_record` の
+  # 失敗も同じ）。**上と分ける**——**原因が違い、人が次にやることも違う**
+  # （**尽きた worker を見る**のか、**持ち主のいない着手を戻す**のか）。
+  #
+  # **測れないことを、健全と同じ出口にしない。** 名前が無いと、**この状態は
+  # 「実装は出ている / まだ早い」と同じ答えになる**（`head-lookup-failed` を
+  # `head-moved` と分けたのと同じ理由）。
+  "claim-record-missing:<Issue番号>|master: 着手中なのに着手の記録が無い (take が途中で落ちた)"
   "publish-failed:<Issue番号>|worker: push / PR 作成に失敗"
   "too-many-ready:<件数>|両方: ready の Issue が 3 件以上ある (上限は 2 件)"
   "procedure-stale|両方: 配られた手順書がディスクより古い (呼び直しても直らなかった)"

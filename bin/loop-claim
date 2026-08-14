@@ -6,6 +6,7 @@
 #   bin/loop-claim resume <Issue番号>   着手中の Issue を、自分が続けてよいか尋ねる
 #   bin/loop-claim pr     <PR番号>      レビュー対応の前に、その PR を取る
 #   bin/loop-claim mine   <PR番号>      その PR を自分の作業場が持っているか（読むだけ）
+#   bin/loop-claim idle                 着手したまま実装が出ていない Issue を並べる
 #
 #   exit 0 = 取れた / 続けてよい
 #   exit 1 = 取れなかった / 別の作業場が持っている → **次の Issue へ進む。待たない**
@@ -64,18 +65,31 @@ readonly LOCK_WAIT_SEC="${LOOP_CLAIM_LOCK_WAIT_SEC:-10}"
 # あるのは、**1 周が長引くより十分に長い**という同じ理由による。
 readonly TTL_SEC="${LOOP_CLAIM_TTL_SEC:-1800}"
 
+# 着手したまま実装が出ていないと見なすまでの時間 (#264)。
+#
+# **周回の数で測らない。** **`/loop` の間隔は設定で変わる**ので、**同じ「N 周」が
+# 機械によって 10 分にも 3 時間にもなる**——**止める条件が、設定で動く。**
+#
+# **長いほうへ倒す。** **短くすると、いちばん長く考えている worker を止める**
+# ——**この検出器が呼ぶのは人**なので、**偽陽性の代償は「人が来て、何も無い」**である。
+# **実測では、取ってから PR が出るまで 1〜2 周（30〜60 分）**なので、**その 2〜4 倍**を取る。
+# **積むのは master の周回ごと**で、**3 周続いて初めて `loop/STOP`** になる——
+# **人が呼ばれるのは、さらに master 2 周ぶん後**である。
+readonly IDLE_SEC="${LOOP_CLAIM_IDLE_SEC:-7200}"
+
 usage() {
   echo "使い方: bin/loop-claim take <Issue番号>     ready の Issue を取る" >&2
   echo "        bin/loop-claim resume <Issue番号>   着手中の Issue を続けてよいか尋ねる" >&2
   echo "        bin/loop-claim pr <PR番号>          レビュー対応の前に PR を取る" >&2
   echo "        bin/loop-claim mine <PR番号>        その PR を自分の作業場が持っているか" >&2
   echo "        bin/loop-claim audit                label と実態の食い違いを見つける" >&2
+  echo "        bin/loop-claim idle                 着手したまま実装が出ていない Issue を並べる" >&2
   echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
   exit 2
 }
 
 readonly ACTION="${1-}"
-if [[ $ACTION == "audit" ]]; then
+if [[ $ACTION == "audit" || $ACTION == "idle" ]]; then
   [[ $# -eq 1 ]] || usage
   ISSUE=""
 else
@@ -86,7 +100,7 @@ else
 fi
 readonly ISSUE
 
-for setting in LOCK_WAIT_SEC TTL_SEC; do
+for setting in LOCK_WAIT_SEC TTL_SEC IDLE_SEC; do
   if ! [[ ${!setting} =~ ^[0-9]+$ ]]; then
     echo "[FAIL] 設定: LOOP_CLAIM_${setting%_SEC}_SEC は 0 以上の整数（秒）で指定してください" >&2
     exit 2
@@ -134,12 +148,187 @@ has_label() {
 }
 
 # **持ち主を書き残す。** 記録が無ければ、2.2 は「誰の作業か」を判定できない。
+#
+# **時刻は 2 つ書く** (#264)。**1 行目の 2 列目は「最後に触った時刻」**で、
+# **周回のたびに新しくなる**（それが「持ち主が生きているか」を表す値である）。
+# **2 行目は「着手した時刻」**で、**引き継いでも書き直さない**——**書き直すと、
+# 「着手したまま実装が出ていない」を測れる値が、どこにも無くなる。**
+#
+# **1 行目には足さない** (#281 の周回で実測)。**記録は版をまたいで共有される**——
+# **前の版は `read` で 1 行目だけを読み、2 列目が数字でなければ exit 2**（読めません）。
+# **列を増やした瞬間、まだ入れ替わっていない作業場の `pr` / `resume` / `audit` が
+# 全部「判定できない」へ倒れ**、**その PR を直す周回まで止まる**（#262 と同じ形）。
+# **行を足すぶんには、前の版は読まないので何も起きない**（`bin/loop-lease` の
+# 記録が 2 行 → 3 行と増えたときと同じ判断）。
+#
+# **引数で渡すのは呼ぶ側**である。**take だけが新しく決め**、**resume と pr は
+# 読んだ値をそのまま渡す**——**「保つ」を既定にすると、`take` で書き忘れたときに
+# 前の着手の時刻が残る。**
 write_record() {
-  printf '%s\t%s\n' "$OWNER" "$(date +%s)" >"$RECORD" || {
+  local taken="${1-}"
+  [[ -n $taken ]] || taken="$(date +%s)"
+  printf '%s\t%s\n%s\n' "$OWNER" "$(date +%s)" "$taken" >"$RECORD" || {
     echo "[FAIL] #$ISSUE の持ち主を記録できません: $RECORD" >&2
     exit 2
   }
 }
+
+# 記録を読む。**前の書式（1 行だけ）で書かれたものも読む** (#264)。
+#
+# **記録はループを跨いで残る**ので、**書式を変えた周回の次に読むのは、前の形**である
+# （`AGENTS.md` §5）。**着手した時刻が無ければ、触った時刻から数える**——
+# **「着手はもっと前」という向きにしかずれない**ので、**早すぎる側へは倒れない。**
+#
+# **1 行目の余りは捨てる。** **列で持たせた版が短い間だけ存在した**ので、
+# **その記録が共有ディレクトリに残っている**——**読めないと言って止まるより、
+# 触った時刻へ倒れるほうがよい**（上と同じ向きである）。
+read_record() {
+  local record="${1:-$RECORD}"
+  held_owner=""
+  held_since=""
+  held_taken=""
+  [[ -f $record ]] || return 0
+  {
+    IFS=$'\t' read -r held_owner held_since _
+    read -r held_taken
+  } <"$record"
+  if ! [[ $held_since =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  [[ $held_taken =~ ^[0-9]+$ ]] || held_taken="$held_since"
+  return 0
+}
+
+# --- idle ----------------------------------------------------------------------
+# **着手したまま実装が出ていない Issue を並べる** (#264)。
+#
+# **どの検査も「健全」と答える状態がある。** **作業ツリーは clean、ブランチも PR も
+# 無く、`resume` は exit 0、`audit` も食い違いを見つけない**——**label と実態は
+# 合っていて、手だけが動いていない**（**worker の context が尽きた**。2026-08-14 に実測）。
+# **`no-work` にも当たらない**（**作業はある**）ので、**どこにも積まれない。**
+#
+# **見るのは「着手からの経過」と「実装が出ているか」の 2 つだけ**である。
+#
+# **`no-work` に相乗りさせない。** **意味が違う**——**あちらは着手できる作業が無い状態**で、
+# **読んだ人が「作業が尽きた」と誤解する。**
+#
+# **本人の申告は待たない。** **申告できないほど尽きていたら積まれない**ので、
+# **塞ぎたい当の場面で黙る**（#243 と同じ形）。**外から見えるものだけで決める。**
+#
+#   exit 0 = 1 件以上ある。**種別ごとに 1 行**
+#            `stalled<TAB><Issue番号><TAB><着手からの秒数>`  実装が出ていない
+#            `unowned<TAB><Issue番号>`                      着手中なのに記録が無い
+#   exit 1 = 無い
+#   exit 2 = 判定できない
+if [[ $ACTION == "idle" ]]; then
+  # **読むだけだが、ロックの中に置く。** **`take` / `resume` が書いている最中の記録を
+  # 読まない**ため（**半分書けた記録は、着手した時刻が空に見える**）。
+  exec 9>"$common_dir/valence-loop-claim.lock" || {
+    echo "[FAIL] 取り合いのロックを作成できません" >&2
+    exit 2
+  }
+  if ! flock -w "$LOCK_WAIT_SEC" 9; then
+    # **ここは譲らない。** **数える側が「無かった」と答えると、検出器が黙って消える**
+    echo "[FAIL] 取り合いのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+    exit 2
+  fi
+
+  repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || {
+    echo "[FAIL] リポジトリを特定できません" >&2
+    exit 2
+  }
+  mapfile -t repo_parts <<<"$repo_ref"
+  readonly HERE="${repo_parts[0]-}/${repo_parts[1]-}"
+
+  # **取れなかったものを「0 件」と読まない。** **読めないまま「動いている」と答えると、
+  # この検出器だけが静かに消える**——**状態は健全に見えたまま**である。
+  if ! in_progress="$(gh issue list --label in-progress --limit 200 --json number,labels \
+    --jq '.[] | "\(.number)\t\([.labels[].name] | join(","))"')"; then
+    echo "[FAIL] 着手中の Issue を読めません" >&2
+    exit 2
+  fi
+  # **閉じる Issue は GitHub に訊く**（`audit` と同じ理由）。**本文を自分で解析すると、
+  # `close` / `fixes` / `resolved` の書き分けを写すことになり、写した規則は必ずずれる。**
+  if ! covered="$(gh pr list --state open --limit 200 --json number,closingIssuesReferences \
+    --jq '.[].closingIssuesReferences[]
+      | "\(.repository.owner.login)/\(.repository.name)\t\(.number)"')"; then
+    echo "[FAIL] open PR が閉じる Issue を読めません" >&2
+    exit 2
+  fi
+
+  # **報告に載せる直前に、直接読んで確かめる** (#281 のレビュー 2 周目)。
+  #
+  # **一覧（索引）は遅れる。** **同じ出口で `audit` が先に走り**、**「着手中でない」と
+  # 直接読んで判断し、記録を消す**——**その数コマンド後にこちらが一覧を読むと、
+  # 消えた記録の Issue がまだ並ぶ**（**マージした周回がいちばん踏みやすい**）。
+  #
+  # **偽陽性の代償は「人が来て、何も無い」だが、それは「たまに」の話**である。
+  # **マージのたびに鳴るなら、次に来た人はまず検出器を疑う**——**そこでこの仕組みは死ぬ。**
+  # **#264 が塞ぎに来たのは「気づけない」ほう**なので、**倒れる向きが逆になる。**
+  #
+  # **全件には投げない。** **絞ったあとの数件だけ**なので、往復は増えない。
+  #
+  # **読めなかったら「着手中でない」に倒さない。** **倒すと、読めないあいだ黙る**
+  # ——**一覧の失敗を exit 2 にしているのと同じ原則である。**
+  still_in_progress() {
+    local number="$1" fresh
+    if ! fresh="$(gh issue view "$number" --json labels --jq '.labels[].name')"; then
+      echo "[FAIL] #$number の label を読み直せません" >&2
+      exit 2
+    fi
+    has_label "in-progress" "$fresh" || return 1
+    # **`blocked` も見直す。** **止められた直後に鳴らせない**（人の判断待ちである）
+    ! has_label "blocked" "$fresh"
+  }
+
+  now="$(date +%s)"
+  idle_found=0
+  while IFS=$'\t' read -r number labels; do
+    [[ $number =~ ^[0-9]+$ ]] || continue
+    # **`blocked` は人の判断待ちである。** **手が止まっているのが正しい状態**なので、
+    # 数えると**人が来るまで毎周回積み続ける**（`no-work` が `blocked` を含めるのと逆向きの理由）。
+    has_label "blocked" "${labels//,/$'\n'}" && continue
+
+    published=0
+    while IFS=$'\t' read -r closed_repo closed; do
+      # **このリポジトリのものだけを見る。** **他所の同じ番号を閉じる PR**（`Fixes owner/other#264`）
+      # を数えると、**実装が出ていないのに「出ている」と読む**——**検出器が黙る側**である。
+      [[ $closed_repo == "$HERE" && $closed == "$number" ]] || continue
+      published=1
+      break
+    done <<<"$covered"
+    ((published == 0)) || continue
+
+    record="$common_dir/valence-loop-claim-$number"
+    if [[ ! -f $record ]]; then
+      # **飛ばさない** (#281 のレビュー)。**`take` は label を先に付ける**ので、
+      # **その間に落ちれば「着手中なのに記録が無い」**——**`write_record` が
+      # 失敗した場合も同じ**で、**どちらもこの Issue が捕まえたい壊れ方**である。
+      #
+      # **測れないことを、健全と同じ出口にしない。** **飛ばすと exit 1 になり、
+      # 呼ぶ側は「無い」と読む**——**この検出器だけが静かに消える**（すぐ上で
+      # `gh` の失敗を exit 2 へ倒しているのと、同じ原則である）。
+      #
+      # **`stalled` と混ぜない。** **原因が違い、人が次にやることも違う**——
+      # **尽きた worker を見る**のか、**持ち主のいない着手を戻す**のか。
+      still_in_progress "$number" || continue
+      printf '%s\t%s\n' "unowned" "$number"
+      idle_found=1
+      continue
+    fi
+    if ! read_record "$record"; then
+      echo "[FAIL] #$number の着手の記録を読めません: $record" >&2
+      exit 2
+    fi
+    ((now - held_taken >= IDLE_SEC)) || continue
+    still_in_progress "$number" || continue
+    printf '%s\t%s\t%s\n' "stalled" "$number" "$((now - held_taken))"
+    idle_found=1
+  done <<<"$in_progress"
+
+  ((idle_found == 1)) || exit 1
+  exit 0
+fi
 
 # --- audit ---------------------------------------------------------------------
 # **label と実態の食い違いを、状態から見つける。**
@@ -316,15 +505,10 @@ fi
 # **解放は要らない。** **記録は期限で切れる**（`TTL_SEC`）——**返す手順を足すと、
 # 落ちた周回のぶんが返らず、その PR が誰にも直せなくなる。**
 if [[ $ACTION == "pr" ]]; then
-  held_owner=""
-  held_since=""
-  if [[ -f $RECORD ]]; then
-    IFS=$'\t' read -r held_owner held_since <"$RECORD"
-    if ! [[ $held_since =~ ^[0-9]+$ ]]; then
-      echo "[FAIL] PR #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
-      exit 2
-    fi
-  fi
+  read_record || {
+    echo "[FAIL] PR #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
+    exit 2
+  }
 
   if [[ -n $held_owner && $held_owner != "$OWNER" ]]; then
     # **時間で測らない** (#237 のレビュー)。**測れるのは「取ってからの経過」だが、
@@ -374,7 +558,8 @@ if [[ $ACTION == "pr" ]]; then
   fi
 
   # **自分のものでも書き直す**（動いていることの印である）。
-  write_record
+  # **着手した時刻は持ち越す** (#264)——**書き直すのは「触った時刻」だけ**である。
+  write_record "$held_taken"
   exit 0
 fi
 
@@ -416,15 +601,10 @@ resume)
     exit 1
   fi
 
-  held_owner=""
-  held_since=""
-  if [[ -f $RECORD ]]; then
-    IFS=$'\t' read -r held_owner held_since <"$RECORD"
-    if ! [[ $held_since =~ ^[0-9]+$ ]]; then
-      echo "[FAIL] #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
-      exit 2
-    fi
-  fi
+  read_record || {
+    echo "[FAIL] #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
+    exit 2
+  }
 
   if [[ -n $held_owner && $held_owner != "$OWNER" ]]; then
     now="$(date +%s)"
@@ -439,6 +619,9 @@ resume)
   # **引き継いだら持ち主を書き換える。** 前の持ち主のまま残すと、
   # **次の周回でも誰でも引き継げる**ことになり、排他が 1 回きりになる。
   # 自分の作業を続けるときも書き直す（動いていることの印である）。
-  write_record
+  #
+  # **着手した時刻は持ち越す** (#264)。**引き継ぎでも書き直さない**——
+  # **持ち主が代わっても、その Issue が着手されたのは最初の 1 回**である。
+  write_record "$held_taken"
   ;;
 esac
