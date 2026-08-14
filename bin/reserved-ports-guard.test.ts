@@ -58,10 +58,16 @@ afterEach(() => {
 /**
  * `ss` の身代わり。**状態での絞り込みだけを演じる。**
  *
+ * - `exclude time-wait` を渡されたら、**TIME-WAIT 以外**を返す
  * - `listening` を渡されたら、**listen している行だけ**を返す
- * - 渡されなければ、**TIME-WAIT も混ざった行**を返す（**いまの runner で起きること**）
+ *   （**接続中の socket が落ちる**——**#256 のレビューで踏んだ形**）
+ * - どちらも渡されなければ、**TIME-WAIT も混ざった行**を返す（**#253 で踏んだ形**）
  */
-function withStubSs({ listening = [] as string[], fails = false } = {}) {
+function withStubSs({
+  listening = [] as string[],
+  connected = [] as string[],
+  fails = false,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "reserved-ports-"));
   made.push(dir);
   const argv = join(dir, "argv");
@@ -72,19 +78,26 @@ function withStubSs({ listening = [] as string[], fails = false } = {}) {
       "#!/usr/bin/env bash",
       `printf '%s\\n' "$*" >>"${argv}"`,
       fails ? "echo 'ss: 失敗しました' >&2; exit 1" : "",
-      // **listen しているものは、渡された番号だけ**
+      // **listen しているものと、接続中のものは、渡された番号だけ**
       `listening="${listening.join(" ")}"`,
+      `connected="${connected.join(" ")}"`,
+      "print_listening() { for port in $listening; do",
+      '  printf "LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\\n" "$port"',
+      "done; }",
+      // **接続中のものは、その番号を送信元に使って外へ出ている**
+      // ——**bind を妨げるのはこちら**である（workflow の 76〜79 行）
+      "print_connected() { for port in $connected; do",
+      '  printf "ESTAB 0 0 10.1.0.157:%s 104.16.10.34:443\\n" "$port"',
+      "done; }",
+      'if [[ " $* " == *" exclude time-wait "* ]]; then',
+      "  print_listening; print_connected; exit 0",
+      "fi",
       'if [[ " $* " == *" listening "* ]]; then',
-      "  for port in $listening; do",
-      '    printf "0 128 0.0.0.0:%s 0.0.0.0:*\\n" "$port"',
-      "  done",
-      "  exit 0",
+      "  print_listening; exit 0",
       "fi",
       // **状態で絞らなければ、出ていった接続の残骸まで出る**（#253 で踏んだ形）
       'printf "TIME-WAIT 0 0 10.1.0.157:54324 104.16.10.34:443\\n"',
-      "for port in $listening; do",
-      '  printf "LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\\n" "$port"',
-      "done",
+      "print_listening; print_connected",
       "",
     ].join("\n"),
   );
@@ -92,7 +105,7 @@ function withStubSs({ listening = [] as string[], fails = false } = {}) {
   return { dir, argv };
 }
 
-function runGuard(options?: { listening?: string[]; fails?: boolean }) {
+function runGuard(options?: { listening?: string[]; connected?: string[]; fails?: boolean }) {
   const { dir, argv } = withStubSs(options);
   // **`-e` を付けて走らせる。** **GitHub Actions の既定が `bash -e`** なので、
   // **付けずに試すと、実物と違う条件で確かめたことになる。**
@@ -126,7 +139,20 @@ describe("予約したポートの見張り", () => {
     // **全部を混ぜて数えると、判定から絞り込みが消えても診断のほうで当たってしまう**
     const result = runGuard({ listening: ["54322"] });
 
-    expect(result.argv.split("\n")[0], "判定が状態で絞り込んでいない").toMatch(/listening/);
+    expect(result.argv.split("\n")[0], "判定が TIME-WAIT を除いていない").toMatch(
+      /exclude time-wait/,
+    );
+  });
+
+  it("接続中の socket は拾う", () => {
+    // **#256 のレビュー。** **listen だけに絞ると、これを落とす**——
+    // **この step が入った経緯そのものが、外向き接続による送信元ポートの占有**
+    // である（workflow の 76〜79 行）。**落とすと `supabase start` が
+    // 診断なしで bind に失敗する。**
+    const result = runGuard({ connected: ["54322"] });
+
+    expect(result.status, "妨げになる socket を通している").toBe(1);
+    expect(result.stderr).toContain("54322");
   });
 
   it("`ss` が落ちたら、見張りも落ちる", () => {
