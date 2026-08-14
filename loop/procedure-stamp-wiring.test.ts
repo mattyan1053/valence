@@ -267,6 +267,38 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
     });
   }
 
+  for (const role of ROLES) {
+    it(`${role} は、--reset が落ちたときの行き先を書いている`, () => {
+      // **手順書は `--reset` の直後で終わっていた**（#270）ので、**読む側は成功した
+      // ものとして進む**——**害は「消えなかったカウンタで、次の周回が古い数から続ける」**。
+      // **#266 が塞いだ「消しすぎ」の裏側**である。
+      //
+      // **落ちる道は実在する**（ロックを取れない / 設定の誤り / 2 引数を知らない版が
+      // ディスクにある——**worker が #269 の周回で実際に受けた**）。
+      const body = readFileSync(join(REPO_ROOT, `.claude/commands/loop-${role}.md`), "utf8");
+      const from = body.indexOf("bin/loop-procedure-changed --role");
+      expect(from, "1.1 の節が見つからない").toBeGreaterThanOrEqual(0);
+      const section = body.slice(from).split("\n## ")[0] ?? "";
+
+      expect(section, "落ちたときの行き先が書いていない").toMatch(/落ちても|失敗しても/);
+      // **止めない** (#270 の「やらないこと」)。**前へ進んだあとに止めると、
+      // 進んでいるのに 3 周で全ループが止まる**
+      expect(section, "止めないことが書いていない").toMatch(/止めない/);
+    });
+  }
+
+  it("マージのあとに捨てる経路は、参照ではなく実際にしていることを書く", () => {
+    // **`#266` が参照される側を変えたのに、参照する側を数えていなかった**（#270）。
+    // **1.1 はいま `main-sync-failed` だけを消す**ので、**「1.1 と同じ」に従った読み手は
+    // 対象つきを打ち**、**マージのあとに消すべきほかの記録が残る。**
+    //
+    // **参照をやめれば、次に 1.1 が変わっても壊れない**（AGENTS.md §5）。
+    const body = readFileSync(join(REPO_ROOT, ".claude/commands/loop-master.md"), "utf8");
+
+    expect(body, "参照の言い回しが残っている").not.toMatch(/捨てるなら 1\.1 と同じ/);
+    expect(body, "その場でしていることが書いていない").toMatch(/全部消す/);
+  });
+
   it("止まる先が、識別子の一覧にある", () => {
     // **識別子を勝手に作らない。** 一覧の正は `bin/loop-stall --list` である
     const listed = spawnSync(join(REPO_ROOT, "bin/loop-stall"), ["--list"], {
