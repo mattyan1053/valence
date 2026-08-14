@@ -947,6 +947,20 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(results.map((result) => result.status)).toEqual([0, 0, 0, 0, 0]);
   });
 
+  it("着手したまま実装が出ない状態は、worker が周回を回していても 3 周で止める", () => {
+    // **#264 が塞ぐのは、worker が元気に周回を回しながら何も出さない状態**である
+    // （**context が尽きた worker は、clean な作業ツリーを報告して正常に終わる**）。
+    // **`WORKER_FIXES` に入れると、その周回がそのまま猶予になり**——
+    // **塞ぎたい当の場面で永久に数えられない**（`review-unanswered` と同じ側の判断）。
+    workerState({ activityAgo: 10, startedAt: Math.floor(Date.now() / 1000) - 600 });
+
+    const results = [1, 2, 3].map(() => stall("implementation-stalled:264"));
+
+    expect(results.map((result) => result.status)).toEqual([0, 0, 1]);
+    expect(results.at(-1)?.stdout).toContain("[STOP]");
+    expect(existsSync(join(repo, "ran")), "ループを止めていない").toBe(true);
+  });
+
   it("worker が解くとした識別子は、すべて一覧にある", () => {
     // **綴りがずれると黙って効かなくなる。** 主体の一覧（WORKER_FIXES）と
     // 識別子の一覧（STOP_IDS）は別の軸なので別に持つが、**片方だけ直すと食い違う**

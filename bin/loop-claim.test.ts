@@ -908,6 +908,209 @@ describe("bin/loop-claim", () => {
     });
   });
 
+  describe("idle — 着手したまま実装が出ていない Issue を並べる", () => {
+    /**
+     * 着手中の Issue と、open PR が閉じる予定の Issue を返す偽の `gh`。
+     *
+     * **`--jq` の後ろの形で返す。** `audit` の偽物と同じ約束である
+     * （**本物の `gh` が絞ったあとの行**を、そのまま出す）。
+     */
+    function withIdle(options: {
+      inProgress?: { number: number; labels?: string[] }[];
+      /** open PR が閉じる予定の Issue。**別リポジトリのものも置ける。** */
+      prs?: { closes: number[]; repo?: string }[];
+      /**
+       * この一覧だけが読めない。**「0 件」と読み違えないこと**を見る。
+       *
+       * **全部の `gh` を落とさない。** **手前の呼び出しで止まると、
+       * 見たかった経路まで届かない**（届いていないのに緑になる）。
+       */
+      failOn?: "issue list" | "pr list";
+    }): void {
+      const issues = (options.inProgress ?? [])
+        .map((issue) => `${issue.number}\t${(issue.labels ?? ["in-progress"]).join(",")}`)
+        .join("\n");
+      const closes = (options.prs ?? [])
+        .flatMap((pr) => pr.closes.map((number) => `${pr.repo ?? "owner/repo"}\t${number}`))
+        .join("\n");
+      const labelsDir = join(repo, "labels-idle");
+      mkdirSync(labelsDir, { recursive: true });
+      for (const issue of options.inProgress ?? []) {
+        writeFileSync(
+          join(labelsDir, String(issue.number)),
+          `${(issue.labels ?? ["in-progress"]).join("\n")}\n`,
+        );
+      }
+
+      writeFileSync(
+        join(path, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          `labels_dir=${JSON.stringify(labelsDir)}`,
+          ...(options.failOn === undefined
+            ? []
+            : [`if [[ $* == *${JSON.stringify(options.failOn)}* ]]; then exit 1; fi`]),
+          'if [[ $* == *"repo view"* ]]; then',
+          '  echo "owner"',
+          '  echo "repo"',
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"issue list"* ]]; then',
+          `  printf '%b' ${JSON.stringify(issues)}`,
+          `  [[ -n ${JSON.stringify(issues)} ]] && echo`,
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"pr list"* ]]; then',
+          `  printf '%b' ${JSON.stringify(closes)}`,
+          `  [[ -n ${JSON.stringify(closes)} ]] && echo`,
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"issue view"* ]]; then',
+          "  for word in $*; do",
+          '    if [[ -f "$labels_dir/$word" ]]; then cat "$labels_dir/$word"; exit 0; fi',
+          "  done",
+          "  exit 0",
+          "fi",
+          'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+          "exit 2",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+    }
+
+    const NOW = Math.floor(Date.now() / 1000);
+
+    /** 記録を置く。**`taken` を省くと、前の書式（2 列）になる。** */
+    function writeClaim(
+      number: number,
+      options: { touched: number; taken?: number; owner?: string },
+    ): void {
+      const fields = [options.owner ?? repo, String(options.touched)];
+      if (options.taken !== undefined) {
+        fields.push(String(options.taken));
+      }
+      writeFileSync(join(repo, ".git", `valence-loop-claim-${number}`), `${fields.join("\t")}\n`);
+    }
+
+    function claimFields(number: number): string[] {
+      return readFileSync(join(repo, ".git", `valence-loop-claim-${number}`), "utf8")
+        .trimEnd()
+        .split("\t");
+    }
+
+    it("着手から長く経っても実装が出ていない Issue を並べる", () => {
+      withIdle({ inProgress: [{ number: 264 }] });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      const idle = run(["idle"]);
+
+      expect(idle.status).toBe(0);
+      expect(idle.stdout).toContain("264");
+    });
+
+    it("着手して間もない Issue は並べない", () => {
+      // **実装には複数の周回がかかる。** 短くすると、健全な作業が止まる
+      withIdle({ inProgress: [{ number: 264 }] });
+      writeClaim(264, { touched: NOW, taken: NOW - 60 });
+
+      expect(run(["idle"]).status).toBe(1);
+    });
+
+    it("閉じる open PR があれば並べない", () => {
+      // **実装は出ている。** そこから先はレビューの側で数える（`awaiting-worker`）
+      withIdle({ inProgress: [{ number: 264 }], prs: [{ closes: [264] }] });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(1);
+    });
+
+    it("別のリポジトリの同じ番号を閉じる PR は、実装ではない", () => {
+      withIdle({
+        inProgress: [{ number: 264 }],
+        prs: [{ closes: [264], repo: "other/repo" }],
+      });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(0);
+    });
+
+    it("blocked が付いていれば並べない", () => {
+      // **人の判断待ちである。** 手が止まっているのは正しい状態で、数えると
+      // **人が来るまで毎周回積み続ける**
+      withIdle({ inProgress: [{ number: 264, labels: ["in-progress", "blocked"] }] });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(1);
+    });
+
+    it("再開しても、着手した時刻は書き直さない", () => {
+      // **これが本題。** **記録の時刻は周回のたびに新しくなる**ので、
+      // **そのまま数えると「着手したまま出ていない」を永久に測れない**
+      withIdle({ inProgress: [{ number: 264 }] });
+      writeClaim(264, { touched: NOW - 9000, taken: NOW - 9000 });
+
+      expect(run(["resume", "264"]).status).toBe(0);
+
+      const resumed = claimFields(264);
+      expect(Number(resumed[1]), "触った時刻は新しくなる").toBeGreaterThan(NOW - 60);
+      expect(run(["idle"]).status).toBe(0);
+    });
+
+    it("take は着手した時刻を残す", () => {
+      // **足す場所を決めたのがこの Issue である。** 残さなければ、どこにも測る値が無い
+      withGh({ labels: ["ready"], viewDelay: "0" });
+
+      expect(run(["take", "264"]).status).toBe(0);
+
+      const fields = claimFields(264);
+      expect(fields).toHaveLength(3);
+      expect(Number(fields[2])).toBeGreaterThan(NOW - 60);
+    });
+
+    it("前の書式で書かれた記録は、触った時刻から数える", () => {
+      // **書式を変えたら、前の書式で書かれた入力を置く**（AGENTS.md §5）。
+      // **記録はループを跨いで残る**ので、**古い形のまま次の周回が読む**
+      withIdle({ inProgress: [{ number: 264 }] });
+      writeClaim(264, { touched: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(0);
+
+      // **新しいほうも置く。** **空を 0 として数えると、前の書式の記録が
+      // すべて「1970 年から着手中」になり**、**取った直後の Issue まで並ぶ**
+      writeClaim(264, { touched: NOW });
+
+      expect(run(["idle"]).status).toBe(1);
+    });
+
+    it("記録が無い Issue は、測れないと言って並べない", () => {
+      // **黙って飛ばさない。** 測れないものがあることは、出力にだけ残る
+      withIdle({ inProgress: [{ number: 264 }] });
+
+      const idle = run(["idle"]);
+
+      expect(idle.status).toBe(1);
+      expect(idle.stderr).toContain("264");
+    });
+
+    it("着手中の一覧を読めなければ 2 で落ちる", () => {
+      // **「0 件」と読み違えない。** 読めないまま「動いている」と答えると、
+      // **この検出器が黙って消える**（状態は健全に見えたままである）
+      withIdle({ inProgress: [{ number: 264 }], failOn: "issue list" });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(2);
+    });
+
+    it("open PR の一覧を読めなければ 2 で落ちる", () => {
+      // **こちらを 0 件と読むと、逆へ倒れる**——**実装が出ているのに「出ていない」**と
+      // 読み、**健全に進んでいる Issue で人を呼ぶ**
+      withIdle({ inProgress: [{ number: 264 }], failOn: "pr list" });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(2);
+    });
+  });
+
   it("使い方の誤りは 2 で落ちる", () => {
     withGh({ labels: ["ready"], viewDelay: "0" });
 
