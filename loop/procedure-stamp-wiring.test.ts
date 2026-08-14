@@ -137,6 +137,19 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
       // **2 回目の行き先まで書く**（#241 の完了条件）——**呼び直しても古い版が
       // 来たのが今回**である
       expect(body, "2 回目の行き先が書いていない").toContain("procedure-stale");
+
+      // **この経路で `--reset` を呼ばない** (#243 のレビュー)。**消すと、次の周回が
+      // 積んだぶんも一緒に消える**——**毎周回 1 に戻り、3 周へ永久に届かない**
+      // （**入れた escalation を、同じ段落の 1 行が消していた**）。
+      const from = body.indexOf("印がずれていたら、`acquire` は exit 2 で止まる");
+      const stale = body.indexOf("procedure-stale", from);
+      expect(from, "印がずれたときの段落が無い").toBeGreaterThanOrEqual(0);
+      const section = body.slice(from, stale);
+      // **「消す」形が残っていないこと**（**「呼ばない」と書いてある文とは別**）
+      expect(section, "捨てる前にカウンタを消している（3 周に届かない）").not.toMatch(
+        /--reset` *→/,
+      );
+      expect(section, "消さない理由が書いていない").toMatch(/--reset` を呼ばない/);
     });
   }
 
