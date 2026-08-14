@@ -79,11 +79,11 @@ readonly REVIEW_BOT="${REVIEW_BOT_REST%\[bot\]}"
 readonly FIELD=$'\037'
 
 usage() {
-  echo "使い方: bin/loop-handoff <役>   役: ${ROLES[*]}" >&2
+  echo "使い方: bin/loop-handoff <役> [--sent]   役: ${ROLES[*]}" >&2
   exit 2
 }
 
-[[ $# -eq 1 ]] || usage
+[[ $# -ge 1 && $# -le 2 ]] || usage
 readonly ROLE="$1"
 role_is_known=1
 for known in "${ROLES[@]}"; do
@@ -93,6 +93,14 @@ done
   echo "[FAIL] 未知の役: $ROLE（使えるのは ${ROLES[*]}）" >&2
   exit 2
 }
+
+# **送信が成功したことを伝える口** (#258)。**呼んだ側にしか分からない。**
+confirm_sent=0
+if [[ $# -eq 2 ]]; then
+  [[ $2 == "--sent" ]] || usage
+  confirm_sent=1
+fi
+readonly confirm_sent
 
 # **読めなかったら「送らない」に倒さない。** 倒すと、止まっていることに気づけない。
 fail_unknown() {
@@ -108,6 +116,72 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
   exit 2
 }
+
+readonly INFORMED="informed"
+readonly OBSERVED="observed"
+
+# **送ると決めた宛先と指紋の置き場所** (#258)。**記録とは分ける**——
+# **ここにあるのは「送ると決めた」までで、届いたかどうかはまだ分からない。**
+readonly PENDING="$common_dir/valence-loop-handoff-$ROLE.pending"
+
+# **記録のロック。** 判断する側と `--sent` で同じものを取る。
+lock_records() {
+  exec 9>"$common_dir/valence-loop-handoff.lock" || {
+    echo "[FAIL] 送信記録のロックを作成できません" >&2
+    exit 2
+  }
+  if ! flock -w "${LOOP_HANDOFF_LOCK_WAIT_SEC:-10}" 9; then
+    echo "[FAIL] 送信記録のロックを取得できません" >&2
+    exit 2
+  fi
+}
+
+# **送れたときにだけ「送った」と書く** (#258)。
+#
+# **判断した周回が「送信済み」を書いていた。** **実際に送るのは呼んだ側**なので、
+# **送信が失敗しても記録だけが残る**——**同じ状態では 2 通目を送らない**ので、
+# **その状態では二度と送られない**。**記録には `informed` と書いてある**ので、
+# **落ちたことがどこにも残らない**（2026-08-14 に、宛先の名前が変わって実際に起きた）。
+#
+# **#173 が直したのは「送らないと決めた周回が記録を書く」**である。
+# **こちらは「送ろうとして失敗した周回が記録を書く」**——**別の入口で、同じ結果**になる。
+#
+# **判断と記録を 2 回に分ける。** 判断した周回は**宛先と指紋を置くだけ**で、
+# **`--sent` を通ったときにだけ `informed` へ上げる。**
+#
+# **ここで指紋を引き直さない。** 引き直すと、**送っている間に状態が変わった場合に、
+# 送っていない状態を「送信済み」として塞ぐ**——**いま塞ごうとしている穴が、逆向きに開く。**
+if ((confirm_sent == 1)); then
+  lock_records
+  pending="$(cat "$PENDING" 2>/dev/null || true)"
+  if [[ -z $pending || $pending != *"$FIELD"* ]]; then
+    echo "[FAIL] 送ると決めた記録がありません: $PENDING" >&2
+    echo "       先に bin/loop-handoff $ROLE を通し、出力があったときだけ送ること" >&2
+    exit 2
+  fi
+  sent_to="${pending%%"$FIELD"*}"
+  sent_state="${pending#*"$FIELD"}"
+  sent_to_is_known=1
+  for known in "${ROLES[@]}"; do
+    [[ $known == "$sent_to" ]] && sent_to_is_known=0
+  done
+  ((sent_to_is_known == 0)) || {
+    echo "[FAIL] 送ると決めた記録の宛先が読めません: $PENDING" >&2
+    exit 2
+  }
+  # **送った側にも書く。** 宛先は呼んだ役で反転するので、
+  # **宛先だけに書くと同じ指紋のまま 2 通出る** (#173 のレビュー)。
+  for role in "$sent_to" "$ROLE"; do
+    printf '%s' "${INFORMED}${FIELD}${sent_state}" >"$common_dir/valence-loop-handoff-$role" || {
+      echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$role" >&2
+      exit 2
+    }
+  done
+  # **消せなくても、記録は済んでいる。** 次の周回が置き直すか消すので自然に収まる
+  rm -f "$PENDING" ||
+    echo "[WARN] 送信待ちの記録を消せません: $PENDING（次の周回が置き直す）" >&2
+  exit 0
+fi
 
 # **入口の確認は、GitHub を読む前に済ませる。** 読めずに落ちた周回でも、
 # **飛ばしたことは記録に残る**——記録を状態の取得に依存させない。
@@ -354,17 +428,14 @@ readonly STATE="prs=${prs}|detail=${details}|checks=${checks}|ready=${ready}|in-
 #
 # **抑止に使うのは `informed` だけ**で、**`observed` は「前の `informed` を古くする」
 # ためだけに置く**（状態が動いたことを覚えておく場所）。
-exec 9>"$common_dir/valence-loop-handoff.lock" || {
-  echo "[FAIL] 送信記録のロックを作成できません" >&2
+lock_records
+
+# **判断し直す周回は、前の送信待ちを引き継がない** (#258)。**残すと、あとから
+# `--sent` が通ったときに、配っていない状態を「送信済み」にする。**
+rm -f "$PENDING" || {
+  echo "[FAIL] 送信待ちの記録を消せません: $PENDING" >&2
   exit 2
 }
-if ! flock -w "${LOOP_HANDOFF_LOCK_WAIT_SEC:-10}" 9; then
-  echo "[FAIL] 送信記録のロックを取得できません" >&2
-  exit 2
-fi
-
-readonly INFORMED="informed"
-readonly OBSERVED="observed"
 
 declare -A informed=()
 for role in "${ROLES[@]}"; do
@@ -493,21 +564,18 @@ if [[ $to == "$ROLE" || -n ${informed[$to]-} ]]; then
   exit 1
 fi
 
-# **送ると決めたときだけ「送った」と書く。** ここより前に書くと、
-# **送らずに終わった周回が「送信済み」を作る** (#125)。
+# **送ると決めただけでは、まだ届いていない** (#258)。**宛先と指紋を置いておき、
+# 送信が成功して `--sent` が通ったときにだけ `informed` へ上げる。**
 #
-# **送った側にも書く。** `answered` の宛先は**呼んだ役で反転する**ので、
-# 宛先だけに書くと**同じ指紋のまま master→worker→master と 2 通出る** (#173 のレビュー)。
-# **自分で見て、自分で配った**のだから、**もう一度知らせても新しいことは何も無い**。
+# **ここで `informed` を書くと、送信に失敗した周回が「送信済み」を作る**——
+# **同じ状態では 2 通目を送らない**ので、**その状態では二度と送られない。**
 #
 # **何もしなかった周回とは分ける。** あちらは**誰にも配っていない**ので、
 # **その状態を「届いた」と数えてはいけない**——それが #125 の本体である。
-for role in "$to" "$ROLE"; do
-  printf '%s' "${INFORMED}${FIELD}${STATE}" >"$common_dir/valence-loop-handoff-$role" || {
-    echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$role" >&2
-    exit 2
-  }
-done
+printf '%s' "${to}${FIELD}${STATE}" >"$PENDING" || {
+  echo "[FAIL] 送信待ちの記録を書き込めません: $PENDING" >&2
+  exit 2
+}
 
 printf '%s\t%s\n' "$to" "$reason"
 exit "$mismatch_exit"

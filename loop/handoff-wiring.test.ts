@@ -57,6 +57,40 @@ describe("周回の出口", () => {
   });
 });
 
+describe("送れたときだけ記録する", () => {
+  /** 出口の節。**送る手順が書いてあるのはここだけ**である。 */
+  function exitSection(path: string): string {
+    return read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+  }
+
+  it.each(PROCEDURES)("$role は、送信が成功したあとに --sent を通す", ({ role, path }) => {
+    // **判断した周回が「送信済み」を書いていた**ので、**送信が失敗しても記録だけが残る**
+    // （#258）——**同じ状態では 2 通目を送らない**ので、**その状態では二度と送られない**。
+    // **記録を上げるのは、送れたことを知っている側**である
+    expect(exitSection(path)).toContain(`bin/loop-handoff ${role} --sent`);
+  });
+
+  it.each(PROCEDURES)("$role は、送れなかったら --sent を通さないと書いてある", ({ path }) => {
+    // **書いていないと、「送った扱い」に倒れる**——**倒れる向きが悪い**
+    // （送っていないのに二度と送られない）
+    expect(exitSection(path)).toMatch(/送れなかった|失敗した/);
+  });
+
+  it.each(PROCEDURES)("$role は、送る直前に宛先を引き直す", ({ path }) => {
+    // **セッションの表示名は変わる**（`valence-master-d4` → `loop-master`）。
+    // **古い名前で送ると明確に失敗する**ので、**キャッシュした名前を使わない**。
+    // **2.1 にしか書いていないと、出口からは読まれない**（実際にそうなっていた）
+    expect(exitSection(path)).toContain("ListAgents");
+  });
+
+  it.each(PROCEDURES)("$role は、宛先を引けないことも送信の失敗として扱う", ({ path }) => {
+    // **引けなかったのに `--sent` を通すと、届いていない状態が送信済みになる**
+    const section = exitSection(path);
+
+    expect(section).toMatch(/引けなかった|居なければ/);
+  });
+});
+
 describe("状態が矛盾したとき", () => {
   it.each(PROCEDURES)("$role の出口に exit 3 の行き先が書いてある", ({ path }) => {
     // **「送るものが無い」と「状態が矛盾している」を混ぜない**（#105）。
