@@ -153,6 +153,97 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
     });
   }
 
+  describe("止まった状態から出る道", () => {
+    /**
+     * **印を変える PR を出した作業場は、次の周回から入れなくなる**（#262）。
+     *
+     * **その PR を直す周回にも入れない**ので、**PR は自分自身で詰む**——
+     * **レビュー指摘が残っていても手が動かせず、マージもされないので、印は違ったまま**である。
+     * **#261 で実測した**（`bin/loop-stall procedure-stale` が積まれ、3 周で `loop/STOP`）。
+     *
+     * **止まること自体は正しい。** **配られた手順書とディスクのスクリプトが噛み合って
+     * いないのは事実**で、**その組み合わせで走らせてはいけない。**
+     * **問題は「止まった状態から出る道が無いこと」**である（AGENTS.md §5。#184）。
+     *
+     * **道はある**——**その PR の枝へ入れば、手順書もスクリプトも揃う。**
+     * **検査を迂回していない**（**噛み合っている状態を実際に作っている**）。
+     * **足りなかったのは、その順序がどこにも書かれていないこと**である。
+     */
+    function worker(): string {
+      return readFileSync(join(REPO_ROOT, ".claude/commands/loop-worker.md"), "utf8");
+    }
+
+    /** 印がずれたときの段落。**入り方が書かれるべきところ**である。 */
+    function staleSection(): string {
+      const body = worker();
+      const from = body.indexOf("印がずれていたら、`acquire` は exit 3 で止まる");
+      expect(from, "印がずれたときの段落が無い").toBeGreaterThanOrEqual(0);
+      return body.slice(from).split("\n## ")[0] ?? "";
+    }
+
+    it("自分の PR の枝へ入って取り直す、と書いてある", () => {
+      // **`acquire` は周回の冒頭で、checkout はそれより後**なので、
+      // **普通に周回を始めるかぎり、この順序へは到達しない**
+      const section = staleSection();
+
+      expect(section, "枝へ入る手が書いていない").toContain("gh pr checkout --detach");
+      expect(section, "入る前に PR を取っていない").toContain("bin/loop-claim pr");
+    });
+
+    it("素通りではないと書いてある（揃わなければ、また止まる）", () => {
+      // **「新しければ通す」で直さない**（Issue の「やらないこと」）。
+      // **方向を見て素通りさせると、まさに噛み合わない組み合わせで走る**
+      expect(staleSection(), "揃わなければ止まることが書いていない").toMatch(
+        /揃わなければ|揃っていなければ/,
+      );
+    });
+
+    it("その周回は `origin/main` へ移らない、と書いてある", () => {
+      // **入った先は PR の枝**である。**そのまま 1.1 で `origin/main` へ移すと、
+      // `bin/loop-procedure-changed` が入れ替わりを見つけて、その周回を捨てる**——
+      // **入れたばかりの道が、次の行で閉じる。**
+      expect(staleSection(), "同期で枝から降ろされることに触れていない").toContain("--fetch-only");
+    });
+
+    it("木を触る前に、原子的に押さえると書いてある", () => {
+      // **読むだけの確認では足りない**（#268 のレビュー）。**`held` を見てから
+      // `gh pr checkout` を打つまでの間に、別の周回が普通の `acquire` を通せる**——
+      // **その直後に checkout すると、走っている周回の HEAD と作業ツリーを入れ替える**
+      // （#68 の形）。**確かめて空けたままにせず、その場で決着させる。**
+      const section = staleSection();
+
+      expect(section, "原子的に押さえていない").toContain("bin/loop-lease recover worker");
+      expect(section, "読むだけの確認に戻っている").not.toContain("bin/loop-lease held worker");
+    });
+
+    it("押さえたあと、揃ったかを確かめると書いてある", () => {
+      // **押さえることは、進んでよいという意味ではない。**
+      // **判定は `bin/loop-procedure-stamp` が 1 箇所で持つ**
+      expect(staleSection(), "揃ったかを確かめていない").toContain(
+        "bin/loop-procedure-stamp worker",
+      );
+    });
+
+    it("揃わなかったら、押さえたぶんを返すと書いてある", () => {
+      // **返さずに終わると、この作業場は期限が切れるまで動けない**——
+      // **入れた道が、次の周回を閉じ込める**
+      expect(staleSection(), "押さえたぶんを返していない").toContain(
+        "bin/loop-lease release worker",
+      );
+    });
+
+    it("比較先を空にしない、と書いてある", () => {
+      // **`--fetch-only` は SHA を出さない**（#268 のレビュー）。**空のまま渡すと、
+      // `${2:-HEAD}` で HEAD に既定されて「HEAD と HEAD を比べる」になる**——
+      // **答えは正しいが、比べていない。** **黙って既定に落ちる形を残さない。**
+      const section = staleSection();
+      const fetchOnly = section.indexOf("--fetch-only");
+
+      expect(fetchOnly, "--fetch-only に触れていない").toBeGreaterThanOrEqual(0);
+      expect(section.slice(fetchOnly), "比較先を明示していない").toContain("git rev-parse HEAD");
+    });
+  });
+
   it("止まる先が、識別子の一覧にある", () => {
     // **識別子を勝手に作らない。** 一覧の正は `bin/loop-stall --list` である
     const listed = spawnSync(join(REPO_ROOT, "bin/loop-stall"), ["--list"], {

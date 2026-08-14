@@ -214,9 +214,80 @@ describe("bin/loop-lease", () => {
       expect(stale.stderr, "捨てて呼び直す先が書いていない").toMatch(/procedure-stale/);
     });
 
+    it("案内が、印を持つ木へ入る道を言う", () => {
+      // **止まった状態から出られるかを見る** (#184 / #262)。
+      //
+      // **印を変える PR を出した作業場は、次の周回から入れなくなる**——
+      // **その PR を直す周回にも入れない**ので、**PR が自分自身で詰む**（#261 で実測）。
+      //
+      // **逃げ道はある**（**その枝を checkout すれば、手順書もスクリプトも揃う**）が、
+      // **どこにも書かれていなかった**。**`acquire` は周回の冒頭で、checkout は
+      // それより後**なので、**普通に周回を始めるかぎり、そこへ到達しない。**
+      //
+      // **案内は「印を埋めて取り直す」しか言っていなかった**——
+      // **同じ印を渡しても、また止まる。**
+      const stale = run(["acquire", "worker", "0123456789ab"]);
+
+      expect(stale.stderr, "印を持つ木へ入る道が書いていない").toMatch(/checkout/);
+      expect(stale.stderr, "何を checkout すればよいのかが書いていない").toMatch(/PR|枝/);
+      // **案内も、押さえてから入る形にそろえる**（#268 のレビュー 2 周目）。
+      // **手順書は `recover` へ直したが、案内には `held` → checkout が残っていた**——
+      // **この案内を実際に読むのは、古い手順書を配られた周回**である。
+      // **読むだけの確認と checkout の間に、別の周回が `acquire` を通せる**（#68）。
+      expect(stale.stderr, "案内が、読むだけの確認のまま").toContain("recover");
+      expect(stale.stderr, "案内に古い順序が残っている").not.toMatch(/loop-lease held/);
+    });
+
     it("同じ印なら、これまでどおり取れる", () => {
       // **止めすぎていないこと**（正常な周回で鳴らない）
       expect(run(["acquire", "worker", stampFor("worker")]).status).toBe(0);
+    });
+  });
+
+  describe("回復のために押さえる", () => {
+    /**
+     * **印がずれた周回が、木を入れ替える前に作業場を押さえる**（#268 のレビュー）。
+     *
+     * **読むだけの確認では足りない。** `held` を見てから `gh pr checkout` を打つまでの間に、
+     * **別の周回が普通の `acquire` を通せる**——**その直後に checkout すると、
+     * 走っている周回の HEAD と作業ツリーを入れ替える**（#68 の形）。
+     *
+     * **押さえることは、進んでよいという意味ではない。** **揃ったかどうかは、
+     * checkout したあとに `bin/loop-procedure-stamp` で確かめる**（判定はそこ 1 箇所）。
+     */
+    it("印がずれていれば、押さえられる", () => {
+      const held = run(["recover", "worker", "0123456789ab"]);
+
+      expect(held.status, held.stderr).toBe(0);
+      expect(held.stdout.trim(), "token が出ていない").toMatch(/^[0-9a-f]{16}$/);
+    });
+
+    it("押さえたぶんは、これまでどおり返せる", () => {
+      const token = run(["recover", "worker", "0123456789ab"]).stdout.trim();
+
+      expect(run(["release", "worker", token]).status).toBe(0);
+    });
+
+    it("走っている周回があるなら、押さえない", () => {
+      // **ここが `held` との違い**——**読んで空けたままにせず、その場で決着させる**
+      expect(acquire().status).toBe(0);
+
+      expect(run(["recover", "worker", "0123456789ab"]).status, "走っているのに押さえた").toBe(1);
+    });
+
+    it("印が揃っているなら、ここは使えない", () => {
+      // **素通りの口にしない。** **回復は「ずれている」状態のためだけのもの**である
+      const same = run(["recover", "worker", stampFor("worker")]);
+
+      expect(same.status, "揃っているのに回復で取れる").toBe(3);
+      expect(same.stdout, "取れたことにしている").toBe("");
+      expect(same.stderr).toMatch(/acquire/);
+    });
+
+    it("使い方の誤りは、押さえる前に落ちる", () => {
+      expect(run(["recover", "worker"]).status).toBe(2);
+      expect(run(["recover", "worker", "0123456789ab", "余計"]).status).toBe(2);
+      expect(run(["recover", "それ以外の役", "0123456789ab"]).status).toBe(2);
     });
   });
 
