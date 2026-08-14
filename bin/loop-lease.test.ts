@@ -725,11 +725,19 @@ describe("bin/loop-lease", () => {
       return stateFile().replace(/^.*valence-loop-lease-/, "");
     }
 
-    /** 取得時刻を過去へずらす。**待たずに古い状態を作る**（#131 の教訓）。 */
+    /**
+     * 取得時刻を過去へずらす。**待たずに古い状態を作る**（#131 の教訓）。
+     *
+     * **1 行目の時刻だけを差し替える。** **残りの行（持ち主・作業場）を落とすと、
+     * 実際には在るものが試験の中だけ消え**——**持ち主で分かれる経路が、
+     * どちらへ倒しても緑になる**（#260 で実際に踏んだ）。
+     */
     function ageLease(secondsAgo: number): void {
       const file = stateFile();
-      const token = (readFileSync(file, "utf8").split("\t")[0] ?? "").trim();
-      writeFileSync(file, `${token}\t${Math.floor(Date.now() / 1000) - secondsAgo}\n`);
+      const lines = readFileSync(file, "utf8").split("\n");
+      const token = (lines[0] ?? "").split("\t")[0] ?? "";
+      lines[0] = `${token}\t${Math.floor(Date.now() / 1000) - secondsAgo}`;
+      writeFileSync(file, lines.join("\n"));
     }
 
     it("活動が続いていれば、取得から TTL を過ぎても引き継がない", () => {
@@ -781,6 +789,101 @@ describe("bin/loop-lease", () => {
 
       expect(second.status).toBe(1);
       expect(second.stderr).toMatch(/最後の活動/);
+    });
+
+    /**
+     * **期限切れは、重なりではない** (#260)。
+     *
+     * **master の周回は `./task` をほとんど通らない**ので、**心拍が打たれず、
+     * 周回の長さに関わらず TTL で外れる**——**実測で 387 秒超過していた。**
+     *
+     * **走っている本人は気づかない。** **期限を見るのは `acquire` だけ**で、
+     * **気づくのは出口の `release` が断ったとき**である。
+     * **そのときの文言が「別の周回が持っています」**だと、**読んだ側は重なったと
+     * 解釈する**——**実際には誰も持っていない**（**期限切れの自分の記録が残っているだけ**）。
+     */
+    describe("期限が切れた自分の記録を、重なりと区別する", () => {
+      it("切れていても、同じ token なら返せる", () => {
+        // **返す資格は token が持つ。** **切れたからといって、持ち主の後始末を断らない**
+        const token = acquire().stdout.trim();
+        ageLease(3600);
+
+        const released = run(["release", "worker", token]);
+
+        expect(released.status, "持ち主が返せない").toBe(0);
+      });
+
+      it("切れていたことを、返すときに言う", () => {
+        // **黙って通すと、重なりが起きていたことに誰も気づかない**
+        const token = acquire().stdout.trim();
+        ageLease(3600);
+
+        const released = run(["release", "worker", token]);
+
+        expect(released.stderr, "期限切れだったことを言っていない").toMatch(/期限切れ/);
+      });
+
+      it("切れた記録が自分のものでなければ、そう言う", () => {
+        // **落ちた別の周回の跡**である。**「誰も持っていない」でも「重なっている」でもない**
+        acquire();
+        ageLease(3600);
+
+        const released = run(["release", "worker", "0000000000000000"]);
+
+        expect(released.status).toBe(1);
+        expect(released.stderr, "期限切れの記録だと読めない").toMatch(/期限切れの記録/);
+        expect(released.stderr, "重なりと同じ文言にしている").not.toContain(
+          "別の周回が持っています",
+        );
+      });
+
+      it("切れた記録を返しても、周回の長さに数えない", () => {
+        // **`bin/loop-stall` の窓は、実際にかかった時間から決まる** (#146)。
+        // **切れたまま放置された記録の「長さ」を入れると、窓が広がって戻らない**
+        const token = acquire().stdout.trim();
+        ageLease(36000);
+
+        expect(run(["release", "worker", token]).status).toBe(0);
+
+        const lengths = readdirSync(join(sandbox, ".git")).find((entry) =>
+          entry.startsWith("valence-loop-roundlen"),
+        );
+        const recorded = lengths ? readFileSync(join(sandbox, ".git", lengths), "utf8") : "";
+        expect(recorded, "期限切れの周回を長さとして数えている").not.toMatch(/\b36000\b/);
+      });
+
+      it("切れていないのに token が違えば、これまでどおり重なりと言う", () => {
+        // **誤検知を消すために、本当の重なりまで消さない**
+        acquire();
+
+        const released = run(["release", "worker", "0000000000000000"]);
+
+        expect(released.status).toBe(1);
+        expect(released.stderr).toContain("別の周回が持っています");
+      });
+
+      it("走っている最中に切れたことを、入口の検査が言う", () => {
+        // **気づく手立てが `release` だけだと、気づいたときには重なっている。**
+        // **`bin/loop-*` を打つたびに通る検査**で言えば、**周回の途中で分かる**
+        acquire();
+        ageLease(3600);
+
+        const checked = run(["check"]);
+
+        expect(checked.status, "止めてはいけない").toBe(0);
+        expect(checked.stderr, "期限切れだと言っていない").toMatch(/期限切れ/);
+      });
+
+      it("走っている最中に切れたのを、入口を飛ばしたと言わない", () => {
+        // **原因が違う。** **飛ばした周回は取り直せばよい**が、
+        // **切れた周回は「重なったかもしれない」を疑う**——**案内が別である**
+        acquire();
+        ageLease(3600);
+
+        const checked = run(["check"]);
+
+        expect(checked.stderr, "飛ばしたと誤診している").not.toContain("acquire を飛ばした");
+      });
     });
 
     it("heartbeat は lease を持っていなくても成功する", () => {

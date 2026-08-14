@@ -326,6 +326,12 @@ read_lease() {
   held_since=""
   held_owner=""
   held_workspace=""
+  # **持ち越さない** (#260)。`busy` / `check` は役や作業場ごとに何度も読む——
+  # **前の記録の跡が残ると、次の判定に混ざる。** **記録が無い経路でも空にする**
+  # （**「誰も持っていない」を「期限切れの記録がある」と読ませない**）。
+  expired_token=""
+  expired_owner=""
+  expired_over=0
   [[ -f $STATE ]] || return 0
 
   # **1 行目は「前の版が読める形」のまま**（token と時刻の 2 列）。**印は 2 行目**である。
@@ -356,6 +362,12 @@ read_lease() {
     # **読むだけの action（`held` / `check`）では黙る**（誰も引き継がない）。
     [[ -n $quiet ]] ||
       echo "[WARN] $SCOPE_LABEL の lease が期限切れでした（$((now - held_since)) 秒前に取得、$(activity_age) ）。引き継ぎます" >&2
+    # **跡は捨てない** (#260)。**「誰も持っていない」と「期限が切れた記録が残っている」は
+    # 別の状態**である——**捨てると、返しに来た持ち主にも、走っている本人にも、
+    # 起きたことを言えない**（**出口で「別の周回が持っています」と読まれる**）。
+    expired_token="$held_token"
+    expired_owner="$held_owner"
+    expired_over=$((now - alive_since - TTL_SEC))
     held_token=""
     held_owner=""
   fi
@@ -496,7 +508,24 @@ if [[ $ACTION == "check" ]]; then
       continue
     }
     exec 9>&-
-    [[ -n $held_token ]] || continue
+    if [[ -z $held_token ]]; then
+      # **走っている最中に切れたのを、飛ばしたと誤診しない** (#260)。
+      # **原因が違えば、次にやることも違う**——**飛ばした周回は取り直せばよい**が、
+      # **切れた周回は「空いて見えた間に別の周回が入ったかもしれない」を疑う。**
+      #
+      # **気づけるのがここしかない。** **期限を見るのは `acquire` だけ**で、
+      # **走っている本人は出口の `release` まで気づけない**——**そのときには
+      # 重なりは既に起きている。** **`bin/loop-*` を打つたびにここを通る。**
+      if [[ -n $expired_token && -n $owner && -n $expired_owner && $expired_owner == "$owner" ]]; then
+        echo "[WARN] この周回の lease は期限切れです（${expired_over} 秒超過）。走っている最中に外れました" >&2
+        echo "       切れている間は空いて見えるので、別の周回が入っているかもしれません" >&2
+        echo "       出口では、同じ token でそのまま返せます（期限切れだったと言われます）" >&2
+        # **記録しない。** **飛ばしてはいない**ので、`./task loop:status` の
+        # 「入口を飛ばした周回」に混ぜると、**数えているものが濁る。**
+        exit 0
+      fi
+      continue
+    fi
     taken="$SCOPE_LABEL"
     # **印が片方でも無ければ、持ち主が自分かどうかは分からない。**
     # **測っているものが違う**（`p:` と `s:`）ときも同じで、**分からない**である。
@@ -741,6 +770,27 @@ acquire | recover)
   ;;
 release)
   [[ $# -eq 3 ]] || usage
+  # **期限切れの記録は、持ち主が返せる** (#260)。**返す資格は token が持つ**ので、
+  # **切れたことは「返させない理由」にならない**——**断ると、後始末をする者が
+  # いなくなる**（記録は残り続ける）。
+  #
+  # **ただし黙って通さない。** **切れていた間は `acquire` から見て空いていた**ので、
+  # **別の周回が入っていた可能性がある**——**それを言うのはここだけ**である。
+  #
+  # **周回の長さには数えない** (#146)。**切れたまま放置された記録の「長さ」を入れると、
+  # `bin/loop-stall` の窓が広がって戻らない**——**測りたいのは実際にかかった周回**である。
+  expired_release=""
+  if [[ -z $held_token && -n $expired_token ]]; then
+    if [[ $expired_token != "$3" ]]; then
+      # **「誰も持っていない」でも「重なっている」でもない。** 落ちた別の周回の跡である
+      echo "[FAIL] $SCOPE_LABEL には期限切れの記録が残っていますが、この token のものではありません" >&2
+      exit 1
+    fi
+    echo "[WARN] $SCOPE_LABEL の lease は期限切れでした（${expired_over} 秒超過）。返します" >&2
+    echo "       切れていた間は空いて見えるので、別の周回が入っていた可能性があります" >&2
+    held_token="$expired_token"
+    expired_release=1
+  fi
   if [[ -z $held_token ]]; then
     echo "[FAIL] $SCOPE_LABEL の lease は誰も持っていません" >&2
     exit 1
@@ -771,6 +821,11 @@ release)
   # （**忘れないことと、異常値を引きずらないことは両立しない**）。
   # **下限は `bin/loop-stall` が lease の期限で置く**ので、そこまでしか縮まない。
   round_len=$((now - held_since))
+  # **期限切れの記録は数えない** (#260)。**切れたまま放置された時間は「周回の長さ」
+  # ではない**——**入れると窓が広がり、二度と戻らない**（#146 と同じ害）。
+  if [[ -n $expired_release ]]; then
+    round_len=""
+  fi
   # **1 行目は「窓に使う値」（＝残しているものの最大）にする。**
   # **記録は版をまたいで共有される**（lease ファイルで 2 度踏んだ）——
   # **古い読み手は 1 行目しか読まない**ので、履歴を先頭に置くと
@@ -784,7 +839,7 @@ release)
       round_history+=("$line")
     done
   fi
-  round_history=("$round_len" "${round_history[@]}")
+  [[ -z $round_len ]] || round_history=("$round_len" "${round_history[@]}")
   round_history=("${round_history[@]:0:$RECENT_ROUNDS}")
   longest_round=0
   for line in "${round_history[@]}"; do
