@@ -17,6 +17,7 @@ import { holdLock } from "../test/held-lock";
 import { MODELLED_HOOK_SPAWNS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-claim", import.meta.url));
+const LEASE = fileURLToPath(new URL("./loop-lease", import.meta.url));
 
 type Run = { status: number; stdout: string; stderr: string };
 
@@ -177,6 +178,11 @@ describe("bin/loop-claim", () => {
       "kill",
       "setsid",
       "touch",
+      // **lease を実際に取る**ために要る（#237 のレビュー。PR の記録は、
+      // **持ち主の周回が走っているか**で決まる）
+      "sha256sum",
+      "od",
+      "tr",
     ]) {
       const found = counted("which", [command]).stdout.trim();
       if (found !== "") {
@@ -339,10 +345,38 @@ describe("bin/loop-claim", () => {
    * 譲るのは後から入った側——**語彙を増やさない。**
    */
   describe("pr — レビュー対応の前に PR を取る", () => {
-    it("別の作業場が取った PR は、取れない", () => {
+    /** 作業場で周回を始める。**PR の記録は、持ち主の周回が走っている間だけ効く。** */
+    function startRound(cwd: string): string {
+      const result = spawnSync(LEASE, ["acquire", "worker"], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    }
+
+    function endRound(cwd: string, token: string): void {
+      const result = spawnSync(LEASE, ["release", "worker", token], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+    }
+
+    /** 記録を、取ってから長く経った形にする。**時間で判定していれば、ここで奪われる。** */
+    function backdateRecord(pr: string, secondsAgo: number): void {
+      const record = join(repo, ".git", `valence-loop-claim-pr-${pr}`);
+      const [owner] = readFileSync(record, "utf8").trim().split("\t");
+      writeFileSync(record, `${owner}\t${Math.floor(Date.now() / 1000) - secondsAgo}\n`);
+    }
+
+    it("持ち主の周回が走っている間は、取れない", () => {
       // **これが本題。** 両方が同じ SHA から直し始めると、**重複返信**と
       // **片方の push が non-fast-forward で落ちる**
       withGh({ labels: [] });
+      startRound(repo);
       expect(run(["pr", "42"]).status, "1 人目が取れていない").toBe(0);
 
       const second = run(["pr", "42"], { cwd: addWorkspace("second") });
@@ -354,6 +388,7 @@ describe("bin/loop-claim", () => {
       // **無言で飛ばすと、2 人居るのに 1 人で回っているように見える。**
       // **判定不能が別の理由に化ける**のと同じ形である
       withGh({ labels: [] });
+      startRound(repo);
       run(["pr", "42"]);
 
       const second = run(["pr", "42"], { cwd: addWorkspace("second") });
@@ -365,10 +400,25 @@ describe("bin/loop-claim", () => {
       expect(second.stderr, "何の話か分からない").toContain("PR #42");
     });
 
+    it("長い周回でも、動いている持ち主から奪わない", () => {
+      // **時間で測らない** (#237 のレビュー)。**レビュー対応は `./task check` を回すので
+      // 1800 秒を超えうる**——**測っているのは「取ってからの経過」だが、知りたいのは
+      // 「持ち主が生きているか」**である。**この PR が消しに来たものが、期限の側から戻ってくる。**
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+      backdateRecord("42", 100_000);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("second") });
+
+      expect(second.status, "動いている持ち主から奪っている").toBe(1);
+    });
+
     it("同じ作業場なら、何周でも取れる", () => {
       // **明日の朝いちで動くのは、いまと同じ 1 人の worker である。**
       // **1 人で回している限り、これまでどおり通ること**
       withGh({ labels: [] });
+      startRound(repo);
 
       expect(run(["pr", "42"]).status).toBe(0);
       expect(run(["pr", "42"]).status, "自分が取った PR に入れない").toBe(0);
@@ -376,27 +426,44 @@ describe("bin/loop-claim", () => {
 
     it("別の PR は、取り合いにならない", () => {
       withGh({ labels: [] });
+      startRound(repo);
       run(["pr", "42"]);
 
       expect(run(["pr", "43"], { cwd: addWorkspace("other") }).status).toBe(0);
     });
 
-    it("期限を過ぎた記録は引き継ぐ", () => {
-      // **落ちた周回の跡で、その PR が誰にも直せなくなってはいけない。**
+    it("持ち主の周回が終わっていれば、引き継げる", () => {
+      // **落ちた周回の跡で、その PR が誰にも直せなくなってはいけない**
+      // （**`release` を作らない**判断は、これで成り立っている）。
       // **黙って奪わない**ので、引き継いだことは残す
       withGh({ labels: [] });
+      const token = startRound(repo);
       run(["pr", "42"]);
+      endRound(repo, token);
 
-      const second = run(["pr", "42"], {
-        cwd: addWorkspace("later"),
-        env: { LOOP_CLAIM_TTL_SEC: "0" },
-      });
+      const second = run(["pr", "42"], { cwd: addWorkspace("later") });
 
       expect(second.status).toBe(0);
       // **`[WARN]` だけを見ない**（`bin/loop-lease check` も出す。上記と同じ理由）。
       // **`bin/loop-lease` の「lease が期限切れでした…引き継ぎます」とも重なる**ので、
       // **PR 番号と一緒に見る**
       expect(second.stderr, "黙って奪っている").toMatch(/PR #42.*引き継ぎます/);
+    });
+
+    it("走っているかどうかを読めないなら、取らない", () => {
+      // **判定不能は、取れなかった側でも取れた側でもない。**
+      // **作業場の入っていない lease** があると、`bin/loop-lease busy` は「読めない」を返す
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+      writeFileSync(
+        join(repo, ".git", "valence-loop-lease-worker-broken"),
+        `tok\t${Math.floor(Date.now() / 1000)}\n\n\n`,
+      );
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("unreadable") });
+
+      expect(second.status, "読めないのに取っている").toBe(2);
     });
 
     it("別の周回が取っている最中なら、譲る", () => {
