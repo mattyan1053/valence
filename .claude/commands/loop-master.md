@@ -862,7 +862,7 @@ fi
 「理由の無い保留になっている」と出したら、理由を投稿し直すか、保留を戻すこと。**
 **`./task loop:status` にも出る**（判定は `bin/loop-silent-park` が 1 つ持つ）。
 
-**保留にしないと、ループ全体が止まる。** 同時に open な PR は 1 本で worker も 1 人なので、
+**保留にしないと、その worker が止まる。** **1 人が同時に持つ PR は 1 本**なので、
 **1 件の人待ちがそのまま全停止**になる——**紐づく Issue が `in-progress` のまま残り、
 次を `ready` へ昇格させられない**（実測で**約 2 時間、どちらのループも何も進めなかった**）。
 **`parked` を付けると、その Issue は「着手中」に数えない**ので、**次の 1 件へ進める。**
@@ -961,8 +961,8 @@ gh pr edit <PR番号> --remove-label changes-requested
 gh issue create --label backlog --title "<何をするか>" --body-file <file>
 ```
 
-**起票時は `backlog` を付ける。`ready` を直接付けない。** `ready` は「次にやる 1 件」で、
-昇格させるのはステップ 6 の仕事である。ここで付けると 2 件以上になり、着手順が壊れる。
+**起票時は `backlog` を付ける。`ready` を直接付けない。** `ready` は「次にやる 2 件まで」で、
+昇格させるのはステップ 6 の仕事である。ここで付けると上限を超え、着手順が壊れる。
 
 **1 つの Issue は 1 つの PR で終わる大きさにする。** `bin/loop-gate` の規模上限
 （既定 40 files / 1500 lines）を超える見込みなら、その時点で割る。
@@ -975,9 +975,9 @@ Issue には次を書く（`.github/ISSUE_TEMPLATE/task.yml` の形）。
 
 起票する対象は `AGENTS.md` の MVP スコープに従う。スコープ外のものを起票しない。
 
-## 6. 着手順を決める（`ready` を 1 件に保つ）
+## 6. 着手順を決める（`ready` を 2 件までに保つ）
 
-**着手順は master が決める。** worker は `ready` の 1 件を取るだけで順序を判断しない。
+**着手順は master が決める。** worker は `ready` から取れるものを取るだけで順序を判断しない。
 `gh issue list` は新しい順に返すので、worker に選ばせると実質 LIFO になり、
 古い Issue が永久に後回しになるうえ、割り込みを伝える手段も無くなる。
 
@@ -994,7 +994,7 @@ printf 'ready: %s\nin-progress: %s\nbacklog: %s\n' "$ready" "$in_progress" "$bac
 **3 つとも取得できたことを確認してから label を触る。** `gh` は失敗時に exit 1、
 認証が要るときに exit 4 を返す。**失敗を「0 件」として扱うと、worker が作業中でも
 別の Issue を `ready` へ昇格させてしまう**（この手順が保証しようとしている
-「`ready` は同時に 1 件」が API 障害で崩れる）。1 つでも取れなかったら **label を触らずに**
+「`ready` は同時に 2 件まで」が API 障害で崩れる）。1 つでも取れなかったら **label を触らずに**
 `bin/loop-stall issue-lookup-failed` を通して停止する。黙って周回を終えると、
 障害が続いても停止が記録されず全ループが止まらない。
 
@@ -1023,13 +1023,18 @@ printf '%s' "$parked" | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+'
 **ここで 0 件と読み違えると、`in-progress` を引きすぎない**——**保留した PR の Issue が
 「着手中」に数え直され、次の 1 件を `ready` へ昇格させられない**（worker は止まる）。
 
-- **`ready` が 2 件以上** → 運用が壊れている。どれを次にするか決まらないので、
+**上限は 2 件**である (#85)。**worker は作業場ごとに 1 人**で、**1 人が同時に持つ PR は
+1 本**なので、**手が 2 つあるなら渡せる仕事も 2 つ**——**`ready` と（`parked` を除く）
+`in-progress` の合計**で数える。**片方だけ数えると、実装中の 2 件目にもう 1 件を重ねる。**
+
+- **`ready` が 3 件以上** → 運用が壊れている。上限を超えているので、
   `bin/loop-stall "too-many-ready:<件数>"` を通して停止する
-- **`in-progress` がある**（上で除いた残りが 1 件でもある）→ worker が動いている。
+- **`ready` と `in-progress`（上で除いた残り）の合計が 2 件以上** → 手は埋まっている。
   何もしない。この周回は終わり
-- **`ready` が 1 件** → worker の番。何もしない。この周回は終わり
-- **`ready` も `in-progress` も 0 件で、`backlog` に 1 件以上** → 次の 1 件を昇格させる
+- **合計が 2 件未満で、`backlog` に 1 件以上** → 次の 1 件を昇格させる
 - **`backlog` も 0 件** → **着手できる作業が尽きている。** 下の「作業が尽きたとき」へ
+
+**3 人目を先回りしない。** **まず 2 人で成立させ、測ってから考える**（#80）。
 
 ```bash
 gh issue edit <N> --remove-label backlog --add-label ready
@@ -1071,7 +1076,7 @@ bin/loop-stall no-work
 ### 割り込ませるとき
 
 急ぎのものを先にやらせたい場合、**現在の `ready` を `backlog` へ戻してから**
-割り込みを `ready` にする。順番を守って 2 件同時に `ready` を作らない。
+割り込みを `ready` にする。順番を守って、上限（2 件）を超える `ready` を作らない。
 
 ```bash
 gh issue edit <元の N> --remove-label ready --add-label backlog

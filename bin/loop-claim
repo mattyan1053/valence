@@ -5,6 +5,7 @@
 #   bin/loop-claim take   <Issue番号>   ready の Issue を取る
 #   bin/loop-claim resume <Issue番号>   着手中の Issue を、自分が続けてよいか尋ねる
 #   bin/loop-claim pr     <PR番号>      レビュー対応の前に、その PR を取る
+#   bin/loop-claim mine   <PR番号>      その PR を自分の作業場が持っているか（読むだけ）
 #
 #   exit 0 = 取れた / 続けてよい
 #   exit 1 = 取れなかった / 別の作業場が持っている → **次の Issue へ進む。待たない**
@@ -67,6 +68,7 @@ usage() {
   echo "使い方: bin/loop-claim take <Issue番号>     ready の Issue を取る" >&2
   echo "        bin/loop-claim resume <Issue番号>   着手中の Issue を続けてよいか尋ねる" >&2
   echo "        bin/loop-claim pr <PR番号>          レビュー対応の前に PR を取る" >&2
+  echo "        bin/loop-claim mine <PR番号>        その PR を自分の作業場が持っているか" >&2
   echo "        bin/loop-claim audit                label と実態の食い違いを見つける" >&2
   echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
   exit 2
@@ -79,7 +81,7 @@ if [[ $ACTION == "audit" ]]; then
 else
   [[ $# -eq 2 ]] || usage
   ISSUE="$2"
-  [[ $ACTION == "take" || $ACTION == "resume" || $ACTION == "pr" ]] || usage
+  [[ $ACTION == "take" || $ACTION == "resume" || $ACTION == "pr" || $ACTION == "mine" ]] || usage
   [[ $ISSUE =~ ^[0-9]+$ ]] || usage
 fi
 readonly ISSUE
@@ -113,7 +115,7 @@ readonly OWNER="$toplevel"
 # **PR と Issue で置き場を分ける。** **同じ番号の Issue と PR は別のもの**で、
 # **混ぜると、Issue を取った作業場が同じ番号の PR を直せなくなる**（逆も同じ）。
 # **`audit` の走査は `valence-loop-claim-[0-9]*` を見る**ので、こちらは当たらない。
-if [[ $ACTION == "pr" ]]; then
+if [[ $ACTION == "pr" || $ACTION == "mine" ]]; then
   readonly RECORD="$common_dir/valence-loop-claim-pr-$ISSUE"
 else
   readonly RECORD="$common_dir/valence-loop-claim-$ISSUE"
@@ -273,6 +275,38 @@ exec 9>"$common_dir/valence-loop-claim.lock" || {
 if ! flock -w "$LOCK_WAIT_SEC" 9; then
   echo "[INFO] #$ISSUE: 別の周回が取っている最中です（${LOCK_WAIT_SEC} 秒待機）。譲ります" >&2
   exit 1
+fi
+
+# --- mine ----------------------------------------------------------------------
+# **数えるのは自分の作業場のものだけ** (#85)。**`--author @me` は 2 人分を返す**ので、
+# **そのまま数えると「1 人が同時に持つ PR は 1 本」に 2 人目のぶんで引っかかる**。
+#
+# **`pr` とは別の問いである。** **`pr` は「いま編集してよいか」**なので**持ち主が
+# 生きているか**を見るが、**こちらは「誰の持ち物か」**——**PR は次の周回でレビュー対応する**ので、
+# **周回をまたいで持ち主のままでなければならない。**
+#
+# **ここでは取らない** (#238 のレビュー 2 周目)。**記録が無いものは
+# 「まだ誰のものでもない」**で、**数えない**（exit 1）。
+#
+# **数える側で取ると、先に走った作業場が記録の無い PR を全部取る**——
+# **「両方の作業場が止まる」が「1 人が両方持って止まる」に置き換わるだけ**である
+# （#184 の形が残る）。**取るのは空き枠のぶんだけ**で、**それは `pr` が 1 本ずつ行う**
+# （手順書のステップ 2.1）。**残しておけば、別の作業場が 1 本目として取れる。**
+#
+# **読むだけだが、ロックの中に置く。** **`pr` と `take` が書いている最中の記録を
+# 読まない**ため（**半分書けた記録は、持ち主が空に見える**）。
+if [[ $ACTION == "mine" ]]; then
+  [[ -f $RECORD ]] || exit 1
+  IFS=$'\t' read -r held_owner _ <"$RECORD" || {
+    echo "[FAIL] PR #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
+    exit 2
+  }
+  [[ -n $held_owner ]] || {
+    echo "[FAIL] PR #$ISSUE の持ち主の記録が空です: $RECORD" >&2
+    exit 2
+  }
+  [[ $held_owner == "$OWNER" ]] || exit 1
+  exit 0
 fi
 
 # --- pr ------------------------------------------------------------------------

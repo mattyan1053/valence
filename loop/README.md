@@ -82,7 +82,8 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
   （判定は `bin/loop-commit-guard`、`core.hooksPath` を向けるのは `./task`）。
   **2 回とも「ブランチを切ったあとに `main` へ戻された」形**だったので、
   **ブランチを切ったかどうかではなく、commit の時点で見る**（#68）。
-- **同時に open にしてよい PR は 1 本**。並行させるとレビュー量が本数倍で増える。
+- **worker 1 人につき、open にしてよい PR は 1 本**（**worker は作業場ごとに 1 人**なので、
+  **全体では 2 本まで**。#85）。並行させるとレビュー量が本数倍で増える。
 
 ## 止め方
 
@@ -201,7 +202,7 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 | label | 意味 | 付ける人 |
 | --- | --- | --- |
 | `backlog` | 起票済み。着手順は未定 | master |
-| `ready` | **次にやる 1 件。同時に 1 件だけ** | master |
+| `ready` | **次にやる 2 件まで**（上限 2 件。#85） | master |
 | `in-progress` | worker が着手中 | worker |
 | `blocked` | 判断が要る。ループは触らない | どちらでも |
 | `parked` | **PR に付ける。** 待って保留中（先行 PR / 人の判断） | master |
@@ -222,8 +223,8 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 ### 人の判断待ち（`awaiting-human`）
 
 **人を待つあいだも、ループは他の作業を進める。** master が人を呼ぶときは、その PR へ
-`parked` と `awaiting-human` を付けて保留にする。保留にしないと、**同時に open な PR は
-1 本・worker は 1 人**なので、**1 件の人待ちがそのまま全停止**になる（実測で約 2 時間）。
+`parked` と `awaiting-human` を付けて保留にする。保留にしないと、**1 人が同時に持つ PR は
+1 本**なので、**その worker は次へ進めない**（実測で約 2 時間、全停止した）。
 
 **戻すのは人である。** ただし **label を外すのは最後**で、**先に判断を GitHub へ残す。**
 
@@ -254,12 +255,13 @@ gh pr edit <PR番号> --remove-label awaiting-human --remove-label parked
 **次の周回は誰も見ない**。`./task loop:status` と `bin/loop-handoff` が
 **`bin/loop-silent-park` で拾う**（判定は 1 箇所、呼ぶ場所は 2 つ）。
 
-**着手順は master が決める。** worker は `ready` の 1 件を取るだけで、順序を判断しない。
+**着手順は master が決める。** worker は `ready` から取れるものを取るだけで、順序を判断しない。
 `gh issue list` は新しい順に返すため、worker に選ばせると実質 LIFO になり、
 古い Issue が後回しになるうえ、割り込みを伝える手段も無くなる。
 
-`ready` が 2 件以上あると着手順が一意に決まらない。どちらのループも
-`bin/loop-stall "too-many-ready:<件数>"` を通して止める。
+`ready` の上限は 2 件である（#85。**worker は作業場ごとに 1 人、1 人 1 本**なので、
+**手が 2 つあるなら渡せる仕事も 2 つ**）。**3 件以上あれば運用が壊れている**ので、
+どちらのループも `bin/loop-stall "too-many-ready:<件数>"` を通して止める。
 
 ## ループの外から割り込む
 
@@ -270,7 +272,7 @@ gh pr edit <PR番号> --remove-label awaiting-human --remove-label parked
 - **急ぐものは、起票したうえで master へ通知を送る。** **急ぐ理由は Issue 本文に書く**——
   通知は届かないことがあり、**届かなかったときに残るのは Issue だけ**である
 - master は通知を受けたら、その Issue を `ready` へ昇格させてよい。
-  **既存の `ready` は `backlog` へ戻す**（**同時に 1 件**を保つ）
+  **上限（2 件）を超えるなら、いちばん後の `ready` を `backlog` へ戻す**
 - **worker が待たされるのは許容する。** 緊急対応が優先されるのは普通のことである
 
 **ループの外から PR を出すこともできる。** その PR に対応が要ると master が判断したら、

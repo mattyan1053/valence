@@ -160,12 +160,12 @@ describe("停止識別子", () => {
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### defer — Issue へ外出ししてマージする", "deferred-overflow"],
-      ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "issue-lookup-failed"],
-      ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "issue-lookup-failed"],
+      ["## 6. 着手順を決める（`ready` を 2 件までに保つ）", "issue-lookup-failed"],
+      ["## 6. 着手順を決める（`ready` を 2 件までに保つ）", "issue-lookup-failed"],
       // **保留した PR の一覧も、落ちたら止める**——**0 件と読むと `in-progress` を
       // 引きすぎず、次の 1 件を `ready` へ昇格させられない**（worker が止まる）
-      ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "pr-lookup-failed"],
-      ["## 6. 着手順を決める（`ready` を 1 件に保つ）", "too-many-ready:<件数>"],
+      ["## 6. 着手順を決める（`ready` を 2 件までに保つ）", "pr-lookup-failed"],
+      ["## 6. 着手順を決める（`ready` を 2 件までに保つ）", "too-many-ready:<件数>"],
       ["### 作業が尽きたとき", "no-work"],
       ["### 周回の出口", "claim-mismatch:<Issue番号>"],
       // **push されたのに PR が無いブランチ**（#148）。**救うか捨てるかは
