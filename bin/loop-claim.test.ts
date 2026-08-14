@@ -450,6 +450,42 @@ describe("bin/loop-claim", () => {
       expect(second.stderr, "黙って奪っている").toMatch(/PR #42.*引き継ぎます/);
     });
 
+    it("持ち主の作業場に置かれたものを実行しない", () => {
+      // **訊きに行く先が、相手の版になっていた** (#237 のレビュー)。
+      // **相手の作業場は `gh pr checkout` で PR の head に入っている**ので、
+      // **その PR が書き換えた `bin/loop-lease` を実行しうる**——**#219 と同じ形**
+      // （**head の版を実行しない**）。**壊れ方は静かで、`busy` の答えを変える PR が
+      // 乗っていると、生きている持ち主を「走っていない」と読む。**
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+      // **持ち主の作業場に、違う答えを返す版を置く**（PR の head に入っている状態）
+      mkdirSync(join(repo, "bin"), { recursive: true });
+      writeFileSync(
+        join(repo, "bin", "loop-lease"),
+        "#!/usr/bin/env bash\nexit 1\n", // 「どこも走っていない」と答える版
+        { mode: 0o755 },
+      );
+
+      // **手順書と同じ呼び方（相対パス）で走らせる。**
+      // **絶対パスで呼ぶと `${BASH_SOURCE[0]%/*}` が絶対になり、この穴は再現しない**
+      // ——**呼ばれ方まで含めて写す**
+      const second = addWorkspace("second");
+      mkdirSync(join(second, "bin"), { recursive: true });
+      symlinkSync(SCRIPT, join(second, "bin", "loop-claim"));
+      symlinkSync(
+        fileURLToPath(new URL("./loop-lease", import.meta.url)),
+        join(second, "bin", "loop-lease"),
+      );
+      const result = spawnSync("bash", ["-c", "bin/loop-claim pr 42"], {
+        cwd: second,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+
+      expect(result.status, "持ち主の作業場の版を実行している").toBe(1);
+    });
+
     it("走っているかどうかを読めないなら、取らない", () => {
       // **判定不能は、取れなかった側でも取れた側でもない。**
       // **作業場の入っていない lease** があると、`bin/loop-lease busy` は「読めない」を返す
