@@ -840,6 +840,45 @@ describe("bin/loop-handoff", () => {
       expect(runWith(["master", "--sent", "extra"]).status).toBe(2);
     });
 
+    describe("送っている間に、相手が先に記録したとき", () => {
+      /**
+       * **`--sent` は、自分より新しい記録を巻き戻してはいけない**（#265 のレビュー）。
+       *
+       * **役が違えば lease は直列化しない。** **判断してから送るまでには、
+       * その周回で分かったことを本文へ書く時間がある**（出口がそう求めている）ので、
+       * **窓は小さくない**——**master が S1 で決めて送っている間に、worker が S2 で
+       * 決めて `--sent` まで通す**と、**あとから来た master の `--sent` が
+       * `informed(S2)` を `informed(S1)` へ戻す**。**次の周回は同じ通知を送り直す。**
+       *
+       * **順序を決める材料は、時刻ではなく「自分が見た値のままか」から取る**——
+       * **指紋は状態の記述で順序を持たない**が、**変わったかどうかなら比べられる**。
+       * **違っていたら書かずに終えるのが正しい。** **抑止が答える問いは
+       * 「いまの状態は既に伝えたか」**で、**後から書かれたほうが、いまの状態に近い。**
+       */
+      it("新しい記録を、古い --sent で巻き戻さない", () => {
+        // master が S1 で送ると決めた（**まだ本文を書いている**）
+        withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
+        expect(run("master").status, "master が渡せていない").toBe(0);
+
+        // その間に worker が S2 で決めて送り、`--sent` まで通した
+        withState({ prs: [{ number: 13 }] }); // → master
+        expect(cycle("worker").status, "worker が渡せていない").toBe(0);
+
+        // master が送り終えた。**S1 は確かに送っている**
+        expect(sent("master").status, "送れたのに落ちている").toBe(0);
+
+        expect(run("worker").status, "巻き戻して、同じ通知を送り直している").toBe(1);
+      });
+
+      it("誰も書き換えていなければ、これまでどおり記録する", () => {
+        // **止めすぎていないこと。** 送れた周回は、これまでどおり 2 通目を出さない
+        withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+        expect(cycle("master").status).toBe(0);
+        expect(run("master").status, "送れているのに送り直している").toBe(1);
+      });
+    });
+
     describe("作業場が 2 つあるとき", () => {
       /**
        * **送ると決めたぶんは、決めた作業場のものである**（#265 のレビュー）。
@@ -874,11 +913,9 @@ describe("bin/loop-handoff", () => {
         withState(s1);
         expect(sent("worker").status, "--sent が落ちた").toBe(0);
 
-        // **記録されたのは S1 である**（S2 ではない）
-        withState(s1);
-        expect(run("worker").status, "自分が送った状態が記録されていない").toBe(1);
-
-        // **2 つ目の作業場は送信に失敗した**（`--sent` を通していない）ので、また送る
+        // **2 つ目の作業場は送信に失敗した**（`--sent` を通していない）ので、また送る。
+        // **共有していると、A の `--sent` が B の判断（S2）を `informed` へ上げる**ので、
+        // **B は二度と送れない**——**送信待ちを読み違えていることが、ここに出る**
         withState(s2);
         expect(
           runIn(other, ["worker"]).status,
@@ -901,8 +938,12 @@ describe("bin/loop-handoff", () => {
         expect(runIn(other, ["worker"]).status, "自分宛てなのに送っている").toBe(1);
 
         withState(s1);
-        expect(sent("worker").status, "別の作業場に送信待ちを消された").toBe(0);
-        expect(run("worker").status, "自分が送った状態が記録されていない").toBe(1);
+        const confirmed = sent("worker");
+
+        expect(confirmed.status, "別の作業場に送信待ちを消された").toBe(0);
+        expect(confirmed.stderr, "送ると決めた記録そのものが消えている").not.toContain(
+          "送ると決めた記録がありません",
+        );
       });
     });
   });
