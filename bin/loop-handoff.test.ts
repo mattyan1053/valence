@@ -114,6 +114,8 @@ type State = {
 describe("bin/loop-handoff", () => {
   let repo: string;
   let path: string;
+  /** 足した作業場。**worktree なので、消し忘れると次の試験へ漏れる。** */
+  let workspaces: string[];
 
   /**
    * **本物の `gh` を呼ばない。** 見たいのは「GitHub の状態から誰へ渡すか」であって、
@@ -259,17 +261,86 @@ describe("bin/loop-handoff", () => {
     );
   }
 
-  function run(role: string, env: Record<string, string> = {}): Run {
-    const result = spawnSync(SCRIPT, role === "" ? [] : [role], {
-      cwd: repo,
+  function runIn(cwd: string, args: string[], env: Record<string, string> = {}): Run {
+    const result = spawnSync(SCRIPT, args, {
+      cwd,
       encoding: "utf8",
       env: { ...process.env, PATH: path, ...env },
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
+  function runWith(args: string[], env: Record<string, string> = {}): Run {
+    return runIn(repo, args, env);
+  }
+
+  function run(role: string, env: Record<string, string> = {}): Run {
+    return runWith(role === "" ? [] : [role], env);
+  }
+
+  /** 送信が成功したことを伝える口。**呼んだ側にしか分からない。** */
+  function sent(role: string, env: Record<string, string> = {}): Run {
+    return runWith([role, "--sent"], env);
+  }
+
+  /**
+   * **2 つ目の作業場を足す。**
+   *
+   * **worktree なので、git の共通ディレクトリは同じ**——**`informed` の記録は
+   * わざと共有されている**（重複抑止はループ全体で 1 つ）。**分かれていなければ
+   * ならないのは、まだ届いていない「送ると決めた」ぶんだけ**である。
+   */
+  function addWorkspace(): string {
+    expect(
+      spawnSync(
+        "git",
+        [
+          "-C",
+          repo,
+          "-c",
+          "user.email=loop@example.invalid",
+          "-c",
+          "user.name=loop",
+          "commit",
+          "--quiet",
+          "--allow-empty",
+          "-m",
+          "根",
+        ],
+        { encoding: "utf8" },
+      ).status,
+      "worktree を足すための commit が作れない",
+    ).toBe(0);
+    const other = `${repo}-b`;
+    expect(
+      spawnSync("git", ["-C", repo, "worktree", "add", "--quiet", "--detach", other, "HEAD"], {
+        encoding: "utf8",
+      }).status,
+      "2 つ目の作業場を作れない",
+    ).toBe(0);
+    workspaces.push(other);
+    return other;
+  }
+
+  /**
+   * **送信まで成功した周回。**
+   *
+   * **判断だけでは「送った」にならない**（#258）。実際に送るのは呼んだ側なので、
+   * **`--sent` を通ったときにだけ記録が `informed` へ上がる**。
+   * 重複抑止を見る試験は、この形で 1 周を回す。
+   */
+  function cycle(role: string, env: Record<string, string> = {}): Run {
+    const handoff = run(role, env);
+    if (handoff.stdout !== "") {
+      const confirmed = sent(role, env);
+      expect(confirmed.status, `--sent が落ちた: ${confirmed.stderr}`).toBe(0);
+    }
+    return handoff;
+  }
+
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "loop-handoff-"));
+    workspaces = [];
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     path = join(repo, "path");
     mkdirSync(path, { recursive: true });
@@ -303,6 +374,9 @@ describe("bin/loop-handoff", () => {
   });
 
   afterEach(() => {
+    for (const workspace of workspaces) {
+      rmSync(workspace, { recursive: true, force: true });
+    }
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -338,7 +412,7 @@ describe("bin/loop-handoff", () => {
         silentPark: [42],
         ready: 1,
       });
-      expect(run("worker").status, "1 周目で渡せていない").toBe(0);
+      expect(cycle("worker").status, "1 周目で渡せていない").toBe(0);
 
       // 理由を投稿し直した（**label も PR の中身も変わらない**）
       withState({
@@ -547,13 +621,13 @@ describe("bin/loop-handoff", () => {
     // **ping-pong を作らない。** 送った状態を覚えておき、変わっていなければ黙る
     withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
 
-    expect(run("master").status).toBe(0);
+    expect(cycle("master").status).toBe(0);
     expect(run("master").status).toBe(1);
   });
 
   it("状態が変われば、また送る", () => {
     withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
-    expect(run("master").status).toBe(0);
+    expect(cycle("master").status).toBe(0);
 
     withState({ prs: [{ number: 13, labels: ["changes-requested"] }] });
 
@@ -565,11 +639,11 @@ describe("bin/loop-handoff", () => {
     // 交互に呼び続けても、送るのは持ち物がある側への 1 通だけである
     withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
 
-    const sent = ["master", "worker", "master", "worker", "master", "worker"]
-      .map((role) => run(role))
+    const delivered = ["master", "worker", "master", "worker", "master", "worker"]
+      .map((role) => cycle(role))
       .filter((handoff) => handoff.status === 0);
 
-    expect(sent).toHaveLength(1);
+    expect(delivered).toHaveLength(1);
   });
 
   it.each([
@@ -595,7 +669,7 @@ describe("bin/loop-handoff", () => {
     // **記録の更新が自己宛ての分岐より後だと、B で更新されずに A の記録が残る。**
     // どの分岐を通っても更新済みになっていること
     withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
-    expect(run("master").status).toBe(0);
+    expect(cycle("master").status).toBe(0);
 
     withState({ prs: [{ number: 12 }] }); // → master。**master から見ると自己宛て**
     expect(run("master").status).toBe(1);
@@ -610,10 +684,10 @@ describe("bin/loop-handoff", () => {
     // （worker の記録が A のままなので「送信済み」と読む）。
     // **評価するたびに、すべての役の記録を更新する**
     withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
-    expect(run("master").status).toBe(0);
+    expect(cycle("master").status).toBe(0);
 
     withState({ prs: [{ number: 12 }] }); // → master
-    expect(run("worker").status).toBe(0);
+    expect(cycle("worker").status).toBe(0);
 
     withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker（戻る）
 
@@ -664,10 +738,213 @@ describe("bin/loop-handoff", () => {
       // **「送信済み」を消してしまうと、逆向きの壊れ方（送り合い）になる。**
       // **受け取った側が自分の周回で同じ状態を見ても、記録は informed のまま**
       withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
       expect(run("worker").status, "worker から送っている").toBe(1);
 
       expect(run("master").status, "同じ状態で 2 通目を送っている").toBe(1);
+    });
+  });
+
+  describe("送信に失敗した周回", () => {
+    /**
+     * **送ろうとして失敗した周回が「送信済み」を作っていた**（#258）。
+     *
+     * **判断するのはこのスクリプトだが、実際に送るのは呼んだ側**である。
+     * **判断した時点で `informed` を書いていた**ので、**送信が失敗しても記録だけが残る**——
+     * **同じ状態では 2 通目を送らない**ので、**その状態では二度と送られない**。
+     * **記録には `informed` と書いてあるので、落ちたことがどこにも残らない。**
+     *
+     * **#173 が直したのは「送らないと決めた周回が記録を書く」**で、
+     * **こちらは「送ろうとして失敗した周回が記録を書く」**——**別の入口で、同じ結果**である。
+     *
+     * 2026-08-14 に実際に起きた（セッションの表示名が変わり、**送信が明確に失敗した**）。
+     */
+    it("記録を書かないので、次の周回で同じ状態にまた送る", () => {
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      // **送信に失敗した周回**——判断は出たが、`--sent` は通っていない
+      expect(run("master").status, "1 通目が出ていない").toBe(0);
+
+      const second = run("master");
+
+      expect(second.status, "送っていないのに「送信済み」になっている").toBe(0);
+      expect(second.stdout, "持ち手が変わっている").toMatch(/^worker\t/);
+    });
+
+    it("送れた周回は、これまでどおり 2 通目を送らない", () => {
+      // **ただ再送を増やすだけにしない。** 送れているなら相手はもう知っている
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      expect(cycle("master").status).toBe(0);
+
+      expect(run("master").status, "送れているのに送り直している").toBe(1);
+    });
+
+    it("--sent は、送ると決めたときの状態を書く（引き直さない）", () => {
+      // **再計算すると、送っている間に状態が変わった場合に
+      // 「まだ送っていない状態」を送信済みで塞ぐ**——**いま塞ごうとしている穴が、
+      // 逆向きに開く**。**判断に使った状態そのものを書く**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      expect(run("master").status).toBe(0);
+
+      // **GitHub を読めない**。引き直していれば、ここで落ちる
+      withState({ fails: true });
+      expect(sent("master").status, "送信のあとに GitHub を読み直している").toBe(0);
+
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      expect(run("master").status, "送った状態が記録されていない").toBe(1);
+    });
+
+    it("送らないと決めた周回のあとに --sent を通しても、記録を作らない", () => {
+      // **自分宛てで終わった周回は、誰にも配っていない**（#125 の本体）。
+      // **送信待ちを残すと、次の `--sent` が配っていない状態を送信済みにする**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
+      expect(run("worker").status, "自分宛てなのに送っている").toBe(1);
+
+      expect(sent("worker").status, "配っていない状態を送信済みにしている").not.toBe(0);
+      expect(run("master").status, "誰も送っていないのに 2 通目として弾かれた").toBe(0);
+    });
+
+    it("判断を通さずに --sent だけ呼んだら、2 で落ちる", () => {
+      // **「送った」を無から作らせない。** 何を送ったのかが分からない
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      const confirmed = sent("master");
+
+      expect(confirmed.status).toBe(2);
+      expect(confirmed.stderr, "何が足りないのかが書かれていない").toMatch(/bin\/loop-handoff/);
+    });
+
+    it("状態が矛盾した周回でも、送れなければまた送る", () => {
+      // **exit 3 も「送る」経路**である（出力があれば 1 通送る）。
+      // **こちらだけ古い形が残ると、食い違いの通知だけが二度と出ない**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] }); // → master（食い違いあり）
+      expect(run("worker").stdout, "1 通目が出ていない").toMatch(/^master\t/);
+
+      expect(run("worker").stdout, "送っていないのに黙った").toMatch(/^master\t/);
+    });
+
+    it("状態が矛盾した周回でも、送れたら 2 通目は出さない", () => {
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      expect(cycle("worker").stdout).toMatch(/^master\t/);
+
+      const second = run("worker");
+
+      expect(second.stdout, "同じ指紋で送り返している").toBe("");
+      // **記録は毎周回する。** 送らないことと、食い違いを数えないことは別である
+      expect(second.status).toBe(3);
+    });
+
+    it("使い方の誤りは 2 で落ちる", () => {
+      withState({});
+
+      expect(runWith(["master", "--sent-ish"]).status).toBe(2);
+      expect(runWith(["master", "--sent", "extra"]).status).toBe(2);
+    });
+
+    describe("送っている間に、相手が先に記録したとき", () => {
+      /**
+       * **`--sent` は、自分より新しい記録を巻き戻してはいけない**（#265 のレビュー）。
+       *
+       * **役が違えば lease は直列化しない。** **判断してから送るまでには、
+       * その周回で分かったことを本文へ書く時間がある**（出口がそう求めている）ので、
+       * **窓は小さくない**——**master が S1 で決めて送っている間に、worker が S2 で
+       * 決めて `--sent` まで通す**と、**あとから来た master の `--sent` が
+       * `informed(S2)` を `informed(S1)` へ戻す**。**次の周回は同じ通知を送り直す。**
+       *
+       * **順序を決める材料は、時刻ではなく「自分が見た値のままか」から取る**——
+       * **指紋は状態の記述で順序を持たない**が、**変わったかどうかなら比べられる**。
+       * **違っていたら書かずに終えるのが正しい。** **抑止が答える問いは
+       * 「いまの状態は既に伝えたか」**で、**後から書かれたほうが、いまの状態に近い。**
+       */
+      it("新しい記録を、古い --sent で巻き戻さない", () => {
+        // master が S1 で送ると決めた（**まだ本文を書いている**）
+        withState({ prs: [{ number: 12, labels: ["changes-requested"] }] }); // → worker
+        expect(run("master").status, "master が渡せていない").toBe(0);
+
+        // その間に worker が S2 で決めて送り、`--sent` まで通した
+        withState({ prs: [{ number: 13 }] }); // → master
+        expect(cycle("worker").status, "worker が渡せていない").toBe(0);
+
+        // master が送り終えた。**S1 は確かに送っている**
+        expect(sent("master").status, "送れたのに落ちている").toBe(0);
+
+        expect(run("worker").status, "巻き戻して、同じ通知を送り直している").toBe(1);
+      });
+
+      it("誰も書き換えていなければ、これまでどおり記録する", () => {
+        // **止めすぎていないこと。** 送れた周回は、これまでどおり 2 通目を出さない
+        withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+        expect(cycle("master").status).toBe(0);
+        expect(run("master").status, "送れているのに送り直している").toBe(1);
+      });
+    });
+
+    describe("作業場が 2 つあるとき", () => {
+      /**
+       * **送ると決めたぶんは、決めた作業場のものである**（#265 のレビュー）。
+       *
+       * **`informed` の記録は、役だけをキーに共有されているのが正しい**——
+       * 表すのは「この状態は既に伝えた」で、**指紋は全体の状態**だからである
+       * （どの作業場から伝えたかは関係ない）。
+       *
+       * **送信待ちは違う。** 表すのは**「いま投げている 1 件」**なので、
+       * **共有すると別の作業場の判断で入れ替わる**——
+       * **A が S1 を置いて送る → 確認の前に B が S2 を置く → A の `--sent` が
+       * S2 を `informed` へ上げる → B の送信が落ちても S2 は抑止される。**
+       * **この PR が塞いだ穴が、塞いだ仕組みの中に開く。**
+       *
+       * **周回は初めから作業場ごと**である（`bin/loop-lease` が直列化する単位）。
+       */
+      /** どちらの状態も master 宛て（ゲートを回せる）。**両方の作業場が worker** である。 */
+      const s1: State = { prs: [{ number: 12 }] };
+      const s2: State = { prs: [{ number: 13 }] };
+
+      it("別の作業場の判断が、こちらの送信待ちを乗っ取らない", () => {
+        const other = addWorkspace();
+
+        withState(s1);
+        expect(run("worker").status, "1 つ目の作業場が渡せていない").toBe(0);
+
+        // **確認の前に、別の作業場が自分の判断を置く**
+        withState(s2);
+        expect(runIn(other, ["worker"]).status, "2 つ目の作業場が渡せていない").toBe(0);
+
+        // 1 つ目の作業場は、送信に成功した
+        withState(s1);
+        expect(sent("worker").status, "--sent が落ちた").toBe(0);
+
+        // **2 つ目の作業場は送信に失敗した**（`--sent` を通していない）ので、また送る。
+        // **共有していると、A の `--sent` が B の判断（S2）を `informed` へ上げる**ので、
+        // **B は二度と送れない**——**送信待ちを読み違えていることが、ここに出る**
+        withState(s2);
+        expect(
+          runIn(other, ["worker"]).status,
+          "別の作業場の確認で「送信済み」にされ、二度と送られない",
+        ).toBe(0);
+      });
+
+      it("別の作業場が送らないと決めても、こちらの送信待ちは消えない", () => {
+        // **上書きだけでなく、消す側も見る。** **判断のたびに前の送信待ちを消す**
+        // ので、**共有していると、送らないと決めた B の周回が A の送信待ちを消し**、
+        // **A の `--sent` が「送ると決めた記録がありません」で落ちる**——
+        // **送れているのに記録できない**（次の周回でもう 1 通出る）
+        const other = addWorkspace();
+
+        withState(s1);
+        expect(run("worker").status, "1 つ目の作業場が渡せていない").toBe(0);
+
+        // **B から見ると自分宛て**なので、送らずに終わる
+        withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+        expect(runIn(other, ["worker"]).status, "自分宛てなのに送っている").toBe(1);
+
+        withState(s1);
+        const confirmed = sent("worker");
+
+        expect(confirmed.status, "別の作業場に送信待ちを消された").toBe(0);
+        expect(confirmed.stderr, "送ると決めた記録そのものが消えている").not.toContain(
+          "送ると決めた記録がありません",
+        );
+      });
     });
   });
 
@@ -678,7 +955,7 @@ describe("bin/loop-handoff", () => {
 
     it("pass から fail に変われば、また送る", () => {
       withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
 
       // **label も head も未解決スレッドも動かない。** 動いたのは CI だけである
       withState({
@@ -694,7 +971,7 @@ describe("bin/loop-handoff", () => {
       withState({
         prs: [{ number: 12, labels: ["changes-requested"], checks: { [first]: "pending" } }],
       });
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
 
       expect(run("master").status, "同じ CI で送っている").toBe(1);
     });
@@ -714,7 +991,7 @@ describe("bin/loop-handoff", () => {
           },
         ],
       });
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
 
       // 必須だけが pass に変わった（**必須でないものは落ちたまま**）
       withState({
@@ -730,7 +1007,7 @@ describe("bin/loop-handoff", () => {
       withState({
         prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "pass" } }],
       });
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
 
       withState({
         prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "fail" } }],
@@ -745,7 +1022,7 @@ describe("bin/loop-handoff", () => {
       withState({
         prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "pending" } }],
       });
-      expect(run("master", env).status).toBe(0);
+      expect(cycle("master", env).status).toBe(0);
 
       // **上書きした一覧の外**（既定では必須）だけが動いた
       withState({
@@ -792,7 +1069,7 @@ describe("bin/loop-handoff", () => {
       // **送った側は、その状態を知っている**——**自分で見て、自分で配った**のだから、
       // **もう一度知らせても新しいことは何も無い**
       withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
-      expect(run("master").status, "worker へ渡せていない").toBe(0);
+      expect(cycle("master").status, "worker へ渡せていない").toBe(0);
 
       expect(run("worker").status, "同じ指紋で送り返している").toBe(1);
     });
@@ -948,7 +1225,7 @@ describe("bin/loop-handoff", () => {
       withState({
         prs: [{ number: 12, labels: requested, unresolvedBy: ["bot"], lastComment: 100 }],
       });
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
 
       withState({
         prs: [{ number: 12, labels: requested, unresolvedBy: ["us"], lastComment: 200 }],
@@ -1088,7 +1365,7 @@ describe("bin/loop-handoff", () => {
       // **指紋が PR の中身を持たないと、往復して元の値へ戻る**（#105 の 3 回目）。
       // 直して push しても「同じ状態」と読まれ、**master へ届かない**
       withState({ prs: [{ number: 12, labels: ["changes-requested"], head: "a".repeat(40) }] });
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
 
       withState({ prs: [{ number: 12, labels: ["changes-requested"], head: "b".repeat(40) }] });
 
@@ -1098,7 +1375,7 @@ describe("bin/loop-handoff", () => {
     it("head が同じなら 2 通目を送らない", () => {
       // **送り合いを作らない。** head SHA は「変われば前へ進んだ」を表す値である
       withState({ prs: [{ number: 12, labels: ["changes-requested"], head: "a".repeat(40) }] });
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
 
       expect(run("master").status).toBe(1);
     });
@@ -1106,7 +1383,7 @@ describe("bin/loop-handoff", () => {
     it("未解決スレッドが増えれば、また送る", () => {
       // **push が無くても master が指摘を返せば状態は動く。** SHA だけでは足りない
       withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
-      expect(run("master").status).toBe(0);
+      expect(cycle("master").status).toBe(0);
 
       withState({
         prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot", "bot"] }],
