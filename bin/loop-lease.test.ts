@@ -290,28 +290,31 @@ describe("bin/loop-lease", () => {
       return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
     }
 
-    it("貼っても構文で壊れない", () => {
-      // **`<役>` を出していた版はここで落ちる**（`syntax error near unexpected token`）
+    it("貼っても構文で壊れず、スクリプトまで届く", () => {
+      // **`<役>` を出していた版はここで落ちる**（`syntax error near unexpected token`）。
+      // **bash の構文エラーも usage も終了コードは 2** なので、**番号では分けない**
+      // ——**「走ったか」は、スクリプトの出力が返っているかで見る。**
       for (const line of suggested(run(["check"]).stderr)) {
         const pasted = paste(line);
 
         expect(pasted.stderr, `貼ると壊れる: ${line}`).not.toMatch(/syntax error/);
-        // **走らなかったときの bash の終了コード。** **走った上での 1 や 2 とは別**
-        expect(pasted.status, `走っていない: ${line}`).not.toBe(2);
+        // **答えは「印が違う」で構わない**（場所取りを埋めていないので当然である）
+        // ——**見たいのは「スクリプトが答えたか」**であって、通ったかではない
+        expect(pasted.stderr, `スクリプトまで届いていない: ${line}`).toMatch(/^(\[NG\]|使い方:)/m);
       }
     });
 
-    it("貼れば取り直せる", () => {
-      // **「壊れない」だけでは足りない。** **usage で終わる案内も壊れてはいない**
-      // ——**この周回が本当に lease を取れるところまで見る。**
-      const lines = suggested(run(["check"]).stderr);
-      const worker = lines.find((line) => line.includes(" worker "));
-      expect(worker, "worker の行が無い").toBeDefined();
+    it("印は実値で埋めない", () => {
+      // **印は「読んだ側が申告する」ことに意味がある** (#243。#257 のレビュー)。
+      // **ディスクから計算して渡すと突き合わせは必ず一致し、古い手順書で
+      // 走っている周回がそのまま取れてしまう**——**この案内が出るのは、
+      // まさにその周回**である。
+      const stamp = stampFor("worker");
 
-      const pasted = paste(worker as string);
-
-      expect(pasted.status, `取り直せない: ${pasted.stderr}`).toBe(0);
-      expect(pasted.stdout.trim(), "token が返っていない").not.toBe("");
+      for (const line of suggested(run(["check"]).stderr)) {
+        expect(line, `印を実値で埋めている: ${line}`).not.toContain(stamp);
+        expect(line, `埋める場所が無い: ${line}`).toMatch(/"<[^"]*印[^"]*>"/);
+      }
     });
 
     it("役の両方を出す（ここでは役が分からない）", () => {

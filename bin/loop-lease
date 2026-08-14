@@ -533,21 +533,21 @@ if [[ $ACTION == "check" ]]; then
   # ——**usage で落ちるより分かりにくい。**
   #
   # **役はここでは分からない**（この検査は役を受け取らない）ので、**両方を出す。**
-  # **印は `bin/loop-procedure-stamp` が作れる**ので、**選ぶのは行だけ**である。
   #
-  # **印を作れなかった役は、埋める場所を引用符で囲んで出す**——**貼っても
-  # 構文では壊れず、usage で「足りない」と分かる。** **形は
-  # `bin/loop-lease.test.ts` が、表示された文字列を bash へ通して確かめる。**
-  echo "[WARN] この周回は lease を持っていません（入口の acquire を飛ばした可能性）" >&2
+  # **印は実値で埋めない** (#257 のレビュー)。**あれは「読んだ側が申告する」ことに
+  # 意味がある** (#243)——**ディスクから計算して渡すと、突き合わせは必ず一致し、
+  # 古い手順書で走っている周回がそのまま lease を取れてしまう。**
+  # **この案内が出るのは「入口を飛ばした周回」**で、**古い版が配られた周回が
+  # まさにそれ**である——**塞いだ穴を、案内が別の口から開けることになる。**
+  #
+  # **埋める場所は引用符で囲む。** **貼っても構文では壊れず、usage で
+  # 「足りない」と分かる。** **形は `bin/loop-lease.test.ts` が、表示された
+  # 文字列を bash へ通して確かめる。**
   echo "       いま取り直してください（役に合うほうを打つ。cwd はリポジトリの根）:" >&2
   for advice_role in worker master; do
-    if advice_stamp="$("${BASH_SOURCE[0]%/*}/loop-procedure-stamp" "$advice_role" 2>/dev/null)" \
-      && [[ -n $advice_stamp ]]; then
-      echo "         bin/loop-lease acquire $advice_role $advice_stamp" >&2
-    else
-      echo "         bin/loop-lease acquire $advice_role \"<手順書の印を埋める>\"" >&2
-    fi
+    echo "         bin/loop-lease acquire $advice_role \"<手順書の印を埋める>\"" >&2
   done
+  echo "       印は、いま読んでいる手順書の冒頭にある \`版:\` の値です（ディスクから取らないこと）" >&2
   echo "       取れないなら、その役の周回が別に走っています——この周回は何もせずに終えること" >&2
   if [[ -n $taken ]]; then
     record_missing "別の周回が保持中: $taken"
