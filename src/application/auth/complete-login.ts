@@ -25,6 +25,25 @@ export type ProviderTokens = {
 };
 
 /**
+ * **落ちた段** (#248)。
+ *
+ * **4 つで足りる。** **細かくするほど、そこに何を入れてよいかの判断が増える**——
+ * **段の名前は、人が「次にどこを見るか」を決められればよい。**
+ *
+ * **`exchange` はここでは起きない**（**`code` をセッションへ交換するのは合成ルート**）。
+ * **同じ 1 つの型に置くのは、記録する側が 4 つを 1 列に並べて受けるため**である。
+ */
+export type LoginStage =
+  /** `code` をセッションへ交換するところ。**この関数より前**である */
+  | "exchange"
+  /** 本人として置き場を開くところ（セッションに本人が居るか） */
+  | "session"
+  /** 期限つきの 1 組へ更新するところ */
+  | "refresh"
+  /** 封じて保存するところ */
+  | "save";
+
+/**
  * 入れられたか、入口へ戻すか。
  *
  * **ここは 2 つのままにしてある。** **`ensureUsableToken` は 3 つに分かれた**
@@ -34,8 +53,25 @@ export type ProviderTokens = {
  * **「同じ形」とは書かない。** **揃っていないものを揃っていると書くと、
  * 次に読む者が片方だけ見て決める** (§5)。**ここで理由を出す価値が生まれたら
  * ——「入り直しても直らない」を伝えたくなったら——そのとき分ける。**
+ *
+ * **理由は、ここには載せない** (#248)。**落ちた段を残すのは `report`** で、
+ * **画面の行き先は変わらない**——**混ぜると、次に読む者が「返り値を見れば分かる」と
+ * 思い、記録の側を配線し忘れる。**
  */
 export type LoginResult = { readonly kind: "signed-in" } | { readonly kind: "needs-login" };
+
+/**
+ * **落ちたことを残す口** (#248)。**何をどこへ書くかは、この向こう側**である（§3）。
+ *
+ * **例外そのものを渡す。** **種類（`ZodError` なのか通信の失敗なのか）を見たいのは
+ * 記録する側**で、**ここは中身を読まない**——**読むと、application が
+ * 「何を出してよいか」を持つことになる**（§6 の判断は 1 箇所に置く）。
+ *
+ * **既定値を置かない。** **置くと、配線し忘れた呼び出しが「記録しない」まま
+ * 静かに動く**——**症状は「ログインできないのに、どこにも理由が無い」**で、
+ * **それは、この Issue が直そうとしているもの**そのものである。
+ */
+export type ReportLoginFailure = (stage: LoginStage, error: unknown) => void;
 
 export type CompleteLoginInput = {
   /**
@@ -59,6 +95,8 @@ export type CompleteLoginInput = {
    * （#224 のレビュー）。**上に書いた不変条件が、そこで破れる。**
    */
   readonly abandonSession: () => Promise<void>;
+  /** **落ちた段を残す** (#248)。**画面へは出さない**（§6）——**戻す先は入口のまま。** */
+  readonly report: ReportLoginFailure;
 };
 
 /**
@@ -77,6 +115,7 @@ export async function completeLogin({
   refresh,
   provider,
   abandonSession,
+  report,
 }: CompleteLoginInput): Promise<LoginResult> {
   let store: UserTokenStore | undefined;
   try {
@@ -84,29 +123,35 @@ export async function completeLogin({
   } catch (error) {
     // **畳んでから投げ直す。** **握りつぶすと、設定の不備が「入口へ戻った」に
     // 化ける**——**毎回同じところで失敗しているのに、誰にも見えない。**
+    report("session", error);
     await abandonSession();
     throw error;
   }
 
   if (store === undefined) {
     // **交換は通ったのに、その人がいない。** **こちらは入口へ戻せば済む。**
+    // **落ちたわけではないが、段は残す**——**「入口へ戻された」だけが見える状態を
+    // 無くすのがこの記録の目的**であり、**例外の有無で分けると、ここだけ消える。**
+    report("session", undefined);
     return abandon(abandonSession);
   }
 
   let usable: Awaited<ReturnType<RefreshUserTokens>>;
   try {
     usable = await refresh(provider.refreshToken);
-  } catch {
+  } catch (error) {
     // **期限の分からない 1 組を入れない。** **入れると、「いつまで使えるか」を
     // 誰も知らないまま使い続けることになる**——**入口へ戻すほうが安い。**
+    report("refresh", error);
     return abandon(abandonSession);
   }
 
   try {
     await store.save(usable);
-  } catch {
+  } catch (error) {
     // **保存できていないのに「入れた」と言わない。** **次の要求で必ず失敗する**
     // ——**その場では動いて見え、次で壊れる。**
+    report("save", error);
     return abandon(abandonSession);
   }
   return { kind: "signed-in" };

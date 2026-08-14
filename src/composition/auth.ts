@@ -22,6 +22,7 @@ import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/
 import { readOAuthCredentials } from "../infrastructure/github/app-credentials";
 import { refreshUserTokens } from "../infrastructure/github/user-token";
 import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
+import { reportLoginFailure } from "../infrastructure/observability/login-failure";
 import {
   createSessionClient,
   currentAccessToken,
@@ -131,7 +132,17 @@ export async function githubLoginUrl(callbackUrl: string): Promise<string> {
 export async function completeGithubLogin(code: string): Promise<LoginResult> {
   const { credentials, connection, key } = settings();
   const client = await sessionClient(connection);
-  const provider = await exchangeCodeForProviderTokens(client, code);
+
+  let provider: Awaited<ReturnType<typeof exchangeCodeForProviderTokens>>;
+  try {
+    provider = await exchangeCodeForProviderTokens(client, code);
+  } catch (error) {
+    // **交換はここでしか起きない**ので、**段の名前もここでしか付けられない** (#248)。
+    // **投げ直す。** **握り潰すと、設定の不備が「入口へ戻った」に化ける**
+    reportLoginFailure("exchange", error);
+    throw error;
+  }
+
   return completeLogin({
     // **開く手続きごと渡す。** **開いた結果だけを渡すと、開く手前で落ちたときに
     // `completeLogin` へ入らず、畳む経路を通らない。**
@@ -141,6 +152,8 @@ export async function completeGithubLogin(code: string): Promise<LoginResult> {
       refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
     // **入れられなかったら、作りかけのセッションを畳む。**
     abandonSession: () => endSession(client),
+    // **落ちた段だけを残す** (#248)。**何をどこへ書くかは adapter が持つ**（§3）
+    report: reportLoginFailure,
   });
 }
 
