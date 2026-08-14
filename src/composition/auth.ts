@@ -130,20 +130,25 @@ export async function githubLoginUrl(callbackUrl: string): Promise<string> {
  * 落ちると、ログインしているのに何も見えない**（#184 の形）。
  */
 export async function completeGithubLogin(code: string): Promise<LoginResult> {
-  const { credentials, connection, key } = settings();
-  const client = await sessionClient(connection);
-
   return completeLogin({
-    // **開く手続きごと渡す。** **開いた結果だけを渡すと、開く手前で落ちたときに
-    // `completeLogin` へ入らず、畳む経路を通らない。**
-    openStore: () => storeForCurrentUser(client, connection, key),
-    // **交換も手続きごと渡す** (#276 のレビュー)。**結果だけを渡すと、交換で落ちた
-    // ときに `completeLogin` へ入らず、段を残す経路をまるごと外れる**
-    exchange: () => exchangeCodeForProviderTokens(client, code),
-    refresh: (refreshToken) =>
-      refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
-    // **入れられなかったら、作りかけのセッションを畳む。**
-    abandonSession: () => endSession(client),
+    // **用意も手続きごと渡す** (#277)。**設定と client をここで読むと、そこで落ちた
+    // ときに `completeLogin` へ一度も入らず、段を残す経路をまるごと外れる**
+    // ——**環境変数の不備は恒常的**なので、**いちばん長く黙る経路**になる。
+    setUp: async () => {
+      const { credentials, connection, key } = settings();
+      const client = await sessionClient(connection);
+      return {
+        // **開く手続きごと渡す。** **開いた結果だけを渡すと、開く手前で落ちたときに
+        // `completeLogin` へ入らず、畳む経路を通らない。**
+        openStore: () => storeForCurrentUser(client, connection, key),
+        // **交換も手続きごと渡す** (#276 のレビュー)
+        exchange: () => exchangeCodeForProviderTokens(client, code),
+        refresh: (refreshToken) =>
+          refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+        // **入れられなかったら、作りかけのセッションを畳む。**
+        abandonSession: () => endSession(client),
+      };
+    },
     // **落ちた段だけを残す** (#248)。**何をどこへ書くかは adapter が持つ**（§3）
     report: reportLoginFailure,
   });

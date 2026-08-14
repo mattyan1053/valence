@@ -27,14 +27,21 @@ export type ProviderTokens = {
 /**
  * **落ちた段** (#248)。
  *
- * **4 つで足りる。** **細かくするほど、そこに何を入れてよいかの判断が増える**——
+ * **5 つで足りる。** **細かくするほど、そこに何を入れてよいかの判断が増える**——
  * **段の名前は、人が「次にどこを見るか」を決められればよい。**
  *
- * **4 つとも、この関数の中で起きる** (#276 のレビュー)。**交換も手続きごと受け取る**
- * ——**結果だけを受け取ると、交換で落ちたときにここへ一度も入らず、
- * 段の名前を合成ルートで付けることになる**（**そこには試験が届かない**）。
+ * **4 つから 1 つ増やした** (#277)。**`setup` は「設定と client を用意するところ」**で、
+ * **他の 4 つとは行き先が違う**——**設定の不備は恒常的**で、**直るまで全員が入れない。**
+ * **`exchange` に混ぜると、「GitHub との交換で落ちた」と読まれる**ので、
+ * **次に見る場所が変わる**（**環境変数か、GitHub 側か**）。
+ *
+ * **5 つとも、この関数の中で起きる** (#276 / #277 のレビュー)。**用意も交換も
+ * 手続きごと受け取る**——**結果だけを受け取ると、その手前で落ちたときにここへ
+ * 一度も入らず、段の名前を合成ルートで付けることになる**（**そこには試験が届かない**）。
  */
 export type LoginStage =
+  /** 設定と client を用意するところ。**`setUp` を呼ぶ** */
+  | "setup"
   /** `code` をセッションへ交換するところ。**`exchange` を呼ぶ** */
   | "exchange"
   /** 本人として置き場を開くところ（セッションに本人が居るか） */
@@ -74,7 +81,13 @@ export type LoginResult = { readonly kind: "signed-in" } | { readonly kind: "nee
  */
 export type ReportLoginFailure = (stage: LoginStage, error: unknown) => void;
 
-export type CompleteLoginInput = {
+/**
+ * 用意が済んだあとの、外側とのつなぎ口。
+ *
+ * **設定を読んでからでないと作れない**（どれも `settings()` の値を握る）ので、
+ * **`setUp` の戻りとしてまとめて受け取る** (#277)。
+ */
+export type LoginPorts = {
   /**
    * 本人として置き場を開く。**その人がいなければ `undefined`。**
    *
@@ -103,6 +116,17 @@ export type CompleteLoginInput = {
    * （#224 のレビュー）。**上に書いた不変条件が、そこで破れる。**
    */
   readonly abandonSession: () => Promise<void>;
+};
+
+export type CompleteLoginInput = {
+  /**
+   * **設定と client を用意する手続き。**
+   *
+   * **結果ではなく手続きを受け取る** (#276 / #277)——**用意で落ちたときに、
+   * ここへ一度も入らないのを避けるため**である。**環境変数の欠落・形式不正は
+   * 恒常的に起きる**ので、**その 1 行が残らないと、直るまで誰も原因に辿り着けない。**
+   */
+  readonly setUp: () => Promise<LoginPorts>;
   /** **落ちた段を残す** (#248)。**画面へは出さない**（§6）——**戻す先は入口のまま。** */
   readonly report: ReportLoginFailure;
 };
@@ -118,13 +142,22 @@ async function abandon(abandonSession: () => Promise<void>): Promise<LoginResult
   return { kind: "needs-login" };
 }
 
-export async function completeLogin({
-  openStore,
-  refresh,
-  exchange,
-  abandonSession,
-  report,
-}: CompleteLoginInput): Promise<LoginResult> {
+export async function completeLogin({ setUp, report }: CompleteLoginInput): Promise<LoginResult> {
+  let openStore: LoginPorts["openStore"];
+  let refresh: LoginPorts["refresh"];
+  let exchange: LoginPorts["exchange"];
+  let abandonSession: LoginPorts["abandonSession"];
+  try {
+    ({ openStore, refresh, exchange, abandonSession } = await setUp());
+  } catch (error) {
+    // **畳まない。** **用意が落ちた時点で、セッションはまだ無い。**
+    //
+    // **投げ直す。** **握り潰すと、設定の不備が「入口へ戻った」に化ける**——
+    // **恒常的に起きるぶん、いちばん長く黙る経路**である。
+    report("setup", error);
+    throw error;
+  }
+
   let provider: ProviderTokens;
   try {
     provider = await exchange();
