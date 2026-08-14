@@ -57,8 +57,8 @@ usage() {
   echo "使い方: bin/loop-lease acquire <役> <手順書の印>" >&2
   echo "        bin/loop-lease recover <役> <手順書の印>  印がずれた周回が、木を入れ替える前に押さえる" >&2
   echo "        bin/loop-lease release <役> <token>" >&2
-  echo "        bin/loop-lease held <役>        この作業場の分を誰かが持っているか（読むだけ）" >&2
-  echo "                                        worker は作業場ごとに分かれる。別の作業場も見るなら busy" >&2
+  echo "        bin/loop-lease held <役>        その lease を誰かが持っているか（worker は呼んだ作業場の分）" >&2
+  echo "                                        別の作業場の worker も見るなら busy（master は 1 つなので同じ）" >&2
   echo "        bin/loop-lease check            この周回が持っていなければ言って記録する（止めない）" >&2
   echo "        bin/loop-lease busy <役>        その役の周回がどこかで走っているか（読むだけ）" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
@@ -854,7 +854,11 @@ held)
   echo "[INFO] $SCOPE_LABEL の lease は、誰も持っていません" >&2
   # **行き先を出す** (#250)。**同じ問いに答える口を 2 つ作らない**——
   # **作業場をまたいで見たいなら `busy`** で、そちらは共通ディレクトリを走査する。
-  echo "       別の作業場も見るなら: bin/loop-lease busy $ROLE" >&2
+  #
+  # **worker のときだけ出す** (#283 のレビュー)。**master の記録は 1 つだけ**なので、
+  # **`busy master` は `held master` と同じものを見る**——**「別の作業場も見るなら」と
+  # 案内しても行き先が同じ**で、**#250 と同じ形（答えは正しく、説明が違う）になる。**
+  [[ $ROLE == "worker" ]] && echo "       別の作業場も見るなら: bin/loop-lease busy $ROLE" >&2
   exit 1
   ;;
 acquire | recover)

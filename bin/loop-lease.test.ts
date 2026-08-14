@@ -525,6 +525,18 @@ describe("bin/loop-lease", () => {
       expect(answered.stderr, "master は作業場で分かれない").not.toContain(sandbox);
     });
 
+    it("master には、別の作業場の案内を出さない", () => {
+      // **役ごとに置き場所が違う** (#283 のレビュー)。**master の記録は 1 つだけ**なので、
+      // **`busy master` は `held master` と同じものを見る**——**「別の作業場も見るなら」と
+      // 案内しても、行き先が同じ**である。
+      //
+      // **#250 と同じ形をここで作らない**——**答えは正しいのに、問いの説明が違う。**
+      const answered = run(["held", "master"]);
+
+      expect(answered.status).toBe(1);
+      expect(answered.stderr, "master に worker 向けの案内が出ている").not.toContain("busy");
+    });
+
     it("使い方の行に、答える範囲が書いてある", () => {
       // **使い方を読んだだけで「呼んだ作業場のことだ」と分かること**（#250 の完了条件）
       const usage = run([]).stderr;
