@@ -114,6 +114,8 @@ type State = {
 describe("bin/loop-handoff", () => {
   let repo: string;
   let path: string;
+  /** 足した作業場。**worktree なので、消し忘れると次の試験へ漏れる。** */
+  let workspaces: string[];
 
   /**
    * **本物の `gh` を呼ばない。** 見たいのは「GitHub の状態から誰へ渡すか」であって、
@@ -259,13 +261,17 @@ describe("bin/loop-handoff", () => {
     );
   }
 
-  function runWith(args: string[], env: Record<string, string> = {}): Run {
+  function runIn(cwd: string, args: string[], env: Record<string, string> = {}): Run {
     const result = spawnSync(SCRIPT, args, {
-      cwd: repo,
+      cwd,
       encoding: "utf8",
       env: { ...process.env, PATH: path, ...env },
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  function runWith(args: string[], env: Record<string, string> = {}): Run {
+    return runIn(repo, args, env);
   }
 
   function run(role: string, env: Record<string, string> = {}): Run {
@@ -275,6 +281,45 @@ describe("bin/loop-handoff", () => {
   /** 送信が成功したことを伝える口。**呼んだ側にしか分からない。** */
   function sent(role: string, env: Record<string, string> = {}): Run {
     return runWith([role, "--sent"], env);
+  }
+
+  /**
+   * **2 つ目の作業場を足す。**
+   *
+   * **worktree なので、git の共通ディレクトリは同じ**——**`informed` の記録は
+   * わざと共有されている**（重複抑止はループ全体で 1 つ）。**分かれていなければ
+   * ならないのは、まだ届いていない「送ると決めた」ぶんだけ**である。
+   */
+  function addWorkspace(): string {
+    expect(
+      spawnSync(
+        "git",
+        [
+          "-C",
+          repo,
+          "-c",
+          "user.email=loop@example.invalid",
+          "-c",
+          "user.name=loop",
+          "commit",
+          "--quiet",
+          "--allow-empty",
+          "-m",
+          "根",
+        ],
+        { encoding: "utf8" },
+      ).status,
+      "worktree を足すための commit が作れない",
+    ).toBe(0);
+    const other = `${repo}-b`;
+    expect(
+      spawnSync("git", ["-C", repo, "worktree", "add", "--quiet", "--detach", other, "HEAD"], {
+        encoding: "utf8",
+      }).status,
+      "2 つ目の作業場を作れない",
+    ).toBe(0);
+    workspaces.push(other);
+    return other;
   }
 
   /**
@@ -295,6 +340,7 @@ describe("bin/loop-handoff", () => {
 
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "loop-handoff-"));
+    workspaces = [];
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     path = join(repo, "path");
     mkdirSync(path, { recursive: true });
@@ -328,6 +374,9 @@ describe("bin/loop-handoff", () => {
   });
 
   afterEach(() => {
+    for (const workspace of workspaces) {
+      rmSync(workspace, { recursive: true, force: true });
+    }
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -789,6 +838,72 @@ describe("bin/loop-handoff", () => {
 
       expect(runWith(["master", "--sent-ish"]).status).toBe(2);
       expect(runWith(["master", "--sent", "extra"]).status).toBe(2);
+    });
+
+    describe("作業場が 2 つあるとき", () => {
+      /**
+       * **送ると決めたぶんは、決めた作業場のものである**（#265 のレビュー）。
+       *
+       * **`informed` の記録は、役だけをキーに共有されているのが正しい**——
+       * 表すのは「この状態は既に伝えた」で、**指紋は全体の状態**だからである
+       * （どの作業場から伝えたかは関係ない）。
+       *
+       * **送信待ちは違う。** 表すのは**「いま投げている 1 件」**なので、
+       * **共有すると別の作業場の判断で入れ替わる**——
+       * **A が S1 を置いて送る → 確認の前に B が S2 を置く → A の `--sent` が
+       * S2 を `informed` へ上げる → B の送信が落ちても S2 は抑止される。**
+       * **この PR が塞いだ穴が、塞いだ仕組みの中に開く。**
+       *
+       * **周回は初めから作業場ごと**である（`bin/loop-lease` が直列化する単位）。
+       */
+      /** どちらの状態も master 宛て（ゲートを回せる）。**両方の作業場が worker** である。 */
+      const s1: State = { prs: [{ number: 12 }] };
+      const s2: State = { prs: [{ number: 13 }] };
+
+      it("別の作業場の判断が、こちらの送信待ちを乗っ取らない", () => {
+        const other = addWorkspace();
+
+        withState(s1);
+        expect(run("worker").status, "1 つ目の作業場が渡せていない").toBe(0);
+
+        // **確認の前に、別の作業場が自分の判断を置く**
+        withState(s2);
+        expect(runIn(other, ["worker"]).status, "2 つ目の作業場が渡せていない").toBe(0);
+
+        // 1 つ目の作業場は、送信に成功した
+        withState(s1);
+        expect(sent("worker").status, "--sent が落ちた").toBe(0);
+
+        // **記録されたのは S1 である**（S2 ではない）
+        withState(s1);
+        expect(run("worker").status, "自分が送った状態が記録されていない").toBe(1);
+
+        // **2 つ目の作業場は送信に失敗した**（`--sent` を通していない）ので、また送る
+        withState(s2);
+        expect(
+          runIn(other, ["worker"]).status,
+          "別の作業場の確認で「送信済み」にされ、二度と送られない",
+        ).toBe(0);
+      });
+
+      it("別の作業場が送らないと決めても、こちらの送信待ちは消えない", () => {
+        // **上書きだけでなく、消す側も見る。** **判断のたびに前の送信待ちを消す**
+        // ので、**共有していると、送らないと決めた B の周回が A の送信待ちを消し**、
+        // **A の `--sent` が「送ると決めた記録がありません」で落ちる**——
+        // **送れているのに記録できない**（次の周回でもう 1 通出る）
+        const other = addWorkspace();
+
+        withState(s1);
+        expect(run("worker").status, "1 つ目の作業場が渡せていない").toBe(0);
+
+        // **B から見ると自分宛て**なので、送らずに終わる
+        withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+        expect(runIn(other, ["worker"]).status, "自分宛てなのに送っている").toBe(1);
+
+        withState(s1);
+        expect(sent("worker").status, "別の作業場に送信待ちを消された").toBe(0);
+        expect(run("worker").status, "自分が送った状態が記録されていない").toBe(1);
+      });
     });
   });
 
