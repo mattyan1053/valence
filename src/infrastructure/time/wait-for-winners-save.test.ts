@@ -58,7 +58,7 @@ describe("勝った側の保存を待つ間合い", () => {
   });
 
   it("既定の間合いは、既定の予算に収まる", async () => {
-    // **既定を変えるとき、ここが「どれだけ画面を止めてよいか」を見せる。**
+    // **既定を変えるとき、ここが「どれだけ待ってよいか」を見せる。**
     // **窓は `save` 1 回ぶん**（DB へ 1 往復）なので、**秒の単位では待たない**
     const { asked, sleep, now } = sleeper();
     const wait = createWaitForWinnersSave({ sleep, now });
