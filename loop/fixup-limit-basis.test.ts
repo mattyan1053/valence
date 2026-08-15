@@ -86,6 +86,71 @@ function examples(): Example[] {
 }
 
 /**
+ * 記録した行を、その場で測り直して突き合わせる手順。
+ *
+ * **形式だけを見ても、値が本当かは分からない**（#309 のレビュー）——**`70` を `700` に
+ * 書き換えても、SHA を別の 40 桁へ差し替えても、列の検査は全部通る**。
+ *
+ * **試験からは本物を測れない。** **測るには GitHub のレビュースレッドが要る**ので、
+ * **CI では `gh` も認証も無い**（**`./task check` の中から実物を触らない**、が
+ * この repo の作り方である）。**そこで、打てば照合できる形にして、
+ * 打てること自体を試験で見る**——**測り直しの手順と同じ扱い**である。
+ */
+function verification(): string {
+  const gate = readFileSync(join(REPO_ROOT, "bin/loop-gate"), "utf8");
+  const body =
+    gate.split("---8<--- 記録を照合する手順 ---")[1]?.split("---8<--- ここまで ---")[0] ?? "";
+  return body
+    .split("\n")
+    .filter((line) => line.startsWith("#"))
+    .map((line) => line.replace(/^#\s?/, ""))
+    .join("\n");
+}
+
+/**
+ * 照合の手順を、偽の数える側で走らせる。
+ *
+ * `lying` を渡すと、**その PR だけ記録と違う値を返す**——**食い違いを見つけられるか**を
+ * 見るためである。`failing` を渡すと、**その PR で落ちる**。
+ */
+function runVerification(options: { lying?: string; failing?: string } = {}) {
+  const workspace = mkdtempSync(join(tmpdir(), "fixup-verify-"));
+  try {
+    mkdirSync(join(workspace, "bin"), { recursive: true });
+    // **照合される側（記録）は本物を置く。** 写しを作ると、写しだけを見て緑になる
+    writeFileSync(
+      join(workspace, "bin/loop-gate"),
+      readFileSync(join(REPO_ROOT, "bin/loop-gate"), "utf8"),
+    );
+    const cases = examples()
+      .map((example) => {
+        const measured =
+          options.lying === example.pr
+            ? [String(Number(example.measured[0]) + 1), example.measured[1], example.measured[2]]
+            : example.measured;
+        // **落ちる側も、記録どおりの値を出してから落ちる。** **値が違えば食い違いの側で
+        // 捕まる**ので、**それだと「落ちたことを見ている」試験にならない**
+        const fail = options.failing === example.pr ? " exit 1;" : "";
+        return `  ${example.pr}) printf '%s\\t%s\\t%s\\n' ${measured.join(" ")};${fail} ;;`;
+      })
+      .join("\n");
+    writeFileSync(
+      join(workspace, "bin/loop-fixup-lines"),
+      ["#!/usr/bin/env bash", "case $1 in", cases, "  *) exit 1 ;;", "esac", ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const result = spawnSync("bash", ["-c", verification()], {
+      cwd: workspace,
+      encoding: "utf8",
+    });
+    return { ...result, status: result.status ?? -1 };
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+/**
  * 手直しの上限に、失効した根拠が残っていないこと（#134）。
  *
  * **60 は「#36 の 44 行を通す / #41 の 74 行を止める」の中間**として決めた値だったが、
@@ -168,6 +233,44 @@ describe("手直しの上限の根拠", () => {
       expect(example.merge, `マージ commit が無い: #${example.pr}`).toMatch(/^[0-9a-f]{40}$/);
       expect(example.verdict, `その実例をどう扱ったかが無い: #${example.pr}`).not.toBe("");
     }
+  });
+
+  it("記録を照合する手順が、そのまま走る", () => {
+    // **列が揃っていることと、値が本当であることは別**である（#309 のレビュー）。
+    // **記録した SHA で測り直して、記録した値と突き合わせる**のが照合で、
+    // **打てば 1 コマンドで終わる形**にしておく——**手順が無ければ、誰も確かめない**
+    const result = runVerification();
+
+    expect(result.status, `照合の手順が走らない: ${result.stderr}`).toBe(0);
+    // **全行を見ていること**（1 行目だけ照合して終わらない）
+    for (const example of examples()) {
+      expect(result.stdout, `#${example.pr} を照合していない`).toContain(example.pr);
+    }
+  });
+
+  it("記録と測り直しが食い違ったら、照合が落ちる", () => {
+    // **これが無いと、照合は「走った」だけで何も見ていない**——
+    // **`70` を `700` に書き換えても通る**、が元の指摘そのものである
+    const [first] = examples();
+    if (first === undefined) {
+      throw new Error("実例が 1 件も記録されていない");
+    }
+    const result = runVerification({ lying: first.pr });
+
+    expect(result.status, "食い違っているのに通っている").not.toBe(0);
+    expect(result.stderr, "どの記録が食い違うのかが出ない").toContain(first.pr);
+  });
+
+  it("測り直せなかったら、照合を「一致」にしない", () => {
+    // **落ちたのを黙って飛ばすと、測れなかった行が「照合済み」になる**——
+    // **測り直しの手順が「欠けたまま表を出さない」としたのと同じ形**である
+    const [first] = examples();
+    if (first === undefined) {
+      throw new Error("実例が 1 件も記録されていない");
+    }
+    const result = runVerification({ failing: first.pr });
+
+    expect(result.status, "測れなかったのに通っている").not.toBe(0);
   });
 
   it("数え方を変える前の実例を、いまの値として並べていない", () => {
