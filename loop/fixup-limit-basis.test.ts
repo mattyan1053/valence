@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { readExamples } from "./fixup-limit-record";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -44,110 +45,13 @@ function defaultLimit(): number {
   return Number(matched[1]);
 }
 
-const EXAMPLES_START = "---8<--- いまの数え方で測った実例 ---";
-
-type Example = {
-  pr: string;
-  /** `bin/loop-fixup-lines` の 3 列（数える行 / 除外したテスト追加行 / 除外した要求ぶん）。 */
-  measured: [string, string, string];
-  reviewed: string;
-  head: string;
-  verdict: string;
-  merge: string;
-};
-
 /**
- * 実例の記録を、列のまま取り出す。
+ * 記録した実例（**読み方は `loop/fixup-limit-record.ts` が 1 つだけ持つ**）。
  *
- * **散文で書かない。** **測り直せることがこの記録の条件**（#242）で、
- * **測り直しに要るのは PR 番号と 2 つの SHA** である——**列にしておけば、
- * 落とした瞬間にここで分かる**。**「70 行だった」とだけ書くと、
- * 何を入力に測ったのかが誰にも分からなくなる**。
+ * **ここが見るのは形だけ**である——**値が本当かは `bin/loop-fixup-basis` が測る。**
  */
-function examples(): Example[] {
-  const body = limitSection().split(EXAMPLES_START)[1]?.split("---8<--- ここまで ---")[0] ?? "";
-  return body
-    .split("\n")
-    .map((line) => line.replace(/^#\s?/, "").trim())
-    .filter((line) => line.includes("\t"))
-    .map((line) => {
-      const [
-        pr = "",
-        counted = "",
-        tests = "",
-        requested = "",
-        reviewed = "",
-        head = "",
-        verdict = "",
-        merge = "",
-      ] = line.split("\t");
-      return { pr, measured: [counted, tests, requested], reviewed, head, verdict, merge };
-    });
-}
-
-/**
- * 記録した行を、その場で測り直して突き合わせる手順。
- *
- * **形式だけを見ても、値が本当かは分からない**（#309 のレビュー）——**`70` を `700` に
- * 書き換えても、SHA を別の 40 桁へ差し替えても、列の検査は全部通る**。
- *
- * **試験からは本物を測れない。** **測るには GitHub のレビュースレッドが要る**ので、
- * **CI では `gh` も認証も無い**（**`./task check` の中から実物を触らない**、が
- * この repo の作り方である）。**そこで、打てば照合できる形にして、
- * 打てること自体を試験で見る**——**測り直しの手順と同じ扱い**である。
- */
-function verification(): string {
-  const gate = readFileSync(join(REPO_ROOT, "bin/loop-gate"), "utf8");
-  const body =
-    gate.split("---8<--- 記録を照合する手順 ---")[1]?.split("---8<--- ここまで ---")[0] ?? "";
-  return body
-    .split("\n")
-    .filter((line) => line.startsWith("#"))
-    .map((line) => line.replace(/^#\s?/, ""))
-    .join("\n");
-}
-
-/**
- * 照合の手順を、偽の数える側で走らせる。
- *
- * `lying` を渡すと、**その PR だけ記録と違う値を返す**——**食い違いを見つけられるか**を
- * 見るためである。`failing` を渡すと、**その PR で落ちる**。
- */
-function runVerification(options: { lying?: string; failing?: string } = {}) {
-  const workspace = mkdtempSync(join(tmpdir(), "fixup-verify-"));
-  try {
-    mkdirSync(join(workspace, "bin"), { recursive: true });
-    // **照合される側（記録）は本物を置く。** 写しを作ると、写しだけを見て緑になる
-    writeFileSync(
-      join(workspace, "bin/loop-gate"),
-      readFileSync(join(REPO_ROOT, "bin/loop-gate"), "utf8"),
-    );
-    const cases = examples()
-      .map((example) => {
-        const measured =
-          options.lying === example.pr
-            ? [String(Number(example.measured[0]) + 1), example.measured[1], example.measured[2]]
-            : example.measured;
-        // **落ちる側も、記録どおりの値を出してから落ちる。** **値が違えば食い違いの側で
-        // 捕まる**ので、**それだと「落ちたことを見ている」試験にならない**
-        const fail = options.failing === example.pr ? " exit 1;" : "";
-        return `  ${example.pr}) printf '%s\\t%s\\t%s\\n' ${measured.join(" ")};${fail} ;;`;
-      })
-      .join("\n");
-    writeFileSync(
-      join(workspace, "bin/loop-fixup-lines"),
-      ["#!/usr/bin/env bash", "case $1 in", cases, "  *) exit 1 ;;", "esac", ""].join("\n"),
-      { mode: 0o755 },
-    );
-
-    const result = spawnSync("bash", ["-c", verification()], {
-      cwd: workspace,
-      encoding: "utf8",
-    });
-    return { ...result, status: result.status ?? -1 };
-  } finally {
-    rmSync(workspace, { recursive: true, force: true });
-  }
+function examples() {
+  return readExamples(readFileSync(join(REPO_ROOT, "bin/loop-gate"), "utf8"));
 }
 
 /**
@@ -235,42 +139,27 @@ describe("手直しの上限の根拠", () => {
     }
   });
 
-  it("記録を照合する手順が、そのまま走る", () => {
-    // **列が揃っていることと、値が本当であることは別**である（#309 のレビュー）。
-    // **記録した SHA で測り直して、記録した値と突き合わせる**のが照合で、
-    // **打てば 1 コマンドで終わる形**にしておく——**手順が無ければ、誰も確かめない**
-    const result = runVerification();
-
-    expect(result.status, `照合の手順が走らない: ${result.stderr}`).toBe(0);
-    // **全行を見ていること**（1 行目だけ照合して終わらない）
-    for (const example of examples()) {
-      expect(result.stdout, `#${example.pr} を照合していない`).toContain(example.pr);
-    }
+  it("形しか見ていないことを、名乗ってある", () => {
+    // **この本が見ているのは「列が揃っているか」だけ**である（#309 のレビュー）——
+    // **`70` を `700` に書き換えても、SHA を別の 40 桁へ差し替えても通る。**
+    //
+    // **主張を、測っているものへ合わせる。** **本当に測り直す側は
+    // `bin/loop-fixup-basis`**（**網と認証が要るので `./task check` には入れない**）で、
+    // **記録の側からそこを指していなければ、誰も打たない**
+    expect(limitSection(), "測り直す側への道が、記録に書かれていない").toContain(
+      "bin/loop-fixup-basis",
+    );
   });
 
-  it("記録と測り直しが食い違ったら、照合が落ちる", () => {
-    // **これが無いと、照合は「走った」だけで何も見ていない**——
-    // **`70` を `700` に書き換えても通る**、が元の指摘そのものである
-    const [first] = examples();
-    if (first === undefined) {
-      throw new Error("実例が 1 件も記録されていない");
-    }
-    const result = runVerification({ lying: first.pr });
+  it("測り直す側が、実際に赤くなる場所で走っている", () => {
+    // **「CI の専用 job で赤くする」と書いてあっても、job が無ければ誰も測らない**——
+    // **`./task check` から外した時点で、打つ人がいなくなる**（#210 で
+    // **足りない環境変数で skip した試験が、緑のまま何も見なくなった**のと同じ形）。
+    //
+    // **置く側と読む側は 1 組である。** **コメントの主張と、workflow の中身を突き合わせる**
+    const workflow = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
 
-    expect(result.status, "食い違っているのに通っている").not.toBe(0);
-    expect(result.stderr, "どの記録が食い違うのかが出ない").toContain(first.pr);
-  });
-
-  it("測り直せなかったら、照合を「一致」にしない", () => {
-    // **落ちたのを黙って飛ばすと、測れなかった行が「照合済み」になる**——
-    // **測り直しの手順が「欠けたまま表を出さない」としたのと同じ形**である
-    const [first] = examples();
-    if (first === undefined) {
-      throw new Error("実例が 1 件も記録されていない");
-    }
-    const result = runVerification({ failing: first.pr });
-
-    expect(result.status, "測れなかったのに通っている").not.toBe(0);
+    expect(workflow, "測り直す側を走らせる job が無い").toMatch(/run: bin\/loop-fixup-basis/);
   });
 
   it("数え方を変える前の実例を、いまの値として並べていない", () => {
