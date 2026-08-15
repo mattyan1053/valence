@@ -45,7 +45,8 @@ database policies
 shell scripts
 dependency vulnerabilities
 new dependencies
-analyze"
+analyze
+fixup limit basis"
 
 # **成功の側を並べ、それ以外は失敗へ倒す。** 失敗の側を並べると、
 # **GitHub が値を増やしたときに、知らない値がどの分岐にも入らない** (#90)。

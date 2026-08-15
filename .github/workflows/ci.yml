@@ -163,3 +163,25 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  # **記録した実例の値が本当であることを、実際に測り直して確かめる** (#242 / #309)。
+  #
+  # **`./task check` からは外してある。** `bin/loop-fixup-lines` は GitHub の
+  # レビュースレッドと `compare` を叩くので**網と認証が要る**——**worker が 1 周ごとに
+  # 叩くものへ入れると、外の状態で赤になる**（`database` job と同じ理由）。
+  #
+  # **形を見る試験は `./task check` の側にある。** **あちらは列が揃っているかしか
+  # 見ていない**ので、**`70` を `700` に書き換えても緑**である——**赤くするのはここ。**
+  fixup-limit-basis:
+    name: fixup limit basis
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # **`bin/loop-fixup-lines` が読むのは、この repo の PR のレビューと diff だけ**
+      # なので、既定の読み取り権限で足りる（`permissions: contents: read`）。
+      - name: Verify recorded examples
+        run: bin/loop-fixup-basis
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

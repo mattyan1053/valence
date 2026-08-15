@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# 手直しの上限の根拠として記録した実例を、**その場で測り直して突き合わせる**。
+#
+#   bin/loop-fixup-basis
+#   → 記録の各行について <PR番号>\t一致 を出す。1 行でも食い違えば exit 1
+#
+# **記録の正は `bin/loop-gate` のコメント**である (#242)。**ここは読んで測るだけ**で、
+# **値も列の意味もあちらが持っている**——**2 箇所に書かない。**
+#
+# **なぜ要るか** (#309 のレビュー)。**列が揃っていることと、値が本当であることは別**で、
+# **`70` を `700` に書き換えても、SHA を別の 40 桁へ差し替えても、形を見る側は全部通る。**
+# **「記録した SHA を渡せば同じ値が出る」という主張そのものが、確かめられていなかった。**
+#
+# **`./task check` では走らない。** **`bin/loop-fixup-lines` は GitHub のレビュースレッドと
+# `compare` を叩く**ので、**網と認証が要る**——**worker が 1 周ごとに叩くものへ入れると、
+# 外の状態で赤くなる**（**`*.db.test.ts` を外したのと同じ理由**。#210）。
+# **赤くする場所は CI の専用 job** (`.github/workflows/ci.yml` の `fixup-limit-basis`)。
+#
+# **記録が読めなければ、照合できたことにしない。** **空の記録は「全部一致した」に化ける**
+# ——**繰り返しが 0 回まわって成功する**。**書式を変えて読めなくなった日**が、その経路である。
+set -uo pipefail
+
+readonly GATE="${BASH_SOURCE[0]%/*}/loop-gate"
+readonly MEASURE="${BASH_SOURCE[0]%/*}/loop-fixup-lines"
+
+# **目印は、そのままの形で書かない**——**この行自身が範囲に当たる**
+rows="$(sed -n '/^# ---8<--- いまの数え方で測った実例/,/^# ---8<--- ここまで/p' "$GATE" |
+  sed -n 's/^#   //p')" || {
+  echo "[FAIL] 記録を読み出せません: $GATE" >&2
+  exit 2
+}
+
+if [[ -z ${rows//[[:space:]]/} ]]; then
+  echo "[FAIL] 記録が 1 行もありません（書式が変わった?）: $GATE" >&2
+  exit 2
+fi
+
+status=0
+while IFS=$'\t' read -r pr counted tests requested reviewed head verdict merge; do
+  [[ -n $pr ]] || continue
+  # **足りない列を空のまま測らない。** **`read` は足りない変数を空にするだけ**なので、
+  # **列を落とした記録は「空の SHA で測る」へ倒れる**——**それは照合ではない**
+  if [[ -z $counted || -z $tests || -z $requested || -z $reviewed || -z $head ||
+    -z $verdict || -z $merge ]]; then
+    echo "[FAIL] 記録の列が足りません: #$pr" >&2
+    exit 2
+  fi
+
+  # **落ちたら黙って飛ばさない。** 飛ばすと、測れなかった行が「照合済み」になる
+  if ! measured="$("$MEASURE" "$pr" "$reviewed" "$head")"; then
+    echo "[FAIL] 測り直せません: #$pr（$MEASURE が落ちた）" >&2
+    status=1
+    continue
+  fi
+
+  expected="$(printf '%s\t%s\t%s' "$counted" "$tests" "$requested")"
+  if [[ $measured != "$expected" ]]; then
+    echo "[FAIL] 記録と測り直しが食い違います: #$pr 記録=$expected 測定=$measured" >&2
+    status=1
+    continue
+  fi
+
+  # **マージ commit の列も照合する** (#309 のレビュー 2 周目)。**空でないことしか
+  # 見ていないと、無関係な 40 桁へ差し替えても「一致」で終わる**——**この列が持つのは
+  # 「人が通した」という結論**で、**その証拠は `main` の履歴に残っていること**である。
+  #
+  # **確かめられなかったら「一致」にしない**（測り直せなかったときと同じ扱い）。
+  if ! pr_state="$(gh pr view "$pr" --json state,mergeCommit \
+    --jq '"\(.state)\t\(.mergeCommit.oid // "")"' 2>/dev/null)"; then
+    echo "[FAIL] マージ commit を確かめられません: #$pr（gh pr view が落ちた）" >&2
+    status=1
+    continue
+  fi
+  if [[ $pr_state != "MERGED	$merge" ]]; then
+    echo "[FAIL] 記録のマージ commit が PR と食い違います: #$pr 記録=$merge PR=$pr_state" >&2
+    status=1
+    continue
+  fi
+
+  # **PR が指す commit であることと、それが残っていることは別**である。
+  # **`main` の履歴で見る**——**squash マージなので、head とレビュー済み SHA は
+  # `main` に無い**（**履歴で確かめられるのは、この列だけ**）。
+  # **ローカルの git では見られない**（**CI の checkout は既定で depth 1**）。
+  if ! contained="$(gh api "repos/{owner}/{repo}/compare/$merge...main" --jq '.status' \
+    2>/dev/null)"; then
+    echo "[FAIL] マージ commit が履歴にあるか確かめられません: #$pr（$merge）" >&2
+    status=1
+    continue
+  fi
+  # **含まれる側を並べ、それ以外は落とす** (#90)。**GitHub が値を増やしたときに、
+  # 知らない値がどの分岐にも入らない形にしない**
+  if [[ $contained != "ahead" && $contained != "identical" ]]; then
+    echo "[FAIL] マージ commit が main の履歴にありません: #$pr $merge（compare=$contained）" >&2
+    status=1
+    continue
+  fi
+  printf '%s\t一致\n' "$pr"
+done <<<"$rows"
+
+exit "$status"
