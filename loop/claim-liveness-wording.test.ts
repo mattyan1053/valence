@@ -18,18 +18,18 @@
  * 両方を食わせる。** **実物の手順書は壊さない**——**読み取った写しの上で変異させる。**
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const PROCEDURE = ".claude/commands/loop-worker.md";
-
-/** 引き継ぎの持ち主について書いてある節（ステップ 2.1）。 */
+/**
+ * 引き継ぎの持ち主について書いてある節（ステップ 2.1）。
+ *
+ * **入口と本体のどちらに載っているかを、ここでは決めない** (#319)——
+ * **節を移すたびにパスを書き換えることになる。** **置き場所は
+ * `loop/procedure-doc.ts` が 1 つだけ知っている。**
+ */
 function ownershipSection(): string {
-  const doc = readFileSync(join(REPO_ROOT, PROCEDURE), "utf8");
-  return doc.split("### 2.1 master へ知らせる")[1]?.split("\n### ")[0] ?? "";
+  return procedureText("worker").split("### 2.1 master へ知らせる")[1]?.split("\n### ")[0] ?? "";
 }
 
 /** 文に割る。**改行は跨ぐ**（手順書は 1 文を複数行に折り返している）。 */

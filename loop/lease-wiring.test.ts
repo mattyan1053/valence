@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -33,8 +34,8 @@ describe("lease の説明が実態と合っている", () => {
   it("worker の手順書は「同じ作業場」で説明している", () => {
     // **嘘になった説明を残さない。** worker は作業場ごとに取るので、
     // 「同じ役の周回とは重ならない」は**別の作業場の worker とは重なる**という実態と食い違う
-    const section =
-      read(".claude/commands/loop-worker.md").split("### 通知を受け取ったら")[1] ?? "";
+    // **入口と本体を続けて読む** (#319)。**この節は本体にある**
+    const section = procedureText("worker").split("### 通知を受け取ったら")[1] ?? "";
 
     expect(section).toContain("作業場");
     expect(section).not.toMatch(/同じ役の周回とは重ならない/);
@@ -68,6 +69,6 @@ describe("lease の説明が実態と合っている", () => {
     const word = usage().includes("作業場");
 
     expect(word).toBe(true);
-    expect(read(".claude/commands/loop-worker.md")).toContain("作業場");
+    expect(procedureText("worker")).toContain("作業場");
   });
 });
