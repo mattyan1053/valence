@@ -1,4 +1,4 @@
-<!-- 版: 345be7328ae9 -->
+<!-- 版: 164ca40416d6 -->
 ---
 name: "Loop: Worker"
 description: Issue の実装またはレビュー指摘への対応を 1 周だけ実行する
