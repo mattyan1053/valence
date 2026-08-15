@@ -25,6 +25,11 @@ services:
     working_dir: ${PWD}
     volumes:
       - ${PWD}:${PWD}
+      # git の本体。**worktree の作業場では `${PWD}` の外にある** (#80)。
+      # **`.git` はファイルで、中身は本体を指す絶対パス**なので、
+      # **コンテナの中でも同じ絶対パスで辿れなければならない**（`working_dir` と同じ理由）。
+      # **clone そのものなら `${PWD}/.git` に落ちる**ので、マウントが重なるだけ。
+      - ${VALENCE_GIT_COMMON_DIR:-${PWD}/.git}:${VALENCE_GIT_COMMON_DIR:-${PWD}/.git}
       # pnpm のグローバルストア。再ビルドのたびに再ダウンロードしないため
       - pnpm-store:/home/node/.local/share/pnpm/store
     env_file:
