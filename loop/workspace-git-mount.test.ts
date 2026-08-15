@@ -113,13 +113,17 @@ function splitMount(entry: string): [string, string] {
   return [entry, ""];
 }
 
-function up(dir: string): void {
-  const result = spawnSync("./task", ["up"], {
+function run(dir: string, args: string[]): void {
+  const result = spawnSync("./task", args, {
     cwd: dir,
     encoding: "utf8",
     env: { ...process.env, PATH: `${join(dir, "stub")}:${process.env.PATH ?? ""}` },
   });
   expect(result.status, result.stderr).toBe(0);
+}
+
+function up(dir: string): void {
+  run(dir, ["up"]);
 }
 
 describe("worktree の作業場でも、コンテナから git が見える", () => {
@@ -169,5 +173,54 @@ describe("worktree の作業場でも、コンテナから git が見える", ()
     for (const [source, target] of mounts) {
       expect(target, `ホストと違うパスへ置いている: ${source}`).toBe(source);
     }
+  });
+});
+
+/**
+ * **直した設定が、直したい作業場に届くこと**（#295 のレビュー）。
+ *
+ * **`ensure_up` は「動いていなければ上げる」だけだった。** **動いているコンテナには
+ * 新しいマウントが入らない**ので、**この修正が main に入っても、既に上がっている
+ * 作業場では `./task check` が落ちたまま**である——**人が `./task up` を打つまで
+ * 直らず、しかも何も言わない。**
+ *
+ * **変えた側（`compose.yaml` と `task`）ではなく、残る側（既に走っているコンテナ）を
+ * 数える**（`AGENTS.md` §5）——**残る側は自分の diff に出てこない。**
+ */
+describe("設定を変えたら、動いているコンテナにも届く", () => {
+  /** **動いていると答える** docker。頼まれたことを全部記録する。 */
+  function equipRunning(dir: string): string {
+    copyFileSync(join(REPO_ROOT, "task"), join(dir, "task"));
+    chmodSync(join(dir, "task"), 0o755);
+    copyFileSync(join(REPO_ROOT, "compose.yaml"), join(dir, "compose.yaml"));
+    const stub = join(dir, "stub");
+    mkdirSync(stub);
+    const log = join(dir, "docker.log");
+    writeFileSync(
+      join(stub, "docker"),
+      [
+        "#!/usr/bin/env bash",
+        `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`,
+        // **既に上がっている**と答える（ここが、届かなかった場面そのもの）
+        'case "$*" in *"ps -q app") printf "deadbeef\\n" ;; "ps -q --filter"*) printf "deadbeef\\n" ;; esac',
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    return log;
+  }
+
+  it("既に上がっている作業場でも、compose に設定を突き合わせさせる", () => {
+    const { dir } = clone();
+    rmSync(join(dir, "stub"), { recursive: true, force: true });
+    const log = equipRunning(dir);
+
+    run(dir, ["lint"]);
+
+    // **`up -d` は、設定が同じなら何もしない**——**差分があるときだけ作り直る**
+    expect(readFileSync(log, "utf8"), "動いているコンテナに設定を届けていない").toMatch(
+      /^compose -p \S+ up -d app$/m,
+    );
   });
 });

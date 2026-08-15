@@ -166,12 +166,13 @@ ensure_network() {
     || docker network create supabase_network_valence >/dev/null
 }
 
+# **毎回 compose に突き合わせさせる** (#295 のレビュー)。**「動いていれば何もしない」
+# だと、`compose.yaml` を変えても動いているコンテナには届かない**——**直したのに
+# 直らず、しかも何も言わない**（**残る側は自分の diff に出てこない**。`AGENTS.md` §5）。
+# **`up -d` は設定が同じなら何もしない**ので、**差分があるときだけ作り直る。**
 ensure_up() {
   ensure_network
-  if [[ -z "$(compose ps -q app 2>/dev/null)" ]] || \
-     [[ -z "$(docker ps -q --filter "id=$(compose ps -q app)" 2>/dev/null)" ]]; then
-    compose up -d app
-  fi
+  compose up -d app
 }
 
 # 開発コンテナを起動する = アプリが起動する (冪等)
