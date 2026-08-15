@@ -510,10 +510,20 @@ parked_issues=${#parked_seen[@]}
 #
 # **読めなければ 1 本とみなす。** **`in_progress < 1` は、これまでの
 # `in_progress == 0` と同じ**——**分からないほうへ倒しても、渡しすぎにならない。**
+#
+# **数えられなかった理由は、ここで捨てない** (#310)。**言うようにした側（#304 / #308）の
+# 読み手はここだけ**で、**`2>/dev/null` にすると「本当は 2 人いるのに 1 本」へ倒れたことが
+# 周回の出力のどこにも出ない**——**#302 が消しに来た沈黙が、原因を変えて戻る。**
+#
+# **受け取ったものをそのまま流す**（**二重に言わない**）。**数えられた周回では
+# `bin/loop-stall` は何も書かない**ので、**正常な周回で増えるものは無い。**
 hands=1
-if alive="$("${BASH_SOURCE[0]%/*}/loop-stall" --alive-workers 2>/dev/null)" &&
-  [[ $alive =~ ^[0-9]+$ ]] && ((alive > hands)); then
-  hands="$alive"
+if alive="$("${BASH_SOURCE[0]%/*}/loop-stall" --alive-workers 2>&1)" &&
+  [[ $alive =~ ^[0-9]+$ ]]; then
+  ((alive > hands)) && hands="$alive"
+else
+  [[ -z $alive ]] || echo "$alive" >&2
+  echo "[WARN] 生きている作業場を数えられないので、手は 1 本として扱います" >&2
 fi
 readonly hands
 
