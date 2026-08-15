@@ -406,15 +406,49 @@ else
 fi
 
 # **件数も検索を通さない。** ここが遅れると `ready` の昇格が伝わらない。
+#
+# **番号も受け取る** (#285)。**件数だけでは、報告に載せる直前に確かめ直せない。**
 counts="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
   -f query='query($owner:String!,$repo:String!){
     repository(owner:$owner,name:$repo){
-      ready: issues(states:OPEN, labels:["ready"]){totalCount}
-      inProgress: issues(states:OPEN, labels:["in-progress"]){totalCount}
+      ready: issues(states:OPEN, labels:["ready"], first:50){nodes{number}}
+      inProgress: issues(states:OPEN, labels:["in-progress"], first:50){nodes{number}}
       backlog: issues(states:OPEN, labels:["backlog"]){totalCount}}}' \
-  --jq '.data.repository | "\(.ready.totalCount)\u001f\(.inProgress.totalCount)\u001f\(.backlog.totalCount)"')" ||
+  --jq '.data.repository | "\([.ready.nodes[].number] | join(","))\u001f\([.inProgress.nodes[].number] | join(","))\u001f\(.backlog.totalCount)"')" ||
   fail_unknown "Issue の件数"
-IFS="$FIELD" read -r ready in_progress backlog <<<"$counts"
+IFS="$FIELD" read -r ready_numbers progress_numbers backlog <<<"$counts"
+
+# **報告に載せる直前だけ、直接読んで数え直す** (#285。#281 と同じ形)。
+#
+# **この口も遅れる。** **label を外した数コマンド後の周回では、まだ返ってくる**
+# ——**そこで「手が埋まっている」と読むと、渡すものがあるのに黙る**（実測で同じ日に 3 回。
+# **マージした周回の出口でいちばん損をする**——**worker が空いていて、仕事が増えた瞬間**である）。
+#
+# **全件には投げない。** **`ready` と `in-progress` は上限が小さい**ので、往復は増えない
+# （**`backlog` は「1 件でもあるか」しか見ない**ので、数え直さない）。
+#
+# **読めなかったら数を返さない。** **「0 件」に倒すと、読めないあいだ黙る**——
+# **呼ぶ側が `fail_unknown` へ渡す**（判定不能は、送らない理由にしない）。
+count_labelled() {
+  local wanted="$1" list="$2" number labels label found=0
+  [[ -n $list ]] || {
+    printf '0'
+    return 0
+  }
+  while IFS= read -r number; do
+    [[ $number =~ ^[0-9]+$ ]] || continue
+    labels="$(gh issue view "$number" --json labels --jq '.labels[].name')" || return 1
+    while IFS= read -r label; do
+      [[ $label == "$wanted" ]] || continue
+      found=$((found + 1))
+      break
+    done <<<"$labels"
+  done <<<"${list//,/$'\n'}"
+  printf '%s' "$found"
+}
+
+ready="$(count_labelled "ready" "$ready_numbers")" || fail_unknown "ready の label"
+in_progress="$(count_labelled "in-progress" "$progress_numbers")" || fail_unknown "in-progress の label"
 
 for count in "$ready" "$in_progress" "$backlog"; do
   [[ $count =~ ^[0-9]+$ ]] || fail_unknown "件数が数値ではありません: $count"
