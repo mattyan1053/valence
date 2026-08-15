@@ -206,7 +206,7 @@ describe("レビュー順序を組み立てる", () => {
 
         const planned = planReviewOrder(
           { pullRequests: sourceReturning(stacked), changes: source },
-          { changesDeadline: deadline.signal },
+          { changesDeadline: () => deadline.signal },
         );
         // **呼ばれてから打ち切る。** 先に切ると「呼ばない」経路へ入り、
         // **待つのをやめる側**を試せない（時間では待たない）
@@ -227,7 +227,7 @@ describe("レビュー順序を組み立てる", () => {
 
         const planned = planReviewOrder(
           { pullRequests: sourceReturning(stacked), changes: source },
-          { changesDeadline: deadline.signal },
+          { changesDeadline: () => deadline.signal },
         );
         await called;
         deadline.abort();
@@ -257,13 +257,45 @@ describe("レビュー順序を組み立てる", () => {
 
         const planned = planReviewOrder(
           { pullRequests: sourceReturning(stacked), changes: source },
-          { changesDeadline: deadline.signal },
+          { changesDeadline: () => deadline.signal },
         );
         const seen = await called;
         deadline.abort();
         await planned;
 
         expect(seen, "口に合図が渡っていない").toBe(deadline.signal);
+      });
+
+      it("合図は、一覧を取り終えてから作る", async () => {
+        // **`AbortSignal.timeout` は作った瞬間から数え始める**（#316 のレビュー）
+        // ——**合成ルートで作ると、一覧に期限ぶんかかった日は材料に 0 秒しか残らない。**
+        // **落ちないので気づけない**（**画面も依存グラフも出て、リスク Tier だけが
+        // 全 PR で欠ける**。**「材料がありません」は正常な表示でもある**）。
+        //
+        // **決め方は composition に残したまま、開始だけ後ろへ動かす**——
+        // **時計を `application` へ持ち込まない**（この節の上に書いてある理由）。
+        const order: string[] = [];
+        const slowListing: PullRequestSource = {
+          listPullRequests: async () => {
+            order.push("一覧");
+            return stacked;
+          },
+        };
+
+        await planReviewOrder(
+          { pullRequests: slowListing, changes: NO_CHANGES },
+          {
+            changesDeadline: () => {
+              order.push("合図");
+              return new AbortController().signal;
+            },
+          },
+        );
+
+        expect(order, "一覧より先に合図を作っている（そのぶん材料の期限が減る）").toEqual([
+          "一覧",
+          "合図",
+        ]);
       });
 
       it("先に期限が切れていれば、口を呼ばない", async () => {
@@ -275,7 +307,7 @@ describe("レビュー順序を組み立てる", () => {
 
         const plan = await planReviewOrder(
           { pullRequests: sourceReturning(stacked), changes: source },
-          { changesDeadline: deadline.signal },
+          { changesDeadline: () => deadline.signal },
         );
 
         expect(asked).toEqual([]);

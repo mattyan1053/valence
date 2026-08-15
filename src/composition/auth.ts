@@ -266,7 +266,10 @@ export async function repositoryBoardForCurrentUser(repository: {
           pullRequests: createGitHubPullRequestSource({ credentials: app, repository }),
           changes: createGitHubChangeSummarySource({ credentials: app, repository }),
         },
-        { changesDeadline: AbortSignal.timeout(CHANGES_DEADLINE_MS) },
+        // **合図は作る手続きで渡す** (#316 のレビュー)。**ここで作って渡すと、
+        // 一覧の取得ぶんが材料の期限から引かれる**——**決め方はここに残したまま、
+        // 数え始める位置だけ後ろへ動かす。**
+        { changesDeadline: () => AbortSignal.timeout(CHANGES_DEADLINE_MS) },
       );
     },
   });

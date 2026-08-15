@@ -38,14 +38,23 @@ export type ReviewOrderSources = {
 
 export type ReviewOrderOptions = {
   /**
-   * 材料の取得を打ち切る合図。
+   * 材料の取得を打ち切る合図を**作る手続き**。
    *
    * **期限の決め方は持たない。** どれだけ待つかは**表示の段取り**であって、
    * ユースケースの判断ではない——ここに時計を置くと、`application` が
    * **Node 標準ライブラリ以外を持つ**か、**試験が時間に依存する**かのどちらかになる。
    * **合図を受け取る形なら、どちらも要らない。**
+   *
+   * **作る手続きで受けるのは、数え始める位置のため**である（#316 のレビュー）。
+   * **`AbortSignal.timeout` は作った瞬間から数え始める**ので、**合成ルートで
+   * 作って渡すと、一覧の取得ぶんが材料の期限から引かれる**——**一覧に期限ぶん
+   * かかった日は、材料に 0 秒しか残らない。**
+   *
+   * **落ちないので気づけない。** **画面も依存グラフも出て、リスク Tier だけが
+   * 全 PR で欠ける**——**「材料がありません」は正常な表示でもある。**
+   * **遅いのは PR が多いリポジトリ**なので、**交通整理がいちばん要る側で消える。**
    */
-  readonly changesDeadline?: AbortSignal;
+  readonly changesDeadline?: () => AbortSignal;
 };
 
 /**
@@ -62,7 +71,8 @@ export async function planReviewOrder(
   const { pullRequests, invalid } = await sources.pullRequests.listPullRequests();
   const edges = buildDependencyEdges(pullRequests);
   const numbers = pullRequests.map((pullRequest) => pullRequest.number);
-  const changes = await collectChanges(sources.changes, numbers, options.changesDeadline);
+  // **合図はここで作る。** **一覧を取り終えてから数え始める**（#316 のレビュー）
+  const changes = await collectChanges(sources.changes, numbers, options.changesDeadline?.());
 
   return {
     pullRequests,
