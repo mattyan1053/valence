@@ -319,9 +319,12 @@ declare -A requested_of=()
 
 # PR ごとの、必須チェックの結果。**指紋に入れる**
 declare -A checks_of=()
+# PR ごとの head。**枝ごとの指紋に要る** (#274)——**その PR が動いたかは head で見る**
+declare -A head_of=()
 
-while IFS="$FIELD" read -r number _labels _head labeled_at _body; do
+while IFS="$FIELD" read -r number _labels head labeled_at _body; do
   [[ -n $number ]] || continue
+  head_of[$number]="$head"
 
   # **ゲートと同じ判定を、同じところから取る。** **指紋は決着の別だけ**で、
   # **予算は見ない**——**時間の経過だけで指紋が動くと、何も変わっていないのに通知が飛ぶ**。
@@ -492,7 +495,175 @@ parked_issues=${#parked_seen[@]}
 #
 # **番号だけを入れる。** 時刻を入れると**変わらないはずのもので指紋が動く**ので、
 # **「同じ状態では 2 通目を送らない」を壊す側**に倒れる。
-readonly STATE="prs=${prs}|detail=${details}|checks=${checks}|ready=${ready}|in-progress=${in_progress}|backlog=${backlog}|silent-park=${silent_park}"
+#
+# **ただし、世界全部を指紋にしない** (#274)。**上の値をすべて並べると、
+# 理由が同じでも、無関係な数が動いただけで「新しい状態」になる**——
+# **CI が pending から success へ進んだだけ / master が別の Issue を起票しただけ**で
+# 再送されていた（どちらも実測）。**受け取る側は本文を読まなくなり、
+# 本当に新しい 1 通がその中に埋もれる。**
+#
+# **指紋は「選ばれた枝が読んだものだけ」から作る。** 枝ごとに `witness` を組み立て、
+# **理由と合わせて 1 つの鍵にする**（下の分岐を参照）。**理由だけを鍵にはしない**
+# ——**同じ文面のまま状況が変わる**（指摘が 1 件増えても文面は同じ）ので、
+# **狭めすぎると、変わったのに黙る**（#258 が塞いだ向きへ倒れる）。
+
+# その PR について、**判断に効く入力だけ**を並べる。
+# **head は「変われば前へ進んだ」**、**未解決の数と最後の発言 ID は「指摘が動いた」**
+# を表す。**どちらも時刻ではない**（`bin/loop-stall` の識別子と同じ制約）。
+pr_witness() {
+  printf 'pr=%s|head=%s|detail=%s:%s' \
+    "$1" "${head_of[$1]-}" "${unresolved_of[$1]-}" "${last_comment_of[$1]-}"
+}
+
+# **その枝の候補ぜんぶ**を指紋にする (#292 のレビュー)。
+#
+# **選ぶのは 1 件だが、指紋を 1 件ぶんにすると、もう 1 件が動いても `STATE` は同じ**
+# ——**送らない。** **選ばれている側が動かないかぎり、もう 1 件はずっと指紋に現れない**
+# （**`changes-requested` は master 待ちで何日でも止まりうる**）。
+# **#80（worker 2 セッション）が入れば、「同じ枝に 2 件」は普通の状態になる。**
+#
+# **倒れる向きで決める**（#124 / #125 / #258）——**送りすぎは読み飛ばされるだけ**だが、
+# **黙るほうは誰も気づけない。** **#274 は前者を減らす Issue で、後者を作ってよい
+# 理由にはならない。**
+#
+# **並びは番号順にする。** **`gh` の返す順に依存すると、並びが変わっただけで
+# 別状態になる**——**何も動いていないのに通知が飛ぶ**（#274 が減らそうとした側）。
+branch_witness() {
+  local number extra="${2-}" out=""
+  for number in $(printf '%s\n' $1 | sort -n); do
+    out+="${out:+;}$(pr_witness "$number")"
+    [[ -z $extra ]] || out+="|${extra}=${checks_of[$number]-}"
+  done
+  printf '%s' "$out"
+}
+
+changes_requested=""
+gateable=""
+# **label と実態の食い違い。** 未解決が残っているのに `changes-requested` が無い状態で、
+# 運用が壊れている（付け忘れではなく、**付ける段が無い経路がある**）。
+mismatched=""
+# **答えを待っている側**の PR（未解決があり、最後に書いたのが自分たちの役）。
+answered=""
+# **当否がまだ判断されていない指摘がある** PR。**動けるのは master だけ**である。
+untriaged=""
+while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
+  [[ -n $number ]] || continue
+  unresolved="${unresolved_of[$number]-0}"
+  [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
+  untriaged_here="${untriaged_of[$number]-0}"
+  requested_here="${requested_of[$number]-0}"
+  if [[ ",$labels," == *",parked,"* ]]; then
+    :
+  elif ((untriaged_here > 0)); then
+    # **まだ誰も答えておらず、当否も判断されていない。**
+    # **`changes-requested` を付け外しできるのは master だけ**なので、
+    # ここを worker 宛にすると **worker の周回は自分宛て → 沈黙**になり、
+    # **master は自分の周回まで気づけない**。その間ずっと下の食い違いが記録され、
+    # **PR が健全でも 3 周で `loop/STOP`** に達する（#149 / #152 で実際に踏んだ）。
+    untriaged="${untriaged:+$untriaged }$number"
+    # **食い違いは「label が 1 つも付いていない」ときだけ**である。
+    # 既に付いている PR へ新しい指摘が届いた状態は、**運用が壊れているのではない**——
+    # 渡す先が master だというだけなので、ここで記録すると**正常な受け渡しで人を呼ぶ**。
+    [[ ",$labels," == *",changes-requested,"* ]] || mismatched="$number"
+  elif ((requested_here > 0)); then
+    # 当否は判断済み（その指摘が見えている時点で label が付いている）。直すのは worker
+    changes_requested="${changes_requested:+$changes_requested }$number"
+  elif ((unresolved > 0)); then
+    # **件数だけでは持ち手が決まらない。** 同じ「未解決 1 件」に
+    # 「指摘が返ってきた直後」と「直して返信し終えた直後」が混ざっている。
+    # **役は同じアカウントで動く**ので、GitHub 側の名前では見分けられない——
+    # **呼んだ側は、その周回で書き終えている**ので、渡す先は相手役である。
+    answered="${answered:+$answered }$number"
+  elif [[ ",$labels," == *",changes-requested,"* ]]; then
+    changes_requested="${changes_requested:+$changes_requested }$number"
+  else
+    gateable="${gateable:+$gateable }$number"
+  fi
+done <<<"$prs"
+
+# 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
+if [[ -n $silent_park ]]; then
+  # **忘れられる側にある**ので、いちばん先に見る (#163)。**ステップ 2 は `parked` を
+  # 選ばない**ので、**ここで渡さないと誰もその PR を見ない**。
+  # **直せるのは master** である (理由を投稿し直すか、保留を戻す)。
+  to="master"
+  reason="PR #${silent_park} が理由の無い保留になっている（理由を投稿し直すか、保留を戻す）"
+  # **読んだのは「理由の無い保留がある」ことだけ**である
+  branch="silent-park"
+  witness="silent-park=${silent_park}"
+elif [[ -n $untriaged ]]; then
+  # **当否を判断できるのは master だけ**である。**放っておくとループが止まる側**なので、
+  # 他の持ち物より先に見る。
+  to="master"
+  reason="PR #${untriaged%% *} の指摘が未処理（当否を判断して changes-requested を付けるか、外出しする）"
+  branch="untriaged"
+  witness="$(branch_witness "$untriaged")"
+elif [[ -n $answered ]]; then
+  # 相手役へ渡す。**自分は今の周回で書き終えている**
+  to="worker"
+  reason="PR #${answered%% *} に未解決の指摘がある"
+  # **役で反転しても、同じ状態である** (#173 のレビュー)。**理由の文面を鍵にすると、
+  # 同じ指摘について master→worker と worker→master で 2 通出る**——
+  # **鍵は枝の名前で持ち、文面は持たない。**
+  branch="answered"
+  witness="$(branch_witness "$answered")"
+  if [[ $ROLE == "worker" ]]; then
+    to="master"
+    # **状態から読めることだけを言う。** 「対応が返っている」とは書かない——
+    # **出口は「何もしなかった場合も含めて必ず通す」**ので、**何も書いていない周回も
+    # ここへ来る**。**書いた前提で文を作ると、していないことを言う** (#173 のレビュー)。
+    reason="PR #${answered%% *} の未解決スレッドの最後の発言が bot ではない（確認して resolve できる）"
+  fi
+elif [[ -n $changes_requested ]]; then
+  to="worker"
+  reason="PR #${changes_requested%% *} に master の要求が残っている"
+  # **CI は見ない。** **要求が残っているかどうかは、CI が進んでも変わらない**
+  branch="changes-requested"
+  witness="$(branch_witness "$changes_requested")"
+elif [[ -n $gateable ]]; then
+  to="master"
+  reason="PR #${gateable%% *} のゲートを回せる"
+  branch="gateable"
+  # **ここでは CI も読む。** **ゲートが落とす条件そのもの**なので、
+  # **外すと、マージできるようになった、まさにその瞬間に黙る** (#125 / #173 のレビュー)
+  witness="$(branch_witness "$gateable" checks)"
+elif ((ready >= 1 && in_progress == 0)); then
+  # **件数で絞らない** (#267)。**等号だと 2 件でどの枝にも入らず、
+  # 「相手に持ち物が無い」と読まれて終わる**——**いちばん渡したい瞬間に落ちる。**
+  # **`in-progress` が 0 になるのは「実装が終わった直後」**で、
+  # **そのとき `ready` が 2 件溜まっているのは普通**である（master は 2 件まで満たす）。
+  #
+  # **重複の抑止は指紋が別に持っている**ので、**緩めても 2 通目は出ない。**
+  # **`in-progress` の条件はそのまま**——**取ったあとに止まった状態を起こすのは #264** で、
+  # **あちらは「そもそも数えていない」ところから**である。
+  to="worker"
+  reason="ready の Issue が ${ready} 件ある"
+  # **`backlog` は読んでいない。** **起票や昇格で動くだけ**で、渡す理由は変わらない
+  branch="ready"
+  witness="ready=${ready}|in-progress=${in_progress}"
+elif ((backlog > 0 && ready == 0)); then
+  to="master"
+  reason="backlog はあるが ready が 0 件（昇格の番）"
+  # **件数までは見ない。** **「1 件でもあるか」しか判断に使っていない**
+  branch="promote"
+  witness="ready=${ready}|backlog=$((backlog > 0))"
+else
+  # ここは `bin/loop-stall` が `no-work` として数える領域である。
+  #
+  # **記録は通す。** **何も渡さない周回でも、状態が動いたことは残す**——
+  # **残さないと、前に送った理由の記録が古くならず、同じ理由が次に立ち上がったとき
+  # 「送信済み」として黙る**（**狭めた指紋では、これが起きやすい**）。
+  to=""
+  reason=""
+  branch="no-work"
+  witness="ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
+fi
+
+# **どの枝に入ったかと、その枝が読んだ入力**を 1 つの鍵にする (#274)。
+#
+# **理由の文面は鍵にしない。** **`answered` は呼んだ役で宛先も文面も反転する**ので、
+# **文面を入れると、同じ指摘について 2 通出る** (#173 のレビュー)。
+readonly STATE="on=${branch}|${witness}"
 
 # **「送った」と「見た」を分ける** (#125)。
 #
@@ -546,97 +717,8 @@ for role in "${ROLES[@]}"; do
   }
 done
 
-changes_requested=""
-gateable=""
-# **label と実態の食い違い。** 未解決が残っているのに `changes-requested` が無い状態で、
-# 運用が壊れている（付け忘れではなく、**付ける段が無い経路がある**）。
-mismatched=""
-# **答えを待っている側**の PR（未解決があり、最後に書いたのが自分たちの役）。
-answered=""
-# **当否がまだ判断されていない指摘がある** PR。**動けるのは master だけ**である。
-untriaged=""
-while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
-  [[ -n $number ]] || continue
-  unresolved="${unresolved_of[$number]-0}"
-  [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
-  untriaged_here="${untriaged_of[$number]-0}"
-  requested_here="${requested_of[$number]-0}"
-  if [[ ",$labels," == *",parked,"* ]]; then
-    :
-  elif ((untriaged_here > 0)); then
-    # **まだ誰も答えておらず、当否も判断されていない。**
-    # **`changes-requested` を付け外しできるのは master だけ**なので、
-    # ここを worker 宛にすると **worker の周回は自分宛て → 沈黙**になり、
-    # **master は自分の周回まで気づけない**。その間ずっと下の食い違いが記録され、
-    # **PR が健全でも 3 周で `loop/STOP`** に達する（#149 / #152 で実際に踏んだ）。
-    untriaged="$number"
-    # **食い違いは「label が 1 つも付いていない」ときだけ**である。
-    # 既に付いている PR へ新しい指摘が届いた状態は、**運用が壊れているのではない**——
-    # 渡す先が master だというだけなので、ここで記録すると**正常な受け渡しで人を呼ぶ**。
-    [[ ",$labels," == *",changes-requested,"* ]] || mismatched="$number"
-  elif ((requested_here > 0)); then
-    # 当否は判断済み（その指摘が見えている時点で label が付いている）。直すのは worker
-    changes_requested="$number"
-  elif ((unresolved > 0)); then
-    # **件数だけでは持ち手が決まらない。** 同じ「未解決 1 件」に
-    # 「指摘が返ってきた直後」と「直して返信し終えた直後」が混ざっている。
-    # **役は同じアカウントで動く**ので、GitHub 側の名前では見分けられない——
-    # **呼んだ側は、その周回で書き終えている**ので、渡す先は相手役である。
-    answered="$number"
-  elif [[ ",$labels," == *",changes-requested,"* ]]; then
-    changes_requested="$number"
-  else
-    gateable="$number"
-  fi
-done <<<"$prs"
-
-# 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
-if [[ -n $silent_park ]]; then
-  # **忘れられる側にある**ので、いちばん先に見る (#163)。**ステップ 2 は `parked` を
-  # 選ばない**ので、**ここで渡さないと誰もその PR を見ない**。
-  # **直せるのは master** である (理由を投稿し直すか、保留を戻す)。
-  to="master"
-  reason="PR #${silent_park} が理由の無い保留になっている（理由を投稿し直すか、保留を戻す）"
-elif [[ -n $untriaged ]]; then
-  # **当否を判断できるのは master だけ**である。**放っておくとループが止まる側**なので、
-  # 他の持ち物より先に見る。
-  to="master"
-  reason="PR #${untriaged} の指摘が未処理（当否を判断して changes-requested を付けるか、外出しする）"
-elif [[ -n $answered ]]; then
-  # 相手役へ渡す。**自分は今の周回で書き終えている**
-  to="worker"
-  reason="PR #${answered} に未解決の指摘がある"
-  if [[ $ROLE == "worker" ]]; then
-    to="master"
-    # **状態から読めることだけを言う。** 「対応が返っている」とは書かない——
-    # **出口は「何もしなかった場合も含めて必ず通す」**ので、**何も書いていない周回も
-    # ここへ来る**。**書いた前提で文を作ると、していないことを言う** (#173 のレビュー)。
-    reason="PR #${answered} の未解決スレッドの最後の発言が bot ではない（確認して resolve できる）"
-  fi
-elif [[ -n $changes_requested ]]; then
-  to="worker"
-  reason="PR #${changes_requested} に master の要求が残っている"
-elif [[ -n $gateable ]]; then
-  to="master"
-  reason="PR #${gateable} のゲートを回せる"
-elif ((ready >= 1 && in_progress == 0)); then
-  # **件数で絞らない** (#267)。**等号だと 2 件でどの枝にも入らず、
-  # 「相手に持ち物が無い」と読まれて終わる**——**いちばん渡したい瞬間に落ちる。**
-  # **`in-progress` が 0 になるのは「実装が終わった直後」**で、
-  # **そのとき `ready` が 2 件溜まっているのは普通**である（master は 2 件まで満たす）。
-  #
-  # **重複の抑止は指紋が別に持っている**ので、**緩めても 2 通目は出ない。**
-  # **`in-progress` の条件はそのまま**——**取ったあとに止まった状態を起こすのは #264** で、
-  # **あちらは「そもそも数えていない」ところから**である。
-  to="worker"
-  reason="ready の Issue が ${ready} 件ある"
-elif ((backlog > 0 && ready == 0)); then
-  to="master"
-  reason="backlog はあるが ready が 0 件（昇格の番）"
-else
-  # ここは `bin/loop-stall` が `no-work` として数える領域である。
-  exit 1
-fi
+# **渡す相手がいなければ、ここで終わる**（記録は上で通してある）。
+[[ -n $to ]] || exit 1
 
 # **「送るかどうか」と「記録するかどうか」は別の判断である。**
 #
