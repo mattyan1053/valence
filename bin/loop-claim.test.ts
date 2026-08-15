@@ -1108,10 +1108,47 @@ describe("bin/loop-claim", () => {
      * **`--jq` の後ろの形で返す。** `audit` の偽物と同じ約束である
      * （**本物の `gh` が絞ったあとの行**を、そのまま出す）。
      */
+    /**
+     * **いま直接読んだら返る label** を、Issue ごとに置く。
+     *
+     * **一覧と直読みは、別のものを返しうる**（索引は遅れる）。**既定では揃えて置き**、
+     * **`nowLabels` を渡した分だけ食い違わせる。**
+     */
+    function writeLabelFixtures(options: {
+      inProgress?: { number: number; labels?: string[] }[];
+      nowLabels?: Record<number, string[]>;
+    }): string {
+      const labelsDir = join(repo, "labels-idle");
+      mkdirSync(labelsDir, { recursive: true });
+      for (const issue of options.inProgress ?? []) {
+        const now = options.nowLabels?.[issue.number] ?? issue.labels ?? ["in-progress"];
+        writeFileSync(join(labelsDir, String(issue.number)), `${now.join("\n")}\n`);
+      }
+      return labelsDir;
+    }
+
+    /**
+     * **その Issue を「言及している」open PR** を、Issue ごとに置く。
+     *
+     * **言及と実装は別である** (#322 のレビュー 2 周目)。**このループは番号を引き合いに
+     * 出しながら書く**ので、**参照だけで黙る実装に戻したら、この口が答えた瞬間に赤くなる。**
+     */
+    function writeReferenceFixtures(referencedBy: Record<number, number[]> | undefined): string {
+      const refsDir = join(repo, "refs-idle");
+      mkdirSync(refsDir, { recursive: true });
+      for (const [number, prs] of Object.entries(referencedBy ?? {})) {
+        writeFileSync(join(refsDir, number), `${prs.join("\n")}\n`);
+      }
+      return refsDir;
+    }
+
     function withIdle(options: {
       inProgress?: { number: number; labels?: string[] }[];
-      /** open PR が閉じる予定の Issue。**別リポジトリのものも置ける。** */
-      prs?: { closes: number[]; repo?: string }[];
+      /**
+       * open PR。**`closes` は閉じる予定の Issue**（**別リポジトリのものも置ける**）、
+       * **`head` は枝の名前**である。
+       */
+      prs?: { closes?: number[]; repo?: string; head?: string }[];
       /**
        * **いま直接読んだら返る label。** 省くと一覧と同じものが返る。
        *
@@ -1119,6 +1156,13 @@ describe("bin/loop-claim", () => {
        * という状態が実在する（マージ直後がいちばん踏みやすい）。
        */
       nowLabels?: Record<number, string[]>;
+      /**
+       * その Issue を**言及している** open PR の番号。
+       *
+       * **言及は実装ではない** (#322 のレビュー 2 周目)——**「#312 と同じ形」と
+       * 書いただけの PR も `CROSS_REFERENCED_EVENT` になる。**
+       */
+      referencedBy?: Record<number, number[]>;
       /**
        * この一覧だけが読めない。**「0 件」と読み違えないこと**を見る。
        *
@@ -1130,23 +1174,22 @@ describe("bin/loop-claim", () => {
       const issues = (options.inProgress ?? [])
         .map((issue) => `${issue.number}\t${(issue.labels ?? ["in-progress"]).join(",")}`)
         .join("\n");
-      const closes = (options.prs ?? [])
-        .flatMap((pr) => pr.closes.map((number) => `${pr.repo ?? "owner/repo"}\t${number}`))
+      // **1 回の `pr list` が返す行。** **枝と `Closes` を種別で書き分ける**
+      const openPrs = (options.prs ?? [])
+        .flatMap((pr) => [
+          ...(pr.head === undefined ? [] : [`head\t${pr.head}`]),
+          ...(pr.closes ?? []).map((number) => `closes\t${pr.repo ?? "owner/repo"}\t${number}`),
+        ])
         .join("\n");
-      const labelsDir = join(repo, "labels-idle");
-      mkdirSync(labelsDir, { recursive: true });
-      for (const issue of options.inProgress ?? []) {
-        // **一覧と直読みは、別のものを返しうる**（索引は遅れる）。**既定では揃えて置き**、
-        // **`nowLabels` を渡した分だけ食い違わせる**
-        const now = options.nowLabels?.[issue.number] ?? issue.labels ?? ["in-progress"];
-        writeFileSync(join(labelsDir, String(issue.number)), `${now.join("\n")}\n`);
-      }
+      const labelsDir = writeLabelFixtures(options);
+      const refsDir = writeReferenceFixtures(options.referencedBy);
 
       writeFileSync(
         join(path, "gh"),
         [
           "#!/usr/bin/env bash",
           `labels_dir=${JSON.stringify(labelsDir)}`,
+          `refs_dir=${JSON.stringify(refsDir)}`,
           ...(options.failOn === undefined
             ? []
             : [`if [[ $* == *${JSON.stringify(options.failOn)}* ]]; then exit 1; fi`]),
@@ -1161,8 +1204,21 @@ describe("bin/loop-claim", () => {
           "  exit 0",
           "fi",
           'if [[ $* == *"pr list"* ]]; then',
-          `  printf '%b' ${JSON.stringify(closes)}`,
-          `  [[ -n ${JSON.stringify(closes)} ]] && echo`,
+          `  printf '%b' ${JSON.stringify(openPrs)}`,
+          `  [[ -n ${JSON.stringify(openPrs)} ]] && echo`,
+          "  exit 0",
+          "fi",
+          // **その Issue を言及している open PR**。**番号は `-F number=<N>` で来る**
+          //
+          // **答える口は残してある**（#322 のレビュー 2 周目）——**言及で黙る実装に
+          // 戻したら、ここが答えた瞬間に「言及しただけでは黙らない」が赤くなる。**
+          'if [[ $* == *"api graphql"* ]]; then',
+          "  for word in $*; do",
+          "    [[ $word == number=* ]] || continue",
+          '    issue="${word#number=}"',
+          '    [[ -f "$refs_dir/$issue" ]] && cat "$refs_dir/$issue"',
+          "    exit 0",
+          "  done",
           "  exit 0",
           "fi",
           'if [[ $* == *"issue view"* ]]; then',
@@ -1210,6 +1266,73 @@ describe("bin/loop-claim", () => {
       const [kind, number, elapsed] = (idle.stdout.split("\n")[0] ?? "").split("\t");
       expect([kind, number]).toEqual(["stalled", "264"]);
       expect(Number(elapsed)).toBeGreaterThanOrEqual(9000);
+    });
+
+    it("`Closes` が無くても、実装が出ていれば並べない", () => {
+      // **割った PR は親 Issue を閉じない**（**途中の 1/3 に `Closes` を書くと、
+      // そこが入った時点で親が閉じる**）ので、**`closingIssuesReferences` には出てこない**
+      // ——**`Closes` だけを見ていると、実装が出ているのに「出ていない」と報告する**（#321）。
+      //
+      // **人が呼ばれる理由が変わる**のが悪い：**実際は人の判断待ち**なのに、
+      // **「実装が出ていない」と書いて呼ぶ**——**来た人は違う場所を見る。**
+      withIdle({
+        inProgress: [{ number: 315 }],
+        prs: [{ head: "feat/315-approve-pull-request" }],
+      });
+      writeClaim(315, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status, "実装が出ているのに stalled と報告している").toBe(1);
+    });
+
+    it("言及しただけの open PR では黙らない", () => {
+      // **「#312 と同じ形」と書けば、それは #312 への `CROSS_REFERENCED_EVENT` になる**
+      // ——**このループは番号を引き合いに出しながら書く**ので、**参照で数えると
+      // 「開いている PR がある限り黙る」**（#322 のレビュー 2 周目）。
+      //
+      // **入れる前より悪い向きである。** **誤報は行が見えるが、黙るのは見えない**
+      // ——**本当に止まっても、誰も呼ばれない。**
+      withIdle({
+        inProgress: [{ number: 315 }],
+        prs: [{ head: "fix/321-idle-cross-references" }],
+        referencedBy: { 315: [322] },
+      });
+      writeClaim(315, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).stdout.split("\n")[0], "言及しただけの PR で黙っている").toMatch(
+        /^stalled\t315\t/,
+      );
+    });
+
+    it("実装の枝が 1 本も無ければ、これまでどおり並べる", () => {
+      // **緩めすぎない側の担保。** **実装を探しに行くようにしたせいで、
+      // 本物の停止まで見逃したら、この検出器そのものが死ぬ**
+      withIdle({ inProgress: [{ number: 264 }], prs: [{ head: "fix/321-other" }] });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(0);
+      expect(run(["idle"]).stdout.split("\n")[0]).toMatch(/^stalled\t264\t/);
+    });
+
+    it("番号が前に付いているだけの枝は、その Issue の実装ではない", () => {
+      // **`feat/3150-` は #315 ではない。** **前方一致で数えると、番号が長い Issue の
+      // 実装が、短い番号の Issue を黙らせる**
+      withIdle({ inProgress: [{ number: 315 }], prs: [{ head: "feat/3150-something" }] });
+      writeClaim(315, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).stdout.split("\n")[0], "別の Issue の枝で黙っている").toMatch(
+        /^stalled\t315\t/,
+      );
+    });
+
+    it("番号を読めない枝は、実装が出ていない側へ倒す", () => {
+      // **積みすぎても人が呼ばれるだけ**だが、**積み損ねると誰も来ない**
+      // ——**規約から外れた枝は、黙る理由にしない**
+      withIdle({ inProgress: [{ number: 315 }], prs: [{ head: "feat/approve-pull-request" }] });
+      writeClaim(315, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).stdout.split("\n")[0], "番号の無い枝で黙っている").toMatch(
+        /^stalled\t315\t/,
+      );
     });
 
     it("着手して間もない Issue は並べない", () => {

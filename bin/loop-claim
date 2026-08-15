@@ -252,10 +252,14 @@ if [[ $ACTION == "idle" ]]; then
   fi
   # **閉じる Issue は GitHub に訊く**（`audit` と同じ理由）。**本文を自分で解析すると、
   # `close` / `fixes` / `resolved` の書き分けを写すことになり、写した規則は必ずずれる。**
-  if ! covered="$(gh pr list --state open --limit 200 --json number,closingIssuesReferences \
-    --jq '.[].closingIssuesReferences[]
-      | "\(.repository.owner.login)/\(.repository.name)\t\(.number)"')"; then
-    echo "[FAIL] open PR が閉じる Issue を読めません" >&2
+  #
+  # **枝の名前も、この 1 回で取る** (#322 のレビュー 2 周目)。**取り直さない**——
+  # **同じ周回の中に 2 つの一覧ができると、片方だけ古い値になりうる。**
+  if ! open_pr_lines="$(gh pr list --state open --limit 200 --json headRefName,closingIssuesReferences \
+    --jq '.[] | "head\t\(.headRefName)",
+      (.closingIssuesReferences[]
+        | "closes\t\(.repository.owner.login)/\(.repository.name)\t\(.number)")')"; then
+    echo "[FAIL] open PR の一覧を読めません" >&2
     exit 2
   fi
 
@@ -284,6 +288,32 @@ if [[ $ACTION == "idle" ]]; then
     ! has_label "blocked" "$fresh"
   }
 
+  # **`Closes` だけに頼らない** (#321)。**割った PR は親 Issue を閉じない**
+  # （**途中の 1/3 に書くと、そこが入った時点で親が閉じる**）ので、
+  # **`closingIssuesReferences` には出てこない**——**それでも実装は出ている。**
+  #
+  # **見るのは枝の名前である** (#322 のレビュー 2 周目)。**参照
+  # （`CROSS_REFERENCED_EVENT`）で数えていたが、言及しただけの PR も参照になる**
+  # ——**このループは番号を引き合いに出しながら書く**ので（**「#312 と同じ形」**）、
+  # **開いている PR がある限り、その Issue では黙る。** **入れる前より悪い向きである**
+  # （**誤報は行が見えるが、黙るのは見えない**）。
+  #
+  # **`CONNECTED_EVENT` は使えない。** **このリポジトリの timeline には 1 件も無く**
+  # （**`Closes` を書いた #316 でも出ない**）、**出たとしても
+  # `closingIssuesReferences` と同じものしか指さない。**
+  #
+  # **番号を読めない枝は、実装が出ていない側へ倒す**（`.claude/rules/git-workflow.md`
+  # の命名から外れた枝）——**積みすぎても人が呼ばれるだけだが、積み損ねると誰も来ない。**
+  implemented_by_open_pr() {
+    local number="$1" kind head
+    while IFS=$'\t' read -r kind head; do
+      [[ $kind == "head" ]] || continue
+      [[ $head =~ ^[a-z]+/([0-9]+)- ]] || continue
+      [[ ${BASH_REMATCH[1]} == "$number" ]] && return 0
+    done <<<"$open_pr_lines"
+    return 1
+  }
+
   now="$(date +%s)"
   idle_found=0
   while IFS=$'\t' read -r number labels; do
@@ -293,13 +323,14 @@ if [[ $ACTION == "idle" ]]; then
     has_label "blocked" "${labels//,/$'\n'}" && continue
 
     published=0
-    while IFS=$'\t' read -r closed_repo closed; do
+    while IFS=$'\t' read -r kind closed_repo closed; do
+      [[ $kind == "closes" ]] || continue
       # **このリポジトリのものだけを見る。** **他所の同じ番号を閉じる PR**（`Fixes owner/other#264`）
       # を数えると、**実装が出ていないのに「出ている」と読む**——**検出器が黙る側**である。
       [[ $closed_repo == "$HERE" && $closed == "$number" ]] || continue
       published=1
       break
-    done <<<"$covered"
+    done <<<"$open_pr_lines"
     ((published == 0)) || continue
 
     record="$common_dir/valence-loop-claim-$number"
@@ -324,6 +355,8 @@ if [[ $ACTION == "idle" ]]; then
       exit 2
     fi
     ((now - held_taken >= IDLE_SEC)) || continue
+    # **`Closes` を書かない PR も実装である** (#321)
+    implemented_by_open_pr "$number" && continue
     still_in_progress "$number" || continue
     printf '%s\t%s\t%s\n' "stalled" "$number" "$((now - held_taken))"
     idle_found=1
