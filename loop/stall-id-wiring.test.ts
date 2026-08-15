@@ -222,6 +222,9 @@ describe("止められなかったときの終了コード", () => {
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     mkdirSync(join(repo, "bin"));
     copyFileSync(join(REPO_ROOT, "bin", "loop-stall"), join(repo, "bin", "loop-stall"));
+    // **`bin/loop-lease` も要る** (#239)。**カウンタを分ける単位を持っている**
+    copyFileSync(join(REPO_ROOT, "bin", "loop-lease"), join(repo, "bin", "loop-lease"));
+    chmodSync(join(repo, "bin", "loop-lease"), 0o755);
     chmodSync(join(repo, "bin", "loop-stall"), 0o755);
     writeFileSync(
       join(repo, "task"),

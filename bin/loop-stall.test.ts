@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { holdingSnippet } from "../test/held-lock";
@@ -247,6 +247,10 @@ describe("上限に達したときに止める対象", () => {
     mkdirSync(join(scriptRepo, "bin"));
     const script = join(scriptRepo, "bin", "loop-stall");
     copyFileSync(SCRIPT, script);
+    // **`bin/loop-lease` も隣へ置く** (#239)。**カウンタを分ける単位（作業場）は
+    // あちらが持っている**ので、**無いと数えられない**（判定不能で止まる）
+    copyFileSync(join(REPO_ROOT, "bin", "loop-lease"), join(dirname(script), "loop-lease"));
+    chmodSync(join(dirname(script), "loop-lease"), 0o755);
     chmodSync(script, 0o755);
 
     const cwd = options.cwd === "same-repo" ? scriptRepo : otherRepo;
@@ -309,6 +313,10 @@ describe("上限に達したときに止める対象", () => {
     mkdirSync(join(scriptRepo, "bin"));
     const script = join(scriptRepo, "bin", "loop-stall");
     copyFileSync(SCRIPT, script);
+    // **`bin/loop-lease` も隣へ置く** (#239)。**カウンタを分ける単位（作業場）は
+    // あちらが持っている**ので、**無いと数えられない**（判定不能で止まる）
+    copyFileSync(join(REPO_ROOT, "bin", "loop-lease"), join(dirname(script), "loop-lease"));
+    chmodSync(join(dirname(script), "loop-lease"), 0o755);
     chmodSync(script, 0o755);
     const link = `${scriptRepo}-link`;
     symlinkSync(scriptRepo, link);
@@ -342,6 +350,10 @@ describe("上限に達したときに止める対象", () => {
     mkdirSync(join(repo, "bin"));
     const script = join(repo, "bin", "loop-stall");
     copyFileSync(SCRIPT, script);
+    // **`bin/loop-lease` も隣へ置く** (#239)。**カウンタを分ける単位（作業場）は
+    // あちらが持っている**ので、**無いと数えられない**（判定不能で止まる）
+    copyFileSync(join(REPO_ROOT, "bin", "loop-lease"), join(dirname(script), "loop-lease"));
+    chmodSync(join(dirname(script), "loop-lease"), 0o755);
     chmodSync(script, 0o755);
     // worktree を足すには commit が要る
     spawnSync("git", ["-C", repo, "add", "-A"]);
@@ -416,6 +428,10 @@ describe("作業が尽きた周回の数え方", () => {
     mkdirSync(join(repo, "bin"));
     const script = join(repo, "bin", "loop-stall");
     copyFileSync(SCRIPT, script);
+    // **`bin/loop-lease` も隣へ置く** (#239)。**カウンタを分ける単位（作業場）は
+    // あちらが持っている**ので、**無いと数えられない**（判定不能で止まる）
+    copyFileSync(join(REPO_ROOT, "bin", "loop-lease"), join(dirname(script), "loop-lease"));
+    chmodSync(join(dirname(script), "loop-lease"), 0o755);
     chmodSync(script, 0o755);
     counted("git", ["-C", repo, "add", "-A"]);
     counted("git", [
@@ -529,6 +545,10 @@ describe("共有カウンタの排他", () => {
     mkdirSync(join(repo, "bin"));
     const script = join(repo, "bin", "loop-stall");
     copyFileSync(SCRIPT, script);
+    // **`bin/loop-lease` も隣へ置く** (#239)。**カウンタを分ける単位（作業場）は
+    // あちらが持っている**ので、**無いと数えられない**（判定不能で止まる）
+    copyFileSync(join(REPO_ROOT, "bin", "loop-lease"), join(dirname(script), "loop-lease"));
+    chmodSync(join(dirname(script), "loop-lease"), 0o755);
     chmodSync(script, 0o755);
     return { repo, script, state: join(repo, ".git", "valence-loop-stall") };
   }
@@ -1647,8 +1667,11 @@ describe("止まっていないのに、止めたと言わない", () => {
     repo = mkdtempSync(join(tmpdir(), "loop-stop-fails-"));
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
     mkdirSync(join(repo, "bin"));
-    copyFileSync(join(REPO_ROOT, "bin", "loop-stall"), join(repo, "bin", "loop-stall"));
-    chmodSync(join(repo, "bin", "loop-stall"), 0o755);
+    for (const name of ["loop-stall", "loop-lease"]) {
+      // **`bin/loop-lease` も要る** (#239。カウンタを分ける単位を持っている)
+      copyFileSync(join(REPO_ROOT, "bin", name), join(repo, "bin", name));
+      chmodSync(join(repo, "bin", name), 0o755);
+    }
     // **止められない `task`。** 失敗を隠さずに返す
     writeFileSync(
       join(repo, "task"),
@@ -1696,12 +1719,22 @@ describe("再開の順番", () => {
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "loop-resume-order-"));
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
-    state = join(repo, ".git", "valence-loop-stall");
     mkdirSync(join(repo, "bin"));
     copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
     chmodSync(join(repo, "task"), 0o755);
-    copyFileSync(join(REPO_ROOT, "bin", "loop-stall"), join(repo, "bin", "loop-stall"));
-    chmodSync(join(repo, "bin", "loop-stall"), 0o755);
+    for (const name of ["loop-stall", "loop-lease"]) {
+      // **`bin/loop-lease` も要る** (#239)。**カウンタを分ける単位（作業場）を持っている**
+      copyFileSync(join(REPO_ROOT, "bin", name), join(repo, "bin", name));
+      chmodSync(join(repo, "bin", name), 0o755);
+    }
+    // **`dirty` は作業場ぶんのカウンタへ移った** (#239)。**単位は本物に訊く**
+    // ——**試験の中で組み立てない**（組み立てると、名前が変わったときに空振りする）
+    const scope = spawnSync(join(repo, "bin", "loop-lease"), ["scope", "worker"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    expect(scope.status, scope.stderr).toBe(0);
+    state = join(repo, ".git", `valence-loop-stall-${scope.stdout.trim()}`);
     mkdirSync(join(repo, "loop"));
     writeFileSync(join(repo, "loop", "STOP"), "とめた\n");
   });
@@ -1854,5 +1887,246 @@ describe("再開の順番", () => {
       existsSync(join(repo, "loop", "STOP")),
       "走っていた周回が作った STOP を、再開処理が消している",
     ).toBe(true);
+  });
+});
+
+describe("作業場ごとに数える", () => {
+  // **2 人目を走らせると、空転の検出が黙って効かなくなっていた** (#239)。
+  //
+  // **カウンタが 1 つしか無い**ので、**A が同じところで止まっている間に B が進んで
+  // `--reset` を呼ぶと、A のぶんまで毎回消える**——**3 周に永久に届かない。**
+  // **症状は「止まらない」**なので、**気づく手立てが無い**（#47 が塞いだ形が戻る）。
+
+  let repo: string;
+  let other: string;
+
+  /** その作業場の `bin/` を作る。**`loop-lease` も要る**（分ける単位を持っている）。 */
+  function equip(dir: string): void {
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    for (const name of ["loop-stall", "loop-lease"]) {
+      copyFileSync(join(REPO_ROOT, "bin", name), join(dir, "bin", name));
+      chmodSync(join(dir, "bin", name), 0o755);
+    }
+    writeFileSync(join(dir, "task"), "#!/usr/bin/env bash\ntrue\n", { mode: 0o755 });
+  }
+
+  function stall(dir: string, args: string[]): Run {
+    const result = spawnSync(join(dir, "bin", "loop-stall"), args, { cwd: dir, encoding: "utf8" });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  /**
+   * **本物と同じ口を持つ `task`**（`loop:stop:paths` と `loop:stop`）。
+   * **STOP の置き場は `task` が持っている**ので、こちらでも同じ口から引く。
+   */
+  function withStopFiles(dir: string, options: { failStop?: boolean } = {}): void {
+    const stop = join(dir, "loop", "STOP");
+    writeFileSync(
+      join(dir, "task"),
+      [
+        "#!/usr/bin/env bash",
+        'case "${1-}" in',
+        `  loop:stop:paths) printf '%s\\n' '${stop}' ;;`,
+        options.failStop === true
+          ? "  loop:stop) exit 1 ;;"
+          : `  loop:stop) mkdir -p '${join(dir, "loop")}' && printf 'stopped\\n' >'${stop}' ;;`,
+        "  *) ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "loop-stall-scoped-"));
+    expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+    expect(
+      spawnSync("git", ["-C", repo, "commit", "--allow-empty", "--quiet", "-m", "init"], {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@e",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@e",
+        },
+      }).status,
+    ).toBe(0);
+    equip(repo);
+    // **2 人目の作業場。** **worktree なので共通ディレクトリは同じ**——
+    // **カウンタが 1 つなら、ここから消える**
+    other = join(repo, "second");
+    expect(spawnSync("git", ["-C", repo, "worktree", "add", "--detach", other]).status).toBe(0);
+    equip(other);
+  });
+
+  afterEach(() => {
+    spawnSync("git", ["-C", repo, "worktree", "remove", "--force", other]);
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("別の作業場が進んでも、この作業場のカウントは消えない", () => {
+    expect(stall(repo, ["local-ci-failed:42"]).stdout).toContain("count=1");
+    expect(stall(repo, ["local-ci-failed:42"]).stdout).toContain("count=2");
+
+    // 2 人目が別の PR で進んだ
+    expect(stall(other, ["--reset"]).status).toBe(0);
+
+    expect(
+      stall(repo, ["local-ci-failed:42"]).stdout,
+      "他人の進捗で、こちらのカウントが消えている",
+    ).toContain("[STOP]");
+  });
+
+  it("ループ全体の状態は、誰が進んでも数え直す", () => {
+    // **`no-work` は「作業が尽きた」**——**誰かが進めば、それは解決している**
+    expect(stall(repo, ["no-work"]).stdout).toContain("count=1");
+
+    expect(stall(other, ["--reset"]).status).toBe(0);
+
+    expect(stall(repo, ["no-work"]).stdout, "ループ全体の状態が消えていない").toContain("count=1");
+  });
+
+  it("上限は、走っているループの数から決まる", () => {
+    // **安全な下限は「同時に走るループ数 + 1」**である（スクリプト自身が書いている）。
+    // **作業場が増えたら、上限も増える**——**数を書き写さない**（§5）
+    const now = Math.floor(Date.now() / 1000);
+    for (const scope of ["worker-aaa", "worker-bbb"]) {
+      writeFileSync(join(repo, ".git", `valence-loop-rounds-${scope}`), `${now}\n`);
+    }
+
+    const counts = [1, 2, 3].map(() => stall(repo, ["no-work"]).stdout);
+
+    expect(counts[2], "3 周で止まっている（master + worker 2 人なら 4 が下限）").not.toContain(
+      "[STOP]",
+    );
+    expect(counts[0], "上限が増えていない").toContain("max=4");
+  });
+
+  it("使われなくなった作業場は、上限を押し上げない", () => {
+    // **印は消さない設計**（すぐ下の走査が「消さないのも意図的」と書いている）で、
+    // **`./task loop:worker:remove` も消さない**——**作って消すたびに上限が 1 増え、
+    // 二度と減らない。** **過去に 5 つ使った環境では、1 人で回していても上限 6** に
+    // なり、**症状は「止まらない」**なので気づけない（#239 のレビュー）。
+    //
+    // **新しい閾値は作らない。** **生死の判定は、窓の走査が既に持っている**
+    const ancient = Math.floor(Date.now() / 1000) - 86_400;
+    for (const scope of ["worker-aaa", "worker-bbb"]) {
+      writeFileSync(join(repo, ".git", `valence-loop-rounds-${scope}`), `${ancient}\n`);
+    }
+
+    const counts = [1, 2, 3].map(() => stall(repo, ["no-work"]).stdout);
+
+    expect(counts[0], "終わった作業場が上限を押し上げている").toContain("max=3");
+    expect(counts[2], "3 周続いても止まらない").toContain("[STOP]");
+  });
+
+  it("別の作業場から再開しても、止めた当人のカウンタが消える", () => {
+    // **STOP は全 worktree へ配られて全部消えるのに、カウンタは共有と呼び出し元の
+    // ぶんしか消えていなかった** (#239 のレビュー)。**止めた当人が上限のまま残り、
+    // 次の 1 回で即座に止め直す**——**`--resumed` が消しに来た当のもの**である
+    for (const _ of [1, 2, 3]) {
+      stall(repo, ["local-ci-failed:42"]);
+    }
+    expect(stall(repo, ["local-ci-failed:42"]).stdout, "止まっていない").toContain("[STOP]");
+
+    // 人は 2 人目の作業場から再開した
+    expect(stall(other, ["--resumed"]).status).toBe(0);
+
+    expect(
+      stall(repo, ["local-ci-failed:42"]).stdout,
+      "止めた当人のカウンタが残っている（1 回で止まり直す）",
+    ).toContain("count=1");
+  });
+
+  it("旧版の再開でも、この作業場のカウンタは無効になる", () => {
+    // **旧版の `--resumed` は共有カウンタしか消さない**（`rm -f "$STATE"` だけ）が、
+    // **STOP は全 worktree から消す** (#239 のレビュー 2 周目)。**この作業場の
+    // カウンタは上限のまま残り、次の 1 回で即座に止め直す**——**版をまたぐ窓は
+    // いま開いている**（master は `origin/main`、worker はこの枝）。
+    //
+    // **旧版に何かをさせない。** **手がかりは STOP そのもの**である——
+    // **配ったはずの STOP が無いなら、誰かが再開した**（**どの版が消したかも、
+    // 人が手で消したかも問わない**）。
+    withStopFiles(repo);
+    for (const _ of [1, 2, 3]) {
+      stall(repo, ["dirty"]);
+    }
+    expect(existsSync(join(repo, "loop", "STOP")), "STOP が配られていない").toBe(true);
+
+    // 旧版の `--resumed` がしたこと: 共有カウンタと STOP だけを消す
+    rmSync(join(repo, "loop", "STOP"));
+    rmSync(join(repo, ".git", "valence-loop-stall"), { force: true });
+
+    expect(stall(repo, ["dirty"]).stdout, "旧版から再開された作業場が、1 回で止まり直す").toContain(
+      "count=1",
+    );
+  });
+
+  it("STOP を配れなかったときは、消さない", () => {
+    // **`exit 3`（上限に達したが STOP を配れなかった）は、同じ形になる**——
+    // **STOP は無いのにカウンタは上限**である。**そこで消すと、人を呼ぶべき状態が
+    // 黙って消える。** **配れたかどうかで分ける。**
+    withStopFiles(repo, { failStop: true });
+    for (const _ of [1, 2]) {
+      stall(repo, ["dirty"]);
+    }
+    expect(stall(repo, ["dirty"]).status, "STOP を配れていない終わり方ではない").toBe(3);
+    expect(existsSync(join(repo, "loop", "STOP")), "STOP が配られてしまっている").toBe(false);
+
+    expect(
+      stall(repo, ["dirty"]).stdout,
+      "止められていないのに、カウンタが消えている",
+    ).not.toContain("count=1");
+  });
+
+  it("共有カウンタが消えただけでは、再開と読まない", () => {
+    // **旧版は `--reset`（対象なし）でも `$STATE` を消す** (#239 のレビュー 2 周目)。
+    // **共有ファイルの有無を合図にすると、普通の前進が再開に化ける**——
+    // **この PR が引いた線（誰の状態か）が、そこで消える。**
+    withStopFiles(repo);
+    for (const _ of [1, 2]) {
+      stall(repo, ["dirty"]);
+    }
+
+    rmSync(join(repo, ".git", "valence-loop-stall"), { force: true });
+
+    expect(
+      stall(repo, ["dirty"]).stdout,
+      "他の作業場の前進で、この作業場のカウンタが消えている",
+    ).toContain("[STOP]");
+  });
+
+  it("旧版から再開されたことも、繰り返しとして残る", () => {
+    // **人が同じところで何度も判断していることは、記録から読めるようにする**
+    // （`--resumed` の狙いと同じ。経路が違うだけで扱いを変えない）
+    withStopFiles(repo);
+    for (const _ of [1, 2, 3]) {
+      stall(repo, ["dirty"]);
+    }
+    rmSync(join(repo, "loop", "STOP"));
+
+    let last = "";
+    for (const _ of [1, 2, 3]) {
+      last = stall(repo, ["dirty"]).stdout;
+    }
+
+    expect(last, "2 回目だと分かる形になっていない").toContain("2 回目");
+  });
+
+  it("別の作業場で止まったことも、繰り返しとして残る", () => {
+    // **拾わないと、止めた当人の識別子が履歴に残らない**——**人が同じ判断を
+    // 繰り返していることに、誰も気づけない**（`--resumed` の狙いそのもの）
+    for (const _ of [1, 2, 3]) {
+      stall(repo, ["local-ci-failed:42"]);
+    }
+    expect(stall(other, ["--resumed"]).status).toBe(0);
+
+    let last = "";
+    for (const _ of [1, 2, 3]) {
+      last = stall(repo, ["local-ci-failed:42"]).stdout;
+    }
+
+    expect(last, "2 回目だと分かる形になっていない").toContain("2 回目");
   });
 });

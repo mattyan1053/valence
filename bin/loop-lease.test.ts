@@ -180,12 +180,14 @@ describe("bin/loop-lease", () => {
       // 挟んでから呼ぶ側が積む**（**ここで積むと 1 件が 2 つ数えられる**）。
       run(["acquire", "worker"]);
 
+      // **置き場所を書き写さない** (#239)。**`procedure-stale` は作業場ごとに数える**
+      // ので、**ファイル名に scope が入る**——**名前を決めているのは本体**である
       const stalls = readdirSync(join(sandbox, ".git")).filter((entry) =>
         entry.startsWith("valence-loop-stall"),
       );
       expect(stalls, "記録が積まれていない").not.toEqual([]);
       expect(
-        readFileSync(join(sandbox, ".git", "valence-loop-stall"), "utf8"),
+        stalls.map((entry) => readFileSync(join(sandbox, ".git", entry), "utf8")).join(""),
         "procedure-stale として積んでいない",
       ).toContain("procedure-stale");
       // **積む先が使い捨ての作業場であることも、ここが同時に言っている**
