@@ -22,11 +22,8 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const PROCEDURE = ".claude/commands/loop-worker.md";
+import { procedureText } from "./procedure-doc";
 
 /** この試験が使う番号。**手順書の穴埋めをそのまま置き換える。** */
 const PR = "42";
@@ -34,8 +31,11 @@ const ISSUE = "7";
 
 /** 手順書の bash ブロックを全部取り出す。**書き写さない**（写すと、直さなくても緑になる）。 */
 function bashBlocks(): string[] {
-  const body = readFileSync(join(REPO_ROOT, PROCEDURE), "utf8");
-  return [...body.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => match[1] ?? "");
+  // **入口と本体を続けて 1 つの手順として読む** (#319)——**節がどちらに載っているかは
+  // 移し替えのたびに変わる**ので、**置き場所は `loop/procedure-doc.ts` だけが知っている**
+  return [...procedureText("worker").matchAll(/```bash\n([\s\S]*?)```/g)].map(
+    (match) => match[1] ?? "",
+  );
 }
 
 /**
