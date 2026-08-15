@@ -925,6 +925,41 @@ acquire | recover)
   ;;
 release)
   [[ $# -eq 3 ]] || usage
+  # **記録の名前は、走っているスクリプトが毎回組み立てる** (#240)。**worker は周回の
+  # 途中で作業ツリーを入れ替える**（1.1 の同期、`gh pr checkout`）ので、
+  # **`bin/loop-lease` 自身もそこで入れ替わる**——**取ったときと返すときで名前の
+  # 作り方が違えば、自分が置いた記録が引けない**（`AGENTS.md` §5「名前を変えたら、
+  # 古い名前を持つ者を数える」。#185）。**症状は「lease が消えた」だが、消したものは
+  # いない**——**記録は前の名前のまま残り、誰も返さない。**
+  #
+  # **token で引き直す。** **名前ではなく token が資格**である（すぐ下の 2 つの分岐と
+  # 同じ線）——**持ち主だけが返せる**ことは変わらない。
+  #
+  # **黙って通さない。** **名前が変わったことは、次の周回でも起きる**ので、
+  # **返せたときこそ言う**（実物の共通ディレクトリには 3 通りの名前が残っている）。
+  if [[ -z $held_token && -z $expired_token ]]; then
+    for renamed_state in "$common_dir"/valence-loop-lease-worker-*; do
+      [[ -f $renamed_state ]] || continue
+      [[ $renamed_state != *.lock && $renamed_state != *.tmp ]] || continue
+      [[ $renamed_state != "$STATE" ]] || continue
+      read -r renamed_first <"$renamed_state" 2>/dev/null || continue
+      [[ ${renamed_first%%$'\t'*} == "$3" ]] || continue
+      echo "[WARN] $SCOPE_LABEL の lease は、いまと違う名前で置かれていました" >&2
+      echo "       記録: ${renamed_state##*/}" >&2
+      echo "       周回の途中で bin/loop-lease の版が入れ替わっています（名前の作り方が違う）" >&2
+      # **乗り換える先のロックを取り直す。** **持っていたのは前の名前のロック**なので、
+      # **そのまま書くと、同じ記録を触る別の周回と競る。**
+      exec 9>&-
+      lease_scope="${renamed_state##*/valence-loop-lease-}"
+      STATE="$renamed_state"
+      # **活動の記録も名前から作られる。** **期限の判定はそちらを見る**ので、
+      # **一緒に乗り換えないと、動いていた周回が「切れていた」に化ける。**
+      ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+      lock_state || exit 2
+      read_lease quiet || exit 2
+      break
+    done
+  fi
   # **期限切れの記録は、持ち主が返せる** (#260)。**返す資格は token が持つ**ので、
   # **切れたことは「返させない理由」にならない**——**断ると、後始末をする者が
   # いなくなる**（記録は残り続ける）。

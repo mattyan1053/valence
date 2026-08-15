@@ -1447,4 +1447,108 @@ describe("bin/loop-lease", () => {
       expect(activity).toHaveLength(1);
     });
   });
+
+  describe("周回の途中で版が入れ替わっても、自分の lease を返せる", () => {
+    // **周回の途中で lease が消えた** (#240)。**消したものはいない**——
+    // **記録の名前が、走っているスクリプトから毎回組み立てられる**ためである。
+    //
+    // **worker は周回の途中で作業ツリーを入れ替える**（1.1 の同期、`gh pr checkout`）
+    // ——**`bin/loop-lease` 自身もそこで入れ替わる。** **取ったときと返すときで
+    // 名前の作り方が違えば、自分が置いた記録を見つけられない**（`AGENTS.md` §5 の
+    // 「名前を変えたら、古い名前を持つ者を数える」。#185）。
+    //
+    // **実物に跡が残っている。** この機械の共通ディレクトリには、**3 通りの名前**の
+    // 記録が並んでいる——`worker_home_mattyan1053_valence`（パスをそのまま畳んだ版）、
+    // `worker-<digest 26 桁>`（**どの main にも無い。PR の枝でだけ存在した版**）、
+    // `worker-<digest 64 桁>`（いまの版）。**枝を checkout した周回が、そこにいた。**
+
+    /**
+     * **前の版**を作る。**名前の作り方だけを変える**（他は実物のまま）。
+     *
+     * **入口の印の突き合わせも通す**ので、**手順書と `loop-procedure-stamp` も
+     * 同じ作業場へ置く**（`acquire` はディスクの手順書を見る）。
+     */
+    function olderVersion(): string {
+      mkdirSync(join(sandbox, "bin"), { recursive: true });
+      mkdirSync(join(sandbox, ".claude", "commands"), { recursive: true });
+      copyFileSync(
+        join(REPO_ROOT, ".claude/commands/loop-worker.md"),
+        join(sandbox, ".claude/commands/loop-worker.md"),
+      );
+      copyFileSync(
+        join(REPO_ROOT, "bin/loop-procedure-stamp"),
+        join(sandbox, "bin", "loop-procedure-stamp"),
+      );
+      chmodSync(join(sandbox, "bin", "loop-procedure-stamp"), 0o755);
+      const older = join(sandbox, "bin", "older-loop-lease");
+      const source = readFileSync(SCRIPT, "utf8");
+      const changed = source.replace(
+        'lease_scope="worker-${digest%% *}"',
+        'lease_scope="worker-${digest:0:26}"',
+      );
+      expect(changed, "名前の作り方を差し替えられていない").not.toBe(source);
+      writeFileSync(older, changed, { mode: 0o755 });
+      return older;
+    }
+
+    function runWith(script: string, args: string[]): Run {
+      const result = spawnSync(script, args, { cwd: sandbox, encoding: "utf8" });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
+
+    it("前の版が置いた記録でも、token で見つけて返せる", () => {
+      const older = olderVersion();
+      const held = runWith(older, ["acquire", "worker", stampFor("worker")]);
+      expect(held.status, held.stderr).toBe(0);
+
+      const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
+
+      expect(released.status, released.stderr).toBe(0);
+    });
+
+    it("名前が変わっていたことを、黙って通さない", () => {
+      // **返せるだけでは足りない。** **名前が変わったことは、次に同じことを起こす**
+      // ——**気づけなければ、記録は溜まり続ける**（実物に 3 通り残っている）
+      const older = olderVersion();
+      const held = runWith(older, ["acquire", "worker", stampFor("worker")]);
+
+      const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
+
+      expect(released.stderr, "名前が変わったことが出ていない").toMatch(/名前/);
+    });
+
+    it("返したら、前の版の記録も残さない", () => {
+      // **消すのは「自分が取った記録」である。** **残すと、次の周回から
+      // 「別の周回が走っている」に見える**——**引き継ぎの窓が開きっぱなしになる**
+      const older = olderVersion();
+      const held = runWith(older, ["acquire", "worker", stampFor("worker")]);
+
+      expect(runWith(SCRIPT, ["release", "worker", held.stdout.trim()]).status).toBe(0);
+
+      const left = readdirSync(join(sandbox, ".git")).filter(
+        (entry) => entry.startsWith("valence-loop-lease-worker") && !entry.endsWith(".lock"),
+      );
+      expect(left, `記録が残っている: ${left.join(", ")}`).toHaveLength(0);
+    });
+
+    it("他人の token では返せないし、名前が変わったとも言わない", () => {
+      // **token は資格である** (#260 と同じ線)。**名前で引けないからといって、
+      // 走査した先の記録を誰にでも返させない**——**直列化そのものが崩れる**。
+      //
+      // **終了コードだけを見ない** (実際に変異が生き残った)。**token を見ずに
+      // 乗り換えても、下の突き合わせが「別の周回が持っています」で弾く**ので、
+      // **合否は変わらない**——**変わるのは、無関係な記録について
+      // 「名前が変わっています」と言い出すこと**である。**誤った案内は、
+      // 次に読む人を間違った方向へ走らせる。**
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      const released = runWith(SCRIPT, ["release", "worker", "deadbeefdeadbeef"]);
+
+      expect(released.status, "他人の token で返せてしまう").not.toBe(0);
+      expect(released.stderr, "無関係な記録を、この token のものだと言っている").not.toMatch(
+        /名前/,
+      );
+    });
+  });
 });
