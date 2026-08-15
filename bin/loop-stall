@@ -16,7 +16,23 @@
 #
 set -uo pipefail
 
-readonly MAX_REPEATS="${LOOP_MAX_STALL_REPEATS:-3}"
+# 上限。**同時に走るループの数から決める** (#239)。
+#
+# **安全な下限は「同時に走るループ数 + 1」**である——**`loop:resume` の直後、
+# 冒頭の STOP 検査を通過した周回がそれぞれ同じ停止を積むと、再開した瞬間にまた止まる。**
+# **数を書き写さない**（`AGENTS.md` §5）——**作業場が増えれば、上限も増える。**
+#
+# **走っているループの数は、周回の印から数える**（`bin/loop-lease acquire` が書く）
+# ——**master が 1 つと、周回を始めたことのある worker の作業場**である。
+# **3 を下回らない**（**1 人で回している間は、これまでと同じ**）。
+loop_count() {
+  local rounds found=1
+  for rounds in "$1"/valence-loop-rounds-worker*; do
+    [[ -f $rounds ]] || continue
+    found=$((found + 1))
+  done
+  printf '%s' "$found"
+}
 
 # 停止識別子の正はここ。`.claude/commands/loop-*.md` の判定箇所は、識別子を
 # 別途一覧にせずこの表を引く (bin/loop-stall --list)。
@@ -154,6 +170,30 @@ readonly WORKER_FIXES=(
   "head-moved"
 )
 
+# **その作業場の状態を表す識別子** (#239)。**カウンタを作業場ごとに分ける。**
+#
+# **1 つのファイルに全部を入れると、2 人目を走らせた瞬間に検出器が黙る**——
+# **A が同じところで止まっている間に B が進んで `--reset` を呼ぶと、A のぶんまで毎回消え、
+# 3 周に永久に届かない**（**症状は「止まらない」**なので、**気づく手立てが無い**）。
+#
+# **分ける基準は「誰の状態か」**である。**`no-work` や `too-many-ready` は
+# ループ全体の状態**（誰が進んでも数え直してよい）だが、**`local-ci-failed` は
+# その作業場の状態**——**別の作業場が進んでも、こちらは何も解決していない。**
+#
+# **`main-sync-failed` と `procedure-stale` もここに入る。** **作業ツリーも、
+# 配られた手順書も作業場ごと**である（**両方の役が打つが、打つ理由は自分の側にある**）。
+readonly WORKSPACE_SCOPED=(
+  "dirty"
+  "main-sync-failed"
+  "procedure-stale"
+  "wrong-branch"
+  "too-many-own-prs"
+  "local-ci-failed"
+  "local-ci-unknown"
+  "implementation-blocked"
+  "publish-failed"
+)
+
 usage() {
   echo "使い方: bin/loop-stall <停止識別子>" >&2
   echo "       bin/loop-stall --reset [<識別子>]  周回が前へ進んだときに呼ぶ" >&2
@@ -248,11 +288,6 @@ if [[ $ID != "--reset" && $ID != "--resumed" ]] && ! id_is_known "$ID"; then
   exit 2
 fi
 
-if ! [[ $MAX_REPEATS =~ ^[0-9]+$ ]] || ((MAX_REPEATS < 1)); then
-  echo "[FAIL] 設定: LOOP_MAX_STALL_REPEATS は 1 以上の整数で指定してください" >&2
-  exit 2
-fi
-
 if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
   echo "[FAIL] git の共通ディレクトリを特定できません" >&2
   exit 2
@@ -264,7 +299,49 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
   exit 2
 }
+# **上限は共通ディレクトリが分かってから決める**（周回の印を数えるため。#239）。
+# **設定で渡されたらそれが正**——**試験と、人が絞りたいときのため**である。
+if [[ -n ${LOOP_MAX_STALL_REPEATS-} ]]; then
+  MAX_REPEATS="$LOOP_MAX_STALL_REPEATS"
+else
+  MAX_REPEATS=$(($(loop_count "$common_dir") + 1))
+  ((MAX_REPEATS >= 3)) || MAX_REPEATS=3
+fi
+readonly MAX_REPEATS
+if ! [[ $MAX_REPEATS =~ ^[0-9]+$ ]] || ((MAX_REPEATS < 1)); then
+  echo "[FAIL] 設定: LOOP_MAX_STALL_REPEATS は 1 以上の整数で指定してください" >&2
+  exit 2
+fi
+
 readonly STATE="$common_dir/valence-loop-stall"
+
+# **この作業場ぶんのカウンタ** (#239)。**単位の作り方は `bin/loop-lease` が持っている**
+# ので、そこへ訊く——**書き写すと、片方だけ直して食い違う**（#159 の形）。
+#
+# **役ではなく作業場で分ける。** **worker の scope は作業場そのもの**（`master` は
+# 1 つしか無いので、分ける単位としては worker 側の作り方が正）——**master の worktree で
+# 呼んでも、そこの作業場を指す名前が返る。**
+#
+# **分からなければ数えない。** **共有側へ倒すと、この Issue が消しに来た形へ戻る**
+# ——**判定不能は、記録できたことにしない。**
+if ! workspace_scope="$("${BASH_SOURCE[0]%/*}/loop-lease" scope worker 2>/dev/null)" \
+  || [[ -z $workspace_scope ]]; then
+  echo "[FAIL] この作業場を表す名前を作れません（bin/loop-lease scope worker）" >&2
+  exit 2
+fi
+readonly LOCAL_STATE="$common_dir/valence-loop-stall-$workspace_scope"
+
+# その識別子を数えるファイル。**ループ全体の状態は共有し、作業場の状態は分ける。**
+state_file() {
+  local id="${1%%:*}" kind
+  for kind in "${WORKSPACE_SCOPED[@]}"; do
+    [[ $id == "$kind" ]] && {
+      printf '%s' "$LOCAL_STATE"
+      return 0
+    }
+  done
+  printf '%s' "$STATE"
+}
 # **人が再開したときに、上限へ達していた識別子を積む。** 「同じところで何度目か」を
 # 出すためのもので、**カウンタとは別に持つ**（--reset で消えると、繰り返しが見えなくなる）。
 readonly RESUMED="$common_dir/valence-loop-resumed"
@@ -341,23 +418,26 @@ if [[ $ID == "--reset" ]]; then
   # **記録は既に識別子ごとの行**なので、**残す行を書き戻すだけでよい**
   # ——**カウンタを 1 つに保ったまま解ける**（#239 に触れない）。
   if [[ -z $RESET_ID ]]; then
-    rm -f "$STATE"
+    # **消すのは、共有と自分の作業場のぶんだけ** (#239)。**他の作業場のカウントは
+    # 残す**——**こちらが進んでも、あちらは何も解決していない。**
+    rm -f "$STATE" "$LOCAL_STATE"
     echo "stall reset"
     exit 0
   fi
   kept=()
-  if [[ -f $STATE ]]; then
+  reset_state="$(state_file "$RESET_ID")"
+  if [[ -f $reset_state ]]; then
     while IFS=$'\t' read -r prev_count prev_id prev_id_epoch; do
       [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
       [[ $prev_id == "$RESET_ID" ]] && continue
       kept+=("$prev_count"$'\t'"$prev_id"$'\t'"$prev_id_epoch")
-    done < "$STATE"
+    done < "$reset_state"
   fi
   if ((${#kept[@]} == 0)); then
-    rm -f "$STATE"
+    rm -f "$reset_state"
   else
-    printf '%s\n' "${kept[@]}" > "$STATE" || {
-      echo "[FAIL] カウンタを書き戻せません: $STATE" >&2
+    printf '%s\n' "${kept[@]}" > "$reset_state" || {
+      echo "[FAIL] カウンタを書き戻せません: $reset_state" >&2
       exit 2
     }
   fi
@@ -385,7 +465,10 @@ fi
 # (消すだけだと「1 回目と同じ」に見え、**人が同じ判断を繰り返していることに誰も
 # 気づけない**)。
 if [[ $ID == "--resumed" ]]; then
-  if [[ -f $STATE ]]; then
+  # **どちらのカウンタも見る** (#239)。**片方だけ見ると、作業場ぶんで止まった状態が
+  # 「繰り返し」として残らない。**
+  for resumed_state in "$STATE" "$LOCAL_STATE"; do
+    [[ -f $resumed_state ]] || continue
     while IFS=$'\t' read -r prev_count prev_id _prev_epoch; do
       [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
       ((10#$prev_count >= MAX_REPEATS)) || continue
@@ -393,8 +476,8 @@ if [[ $ID == "--resumed" ]]; then
         echo "[FAIL] 再開の記録を書けません: $RESUMED" >&2
         exit 2
       }
-    done < "$STATE"
-  fi
+    done < "$resumed_state"
+  done
   # **消せなかったら成功を返さない。** `task` は終了コードで判断し、消せなければ
   # STOP を残す（そう約束した）。ここで握りつぶすと、**約束した側が、約束を測る値を
   # 返していない**ことになる。**カウンタが残ったまま STOP が消える**と、
@@ -402,8 +485,8 @@ if [[ $ID == "--resumed" ]]; then
   #
   # **`rm -f` は「ファイルが無い」では失敗しない**ので、**まだ 1 度も記録していない
   # 状態の resume は、これまでどおり通る**。
-  rm -f "$STATE" || {
-    echo "[FAIL] 停止カウンタを消せません: $STATE" >&2
+  rm -f "$STATE" "$LOCAL_STATE" || {
+    echo "[FAIL] 停止カウンタを消せません: $STATE / $LOCAL_STATE" >&2
     exit 2
   }
   echo "stall resumed"
@@ -462,7 +545,8 @@ fi
 count=0
 others=()
 prev_epoch=""
-if [[ -f $STATE ]]; then
+counted_state="$(state_file "$ID")"
+if [[ -f $counted_state ]]; then
   while IFS=$'\t' read -r prev_count prev_id prev_id_epoch; do
     [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
     if [[ $prev_id == "$ID" ]]; then
@@ -471,7 +555,7 @@ if [[ -f $STATE ]]; then
     else
       others+=("$prev_count"$'\t'"$prev_id"$'\t'"$prev_id_epoch")
     fi
-  done < "$STATE"
+  done < "$counted_state"
 fi
 
 # **数える単位を「相手の周回」にする。**
@@ -665,8 +749,8 @@ else
   count=$((count + 1))
 fi
 
-printf '%s\n' "${others[@]}" "$count"$'\t'"$ID"$'\t'"$prev_epoch" > "$STATE" || {
-  echo "[FAIL] 停止カウンタを書き込めません: $STATE" >&2
+printf '%s\n' "${others[@]}" "$count"$'\t'"$ID"$'\t'"$prev_epoch" > "$counted_state" || {
+  echo "[FAIL] 停止カウンタを書き込めません: $counted_state" >&2
   exit 2
 }
 

@@ -63,6 +63,7 @@ usage() {
   echo "        bin/loop-lease busy <役>        その役の周回がどこかで走っているか（読むだけ）" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
   echo "        bin/loop-lease ttl              期限（秒）を出す" >&2
+  echo "        bin/loop-lease scope <役>       その役の記録を分ける単位（作業場）を出す" >&2
   echo "        役: ${ROLES[*]}" >&2
   echo "        master は役ごとに 1 つ（判定を並列にしない）" >&2
   echo "        worker は作業場ごとに 1 つ（作業場が増えたぶん並列になる）" >&2
@@ -533,6 +534,20 @@ fi
 # ——**遅い周回と落ちた周回は、経過時間では分けられない** (#129)。
 #
 #   exit 0 = 走っている / exit 1 = 走っていない / exit 2 = 読めない
+# **記録を分ける単位を、外から引けるようにする** (#239)。
+#
+# **`bin/loop-stall` は作業場ごとにカウンタを分ける**が、**単位の作り方をあちらへ
+# 書き写すと、片方だけ直して食い違う**（#159 で実際に踏んだ形）——**組み立ては
+# `set_role_paths` が 1 箇所で持っている**ので、そこへ訊く。
+#
+#   exit 0 = 出せた / exit 2 = 判定できない
+if [[ $ACTION == "scope" ]]; then
+  [[ $# -eq 2 ]] || usage
+  set_role_paths "$ROLE" || exit 2
+  printf '%s\n' "$lease_scope"
+  exit 0
+fi
+
 if [[ $ACTION == "busy" ]]; then
   [[ $# -eq 2 ]] || usage
   # **役ごとに置き場所が違う。** master は 1 つ、worker は作業場ごとに増える——
