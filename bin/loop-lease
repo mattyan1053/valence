@@ -208,6 +208,9 @@ set_role_paths() {
       return 2
     fi
     lease_scope="worker-${digest%% *}"
+    # **どの作業場かは、名前ではなく中身で照らす** (#291)。**名前の作り方は版で変わる**
+    # ので、**別の名前の記録が自分のものかは、記録の 3 行目（作業場）でしか分からない。**
+    WORKSPACE_PATH="$toplevel"
     # **どの単位で弾かれたのかを、出力だけで分かるようにする。** 「worker の周回が
     # 走っています」だと、別の作業場の worker まで止まっているように読める
     SCOPE_LABEL="この作業場（$toplevel）の worker"
@@ -882,6 +885,84 @@ acquire | recover)
   #
   # **`recover` も同じ口から取る** (#268 のレビュー)。**違うのは入口の条件だけ**で、
   # **押さえ方・token・返し方は 1 つ**である（**2 箇所に持つと片方だけ直して食い違う**）。
+  # **いまの名前で空いていても、前の版の名前で走っていることがある** (#291)。
+  #
+  # **`release` を直しただけでは、片側しか塞がらない**（#240 / #290）——
+  # **名前が変わった直後、`acquire` は新しい名前を見て「空いている」と読む。**
+  # **まだ返していない周回がいるのに、もう 1 つ取れる**ので、**同じ作業ツリーで
+  # checkout と commit が並行する**（#68 の形）。**直列化そのものが、その瞬間だけ
+  # 成り立たない**——**版が入れ替わるのは `gh pr checkout` と 1.1 の同期**で、
+  # **周回のたびに通る道**である。
+  #
+  # **役ごとの前方一致に閉じる**（`release` と同じ形。#290 のレビュー）。
+  # **判定は書き写さない**——**`read_lease` を、見に行く記録へ向けて呼ぶ**
+  # （**期限の測り方を 2 箇所に持つと、片方だけ直して食い違う**）。
+  #
+  # **自分のロックは手放さない。** **`lock_state` は fd 9 を使う**ので、
+  # **走査は別の fd で取る**——**手放すと、その隙に別の周回がいまの名前で取れる。**
+  #
+  # **消さない。** **`acquire` は返す口ではない**ので、**跡はそのまま残す**
+  # （**消すと、前の版の周回が返しに来たとき「誰も持っていません」に落ちる**——
+  # **#290 で塞いだ側が、こちらから開く**）。
+  if [[ -z $held_token && -z $expired_token ]]; then
+    keep_state="$STATE"
+    keep_activity="$ACTIVITY"
+    for renamed_state in "$common_dir/valence-loop-lease-$ROLE"*; do
+      [[ -f $renamed_state ]] || continue
+      [[ $renamed_state != *.lock && $renamed_state != *.tmp ]] || continue
+      [[ $renamed_state != "$keep_state" ]] || continue
+      STATE="$renamed_state"
+      ACTIVITY="$common_dir/valence-loop-activity-${renamed_state##*/valence-loop-lease-}"
+      renamed_read=0
+      if ! exec 8>"$STATE.lock"; then
+        echo "[FAIL] lease のロックを作成できません: $STATE.lock" >&2
+        renamed_read=2
+      elif ! flock -w "$LOCK_WAIT_SEC" 8; then
+        echo "[FAIL] lease のロックを取得できません（${LOCK_WAIT_SEC} 秒待機）: $STATE.lock" >&2
+        renamed_read=2
+      elif ! read_lease quiet; then
+        renamed_read=2
+      fi
+      exec 8>&-
+      STATE="$keep_state"
+      ACTIVITY="$keep_activity"
+      # **読めなかったら「空いている」に倒さない。** **倒すと、走っている周回の隣で
+      # もう 1 つ取れる**——**塞ぎに来た当の状態が、判定不能から戻ってくる。**
+      ((renamed_read == 0)) || exit 2
+      # **別の作業場のものを、自分のものと読まない** (#291)。**worker の lease は
+      # 作業場ごと**なので、**走査で拾った記録が自分のものとは限らない**——
+      # **見分けずに止めると、2 人目が走っているだけで 1 人目が取れなくなる**
+      # （**既存の試験がこれを捕まえた**）。
+      #
+      # **名前では照らせない**（**名前の作り方が版で変わるのが、この Issue の前提**）。
+      # **記録の 3 行目（作業場）で照らす**——**書いていない版の記録は、自分のものだと
+      # 言えない**ので、**止めずに、そう言う**（**黙って通すと、次に読む人が誤解する**）。
+      if [[ $ROLE == "worker" && ( -n $held_token || -n $expired_token ) ]]; then
+        if [[ -z $held_workspace ]]; then
+          echo "[WARN] 作業場の書かれていない lease があります: ${renamed_state##*/}" >&2
+          echo "       前の版の記録です。誰のものか読めないので、この判定では飛ばします" >&2
+          held_token=""
+          expired_token=""
+          continue
+        fi
+        if [[ $held_workspace != "$WORKSPACE_PATH" ]]; then
+          held_token=""
+          expired_token=""
+          continue
+        fi
+      fi
+      if [[ -n $held_token || -n $expired_token ]]; then
+        echo "[WARN] $SCOPE_LABEL の lease が、いまと違う名前で置かれています" >&2
+        echo "       記録: ${renamed_state##*/}" >&2
+        echo "       周回の途中で bin/loop-lease の版が入れ替わっています（名前の作り方が違う）" >&2
+        # **切れていたら、これまでどおり引き継ぐ**（**落ちた周回の跡で止まると、
+        # その作業場は二度と動けない**）。**言うのはここだけ**なので黙らない。
+        [[ -z $expired_token ]] \
+          || echo "[WARN] その記録は期限切れでした（${expired_over} 秒超過）。引き継ぎます" >&2
+        break
+      fi
+    done
+  fi
   if [[ -n $held_token ]]; then
     # **「走っている」と「返し忘れ」を、この 1 行で見分けられるようにする。**
     # 手順書は「何周も取れないなら返し忘れ」と読ませるが、**活動が見えないと

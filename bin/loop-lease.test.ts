@@ -1488,6 +1488,26 @@ describe("bin/loop-lease", () => {
       return older;
     }
 
+    /**
+     * すべての記録を、期限の外へずらす。**待たずに古い状態を作る**（#131 の教訓）。
+     *
+     * **期限は「取得」と「最後の活動」の新しいほうから測る**ので、**両方ずらす。**
+     */
+    function ageRecords(): void {
+      const old = Math.floor(Date.now() / 1000) - 100_000;
+      const entries = readdirSync(join(sandbox, ".git"));
+      for (const entry of entries.filter((name) => name.startsWith("valence-loop-activity-"))) {
+        writeFileSync(join(sandbox, ".git", entry), `${old}\n`);
+      }
+      for (const entry of leaseRecords()) {
+        const path = join(sandbox, ".git", entry);
+        const lines = readFileSync(path, "utf8").split("\n");
+        const [token = ""] = (lines[0] ?? "").split("\t");
+        lines[0] = `${token}\t${old}`;
+        writeFileSync(path, lines.join("\n"));
+      }
+    }
+
     /** その作業場の lease の記録（`.lock` は除く）。**名前の作り方は写さない。** */
     function leaseRecords(): string[] {
       return readdirSync(join(sandbox, ".git")).filter(
@@ -1508,6 +1528,99 @@ describe("bin/loop-lease", () => {
       const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
 
       expect(released.status, released.stderr).toBe(0);
+    });
+
+    it("前の版が持っている lease は、いまの版の acquire にも見える", () => {
+      // **返せるようにしただけでは、片側しか塞げていない** (#291)。
+      // **名前が変わった直後、`acquire` は新しい名前で「空いている」と読む**
+      // ——**まだ返していない周回がいるのに、もう 1 つ取れる**。**同じ作業場で
+      // checkout と commit が並行する**（#68 の形）——**直列化そのものが、
+      // その瞬間だけ成り立たない。**
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      const second = runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]);
+
+      expect(second.status, "同じ作業場で 2 つ目の周回が通ってしまう").toBe(1);
+    });
+
+    it("前の版の記録が期限切れなら、これまでどおり引き継ぐ", () => {
+      // **走っている周回を止めるのが目的**であって、**落ちた周回の跡で止まるのは
+      // 別の壊れ方**である（**引き継げなくなると、その作業場は二度と動けない**）
+      const older = olderVersion();
+      expect(
+        runWith(older, ["acquire", "worker", stampFor("worker")]).status,
+        "前の版で取れていない",
+      ).toBe(0);
+      ageRecords();
+
+      const second = runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]);
+
+      expect(second.status, second.stderr).toBe(0);
+      expect(second.stderr, "引き継いだことが出ていない").toMatch(/期限切れ|引き継/);
+    });
+
+    it("引き継いだときも、見つけた記録を消さない", () => {
+      // **acquire は返す口ではない** (#291)。**跡を消すと、前の版の周回が返しに来たとき
+      // 「誰も持っていません」に落ちる**——**#290 で塞いだ側が、こちらから開く**。
+      //
+      // **期限切れのほうで見る。** **走っている記録は消しようがない**（取れずに終わる）
+      // ——**消したくなるのは引き継ぐ側**である（**実際、生きている記録だけを見ていた
+      // 版では、消す変異が生き残った**）
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+      const before = leaseRecords();
+      ageRecords();
+
+      expect(runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      expect(leaseRecords(), `前の版の記録が消えている: ${before.join(", ")}`).toEqual(
+        expect.arrayContaining(before),
+      );
+    });
+
+    it("別の作業場の記録では止まらない（名前が違っていても）", () => {
+      // **worker の lease は作業場ごと**である (#98)。**名前で引けないぶんを走査で
+      // 補うと、別の作業場の記録まで見えてしまう**——**2 人目が走っているだけで
+      // 1 人目が取れなくなる**（**既存の試験がこれを捕まえた**）。
+      //
+      // **持ち主は記録の中に書いてある**（3 行目の作業場）ので、**そこで見分ける。**
+      expect(
+        spawnSync("git", ["-C", sandbox, "commit", "--allow-empty", "--quiet", "-m", "init"], {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@e",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@e",
+          },
+        }).status,
+      ).toBe(0);
+      const other = join(sandbox, "second");
+      expect(spawnSync("git", ["-C", sandbox, "worktree", "add", "--detach", other]).status).toBe(
+        0,
+      );
+      const older = olderVersion();
+      const held = spawnSync(older, ["acquire", "worker", stampFor("worker")], {
+        cwd: other,
+        encoding: "utf8",
+      });
+      expect(held.status, held.stderr).toBe(0);
+
+      const mine = runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]);
+
+      expect(mine.status, `別の作業場が走っているだけで取れない: ${mine.stderr}`).toBe(0);
+    });
+
+    it("master の acquire は、worker の記録で止まらない", () => {
+      // **役ごとの前方一致に閉じる**（この PR で `release` に入れた形と同じ）——
+      // **役が違えば、走っていても関係が無い**
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      const master = runWith(SCRIPT, ["acquire", "master", stampFor("master")]);
+
+      expect(master.status, master.stderr).toBe(0);
     });
 
     it("パスを畳んでいた版の記録でも返せる", () => {
