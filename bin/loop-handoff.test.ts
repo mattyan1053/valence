@@ -1628,6 +1628,22 @@ describe("bin/loop-handoff", () => {
     expect(run("master").stdout).toMatch(/^worker\t/);
   });
 
+  it("Closes が無い parked の PR でも、その枠は着手中から引く", () => {
+    // **割った PR は親 Issue を閉じない**（**途中の 1/3 に `Closes` を書くと、
+    // そこが入った時点で親が閉じる**）ので、**書いていないほうが普通**である (#318)。
+    //
+    // **`Closes` だけを見ていると、保留した瞬間から「着手中」が減らない**——
+    // **ready 0 / backlog 0 で worker が待っていても `no-work` が積まれず**、
+    // **3 周で人を呼ぶ経路に乗らない。** **ループは正常に動きながら、何も進まない。**
+    withState({
+      prs: [{ number: 12, labels: ["parked", "awaiting-human"], body: "本文に Closes が無い" }],
+      ready: 1,
+      inProgress: 1,
+    });
+
+    expect(run("master").stdout, "保留 PR の枠を着手中に数え続けている").toMatch(/^worker\t/);
+  });
+
   describe("一覧が古くても取りこぼさない", () => {
     it("`ready` を付けた直後でも、worker へ渡る", () => {
       // **一覧（検索）は付け替えた直後に古い値を返す**（実測で 4 秒ほど 0 件のまま）。
