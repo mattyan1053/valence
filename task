@@ -3,7 +3,7 @@
 # 開発タスクランナー。
 #
 # ホストに何もインストールしない方針のため、make ではなく素の bash で書いてある
-# (bash / docker / git 以外はホストに要求しない)。
+# (bash / docker / git / flock 以外はホストに要求しない)。
 # 実処理はすべて開発コンテナ内で走る。
 #
 #   ./task help
@@ -282,8 +282,8 @@ with_db_lock() {
   # `command not found`（127）になり、まとめて扱うと「別の作業場が使っています」に化ける**
   # ——**誰も掴んでいないのに、である**（**判定不能が、別の理由に化ける**形）。
   if ! command -v flock >/dev/null 2>&1; then
-    echo "==> flock がありません。この開発環境は Linux 前提で、macOS / BSD は対象外です" >&2
-    echo "    ホストへは何も入れない方針（AGENTS.md §2）なので、Linux で動かすこと" >&2
+    echo "==> flock がありません。DB を触るコマンドは flock で直列化します" >&2
+    echo "    ホストに要るのは bash / docker / git / flock です（既定で無い macOS / BSD は対象外）" >&2
     return 1
   fi
   local locked=0

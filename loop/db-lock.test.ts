@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { holdLock } from "../test/held-lock";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -96,31 +97,26 @@ describe("task の DB ロック", () => {
 
   it("待ち時間を超えたら、これまでどおり掴まれていると言う", () => {
     // **倒す先は 2 つある。片方だけ直すと、もう片方が化ける**（#220 の完了条件）
-    const held = spawnSync(
+    //
+    // **時間で待たない** (#286 のレビュー)。**`sleep 0.3` で相手がスケジュールされる
+    // 保証は無い**——**取り損ねると、実装が正しくても赤になる**（今日、時間依存の
+    // 1 本が CI で落ちて再実行で緑になった）。**握れたことを確かめてから返る**
+    const lockPath = spawnSync(
       join(path, "bash"),
-      [
-        "-c",
-        `source ./task >/dev/null 2>&1; path="$(db_lock_path)"; ` +
-          `flock -x "$path" -c 'sleep 3' & sleep 0.5; wait $!`,
-      ],
-      { cwd: box, encoding: "utf8", env: { ...process.env, PATH: path }, timeout: 20_000 },
-    );
-    expect(held.status, held.stderr).toBe(0);
+      ["-c", "source ./task >/dev/null 2>&1; db_lock_path"],
+      { cwd: box, encoding: "utf8", env: { ...process.env, PATH: path } },
+    ).stdout.trim();
+    expect(lockPath, "ロックの置き場を読めない").not.toBe("");
+    const held = holdLock({ dir: box, lock: lockPath });
 
-    // 掴んだまま、別のプロセスから待ち時間 0 で取りに行く
-    const busy = spawnSync(
-      join(path, "bash"),
-      [
-        "-c",
-        `source ./task >/dev/null 2>&1; path="$(db_lock_path)"; ` +
-          `flock -x "$path" -c 'sleep 2' & sleep 0.3; ` +
-          `DB_LOCK_WAIT_SECONDS=0 with_db_lock true; code=$?; wait; exit $code`,
-      ],
-      { cwd: box, encoding: "utf8", env: { ...process.env, PATH: path }, timeout: 20_000 },
-    );
+    try {
+      const busy = lock({ DB_LOCK_WAIT_SECONDS: "0" });
 
-    expect(busy.status).not.toBe(0);
-    expect(busy.stderr, "待ち時間の超過が、別のものに化けている").toContain("別の作業場");
+      expect(busy.status).not.toBe(0);
+      expect(busy.stderr, "待ち時間の超過が、別のものに化けている").toContain("別の作業場");
+    } finally {
+      held.release();
+    }
   });
 
   it("flock が知らない終わり方をしたら、掴まれているとは言わない", () => {
@@ -132,6 +128,38 @@ describe("task の DB ロック", () => {
 
     expect(failed.status).not.toBe(0);
     expect(failed.stderr, "掴まれていると嘘をついている").not.toContain("別の作業場");
+  });
+
+  it("案内は、要る道具の名前で言う", () => {
+    // **`flock` の無い Linux で「Linux で動かすこと」と言うと、また別の嘘になる**
+    // (#286 のレビュー)——**既に Linux に居る人に、直し方が伝わらない。**
+    // **OS の名前ではなく、要るものを言う**
+    withTools({ flock: "missing" });
+
+    const failed = lock();
+
+    expect(failed.stderr, "OS の名前で案内している").not.toMatch(/Linux で(動かす|実行)/);
+    expect(failed.stderr, "要る道具が言われていない").toContain("flock");
+  });
+
+  it("ホストに要る道具の一覧に flock が入っている", () => {
+    // **公開している要件と食い違わせない** (#286 のレビュー)。**`task` も README も
+    // 「bash / docker / git だけ」と書いていた**のに、**`flock` を前提にしていた**
+    const task = readFileSync(join(REPO_ROOT, "task"), "utf8");
+    const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
+    const requirement = /bash[^\n]*docker[^\n]*git[^\n]*/g;
+
+    for (const [name, text] of [
+      ["task", task],
+      ["README.md", readme],
+    ] as const) {
+      const lines = text.match(requirement) ?? [];
+      expect(lines.length, `${name} に要件の行が無い`).toBeGreaterThan(0);
+      expect(
+        lines.every((line) => line.includes("flock")),
+        `${name} の要件に flock が無い`,
+      ).toBe(true);
+    }
   });
 
   it("どの環境を通すのかが task に書いてある", () => {

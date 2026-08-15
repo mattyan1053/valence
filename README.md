@@ -32,7 +32,7 @@ Next.js (App Router) / React / TypeScript / Tailwind CSS / React Flow / Supabase
 
 ## 開発
 
-必要なのは bash / docker / git だけ。Node も pnpm もホストには入れない。
+必要なのは bash / docker / git / flock だけ。Node も pnpm もホストには入れない。
 
 ```bash
 cp .env.example .env  # 値を埋める
