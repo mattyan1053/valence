@@ -1,4 +1,4 @@
-<!-- 版: 9d1d816a7435 -->
+<!-- 版: 4586f282ff78 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -794,9 +794,13 @@ gh pr edit <PR番号> --add-label changes-requested     # 付け直して初め�
 ```bash
 bin/loop-triage --findings <残っている指摘の件数> \
                 --rework-lines <差し戻して直したときの本体の見込み行数> \
+                --fixup-lines <ゲートが出した、レビュー後の本体変更の実測行数> \
                 --security <yes|no> --worse <yes|no> --reachable <yes|no>
 ```
 
+- `--fixup-lines` … **ゲートの第 3 層が出した実測**（`レビュー後の本体変更が N 行` の N）。
+  **`--rework-lines` の見込みとは別物**である——**前者はこれから直す見込み、
+  こちらは既に積まれた変更**。**止められていないなら 0 を渡す**
 - `--security` … `AGENTS.md` §6 に当たるか
 - `--worse` … **この PR を入れると、入れる前より悪くなるか**（優先度ではなく差し引きで見る）
 - `--reachable` … **いまの構成で踏めるか**（別の Issue が入るまで踏めないなら `no`）
@@ -934,6 +938,29 @@ fi
 次の master の周回で**普通の PR としてゲートに乗る**——**master が外す形にすると、
 master が忘れたときに永久に止まる**（`changes-requested` と同じ懸念）。
 **その手順を PR のコメントに書いておくこと。**
+
+#### recount — main を取り込み直して、レビューを数え直す
+
+**指摘は残っていないのに、第 3 層（レビュー後の本体変更）だけがゲートを塞いでいる**
+状態である（#324。#322 で踏んだ）。**外出しする指摘が無い**ので、
+**`defer` では Issue が 1 件増えるだけでゲートは落ちたまま**になる。
+
+**worker に「`main` を取り込み直して push してほしい」と伝える**
+（手順は「PR を保留にする / 再開する」と同じ）。
+
+```bash
+bin/loop-head same <PR番号> <ゲートが出した head>   # exit 1/2 なら書かない
+gh pr comment <PR番号> --body-file <file>          # 何を頼むか・なぜ要るか
+```
+
+**rebase すると head が変わり、それまでのレビューは数え直される**
+（`bin/loop-review-commits` が現 head の祖先でない commit へのレビューを落とす）——
+**数え直したうえで、改めてレビューを要求できる。**
+
+**`changes-requested` は付けない。** **直すものは無い**（指摘は 0 件）ので、
+**付けると「指摘が残っている」と読める**——**頼んでいるのは取り込み直しだけ**である。
+
+この周回はここで終わり。worker の push を待つ。
 
 #### defer — Issue へ外出ししてマージする
 

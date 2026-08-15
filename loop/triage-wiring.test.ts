@@ -112,3 +112,40 @@ describe("上限に達したあとの行き先", () => {
     expect(read("loop/README.md")).not.toMatch(/入れる前より悪くなる/);
   });
 });
+
+describe("指摘 0 件で、手直しが上限を超えている（#324）", () => {
+  it("実測を渡している", () => {
+    // **`--rework-lines`（見込み）だけでは、この状態を判定できない**——
+    // **ゲートが実測した行数を渡さないと、スクリプトは exit 2 で止まる**
+    expect(bashBlocks(triageSection())).toContain("--fixup-lines");
+  });
+
+  it("数え直しの行き先が書いてある", () => {
+    // **スクリプトが返す行き先に、手順書側の受け皿が無いと、
+    // 読む側は「知らない答え」を受けて止まる**
+    expect(triageSection()).toContain("recount");
+  });
+
+  it("その行き先が、実際にゲートを通せる手を指している", () => {
+    // **完了条件**（#324）。**「Issue を作る」だけでは通らない**——
+    // **`main` を取り込み直すと head が変わり、レビューが数え直される**
+    const section = triageSection();
+    const from = section.indexOf("recount");
+    expect(from, "recount の節が無い").toBeGreaterThanOrEqual(0);
+    const recount = section.slice(from).split("\n#### ")[0] ?? "";
+
+    expect(recount, "取り込み直す手が書いていない").toMatch(/取り込み直/);
+    expect(recount, "数え直されることに触れていない").toMatch(/数え直/);
+  });
+
+  it("外出しの節が、この状態を引き取ると言っていない", () => {
+    // **`defer` は「片付いた」と読めるのに、状態は 1 ミリも動かない**——
+    // **外出しする指摘が無いときに、そこへ倒す書き方を残さない**
+    const section = triageSection();
+    const from = section.indexOf("#### defer");
+    expect(from, "defer の節が無い").toBeGreaterThanOrEqual(0);
+    const defer = section.slice(from).split("\n#### ")[0] ?? "";
+
+    expect(defer, "指摘が無くても外出しすると読める").not.toMatch(/指摘が無くても|0 件でも/);
+  });
+});
