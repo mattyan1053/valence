@@ -1915,6 +1915,29 @@ describe("作業場ごとに数える", () => {
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
+  /**
+   * **本物と同じ口を持つ `task`**（`loop:stop:paths` と `loop:stop`）。
+   * **STOP の置き場は `task` が持っている**ので、こちらでも同じ口から引く。
+   */
+  function withStopFiles(dir: string, options: { failStop?: boolean } = {}): void {
+    const stop = join(dir, "loop", "STOP");
+    writeFileSync(
+      join(dir, "task"),
+      [
+        "#!/usr/bin/env bash",
+        'case "${1-}" in',
+        `  loop:stop:paths) printf '%s\\n' '${stop}' ;;`,
+        options.failStop === true
+          ? "  loop:stop) exit 1 ;;"
+          : `  loop:stop) mkdir -p '${join(dir, "loop")}' && printf 'stopped\\n' >'${stop}' ;;`,
+        "  *) ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "loop-stall-scoped-"));
     expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
@@ -2014,6 +2037,81 @@ describe("作業場ごとに数える", () => {
       stall(repo, ["local-ci-failed:42"]).stdout,
       "止めた当人のカウンタが残っている（1 回で止まり直す）",
     ).toContain("count=1");
+  });
+
+  it("旧版の再開でも、この作業場のカウンタは無効になる", () => {
+    // **旧版の `--resumed` は共有カウンタしか消さない**（`rm -f "$STATE"` だけ）が、
+    // **STOP は全 worktree から消す** (#239 のレビュー 2 周目)。**この作業場の
+    // カウンタは上限のまま残り、次の 1 回で即座に止め直す**——**版をまたぐ窓は
+    // いま開いている**（master は `origin/main`、worker はこの枝）。
+    //
+    // **旧版に何かをさせない。** **手がかりは STOP そのもの**である——
+    // **配ったはずの STOP が無いなら、誰かが再開した**（**どの版が消したかも、
+    // 人が手で消したかも問わない**）。
+    withStopFiles(repo);
+    for (const _ of [1, 2, 3]) {
+      stall(repo, ["dirty"]);
+    }
+    expect(existsSync(join(repo, "loop", "STOP")), "STOP が配られていない").toBe(true);
+
+    // 旧版の `--resumed` がしたこと: 共有カウンタと STOP だけを消す
+    rmSync(join(repo, "loop", "STOP"));
+    rmSync(join(repo, ".git", "valence-loop-stall"), { force: true });
+
+    expect(stall(repo, ["dirty"]).stdout, "旧版から再開された作業場が、1 回で止まり直す").toContain(
+      "count=1",
+    );
+  });
+
+  it("STOP を配れなかったときは、消さない", () => {
+    // **`exit 3`（上限に達したが STOP を配れなかった）は、同じ形になる**——
+    // **STOP は無いのにカウンタは上限**である。**そこで消すと、人を呼ぶべき状態が
+    // 黙って消える。** **配れたかどうかで分ける。**
+    withStopFiles(repo, { failStop: true });
+    for (const _ of [1, 2]) {
+      stall(repo, ["dirty"]);
+    }
+    expect(stall(repo, ["dirty"]).status, "STOP を配れていない終わり方ではない").toBe(3);
+    expect(existsSync(join(repo, "loop", "STOP")), "STOP が配られてしまっている").toBe(false);
+
+    expect(
+      stall(repo, ["dirty"]).stdout,
+      "止められていないのに、カウンタが消えている",
+    ).not.toContain("count=1");
+  });
+
+  it("共有カウンタが消えただけでは、再開と読まない", () => {
+    // **旧版は `--reset`（対象なし）でも `$STATE` を消す** (#239 のレビュー 2 周目)。
+    // **共有ファイルの有無を合図にすると、普通の前進が再開に化ける**——
+    // **この PR が引いた線（誰の状態か）が、そこで消える。**
+    withStopFiles(repo);
+    for (const _ of [1, 2]) {
+      stall(repo, ["dirty"]);
+    }
+
+    rmSync(join(repo, ".git", "valence-loop-stall"), { force: true });
+
+    expect(
+      stall(repo, ["dirty"]).stdout,
+      "他の作業場の前進で、この作業場のカウンタが消えている",
+    ).toContain("[STOP]");
+  });
+
+  it("旧版から再開されたことも、繰り返しとして残る", () => {
+    // **人が同じところで何度も判断していることは、記録から読めるようにする**
+    // （`--resumed` の狙いと同じ。経路が違うだけで扱いを変えない）
+    withStopFiles(repo);
+    for (const _ of [1, 2, 3]) {
+      stall(repo, ["dirty"]);
+    }
+    rmSync(join(repo, "loop", "STOP"));
+
+    let last = "";
+    for (const _ of [1, 2, 3]) {
+      last = stall(repo, ["dirty"]).stdout;
+    }
+
+    expect(last, "2 回目だと分かる形になっていない").toContain("2 回目");
   });
 
   it("別の作業場で止まったことも、繰り返しとして残る", () => {

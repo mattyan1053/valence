@@ -480,6 +480,28 @@ state_file() {
 # 出すためのもので、**カウンタとは別に持つ**（--reset で消えると、繰り返しが見えなくなる）。
 readonly RESUMED="$common_dir/valence-loop-resumed"
 
+# **この作業場が STOP を配ったという印** (#239 のレビュー 2 周目)。
+#
+# **版をまたいで再開されると、この作業場だけが出られなくなる。** **前の版の
+# `--resumed` は共有カウンタしか消さない**が、**STOP は全 worktree から消す**
+# ——**作業場ごとのカウンタは前の版から見えない**ので、**上限のまま残り、
+# 次の 1 回で即座に止め直す**（`AGENTS.md` §5 の「新しい書き手 → 古い読み手」。
+# **「足すなら古い読み手は見ない」が効かない**——**古い読み手の仕事が
+# 「全部消すこと」だから**である）。
+#
+# **前の版に何かをさせない。** **手がかりは STOP そのもの**である——
+# **配ったはずの STOP が無いなら、誰かが再開した**（**どの版が消したかも、
+# 人が手で消したかも問わない**。**版をまたぐ約束が要らない**）。
+#
+# **印が要るのは、`exit 3` と見分けるため**である。**上限に達したが配れなかった**とき、
+# **STOP は無いのにカウンタは上限**という同じ形になる——**そこで消すと、
+# 人を呼ぶべき状態が黙って消える。**
+#
+# **共有ファイルの有無は合図にしない。** **前の版は `--reset`（対象なし）でも
+# `$STATE` を消す**ので、**普通の前進が再開に化ける**——**この作業場のカウンタが
+# 他人の前進で消え、分けた意味が無くなる。**
+readonly STOPPED_MARK="$common_dir/valence-loop-stopped-$workspace_scope"
+
 # **master と worker は同じカウンタを、同じ周期で書きうる。** 読んでから書くまでを
 # 排他しないと、後から書いた側が相手の増分を消す (lost update)。記録が増えないまま
 # 周回だけ進むので、**どちらの識別子も上限に届かず第 4 層が効かなくなる**。
@@ -633,6 +655,12 @@ if [[ $ID == "--resumed" ]]; then
     echo "[FAIL] 停止カウンタを消せません: ${resumed_states[*]}" >&2
     exit 2
   }
+  # **配ったという印も一緒に消す。** **カウンタが無くなった以上、印だけ残しても
+  # 何も指していない**（下の推定は「カウンタが上限」と組でしか働かない）。
+  rm -f "$common_dir"/valence-loop-stopped-worker-* || {
+    echo "[FAIL] 停止の印を消せません: $common_dir/valence-loop-stopped-worker-*" >&2
+    exit 2
+  }
   echo "stall resumed"
   # **STOP の撤去まで、このロックの中で行う** (#151)。
   #
@@ -672,6 +700,56 @@ if [[ $ID == "--resumed" ]]; then
   done <<<"$stop_paths"
   ((resume_found == 1)) || echo "==> STOP は無い（停止していない）"
   exit 0
+fi
+
+# **配ったはずの STOP が無いなら、誰かが再開している** (#239 のレビュー 2 周目)。
+#
+# **前の版から再開されると、この作業場だけが出られない**（印の宣言に書いた形）。
+# **前の版に何かをさせるのではなく、こちら側だけで閉じる**——**STOP は人にしか
+# 解けない**ので、**配ったのに無いことが、そのまま「人が来た」証拠**になる。
+#
+# **`--resumed` と同じ扱いにする**（**経路が違うだけで、起きたことは同じ**）——
+# **上限に達していた識別子を繰り返しとして覚えてから、この作業場のぶんを消す。**
+#
+# **読めなければ推定しない。** **別のリポジトリで動いている / `task` が無い /
+# 一覧を取れない**ときは、**「STOP は無い」と読まない**——**取れなかったものを
+# 0 件と読まない**のは、このリポジトリで繰り返し踏んできた形である。
+if [[ -f $STOPPED_MARK ]]; then
+  if [[ -z $script_common_dir || $script_common_dir != "$common_dir" || ! -x $TASK ]]; then
+    echo "[WARN] STOP の有無を確かめられません（別のリポジトリで実行している）" >&2
+  elif ! mark_stop_paths="$("$TASK" loop:stop:paths)"; then
+    echo "[WARN] STOP の置き場所を取得できません: $TASK" >&2
+  else
+    mark_stop_found=0
+    mark_stop_listed=0
+    while read -r mark_stop_path; do
+      [[ -n $mark_stop_path ]] || continue
+      mark_stop_listed=$((mark_stop_listed + 1))
+      [[ -f $mark_stop_path ]] || continue
+      mark_stop_found=1
+    done <<<"$mark_stop_paths"
+    # **空の一覧を「STOP は無い」と読まない。** **置き場所が 1 つも返らないのは
+    # 「見に行けなかった」**のと同じである——**取れなかったものを 0 件と読まない。**
+    if ((mark_stop_listed == 0)); then
+      echo "[WARN] STOP の置き場所が 1 つも返りません: $TASK" >&2
+    elif ((mark_stop_found == 0)); then
+      if [[ -f $LOCAL_STATE ]]; then
+        while IFS=$'\t' read -r prev_count prev_id _prev_epoch; do
+          [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
+          ((10#$prev_count >= MAX_REPEATS)) || continue
+          printf '%s\n' "$prev_id" >>"$RESUMED" || {
+            echo "[FAIL] 再開の記録を書けません: $RESUMED" >&2
+            exit 2
+          }
+        done < "$LOCAL_STATE"
+      fi
+      rm -f "$LOCAL_STATE" "$STOPPED_MARK" || {
+        echo "[FAIL] 停止カウンタを消せません: $LOCAL_STATE" >&2
+        exit 2
+      }
+      echo "==> 配った STOP が無い（誰かが再開した）ので、この作業場のカウンタを消した"
+    fi
+  fi
 fi
 
 # **識別子ごとに数える。** 1 つだけ持って「直前と違えば 1 に戻す」形にすると、
@@ -821,6 +899,18 @@ if ((count >= MAX_REPEATS)); then
       echo "       止めるには、この作業ツリーで ./task loop:stop を手で叩くこと" >&2
       stopped=3
     }
+    # **配れたときだけ印を残す** (#239 のレビュー 2 周目)。**配れなかった側に残すと、
+    # 「STOP が無い」が再開と区別できなくなり、人を呼ぶべき状態が黙って消える。**
+    #
+    # **書けなくても、終了コードは変えない。** **ここが表すのは「止まったかどうか」**
+    # で、**止まってはいる**——**別の意味を同じ値に載せると、手順書の
+    # 「exit 1 → 全ループが停止済み」が嘘になる**（#191 のレビューと同じ理由）。
+    # **落ちたぶんは声に出す**——**次の周回は、前の版から再開されても気づけない。**
+    ((stopped == 1)) && { printf '%s\n' "$(date +%s)" >"$STOPPED_MARK" || {
+      echo "[FAIL] 停止の印を書けません: $STOPPED_MARK" >&2
+      echo "       止まってはいます。前の版から再開されると、この作業場は出られません" >&2
+      echo "       再開したら、この作業ツリーで ./task loop:resume を打つこと" >&2
+    }; }
   else
     # 黙って何もしないのは、黙って止めるのと同じくらい分かりにくい。
     echo "[FAIL] ループを止められません" >&2
