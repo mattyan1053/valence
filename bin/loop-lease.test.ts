@@ -1447,4 +1447,256 @@ describe("bin/loop-lease", () => {
       expect(activity).toHaveLength(1);
     });
   });
+
+  describe("周回の途中で版が入れ替わっても、自分の lease を返せる", () => {
+    // **周回の途中で lease が消えた** (#240)。**消したものはいない**——
+    // **記録の名前が、走っているスクリプトから毎回組み立てられる**ためである。
+    //
+    // **worker は周回の途中で作業ツリーを入れ替える**（1.1 の同期、`gh pr checkout`）
+    // ——**`bin/loop-lease` 自身もそこで入れ替わる。** **取ったときと返すときで
+    // 名前の作り方が違えば、自分が置いた記録を見つけられない**（`AGENTS.md` §5 の
+    // 「名前を変えたら、古い名前を持つ者を数える」。#185）。
+    //
+    // **実物に跡が残っている。** この機械の共通ディレクトリには、**3 通りの名前**の
+    // 記録が並んでいる——`worker_home_mattyan1053_valence`（パスをそのまま畳んだ版）、
+    // `worker-<digest 26 桁>`（**どの main にも無い。PR の枝でだけ存在した版**）、
+    // `worker-<digest 64 桁>`（いまの版）。**枝を checkout した周回が、そこにいた。**
+
+    /**
+     * **前の版**を作る。**名前の作り方だけを変える**（他は実物のまま）。
+     *
+     * **入口の印の突き合わせも通す**ので、**手順書と `loop-procedure-stamp` も
+     * 同じ作業場へ置く**（`acquire` はディスクの手順書を見る）。
+     */
+    function olderVersion(formula = 'lease_scope="worker-${digest:0:26}"'): string {
+      mkdirSync(join(sandbox, "bin"), { recursive: true });
+      mkdirSync(join(sandbox, ".claude", "commands"), { recursive: true });
+      copyFileSync(
+        join(REPO_ROOT, ".claude/commands/loop-worker.md"),
+        join(sandbox, ".claude/commands/loop-worker.md"),
+      );
+      copyFileSync(
+        join(REPO_ROOT, "bin/loop-procedure-stamp"),
+        join(sandbox, "bin", "loop-procedure-stamp"),
+      );
+      chmodSync(join(sandbox, "bin", "loop-procedure-stamp"), 0o755);
+      const older = join(sandbox, "bin", "older-loop-lease");
+      const source = readFileSync(SCRIPT, "utf8");
+      const changed = source.replace('lease_scope="worker-${digest%% *}"', formula);
+      expect(changed, "名前の作り方を差し替えられていない").not.toBe(source);
+      writeFileSync(older, changed, { mode: 0o755 });
+      return older;
+    }
+
+    /**
+     * すべての記録を、期限の外へずらす。**待たずに古い状態を作る**（#131 の教訓）。
+     *
+     * **期限は「取得」と「最後の活動」の新しいほうから測る**ので、**両方ずらす。**
+     */
+    function ageRecords(): void {
+      const old = Math.floor(Date.now() / 1000) - 100_000;
+      const entries = readdirSync(join(sandbox, ".git"));
+      for (const entry of entries.filter((name) => name.startsWith("valence-loop-activity-"))) {
+        writeFileSync(join(sandbox, ".git", entry), `${old}\n`);
+      }
+      for (const entry of leaseRecords()) {
+        const path = join(sandbox, ".git", entry);
+        const lines = readFileSync(path, "utf8").split("\n");
+        const [token = ""] = (lines[0] ?? "").split("\t");
+        lines[0] = `${token}\t${old}`;
+        writeFileSync(path, lines.join("\n"));
+      }
+    }
+
+    /** その作業場の lease の記録（`.lock` は除く）。**名前の作り方は写さない。** */
+    function leaseRecords(): string[] {
+      return readdirSync(join(sandbox, ".git")).filter(
+        (entry) => entry.startsWith("valence-loop-lease-worker") && !entry.endsWith(".lock"),
+      );
+    }
+
+    function runWith(script: string, args: string[]): Run {
+      const result = spawnSync(script, args, { cwd: sandbox, encoding: "utf8" });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
+
+    it("前の版が置いた記録でも、token で見つけて返せる", () => {
+      const older = olderVersion();
+      const held = runWith(older, ["acquire", "worker", stampFor("worker")]);
+      expect(held.status, held.stderr).toBe(0);
+
+      const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
+
+      expect(released.status, released.stderr).toBe(0);
+    });
+
+    it("前の版が持っている lease は、いまの版の acquire にも見える", () => {
+      // **返せるようにしただけでは、片側しか塞げていない** (#291)。
+      // **名前が変わった直後、`acquire` は新しい名前で「空いている」と読む**
+      // ——**まだ返していない周回がいるのに、もう 1 つ取れる**。**同じ作業場で
+      // checkout と commit が並行する**（#68 の形）——**直列化そのものが、
+      // その瞬間だけ成り立たない。**
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      const second = runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]);
+
+      expect(second.status, "同じ作業場で 2 つ目の周回が通ってしまう").toBe(1);
+    });
+
+    it("前の版の記録が期限切れなら、これまでどおり引き継ぐ", () => {
+      // **走っている周回を止めるのが目的**であって、**落ちた周回の跡で止まるのは
+      // 別の壊れ方**である（**引き継げなくなると、その作業場は二度と動けない**）
+      const older = olderVersion();
+      expect(
+        runWith(older, ["acquire", "worker", stampFor("worker")]).status,
+        "前の版で取れていない",
+      ).toBe(0);
+      ageRecords();
+
+      const second = runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]);
+
+      expect(second.status, second.stderr).toBe(0);
+      expect(second.stderr, "引き継いだことが出ていない").toMatch(/期限切れ|引き継/);
+    });
+
+    it("引き継いだときも、見つけた記録を消さない", () => {
+      // **acquire は返す口ではない** (#291)。**跡を消すと、前の版の周回が返しに来たとき
+      // 「誰も持っていません」に落ちる**——**#290 で塞いだ側が、こちらから開く**。
+      //
+      // **期限切れのほうで見る。** **走っている記録は消しようがない**（取れずに終わる）
+      // ——**消したくなるのは引き継ぐ側**である（**実際、生きている記録だけを見ていた
+      // 版では、消す変異が生き残った**）
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+      const before = leaseRecords();
+      ageRecords();
+
+      expect(runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      expect(leaseRecords(), `前の版の記録が消えている: ${before.join(", ")}`).toEqual(
+        expect.arrayContaining(before),
+      );
+    });
+
+    it("別の作業場の記録では止まらない（名前が違っていても）", () => {
+      // **worker の lease は作業場ごと**である (#98)。**名前で引けないぶんを走査で
+      // 補うと、別の作業場の記録まで見えてしまう**——**2 人目が走っているだけで
+      // 1 人目が取れなくなる**（**既存の試験がこれを捕まえた**）。
+      //
+      // **持ち主は記録の中に書いてある**（3 行目の作業場）ので、**そこで見分ける。**
+      expect(
+        spawnSync("git", ["-C", sandbox, "commit", "--allow-empty", "--quiet", "-m", "init"], {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@e",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@e",
+          },
+        }).status,
+      ).toBe(0);
+      const other = join(sandbox, "second");
+      expect(spawnSync("git", ["-C", sandbox, "worktree", "add", "--detach", other]).status).toBe(
+        0,
+      );
+      const older = olderVersion();
+      const held = spawnSync(older, ["acquire", "worker", stampFor("worker")], {
+        cwd: other,
+        encoding: "utf8",
+      });
+      expect(held.status, held.stderr).toBe(0);
+
+      const mine = runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]);
+
+      expect(mine.status, `別の作業場が走っているだけで取れない: ${mine.stderr}`).toBe(0);
+    });
+
+    it("master の acquire は、worker の記録で止まらない", () => {
+      // **役ごとの前方一致に閉じる**（この PR で `release` に入れた形と同じ）——
+      // **役が違えば、走っていても関係が無い**
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      const master = runWith(SCRIPT, ["acquire", "master", stampFor("master")]);
+
+      expect(master.status, master.stderr).toBe(0);
+    });
+
+    it("パスを畳んでいた版の記録でも返せる", () => {
+      // **残っている名前は 3 通りある** (#290 のレビュー)。**いちばん古い版は
+      // `worker` の直後が `_` で、`worker-` では拾えない**——**自分で「3 通り」と
+      // 書いておきながら、走査は 2 通りしか見ていなかった**（`AGENTS.md` §5
+      // 「変えた側ではなく残る側を数える」。**残る側は自分の diff に出てこない**）
+      const older = olderVersion('lease_scope="worker${toplevel//\\//_}"');
+      const held = runWith(older, ["acquire", "worker", stampFor("worker")]);
+      expect(held.status, held.stderr).toBe(0);
+      expect(leaseRecords().join(","), "`_` で始まる名前になっていない").toMatch(
+        /valence-loop-lease-worker_/,
+      );
+
+      const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
+
+      expect(released.status, released.stderr).toBe(0);
+      expect(leaseRecords(), "前の版の記録が残っている").toHaveLength(0);
+    });
+
+    it("master の release は、worker の記録を触らない", () => {
+      // **役を取り違えて打つと、別の役の直列化が解ける** (#290 のレビュー)。
+      // **走査は自分の役のぶんだけ**である——**`release master <worker の token>` が
+      // worker の lease を消して exit 0 になり、しかも「master の lease」と名乗っていた**
+      const held = runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]);
+      expect(held.status, held.stderr).toBe(0);
+
+      const released = runWith(SCRIPT, ["release", "master", held.stdout.trim()]);
+
+      expect(released.status, "worker の lease を master として返せてしまう").not.toBe(0);
+      expect(leaseRecords(), "worker の記録が消えている").toHaveLength(1);
+    });
+
+    it("名前が変わっていたことを、黙って通さない", () => {
+      // **返せるだけでは足りない。** **名前が変わったことは、次に同じことを起こす**
+      // ——**気づけなければ、記録は溜まり続ける**（実物に 3 通り残っている）
+      const older = olderVersion();
+      const held = runWith(older, ["acquire", "worker", stampFor("worker")]);
+
+      const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
+
+      expect(released.stderr, "名前が変わったことが出ていない").toMatch(/名前/);
+    });
+
+    it("返したら、前の版の記録も残さない", () => {
+      // **消すのは「自分が取った記録」である。** **残すと、次の周回から
+      // 「別の周回が走っている」に見える**——**引き継ぎの窓が開きっぱなしになる**
+      const older = olderVersion();
+      const held = runWith(older, ["acquire", "worker", stampFor("worker")]);
+
+      expect(runWith(SCRIPT, ["release", "worker", held.stdout.trim()]).status).toBe(0);
+
+      const left = readdirSync(join(sandbox, ".git")).filter(
+        (entry) => entry.startsWith("valence-loop-lease-worker") && !entry.endsWith(".lock"),
+      );
+      expect(left, `記録が残っている: ${left.join(", ")}`).toHaveLength(0);
+    });
+
+    it("他人の token では返せないし、名前が変わったとも言わない", () => {
+      // **token は資格である** (#260 と同じ線)。**名前で引けないからといって、
+      // 走査した先の記録を誰にでも返させない**——**直列化そのものが崩れる**。
+      //
+      // **終了コードだけを見ない** (実際に変異が生き残った)。**token を見ずに
+      // 乗り換えても、下の突き合わせが「別の周回が持っています」で弾く**ので、
+      // **合否は変わらない**——**変わるのは、無関係な記録について
+      // 「名前が変わっています」と言い出すこと**である。**誤った案内は、
+      // 次に読む人を間違った方向へ走らせる。**
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      const released = runWith(SCRIPT, ["release", "worker", "deadbeefdeadbeef"]);
+
+      expect(released.status, "他人の token で返せてしまう").not.toBe(0);
+      expect(released.stderr, "無関係な記録を、この token のものだと言っている").not.toMatch(
+        /名前/,
+      );
+    });
+  });
 });
