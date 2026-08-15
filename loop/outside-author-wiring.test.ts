@@ -148,6 +148,9 @@ describe("ループの外の著者", () => {
     ).toEqual([
       ["### 要求が満たされたか確かめる（`changes-requested`）", true],
       ["#### rework — worker へ差し戻す", true],
+      // **`recount` も「worker の対応待ち」を数える**（#326 のレビュー）——
+      // **worker は `--author @me` で並べる**ので、**外の著者の PR は誰も rebase しない**
+      ["#### recount — main を取り込み直して、レビューを数え直す", true],
     ]);
   });
 
