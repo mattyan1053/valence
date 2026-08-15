@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { dynamic, invalidNote } from "./page";
+import { boardPath, dynamic, invalidNote } from "./page";
 
 describe("読めなかったものを画面から消さない", () => {
   // **port が `invalid` を残しているのは、この最後の 1 歩のため**である
@@ -30,6 +30,20 @@ describe("読めなかったものを画面から消さない", () => {
   it("理由は画面へ出さない", () => {
     // **Zod のメッセージには値が入りうる**（`app-credentials.ts` と同じ理由）
     expect(invalidNote(1)).not.toMatch(/expected|received|invalid_type/i);
+  });
+});
+
+describe("盤面への行き先", () => {
+  // **並べるだけでは、依存グラフもリスク Tier も見られない** (#314)
+  it("リポジトリごとの画面を指す", () => {
+    expect(boardPath({ owner: "acme", name: "web" })).toBe("/repos/acme/web");
+  });
+
+  it("名前をそのまま繋がない", () => {
+    // **`/` や `..` の入った値で、別の経路を指させない**
+    expect(boardPath({ owner: "acme", name: "../../auth/logout" })).toBe(
+      "/repos/acme/..%2F..%2Fauth%2Flogout",
+    );
   });
 });
 

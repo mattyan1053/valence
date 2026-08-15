@@ -34,6 +34,17 @@ export function invalidNote(count: number): string | undefined {
   return count === 0 ? undefined : `${count} 件は読めませんでした。`;
 }
 
+/**
+ * 盤面への行き先 (#314)。
+ *
+ * **名前をそのまま繋がない。** **owner / name は GitHub から来た値**で、
+ * **`/` や `..` が入っていれば別の経路を指す**——**セグメントとして符号化する**
+ * （**取り違えた先を、リンクの側から作らない**）。
+ */
+export function boardPath(repository: { readonly owner: string; readonly name: string }): string {
+  return `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+}
+
 export default async function Home() {
   const result = await visibleRepositoriesForCurrentUser();
 
@@ -46,7 +57,10 @@ export default async function Home() {
           <ul className="flex flex-col gap-1 text-sm">
             {result.listing.repositories.map((repository) => (
               <li key={`${repository.owner}/${repository.name}`}>
-                {repository.owner}/{repository.name}
+                {/* **並べるだけでは、盤面へ行けない** (#314)。**名前を入力させない** */}
+                <a className="underline" href={boardPath(repository)}>
+                  {repository.owner}/{repository.name}
+                </a>
               </li>
             ))}
           </ul>

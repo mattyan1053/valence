@@ -18,8 +18,13 @@ import { signOut } from "../application/auth/sign-out";
 import type { UserTokenStore } from "../application/ports/user-token-store";
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
 import { listVisibleRepositories } from "../application/repositories/list-visible-repositories";
+import { planReviewOrder } from "../application/review-order/plan-review-order";
+import type { RepositoryBoardResult } from "../application/review-order/view-repository-board";
+import { viewRepositoryBoard } from "../application/review-order/view-repository-board";
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
-import { readOAuthCredentials } from "../infrastructure/github/app-credentials";
+import { readAppCredentials, readOAuthCredentials } from "../infrastructure/github/app-credentials";
+import { createGitHubChangeSummarySource } from "../infrastructure/github/github-change-summary-source";
+import { createGitHubPullRequestSource } from "../infrastructure/github/github-pull-request-source";
 import { refreshUserTokens } from "../infrastructure/github/user-token";
 import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
 import { reportLoginFailure } from "../infrastructure/observability/login-failure";
@@ -79,6 +84,17 @@ function settings() {
     connection: readSupabaseConnection(process.env),
     key: readEncryptionKey(process.env),
   };
+}
+
+/**
+ * **App の資格**（installation token を取るのに要る）。**`settings()` へ入れない。**
+ *
+ * **ログインの経路は、App の資格を使わない。** **一緒に読むと、鍵が置かれていない
+ * 環境ではログインまで落ちる**——**症状は「盤面が出ない」ではなく「入れない」**になり、
+ * **原因から最も遠い場所で止まる。**
+ */
+function appSettings() {
+  return { app: readAppCredentials(process.env) };
 }
 
 async function sessionClient(connection: SupabaseConnection) {
@@ -201,5 +217,57 @@ export async function visibleRepositoriesForCurrentUser(): Promise<VisibleReposi
       }),
     // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない。**
     repositories: createUserVisibleRepositories(),
+  });
+}
+
+/**
+ * 材料の取得を打ち切るまで。
+ *
+ * **図だけでも交通整理の役に立つ**（`planReviewOrder` の `collectChanges`）ので、
+ * **材料が遅い日は、依存グラフを先に出す**——**渡さないと、画面ごと待つ。**
+ */
+const CHANGES_DEADLINE_MS = 5_000;
+
+/**
+ * **いまログインしている人の目で、1 つのリポジトリの盤面を返す**（#314）。
+ *
+ * **見てよいかはユーザートークンで決め、PR のデータは installation トークンで取る**
+ * （§6）——**順序が本体である。** **確かめる前に取りに行かないよう、盤面は
+ * 手続きごと渡す**（`viewRepositoryBoard` が「見える」と分かってから呼ぶ）。
+ *
+ * **installation は実行時に解決する**（§1）——**引くのは adapter の側**で、
+ * **ここが渡すのは「どのリポジトリか」だけ**である。
+ */
+export async function repositoryBoardForCurrentUser(repository: {
+  readonly owner: string;
+  readonly name: string;
+}): Promise<RepositoryBoardResult> {
+  const { credentials, connection, key } = settings();
+  const client = await sessionClient(connection);
+  const budget = createWinnersSaveBudget();
+  return viewRepositoryBoard({
+    repository,
+    openStore: () => storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
+    ensure: (store) =>
+      ensureUsableToken({
+        store,
+        refresh: (refreshToken) =>
+          refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+        now: new Date(),
+        waitForWinnersSave: createWaitForWinnersSave({ budget }),
+      }),
+    // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない。**
+    repositories: createUserVisibleRepositories(),
+    // **App の資格を読むのはここだけ。** **見てよいと分かるまで、1 度も呼ばれない**
+    plan: () => {
+      const { app } = appSettings();
+      return planReviewOrder(
+        {
+          pullRequests: createGitHubPullRequestSource({ credentials: app, repository }),
+          changes: createGitHubChangeSummarySource({ credentials: app, repository }),
+        },
+        { changesDeadline: AbortSignal.timeout(CHANGES_DEADLINE_MS) },
+      );
+    },
   });
 }
