@@ -44,6 +44,14 @@ function entry(): string {
   return readFileSync(ENTRY, "utf8");
 }
 
+/** 本体を読む節。**行き先が書かれるべきところ**である。 */
+function readSection(): string {
+  const text = entry();
+  const from = text.indexOf("bin/loop-procedure-body worker");
+  expect(from, "本体を読む口が無い").toBeGreaterThanOrEqual(0);
+  return text.slice(from).split("\n## ")[0] ?? "";
+}
+
 describe("入口だけが cron に運ばれる", () => {
   it("入口が、本体をディスクから読む口を持っている", () => {
     // **入口に書く**（#243 と同じ理由）。**本体の側に「本体を読め」と書いても、
@@ -51,15 +59,39 @@ describe("入口だけが cron に運ばれる", () => {
     expect(entry(), "本体を読む口が入口に無い").toContain("bin/loop-procedure-body worker");
   });
 
-  it("読めなかったら、何もせず終わると書いてある", () => {
+  it("読めなかったら、押さえたぶんを返して終わると書いてある", () => {
     // **完了条件。** **入口には手順の後半が無い**ので、**読めないまま進むと
-    // レビュー対応も出口も飛ばす**——**黙って古い手順で走らせない**
-    const body = entry();
-    const from = body.indexOf("bin/loop-procedure-body worker");
-    expect(from, "本体を読む口が無い").toBeGreaterThanOrEqual(0);
-    const section = body.slice(from).split("\n## ")[0] ?? "";
+    // レビュー対応も出口も飛ばす**——**黙って古い手順で走らせない**。
+    // **読むのは lease を取ったあと**なので、**返さずに終えると、この作業場は
+    // 期限が切れるまで動けない**
+    const section = readSection();
 
-    expect(section, "読めなかったときの行き先が書いていない").toMatch(/何もせず終わる/);
+    expect(section, "読めなかったときの行き先が書いていない").toContain(
+      "bin/loop-lease release worker",
+    );
+  });
+
+  it("本体を読むのは、同期のあとである", () => {
+    // **これが #323 のレビューで出た P1 である。** **同期の前に読むと、その周回が
+    // 始まった時点の作業ツリーから読む**——**未マージの PR の枝に居た周回は、
+    // その PR の本体をそのまま実行する。** **`bin/loop-procedure-changed` は
+    // `BEFORE` の側にしか無い変更を意図して除く**（#259）ので、**赤くならない。**
+    const text = entry();
+    const sync = text.indexOf("bin/loop-procedure-changed --role worker");
+    const read = text.indexOf("bin/loop-procedure-body worker");
+
+    expect(sync, "同期の判定が入口に無い").toBeGreaterThanOrEqual(0);
+    expect(read, "本体を読む口が無い").toBeGreaterThanOrEqual(0);
+    expect(read, "同期より先に本体を読んでいる").toBeGreaterThan(sync);
+  });
+
+  it("古い checkout に閉じ込められない理由が書いてある", () => {
+    // **`bin/loop-procedure-body` を持たない checkout に居ると、同期の前では落ちる**
+    // ——**同期へ到達しないまま毎周回そこで止まる**（#184 / #262 と同じ形）。
+    // **順序を戻す人が、この理由に必ず当たるようにする**
+    expect(readSection(), "止まった状態から出られない形に触れていない").toMatch(
+      /同期へ到達しない|閉じ込め/,
+    );
   });
 
   it("入口に、本体の写しが残っていない", () => {
