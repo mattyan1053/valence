@@ -1468,7 +1468,7 @@ describe("bin/loop-lease", () => {
      * **入口の印の突き合わせも通す**ので、**手順書と `loop-procedure-stamp` も
      * 同じ作業場へ置く**（`acquire` はディスクの手順書を見る）。
      */
-    function olderVersion(): string {
+    function olderVersion(formula = 'lease_scope="worker-${digest:0:26}"'): string {
       mkdirSync(join(sandbox, "bin"), { recursive: true });
       mkdirSync(join(sandbox, ".claude", "commands"), { recursive: true });
       copyFileSync(
@@ -1482,13 +1482,17 @@ describe("bin/loop-lease", () => {
       chmodSync(join(sandbox, "bin", "loop-procedure-stamp"), 0o755);
       const older = join(sandbox, "bin", "older-loop-lease");
       const source = readFileSync(SCRIPT, "utf8");
-      const changed = source.replace(
-        'lease_scope="worker-${digest%% *}"',
-        'lease_scope="worker-${digest:0:26}"',
-      );
+      const changed = source.replace('lease_scope="worker-${digest%% *}"', formula);
       expect(changed, "名前の作り方を差し替えられていない").not.toBe(source);
       writeFileSync(older, changed, { mode: 0o755 });
       return older;
+    }
+
+    /** その作業場の lease の記録（`.lock` は除く）。**名前の作り方は写さない。** */
+    function leaseRecords(): string[] {
+      return readdirSync(join(sandbox, ".git")).filter(
+        (entry) => entry.startsWith("valence-loop-lease-worker") && !entry.endsWith(".lock"),
+      );
     }
 
     function runWith(script: string, args: string[]): Run {
@@ -1504,6 +1508,37 @@ describe("bin/loop-lease", () => {
       const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
 
       expect(released.status, released.stderr).toBe(0);
+    });
+
+    it("パスを畳んでいた版の記録でも返せる", () => {
+      // **残っている名前は 3 通りある** (#290 のレビュー)。**いちばん古い版は
+      // `worker` の直後が `_` で、`worker-` では拾えない**——**自分で「3 通り」と
+      // 書いておきながら、走査は 2 通りしか見ていなかった**（`AGENTS.md` §5
+      // 「変えた側ではなく残る側を数える」。**残る側は自分の diff に出てこない**）
+      const older = olderVersion('lease_scope="worker${toplevel//\\//_}"');
+      const held = runWith(older, ["acquire", "worker", stampFor("worker")]);
+      expect(held.status, held.stderr).toBe(0);
+      expect(leaseRecords().join(","), "`_` で始まる名前になっていない").toMatch(
+        /valence-loop-lease-worker_/,
+      );
+
+      const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
+
+      expect(released.status, released.stderr).toBe(0);
+      expect(leaseRecords(), "前の版の記録が残っている").toHaveLength(0);
+    });
+
+    it("master の release は、worker の記録を触らない", () => {
+      // **役を取り違えて打つと、別の役の直列化が解ける** (#290 のレビュー)。
+      // **走査は自分の役のぶんだけ**である——**`release master <worker の token>` が
+      // worker の lease を消して exit 0 になり、しかも「master の lease」と名乗っていた**
+      const held = runWith(SCRIPT, ["acquire", "worker", stampFor("worker")]);
+      expect(held.status, held.stderr).toBe(0);
+
+      const released = runWith(SCRIPT, ["release", "master", held.stdout.trim()]);
+
+      expect(released.status, "worker の lease を master として返せてしまう").not.toBe(0);
+      expect(leaseRecords(), "worker の記録が消えている").toHaveLength(1);
     });
 
     it("名前が変わっていたことを、黙って通さない", () => {

@@ -937,8 +937,17 @@ release)
   #
   # **黙って通さない。** **名前が変わったことは、次の周回でも起きる**ので、
   # **返せたときこそ言う**（実物の共通ディレクトリには 3 通りの名前が残っている）。
+  #
+  # **走査するのは自分の役のぶんだけ** (#290 のレビュー)。**役を取り違えて打つと、
+  # 別の役の直列化が解ける**——**`release master <worker の token>` が worker の lease を
+  # 消して exit 0 になり、しかも「master の lease」と名乗る**（`busy` と同じ前方一致で、
+  # `valence-loop-lease-master` と `-worker…` は分かれる）。
+  #
+  # **`worker-` で切らない。** **いちばん古い版は `worker` の直後が `_`**
+  # （パスをそのまま畳んでいた。#98）——**残る側を数える**と 3 通りある
+  # （`AGENTS.md` §5。**残る側は自分の diff に出てこない**）。
   if [[ -z $held_token && -z $expired_token ]]; then
-    for renamed_state in "$common_dir"/valence-loop-lease-worker-*; do
+    for renamed_state in "$common_dir/valence-loop-lease-$ROLE"*; do
       [[ -f $renamed_state ]] || continue
       [[ $renamed_state != *.lock && $renamed_state != *.tmp ]] || continue
       [[ $renamed_state != "$STATE" ]] || continue
