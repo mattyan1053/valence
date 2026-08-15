@@ -49,6 +49,8 @@
 set -uo pipefail
 
 readonly ROLES=(master worker)
+# 役ごとの印（`bin/loop-review-reply --mark` から引く。#174）
+declare -A ROLE_MARK=()
 
 # 自動レビューの bot。**この人が最後なら、まだ誰も答えていない。**
 #
@@ -68,6 +70,20 @@ readonly REVIEW_BOT_REST
 # **ここが読むのは GraphQL の `author.login`** なので、`[bot]` を**取り除いて**持つ。
 # **足す側で書かない**——出所が `[bot]` 無しに変わったときに二重に付く。
 readonly REVIEW_BOT="${REVIEW_BOT_REST%\[bot\]}"
+
+# 役の印 (#174)。**master と worker は同じアカウントで動く**ので、
+# **GitHub 側の名前では見分けられない**——**投稿する側が印を付ける。**
+#
+# **文字列は書き写さない。** **正は `bin/loop-review-reply`**（付ける側）で、
+# **ここは引くだけ**である——**2 箇所に持つと、片方だけ直して黙って食い違う** (#159)。
+for mark_role in "${ROLES[@]}"; do
+  if ! role_mark="$("$bot_script_dir/loop-review-reply" --mark "$mark_role")" \
+    || [[ -z $role_mark ]]; then
+    echo "[FAIL] 役の印を取得できません: $mark_role" >&2
+    exit 2
+  fi
+  ROLE_MARK[$mark_role]="$role_mark"
+done
 
 # 列の区切り。**タブを使わない。**
 #
@@ -293,6 +309,8 @@ prs="$(gh api graphql --paginate \
 declare -A unresolved_of=()
 declare -A last_comment_of=()
 declare -A last_author_of=()
+# **最後の発言の本文。** **役の印を読むため**である (#174)
+declare -A last_body_of=()
 # **まだ誰も答えていないスレッドの数。** 件数とは別に持つ。
 #
 # さらに 2 つに分ける。**`changes-requested` は PR 全体の状態であって、
@@ -342,14 +360,14 @@ while IFS="$FIELD" read -r number _labels head labeled_at _body; do
             pageInfo{hasNextPage endCursor}
             nodes{isResolved
               opened: comments(first:1){nodes{createdAt}}
-              comments(last:1){nodes{databaseId author{login}}}}}}}}' \
+              comments(last:1){nodes{databaseId author{login} body}}}}}}}' \
     --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)
-      | "\(.comments.nodes[0].databaseId)\u001f\(.comments.nodes[0].author.login)\u001f\(.opened.nodes[0].createdAt)"')" ||
+      | "\(.comments.nodes[0].databaseId)\u001f\(.comments.nodes[0].author.login)\u001f\(.opened.nodes[0].createdAt)\u001f\(.comments.nodes[0].body | gsub("[\n\r]"; " "))"')" ||
     fail_unknown "未解決スレッド (#$number)"
   count=0
   untriaged=0
   requested=0
-  while IFS="$FIELD" read -r comment_id author opened_at; do
+  while IFS="$FIELD" read -r comment_id author opened_at body_line; do
     [[ -n $comment_id ]] || continue
     ((count++))
     # **スレッドごとに数える。** PR ごとに「いちばん新しい発言」だけで決めると、
@@ -368,6 +386,7 @@ while IFS="$FIELD" read -r number _labels head labeled_at _body; do
     if [[ -z ${last_comment_of[$number]-} || $comment_id -gt ${last_comment_of[$number]} ]]; then
       last_comment_of[$number]="$comment_id"
       last_author_of[$number]="$author"
+      last_body_of[$number]="$body_line"
     fi
   done <<<"$threads"
   unresolved_of[$number]="$count"
@@ -599,20 +618,34 @@ elif [[ -n $untriaged ]]; then
   branch="untriaged"
   witness="$(branch_witness "$untriaged")"
 elif [[ -n $answered ]]; then
-  # 相手役へ渡す。**自分は今の周回で書き終えている**
-  to="worker"
-  reason="PR #${answered%% *} に未解決の指摘がある"
+  # **誰が書いたかは、発言の印で読む** (#174)。**呼んだ役では決めない。**
+  #
+  # **前は「呼んだ側は、その周回で書き終えている」で代用していた**——**前提であって
+  # 事実ではない。** **worker の返信を master の判断として読むと、当否が判断されて
+  # いない指摘が「判断済み」に落ちる**（**通す側へ倒れるので気づけない**）。
+  # **代用はやめた**——**印で分かるなら、呼んだ役を見る理由が無い。**
+  #
+  # **印の無い発言は worker の返信として扱う。** **この仕組みより前のコメントと、
+  # 人が手で書いたものがそこに入る**——**master 扱いにすると、この Issue が挙げた
+  # 誤認そのものを既定にする。** **worker 扱いなら倒れる先は「master が確認する」**で、
+  # **止まる側**である。
+  #
   # **役で反転しても、同じ状態である** (#173 のレビュー)。**理由の文面を鍵にすると、
   # 同じ指摘について master→worker と worker→master で 2 通出る**——
   # **鍵は枝の名前で持ち、文面は持たない。**
   branch="answered"
   witness="$(branch_witness "$answered")"
-  if [[ $ROLE == "worker" ]]; then
+  answered_first="${answered%% *}"
+  if [[ ${last_body_of[$answered_first]-} == *"${ROLE_MARK[master]}"* ]]; then
+    # master が書いた（要求・質問）。**直すのは worker**
+    to="worker"
+    reason="PR #${answered_first} に未解決の指摘がある"
+  else
     to="master"
     # **状態から読めることだけを言う。** 「対応が返っている」とは書かない——
     # **出口は「何もしなかった場合も含めて必ず通す」**ので、**何も書いていない周回も
     # ここへ来る**。**書いた前提で文を作ると、していないことを言う** (#173 のレビュー)。
-    reason="PR #${answered%% *} の未解決スレッドの最後の発言が bot ではない（確認して resolve できる）"
+    reason="PR #${answered_first} の未解決スレッドの最後の発言が bot ではない（確認して resolve できる）"
   fi
 elif [[ -n $changes_requested ]]; then
   to="worker"

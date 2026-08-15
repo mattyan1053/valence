@@ -1,4 +1,4 @@
-<!-- 版: b75a7f5eca12 -->
+<!-- 版: a7963d3b97b7 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -744,7 +744,9 @@ gh pr edit <PR番号> --add-label changes-requested     # 付け直して初め�
   fetch されていないので、`git show refs/pr/<N>:...` は revision 不明で失敗する）
 - 直さないと判断したものは、**その理由が書かれているか**
 
-**スレッドへの返信は `bin/loop-review-reply <PR番号> <スレッドID> <本文ファイル>` を通す。**
+**スレッドへの返信は `bin/loop-review-reply master <PR番号> <スレッドID> <本文ファイル>` を通す。**
+**役を渡す** (#174)——**master と worker は同じ GitHub アカウントで発言する**ので、
+**印が無いと、出口は「誰が最後に書いたか」を読めない**。**印はスクリプトが付ける。**
 **`gh api` を直接叩かない**——**前の投稿が落ちた残骸（空の pending review）が、
 次の投稿を全部塞ぐ** (#216。**master も worker も同じところで詰まる**ので、
 **始末はスクリプトが持つ**)。**exit 1 は「消してはいけないものが塞いでいる」**

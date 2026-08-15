@@ -23,6 +23,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 const SCRIPT = fileURLToPath(new URL("./loop-review-reply", import.meta.url));
 
 const THREAD = "PRRT_test";
+
+/** 役の印。**書く側から引く**（試験にも写さない）。 */
+function markOf(role: string): string {
+  const result = spawnSync(SCRIPT, ["--mark", role], { encoding: "utf8" });
+  expect(result.status, result.stderr).toBe(0);
+  return result.stdout.trim();
+}
 const BLOCKED = "user_id can only have one pending review per pull request";
 
 /** pending review 1 件ぶんの答え。 */
@@ -147,6 +154,8 @@ describe("bin/loop-review-reply", () => {
     body?: string;
     /** ロックを別の周回が握っている状態にする。 */
     lockHeld?: boolean;
+    /** 役の印。**渡さないときの既定は worker**（試験の都合。実装では必須である） */
+    role?: string[];
   }): {
     status: number;
     stdout: string;
@@ -172,7 +181,7 @@ describe("bin/loop-review-reply", () => {
     if (options.lockHeld === true) {
       holdLock(lock, join(sandbox, "lock-held"));
     }
-    const result = spawnSync(SCRIPT, ["42", THREAD, body], {
+    const result = spawnSync(SCRIPT, [...(options.role ?? ["worker"]), "42", THREAD, body], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -276,6 +285,16 @@ describe("bin/loop-review-reply", () => {
     expect(result.passed, "スレッド ID も型を変えて渡している").not.toContain("-F t=");
   });
 
+  it("印は、投稿する本文の中に入る", () => {
+    // **印は投稿する側が必ず付ける** (#174)。**本文へ書けと手順書に書く形にすると、
+    // 付け忘れがそのまま誤認になる**——**スクリプトが付ける。**
+    const posted = run({ replies: ["ok"], role: ["worker"], body: "直しました。" });
+
+    expect(posted.status, posted.stderr).toBe(0);
+    expect(posted.passed, "本文が渡っていない").toContain("直しました。");
+    expect(posted.passed, "役の印が入っていない").toContain(markOf("worker"));
+  });
+
   it("`@` で始まる本文でも投稿できる", () => {
     // **落ちると、症状は「pending review が原因ではありません」**になる
     // ——**原因は本文の 1 文字目なのに、そう読める文面はどこにも出ない。**
@@ -339,6 +358,45 @@ describe("bin/loop-review-reply", () => {
  * **master も worker も返信を投稿する。** **散文で片方にだけ書くと、
  * もう片方が同じところで詰まる**——**実際に、同じ手を 2 回、記憶で打っている。**
  */
+describe("投稿した役が、GitHub 側から読める", () => {
+  // **master と worker は同じ GitHub アカウントで動く**ので、**発言から役を
+  // 見分けられない** (#174)。**`bin/loop-handoff` は「呼んだ側は書き終えている」で
+  // 代用していた**が、**それは前提であって事実ではない**——**worker の返信を
+  // master の判断として読むと、当否が判断されていない指摘が「判断済み」に落ちる**
+  // （**通す側へ倒れるので気づきにくい**）。
+  //
+  // **印は投稿する側が必ず付ける。** **「付け忘れたら master 扱い」のような既定を
+  // 置くと、付け忘れがそのまま誤認になる**ので、**役は引数で必ず受け取る。**
+
+  it("役を渡さなければ、使い方の誤りで落ちる", () => {
+    const result = spawnSync(SCRIPT, ["42", THREAD, "/dev/null"], { encoding: "utf8" });
+
+    expect(result.status, "役なしで通ってしまう").toBe(2);
+    expect(result.stderr, "使い方が出ていない").toContain("使い方");
+  });
+
+  it("知らない役は受け付けない", () => {
+    const result = spawnSync(SCRIPT, ["reviewer", "42", THREAD, "/dev/null"], {
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(2);
+  });
+
+  it("役ごとに違う印になる", () => {
+    expect(markOf("worker"), "役で分かれていない").not.toBe(markOf("master"));
+  });
+
+  it("印は、読む側から引ける", () => {
+    // **2 箇所に持たない**（#159 の形）。**書く側と読む側が同じ文字列を持つと、
+    // 片方だけ直したときに黙って食い違う**——**読む側はここへ訊く**
+    const asked = spawnSync(SCRIPT, ["--mark", "worker"], { encoding: "utf8" });
+
+    expect(asked.status, asked.stderr).toBe(0);
+    expect(asked.stdout.trim()).not.toBe("");
+  });
+});
+
 describe("返信の投稿口は、両方の役から辿れる", () => {
   const ROOT = fileURLToPath(new URL("..", import.meta.url));
 

@@ -59,6 +59,27 @@ const THREAD_AT = "2026-01-01T00:00:00Z";
 /** `changes-requested` を付けた既定の時刻。**スレッドより後**。 */
 const LABELED_AT = "2026-06-01T00:00:00Z";
 
+/** 役の印。**書く側から引く**（試験にも写さない。#174）。 */
+function markOf(role: string): string {
+  const result = spawnSync(fileURLToPath(new URL("./loop-review-reply", import.meta.url)), [
+    "--mark",
+    role,
+  ]);
+  return (result.stdout ?? "").toString().trim();
+}
+
+/**
+ * 最後の発言の本文。**印の有無で「誰が書いたか」が決まる** (#174)。
+ *
+ * **`us` は印の無い発言**（**この仕組みより前のコメント / 人が手で書いたもの**）。
+ */
+function bodyOf(who: "bot" | "us" | "worker" | "master"): string {
+  if (who === "worker" || who === "master") {
+    return `直しました。 ${markOf(who)}`;
+  }
+  return "印のない発言";
+}
+
 /** GitHub の状態。**偽の `gh` はこれを返すだけ**にして、判断だけを試す。 */
 type State = {
   /** open PR。`labels` は付いている label 名。 */
@@ -68,7 +89,7 @@ type State = {
     body?: string;
     labels?: string[];
     /** 未解決スレッドの最後の発言。**件数だけでは持ち手が決まらない。** */
-    unresolvedBy?: ("bot" | "us")[];
+    unresolvedBy?: ("bot" | "us" | "worker" | "master")[];
     /**
      * スレッドが立った時刻（`unresolvedBy` と同じ並び）。
      *
@@ -226,7 +247,7 @@ describe("bin/loop-handoff", () => {
       .flatMap((pr) =>
         (pr.unresolvedBy ?? []).map(
           (who, index) =>
-            `${pr.lastComment ?? 100 + index}${FIELD}${who === "bot" ? BOT_GRAPHQL : "mattyan1053"}${FIELD}${pr.threadsAt?.[index] ?? THREAD_AT}`,
+            `${pr.lastComment ?? 100 + index}${FIELD}${who === "bot" ? BOT_GRAPHQL : "mattyan1053"}${FIELD}${pr.threadsAt?.[index] ?? THREAD_AT}${FIELD}${bodyOf(who)}`,
         ),
       )
       .join("\n");
@@ -1314,14 +1335,77 @@ describe("bin/loop-handoff", () => {
     });
   });
 
+  describe("誰が書いたかを、印で読む", () => {
+    // **master と worker は同じ GitHub アカウントで動く** (#174)。**発言から役を
+    // 見分けられない**ので、**ここは「呼んだ側は書き終えている」で代用していた**
+    // ——**前提であって事実ではない。** **worker の返信を master の判断として読むと、
+    // 当否が判断されていない指摘が「判断済み」に落ちる**（**通す側へ倒れる**）。
+    //
+    // **印は `bin/loop-review-reply` が必ず付ける。** **ここは読むだけ。**
+
+    it("worker の返信なら、確認するのは master である", () => {
+      withState({ prs: [{ number: 12, unresolvedBy: ["worker"] }] });
+
+      const handoff = run("worker");
+
+      expect(handoff.status, handoff.stderr).toBe(0);
+      expect(handoff.stdout).toMatch(/^master\t/);
+    });
+
+    it("worker の返信なら、master から見ても worker へは渡さない", () => {
+      // **呼んだ役で反転しない**のが要点である（**代用をやめた**）。
+      // **master から見れば自分宛て**なので、**渡さないのが正しい**
+      // ——**前は「相手役へ」で worker へ返していた**（**直す番ではないのに起こす**）
+      withState({ prs: [{ number: 12, unresolvedBy: ["worker"] }] });
+
+      const handoff = run("master");
+
+      expect(handoff.stdout, "worker を起こしている").not.toMatch(/^worker\t/);
+      expect(handoff.status, "自分宛てなので渡さない").toBe(1);
+    });
+
+    it("master の発言なら、直すのは worker である", () => {
+      withState({ prs: [{ number: 12, unresolvedBy: ["master"] }] });
+
+      const handoff = run("master");
+
+      expect(handoff.status, handoff.stderr).toBe(0);
+      expect(handoff.stdout).toMatch(/^worker\t/);
+    });
+
+    it("master の発言なら、worker から見ても master へは渡さない", () => {
+      // **こちらも反転しない。** **前は worker から呼ぶと master へ返していた**
+      // ——**master は自分が書いたばかりのものを見に行くことになる**
+      withState({ prs: [{ number: 12, unresolvedBy: ["master"] }] });
+
+      const handoff = run("worker");
+
+      expect(handoff.stdout, "master を起こしている").not.toMatch(/^master\t/);
+      expect(handoff.status, "自分宛てなので渡さない").toBe(1);
+    });
+
+    it("印の無い発言は、worker の返信として扱う", () => {
+      // **どちらかへ倒す必要がある**（#174 の完了条件）。**master 扱いにすると、
+      // まさにこの Issue が挙げた誤認——「worker の返信を master の判断として読む」
+      // ——を既定にしてしまう。** **worker 扱いなら、倒れる先は「master が確認する」**
+      // で、**止まる側**である（**通す側へ倒さない**）。
+      withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
+
+      expect(run("worker").stdout, "印が無いときに worker へ返している").toMatch(/^master\t/);
+    });
+  });
+
   describe("役で反転する宛先", () => {
     it("同じ指紋で 2 通目を送らない", () => {
-      // **`answered` の宛先は呼んだ役で反転する**ので、**`informed` を宛先だけに
-      // 書くと、同じ指紋のまま master→worker→master と 2 通出る**（#173 のレビュー）。
+      // **`informed` を宛先だけに書くと、同じ指紋のまま master→worker→master と
+      // 2 通出る**（#173 のレビュー）。
       //
       // **送った側は、その状態を知っている**——**自分で見て、自分で配った**のだから、
-      // **もう一度知らせても新しいことは何も無い**
-      withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
+      // **もう一度知らせても新しいことは何も無い**。
+      //
+      // **宛先が呼んだ役で反転しなくなっても**（#174。**印で決める**）、
+      // **ここは残る**——**worker が受け取ったあと、同じ状態のまま出口を通る**
+      withState({ prs: [{ number: 12, unresolvedBy: ["master"] }] });
       expect(cycle("master").status, "worker へ渡せていない").toBe(0);
 
       expect(run("worker").status, "同じ指紋で送り返している").toBe(1);
@@ -1454,8 +1538,9 @@ describe("bin/loop-handoff", () => {
     });
 
     it("master が返した周回は worker へ渡す", () => {
-      // **件数は同じで、変わるのは「最後に誰が書いたか」**である
-      withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
+      // **件数は同じで、変わるのは「最後に誰が書いたか」**である。
+      // **「誰が」は発言の印で読む** (#174)——**呼んだ役では決めない**
+      withState({ prs: [{ number: 12, unresolvedBy: ["master"] }] });
 
       expect(run("master").stdout).toMatch(/^worker\t/);
     });
