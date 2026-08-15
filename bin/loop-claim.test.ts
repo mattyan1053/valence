@@ -684,6 +684,70 @@ describe("bin/loop-claim", () => {
    * **`--author @me` は 2 人分を返す**ので、**そのまま数えると 1 人目が止まる**——
    * **数えるのは自分の作業場のものだけ**である。
    */
+  describe("release — 自分が取った PR の claim を返す", () => {
+    /** 作業場で周回を始める。 */
+    function startRound(cwd: string): string {
+      const result = spawnSync(LEASE, ["acquire", "worker", workerStamp()], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    }
+
+    /**
+     * **間違って取った claim を、持ち主が返せること**（#307 のレビュー）。
+     *
+     * **`pr` を `alive` へ寄せると、持ち主が周回を回している限り窓が開かない**
+     * ——**取り違えた claim は、その作業場が 30 分以上まったく回さなくなるまで
+     * 誰にも取り返せない。** **返す口が無いと、その PR は永久に直せなくなる。**
+     *
+     * **落ちた周回のぶんは、これまでどおり `alive` の窓が拾う**ので、
+     * **#237 が拒んだ「自動で返す仕組み」とは別のもの**である。
+     */
+    it("持ち主が返せば、別の作業場が取れる", () => {
+      withGh({ labels: [] });
+      startRound(repo);
+      expect(run(["pr", "42"]).status, "取れていない").toBe(0);
+
+      expect(run(["release", "42"]).status, "返せていない").toBe(0);
+
+      // **周回を回したままでも、返したぶんは空く**（`alive` の窓を待たない）
+      expect(run(["pr", "42"], { cwd: addWorkspace("next") }).status, "空いていない").toBe(0);
+    });
+
+    it("返したら、自分のものではなくなる", () => {
+      // **数える側（ステップ 2.1）が見るのは `mine`** である
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+
+      run(["release", "42"]);
+
+      expect(run(["mine", "42"]).status, "返したのに自分のものになっている").toBe(1);
+    });
+
+    it("別の作業場の claim は返せない", () => {
+      // **返せるのは自分のものだけ。** **他人のものを消せると、排他が意味を失う**
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+
+      const other = run(["release", "42"], { cwd: addWorkspace("stranger") });
+
+      expect(other.status, "他人の claim を消している").toBe(1);
+      expect(run(["mine", "42"]).status, "持ち主が変わっている").toBe(0);
+    });
+
+    it("記録が無ければ、何もせず終わる", () => {
+      // **返す先が無いのは失敗ではない**（**取る前に返しても、周回は止まらない**）
+      withGh({ labels: [] });
+
+      expect(run(["release", "42"]).status).toBe(0);
+    });
+  });
+
   describe("mine — その PR を自分の作業場が持っているか", () => {
     it("自分が取った PR は、自分のもの", () => {
       withGh({ labels: [] });
