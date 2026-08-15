@@ -1,4 +1,4 @@
-<!-- 版: 345be7328ae9 -->
+<!-- 版: 164ca40416d6 -->
 ---
 name: "Loop: Worker"
 description: Issue の実装またはレビュー指摘への対応を 1 周だけ実行する
@@ -444,10 +444,39 @@ printf '%s\n' "$head_prs"
   - **OPEN かつ `parked`** → master が保留にした PR である。**何もしないでステップ 4 へ進む。**
     先行 Issue を実装させるための保留なので、ここで止まると **PR-B を作れず保留の意味が消える**。
     label は `in-progress` のままでよい（再開するのは master の指示を受けてから）
-  - **OPEN**（`parked` でない）→ ステップ 2 の「自分の open PR」に出ていないのに
-    ここで見つかる状態（他人が作った PR など）。推測で触らず、
-    `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
-    （状態が変わらなければ同じ識別子が積み上がり、3 周で止まる）
+  - **OPEN**（`parked` でない）→ **「他人が作った PR」と決めつけない。持ち主を確かめる。**
+
+    **`in-progress` の記録と PR の記録は、別々に期限切れする** (#80)。
+    **PR ができたあと、Issue 側の記録を更新する経路は無い**——**持ち主はステップ 3 の
+    `bin/loop-claim pr` しか通らない**ので、**PR が立って期限が過ぎれば、Issue 側の記録
+    だけが必ず空く。** **そこで `resume` は exit 0（引き継ぎ）を返す**——
+    **PR は別の作業場が現に直しているのに**である。
+
+    **決めつけると、正常な状態で全ループが止まる。** **もう一方がレビュー対応を
+    している間、こちらは毎周回 `implementation-blocked` を積む**——**3 周で
+    `loop/STOP`** である。**1 人では起きない**（**PR を持っている作業場自身は
+    ステップ 2.1 でステップ 3 へ行くので、ここへ入らない**）。
+
+    ```bash
+    if ! own_prs="$(gh pr list --state open --limit 200 --author @me --json number --jq '.[].number')"; then
+      bin/loop-stall pr-lookup-failed          # **0 件と読み違えない**
+      exit
+    fi
+    if ! printf '%s\n' "$own_prs" | grep -qx '<PR番号>'; then
+      bin/loop-stall "implementation-blocked:<Issue番号>"   # 他人が作った PR。推測で触らない
+      exit
+    fi
+    bin/loop-claim pr <PR番号>
+    case "$?" in
+      0) ;;        # 持ち主が居ない。**引き継いだ**ので、ステップ 3（レビュー対応）へ進む
+      1) exit ;;   # **別の作業場が直している。触らない**（**停止を積まない**）
+      *) exit ;;   # 判定できない。標準エラーに出た内容を報告して終わる
+    esac
+    ```
+
+    **他人が作った PR のときだけ停止を積む**（状態が変わらなければ同じ識別子が
+    積み上がり、3 周で止まる）。**別の作業場が持っているだけなら、積まない**——
+    **そちらが前へ進めている。**
 - **PR が無く、コミットが載ったブランチがある** → 公開に失敗した周回の続きである。
   そのブランチへ **detached で入り**、ステップ 4 の「PR を作る」から再開する。
   再び失敗したら同じ `publish-failed:<Issue番号>` を記録するので、3 周で止まる

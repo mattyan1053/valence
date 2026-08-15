@@ -121,10 +121,32 @@ workspace_port() {
   printf '%s' "$((WORKSPACE_PORT_BASE + 16#${digest:0:8} % WORKSPACE_PORT_SPAN))"
 }
 
+# git の本体（`--git-common-dir`）。**worktree では作業場の外にある** (#80)。
+#
+# **`.git` はファイルで、中身は「本体を指す絶対パス」**である。**コンテナは `${PWD}`
+# しかマウントしていない**ので、**指した先が無い**——**`fatal: not a git repository`。**
+# **git を使う試験が 10 件以上ある**ので、**2 人目の作業場では `./task check` を
+# 緑にできない**（**push の前に緑を求める手順書と噛み合わず、1 本も出せない**）。
+#
+# **clone そのものなら `${PWD}/.git` に落ちる**ので、**マウントが重なるだけで害は無い。**
+# **訊けないのは「そもそも repo の中に居ない」ときだけ**である。**worktree なら
+# 必ず答えが返る**ので、**`${PWD}/.git` へ倒しても、この穴は戻らない。**
+# **git そのものが使えないなら `workspace_port` が先に落ちる**（`git hash-object`）。
+git_common_dir() {
+  local common
+  if common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" &&
+    [[ -n $common ]]; then
+    printf '%s' "$common"
+    return 0
+  fi
+  printf '%s' "$PWD/.git"
+}
+
 compose() {
   local port
   port="$(workspace_port)" || return 1
-  VALENCE_APP_PORT="$port" docker compose -p "$(workspace_name)" "$@"
+  VALENCE_APP_PORT="$port" VALENCE_GIT_COMMON_DIR="$(git_common_dir)" \
+    docker compose -p "$(workspace_name)" "$@"
 }
 
 # 非対話用。CI や AI エージェントからは TTY がないため -T を付ける。
@@ -144,12 +166,13 @@ ensure_network() {
     || docker network create supabase_network_valence >/dev/null
 }
 
+# **毎回 compose に突き合わせさせる** (#295 のレビュー)。**「動いていれば何もしない」
+# だと、`compose.yaml` を変えても動いているコンテナには届かない**——**直したのに
+# 直らず、しかも何も言わない**（**残る側は自分の diff に出てこない**。`AGENTS.md` §5）。
+# **`up -d` は設定が同じなら何もしない**ので、**差分があるときだけ作り直る。**
 ensure_up() {
   ensure_network
-  if [[ -z "$(compose ps -q app 2>/dev/null)" ]] || \
-     [[ -z "$(docker ps -q --filter "id=$(compose ps -q app)" 2>/dev/null)" ]]; then
-    compose up -d app
-  fi
+  compose up -d app
 }
 
 # 開発コンテナを起動する = アプリが起動する (冪等)
