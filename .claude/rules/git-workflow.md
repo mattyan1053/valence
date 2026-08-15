@@ -4,7 +4,11 @@
 
 ## ブランチと PR
 
-- ブランチは `main` から切る（`feat/` `fix/` `chore/` `refactor/` `docs/`）
+- ブランチは `main` から切る。名前は `<種別>/<Issue番号>-<短い説明>`
+  （`feat/` `fix/` `chore/` `refactor/` `docs/`。例: `fix/321-idle-cross-references`）。
+  **番号は `bin/loop-claim idle` が「その Issue の実装が出ているか」を判る唯一の手掛かり**
+  である（`Closes` を書かない PR もあるため）——**番号の無い枝は「実装が出ていない」側へ
+  倒れる**ので、**止まっていないのに人が呼ばれる**
 - **`main` へ直接 push しない。** 必ず PR 経由
 - PR は 1 つの関心事にひとつ。レビューしやすい大きさに割る
   （このプロダクト自体がそういう思想のツールである）

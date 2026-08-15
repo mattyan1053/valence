@@ -1128,16 +1128,13 @@ describe("bin/loop-claim", () => {
     }
 
     /**
-     * **その Issue を参照している open PR** を、Issue ごとに置く (#321)。
+     * **その Issue を「言及している」open PR** を、Issue ごとに置く。
      *
-     * **`dir` を分けて、1 ページ目と「その先」を書き分ける** (#322 のレビュー)
-     * ——**打ち切ったら見えないもの**を置くために要る。
+     * **言及と実装は別である** (#322 のレビュー 2 周目)。**このループは番号を引き合いに
+     * 出しながら書く**ので、**参照だけで黙る実装に戻したら、この口が答えた瞬間に赤くなる。**
      */
-    function writeReferenceFixtures(
-      referencedBy: Record<number, number[]> | undefined,
-      dir: string,
-    ): string {
-      const refsDir = join(repo, dir);
+    function writeReferenceFixtures(referencedBy: Record<number, number[]> | undefined): string {
+      const refsDir = join(repo, "refs-idle");
       mkdirSync(refsDir, { recursive: true });
       for (const [number, prs] of Object.entries(referencedBy ?? {})) {
         writeFileSync(join(refsDir, number), `${prs.join("\n")}\n`);
@@ -1147,8 +1144,11 @@ describe("bin/loop-claim", () => {
 
     function withIdle(options: {
       inProgress?: { number: number; labels?: string[] }[];
-      /** open PR が閉じる予定の Issue。**別リポジトリのものも置ける。** */
-      prs?: { closes: number[]; repo?: string }[];
+      /**
+       * open PR。**`closes` は閉じる予定の Issue**（**別リポジトリのものも置ける**）、
+       * **`head` は枝の名前**である。
+       */
+      prs?: { closes?: number[]; repo?: string; head?: string }[];
       /**
        * **いま直接読んだら返る label。** 省くと一覧と同じものが返る。
        *
@@ -1157,39 +1157,32 @@ describe("bin/loop-claim", () => {
        */
       nowLabels?: Record<number, string[]>;
       /**
-       * その Issue を参照している open PR の番号 (#321)。
+       * その Issue を**言及している** open PR の番号。
        *
-       * **`Closes` を書かない PR も実装である**——**割った PR は親を閉じない**ので、
-       * **`closingIssuesReferences` には出てこない。** **参照は GitHub が持っている。**
+       * **言及は実装ではない** (#322 のレビュー 2 周目)——**「#312 と同じ形」と
+       * 書いただけの PR も `CROSS_REFERENCED_EVENT` になる。**
        */
       referencedBy?: Record<number, number[]>;
-      /**
-       * **1 ページ目より先にしか出てこない参照** (#322 のレビュー)。
-       *
-       * **内側を辿らない要求には返らない**ので、**`last:100` で打ち切る実装では
-       * 取りこぼす**——**「実装は出ているのに `stalled`」がそのまま出る。**
-       */
-      referencedBeyondFirstPage?: Record<number, number[]>;
       /**
        * この一覧だけが読めない。**「0 件」と読み違えないこと**を見る。
        *
        * **全部の `gh` を落とさない。** **手前の呼び出しで止まると、
        * 見たかった経路まで届かない**（届いていないのに緑になる）。
        */
-      failOn?: "issue list" | "pr list" | "issue view" | "api graphql";
+      failOn?: "issue list" | "pr list" | "issue view";
     }): void {
       const issues = (options.inProgress ?? [])
         .map((issue) => `${issue.number}\t${(issue.labels ?? ["in-progress"]).join(",")}`)
         .join("\n");
-      const closes = (options.prs ?? [])
-        .flatMap((pr) => pr.closes.map((number) => `${pr.repo ?? "owner/repo"}\t${number}`))
+      // **1 回の `pr list` が返す行。** **枝と `Closes` を種別で書き分ける**
+      const openPrs = (options.prs ?? [])
+        .flatMap((pr) => [
+          ...(pr.head === undefined ? [] : [`head\t${pr.head}`]),
+          ...(pr.closes ?? []).map((number) => `closes\t${pr.repo ?? "owner/repo"}\t${number}`),
+        ])
         .join("\n");
       const labelsDir = writeLabelFixtures(options);
-      const refsDir = writeReferenceFixtures(options.referencedBy, "refs-idle");
-      const refsTailDir = writeReferenceFixtures(
-        options.referencedBeyondFirstPage,
-        "refs-tail-idle",
-      );
+      const refsDir = writeReferenceFixtures(options.referencedBy);
 
       writeFileSync(
         join(path, "gh"),
@@ -1197,7 +1190,6 @@ describe("bin/loop-claim", () => {
           "#!/usr/bin/env bash",
           `labels_dir=${JSON.stringify(labelsDir)}`,
           `refs_dir=${JSON.stringify(refsDir)}`,
-          `refs_tail_dir=${JSON.stringify(refsTailDir)}`,
           ...(options.failOn === undefined
             ? []
             : [`if [[ $* == *${JSON.stringify(options.failOn)}* ]]; then exit 1; fi`]),
@@ -1212,25 +1204,19 @@ describe("bin/loop-claim", () => {
           "  exit 0",
           "fi",
           'if [[ $* == *"pr list"* ]]; then',
-          `  printf '%b' ${JSON.stringify(closes)}`,
-          `  [[ -n ${JSON.stringify(closes)} ]] && echo`,
+          `  printf '%b' ${JSON.stringify(openPrs)}`,
+          `  [[ -n ${JSON.stringify(openPrs)} ]] && echo`,
           "  exit 0",
           "fi",
-          // **その Issue を参照している open PR**（#321）。**番号は `-F number=<N>` で来る**
+          // **その Issue を言及している open PR**。**番号は `-F number=<N>` で来る**
           //
-          // **1 ページ目と、その先を分けて置く**（#322 のレビュー）。**本物の
-          // `--paginate` は内側の `pageInfo` を辿って続きを読む**ので、
-          // **辿る形になっていない要求には、1 ページ目しか返さない**
-          // ——**「100 件で打ち切ると取りこぼす」を、そのまま再現する。**
+          // **答える口は残してある**（#322 のレビュー 2 周目）——**言及で黙る実装に
+          // 戻したら、ここが答えた瞬間に「言及しただけでは黙らない」が赤くなる。**
           'if [[ $* == *"api graphql"* ]]; then',
           "  for word in $*; do",
           "    [[ $word == number=* ]] || continue",
           '    issue="${word#number=}"',
           '    [[ -f "$refs_dir/$issue" ]] && cat "$refs_dir/$issue"',
-          // **続きは、内側を辿る要求にだけ返す**（`--paginate` と `pageInfo` と `after:`）
-          '    if [[ $* == *"--paginate"* && $* == *"pageInfo"* && $* == *"after:"* ]]; then',
-          '      [[ -f "$refs_tail_dir/$issue" ]] && cat "$refs_tail_dir/$issue"',
-          "    fi",
           "    exit 0",
           "  done",
           "  exit 0",
@@ -1289,55 +1275,64 @@ describe("bin/loop-claim", () => {
       //
       // **人が呼ばれる理由が変わる**のが悪い：**実際は人の判断待ち**なのに、
       // **「実装が出ていない」と書いて呼ぶ**——**来た人は違う場所を見る。**
-      withIdle({ inProgress: [{ number: 315 }], referencedBy: { 315: [317] } });
+      withIdle({
+        inProgress: [{ number: 315 }],
+        prs: [{ head: "feat/315-approve-pull-request" }],
+      });
       writeClaim(315, { touched: NOW, taken: NOW - 9000 });
 
       expect(run(["idle"]).status, "実装が出ているのに stalled と報告している").toBe(1);
     });
 
-    it("参照している PR が 1 本も無ければ、これまでどおり並べる", () => {
-      // **緩めすぎない側の担保。** **参照を見に行くようにしたせいで、
+    it("言及しただけの open PR では黙らない", () => {
+      // **「#312 と同じ形」と書けば、それは #312 への `CROSS_REFERENCED_EVENT` になる**
+      // ——**このループは番号を引き合いに出しながら書く**ので、**参照で数えると
+      // 「開いている PR がある限り黙る」**（#322 のレビュー 2 周目）。
+      //
+      // **入れる前より悪い向きである。** **誤報は行が見えるが、黙るのは見えない**
+      // ——**本当に止まっても、誰も呼ばれない。**
+      withIdle({
+        inProgress: [{ number: 315 }],
+        prs: [{ head: "fix/321-idle-cross-references" }],
+        referencedBy: { 315: [322] },
+      });
+      writeClaim(315, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).stdout.split("\n")[0], "言及しただけの PR で黙っている").toMatch(
+        /^stalled\t315\t/,
+      );
+    });
+
+    it("実装の枝が 1 本も無ければ、これまでどおり並べる", () => {
+      // **緩めすぎない側の担保。** **実装を探しに行くようにしたせいで、
       // 本物の停止まで見逃したら、この検出器そのものが死ぬ**
-      withIdle({ inProgress: [{ number: 264 }], referencedBy: { 264: [] } });
+      withIdle({ inProgress: [{ number: 264 }], prs: [{ head: "fix/321-other" }] });
       writeClaim(264, { touched: NOW, taken: NOW - 9000 });
 
       expect(run(["idle"]).status).toBe(0);
       expect(run(["idle"]).stdout.split("\n")[0]).toMatch(/^stalled\t264\t/);
     });
 
-    it("1 ページ目より先にある実装 PR も見つける", () => {
-      // **`last:100` だと、参照が 100 件を超えた Issue で唯一の実装 PR を取りこぼす**
-      // ——**「実装が出ていない」へ化ける**（#322 のレビュー）。
-      // **長く開いている親 Issue がいちばん当たりやすい**（**このループは番号を
-      // 引き合いに出しながら回る**ので、cross-reference は増え続ける）。
-      //
-      // **1 ページ目には、このリポジトリの open PR が 1 本も無い**状態を作る
-      // ——**続きを読まなければ「実装が出ていない」と答える。**
-      withIdle({
-        inProgress: [{ number: 315 }],
-        referencedBy: { 315: [] },
-        referencedBeyondFirstPage: { 315: [317] },
-      });
+    it("番号が前に付いているだけの枝は、その Issue の実装ではない", () => {
+      // **`feat/3150-` は #315 ではない。** **前方一致で数えると、番号が長い Issue の
+      // 実装が、短い番号の Issue を黙らせる**
+      withIdle({ inProgress: [{ number: 315 }], prs: [{ head: "feat/3150-something" }] });
       writeClaim(315, { touched: NOW, taken: NOW - 9000 });
 
-      expect(run(["idle"]).status, "打ち切って「実装が出ていない」と答えている").toBe(1);
+      expect(run(["idle"]).stdout.split("\n")[0], "別の Issue の枝で黙っている").toMatch(
+        /^stalled\t315\t/,
+      );
     });
 
-    it("参照を読めなければ、黙らずに止まる", () => {
-      // **倒す向きは「言う」でも「言わない」でもなく、「読めなかったと言う」**である
-      // ——**このファイルは既に、一覧が読めないときを exit 2 にしている**
-      // （**測れないことを、健全と同じ出口にしない**）。
-      //
-      // **`stalled` と言いすぎれば、人が誤った理由で呼ばれる**。
-      // **言わなすぎれば、本物の停止を見逃す**——**どちらへも倒さずに済むなら、
-      // 倒さないのが正しい。**
-      withIdle({ inProgress: [{ number: 315 }], failOn: "api graphql" });
+    it("番号を読めない枝は、実装が出ていない側へ倒す", () => {
+      // **積みすぎても人が呼ばれるだけ**だが、**積み損ねると誰も来ない**
+      // ——**規約から外れた枝は、黙る理由にしない**
+      withIdle({ inProgress: [{ number: 315 }], prs: [{ head: "feat/approve-pull-request" }] });
       writeClaim(315, { touched: NOW, taken: NOW - 9000 });
 
-      const idle = run(["idle"]);
-
-      expect(idle.status, "読めなかったのに答えを返している").toBe(2);
-      expect(idle.stderr).not.toBe("");
+      expect(run(["idle"]).stdout.split("\n")[0], "番号の無い枝で黙っている").toMatch(
+        /^stalled\t315\t/,
+      );
     });
 
     it("着手して間もない Issue は並べない", () => {
