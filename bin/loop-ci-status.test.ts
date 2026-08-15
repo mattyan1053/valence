@@ -209,22 +209,29 @@ describe("bin/loop-ci-status", () => {
   }
 
   /**
-   * head が push された時刻を返す枝（#297）。
+   * **その head を初めて観測した時刻の記録**（#297。#305 のレビューで直した）。
    *
-   * **「1 件も作られていない」の猶予は、これで測る。** **始まった時刻では測れない**
-   * ——**始まっていないものに、始まった時刻は無い。**
+   * **commit の時刻は push の時刻ではない**——**手元で commit してから時間を置いて
+   * push すると、押した直後から猶予の外**になり、**未来の日付を持つ commit では
+   * 永久に猶予を抜けない**（`bin/loop-review-commits` も同じことを書いている）。
+   * **始まった時刻でも測れない**——**始まっていないものに、始まった時刻は無い。**
    *
-   * **`--jq` に `committer` を尋ねているかまで見る**（check-runs も
-   * `commits/<sha>` を通るので、**式を見ないと取り違える**）。
+   * **測れる時計は「こちらが初めて見た時刻」だけ**である。
    */
-  function pushedAtBranch(agoSec: number, fails: boolean): string[] {
-    const at = new Date((Math.floor(Date.now() / 1000) - agoSec) * 1000).toISOString();
-    return [
-      'if [[ $args == *"commits/deadbeef"* && $args == *"committer"* ]]; then',
-      ...(fails ? ["  exit 1"] : [`  printf '%s\\n' ${JSON.stringify(at)}`]),
-      "  exit 0",
-      "fi",
-    ];
+  function firstSeen(sha: string, agoSec: number): void {
+    writeFileSync(
+      join(sandbox, ".git", "valence-loop-ci-firstseen-42"),
+      `${sha}\t${Math.floor(Date.now() / 1000) - agoSec}\n`,
+    );
+  }
+
+  /** 記録そのもの（読めない形も置ける）。 */
+  function writeFirstSeen(body: string): void {
+    writeFileSync(join(sandbox, ".git", "valence-loop-ci-firstseen-42"), body);
+  }
+
+  function readFirstSeen(): string {
+    return readFileSync(join(sandbox, ".git", "valence-loop-ci-firstseen-42"), "utf8");
   }
 
   function run(options: {
@@ -233,10 +240,6 @@ describe("bin/loop-ci-status", () => {
     ghFails?: boolean;
     /** head を読めない。 */
     headFails?: boolean;
-    /** head が push されてからの秒数（#297 の猶予はここから測る）。 */
-    pushedAgo?: number;
-    /** push された時刻を読めない。 */
-    pushedFails?: boolean;
     /** 指紋だけを尋ねる（`bin/loop-handoff` が使う）。 */
     fingerprint?: boolean;
   }): { status: number; stdout: string; stderr: string } {
@@ -260,7 +263,6 @@ describe("bin/loop-ci-status", () => {
         "fi",
         ...headScriptBranch(headScriptPath),
         ...workflowBranches(),
-        ...pushedAtBranch(options.pushedAgo ?? 3600, options.pushedFails === true),
         ...checkRunsBranch(options.checks ?? [], options.ghFails === true),
         "exit 1",
         "",
@@ -585,40 +587,72 @@ describe("bin/loop-ci-status", () => {
 
     it("猶予を過ぎても 1 件も作られていなければ、人を呼ぶ側へ倒す", () => {
       workflows([5]);
+      firstSeen("deadbeef", 3600);
 
-      const result = run({ checks: [], pushedAgo: 3600 });
+      const result = run({ checks: [] });
 
       expect(result.status, "落ちた検査と同じ行き先に落ちている").toBe(5);
     });
 
-    it("push 直後の猶予の内側では、人を呼ばない", () => {
+    it("初めて見た周回では、人を呼ばない", () => {
       // **push 直後は必ず 0 件である。** **猶予が無いと、正常な PR で毎回人を呼ぶ。**
+      // **測る起点は「こちらが初めて見た時刻」**なので、**初めて見た周回は必ず猶予の内**
       workflows([5]);
 
-      const result = run({ checks: [], pushedAgo: 30 });
+      const result = run({ checks: [] });
 
-      expect(result.status, "push 直後に人を呼んでいる").toBe(3);
+      expect(result.status, "初めて見た周回で人を呼んでいる").toBe(3);
+      expect(readFirstSeen(), "観測を記録していない").toContain("deadbeef");
+    });
+
+    it("commit の時刻は使わない（push の時刻ではない）", () => {
+      // **#305 のレビュー。** **手元で commit してから時間を置いて push すると、
+      // 押した直後から猶予の外**になり、**未来の日付を持つ commit では永久に
+      // 猶予を抜けない**——**`bin/loop-review-commits` も同じことを書いている。**
+      //
+      // **`gh` へ commit の日付を尋ねていないこと**で見る（スタブは答えない）。
+      workflows([5]);
+
+      const result = run({ checks: [] });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(3);
+      expect(
+        readFileSync(join(sandbox, "gh.calls"), "utf8"),
+        "commit の時刻を push の時刻として使っている",
+      ).not.toContain("committer");
+    });
+
+    it("head が変われば、猶予は測り直す", () => {
+      // **別の head の記録で数えない。** **push し直せば検査は作り直される**ので、
+      // **前の head で溜めた時間を持ち越すと、新しい head の直後に人を呼ぶ。**
+      workflows([5]);
+      firstSeen("f".repeat(40), 3600);
+
+      const result = run({ checks: [] });
+
+      expect(result.status, "別の head の記録で数えている").toBe(3);
     });
 
     it("一部だけ欠けているのは、これまでどおり直せる側へ倒す", () => {
       // **「1 件も無い」と「1 件足りない」は別**である——**後者は名前の食い違いなど、
       // PR 側で直りうる。** **緩める向きを広げない。**
       workflows([5]);
+      firstSeen("deadbeef", 3600);
 
       const result = run({
         checks: [{ name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 }],
-        pushedAgo: 3600,
       });
 
       expect(result.status, "欠けを全部「人を呼ぶ」へ倒している").toBe(1);
     });
 
-    it("push された時刻を読めなければ、判定できないとして返す", () => {
+    it("観測の記録を読めなければ、判定できないとして返す", () => {
       // **猶予の内か外かが決まらない。** **「待つ」へ倒すと、この状態は永久に
       // 人へ届かない**——**この Issue が消しに来た形そのもの**である。
       workflows([5]);
+      writeFirstSeen("deadbeef\tこわれている\n");
 
-      const result = run({ checks: [], pushedFails: true });
+      const result = run({ checks: [] });
 
       expect(result.status, "判定できないものを待ちへ倒している").toBe(2);
     });
