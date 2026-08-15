@@ -195,10 +195,33 @@ describe("bin/loop-ci-status", () => {
       "    exit 1",
       "  fi",
       '  if [[ $args == *"@base64"* ]]; then',
+      // **1 件も無い状態を作れるようにする**（#297）。**空の分岐は bash の構文誤り**で、
+      // **スタブが落ちた結果を「読めない」として受け取ることになる**
+      "    :",
       ...checks.map((check) => row(Buffer.from(check.name, "utf8").toString("base64"), check)),
       "  else",
+      "    :",
       ...checks.map((check) => row(check.name, check)),
       "  fi",
+      "  exit 0",
+      "fi",
+    ];
+  }
+
+  /**
+   * head が push された時刻を返す枝（#297）。
+   *
+   * **「1 件も作られていない」の猶予は、これで測る。** **始まった時刻では測れない**
+   * ——**始まっていないものに、始まった時刻は無い。**
+   *
+   * **`--jq` に `committer` を尋ねているかまで見る**（check-runs も
+   * `commits/<sha>` を通るので、**式を見ないと取り違える**）。
+   */
+  function pushedAtBranch(agoSec: number, fails: boolean): string[] {
+    const at = new Date((Math.floor(Date.now() / 1000) - agoSec) * 1000).toISOString();
+    return [
+      'if [[ $args == *"commits/deadbeef"* && $args == *"committer"* ]]; then',
+      ...(fails ? ["  exit 1"] : [`  printf '%s\\n' ${JSON.stringify(at)}`]),
       "  exit 0",
       "fi",
     ];
@@ -210,6 +233,10 @@ describe("bin/loop-ci-status", () => {
     ghFails?: boolean;
     /** head を読めない。 */
     headFails?: boolean;
+    /** head が push されてからの秒数（#297 の猶予はここから測る）。 */
+    pushedAgo?: number;
+    /** push された時刻を読めない。 */
+    pushedFails?: boolean;
     /** 指紋だけを尋ねる（`bin/loop-handoff` が使う）。 */
     fingerprint?: boolean;
   }): { status: number; stdout: string; stderr: string } {
@@ -233,6 +260,7 @@ describe("bin/loop-ci-status", () => {
         "fi",
         ...headScriptBranch(headScriptPath),
         ...workflowBranches(),
+        ...pushedAtBranch(options.pushedAgo ?? 3600, options.pushedFails === true),
         ...checkRunsBranch(options.checks ?? [], options.ghFails === true),
         "exit 1",
         "",
@@ -544,6 +572,56 @@ describe("bin/loop-ci-status", () => {
     });
 
     expect(result.status, "必須が欠けたまま通している").toBe(1);
+  });
+
+  describe("1 件も作られていない状態（#297）", () => {
+    // **「チェックが 1 件も作られていない」と「チェックが落ちた」は行き先が違う。**
+    // **落ちたものは worker が直せる**が、**作られていないものは PR に足すもので
+    // 直る保証が無い**——**実測では 33 分以上 run が 1 件も作られず、worker が
+    // 空 commit まで試して尽きた**（2026-08-15、#295）。
+    //
+    // **予算（exit 4）では拾えない。** **あれは「始まった時刻」から測る**ので、
+    // **始まっていないものは永久に超えない**——**待っていても人を呼ぶ経路に乗らない。**
+
+    it("猶予を過ぎても 1 件も作られていなければ、人を呼ぶ側へ倒す", () => {
+      workflows([5]);
+
+      const result = run({ checks: [], pushedAgo: 3600 });
+
+      expect(result.status, "落ちた検査と同じ行き先に落ちている").toBe(5);
+    });
+
+    it("push 直後の猶予の内側では、人を呼ばない", () => {
+      // **push 直後は必ず 0 件である。** **猶予が無いと、正常な PR で毎回人を呼ぶ。**
+      workflows([5]);
+
+      const result = run({ checks: [], pushedAgo: 30 });
+
+      expect(result.status, "push 直後に人を呼んでいる").toBe(3);
+    });
+
+    it("一部だけ欠けているのは、これまでどおり直せる側へ倒す", () => {
+      // **「1 件も無い」と「1 件足りない」は別**である——**後者は名前の食い違いなど、
+      // PR 側で直りうる。** **緩める向きを広げない。**
+      workflows([5]);
+
+      const result = run({
+        checks: [{ name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 }],
+        pushedAgo: 3600,
+      });
+
+      expect(result.status, "欠けを全部「人を呼ぶ」へ倒している").toBe(1);
+    });
+
+    it("push された時刻を読めなければ、判定できないとして返す", () => {
+      // **猶予の内か外かが決まらない。** **「待つ」へ倒すと、この状態は永久に
+      // 人へ届かない**——**この Issue が消しに来た形そのもの**である。
+      workflows([5]);
+
+      const result = run({ checks: [], pushedFails: true });
+
+      expect(result.status, "判定できないものを待ちへ倒している").toBe(2);
+    });
   });
 
   it("取得できなければ、止める側へ倒さない", () => {

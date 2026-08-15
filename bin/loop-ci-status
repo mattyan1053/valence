@@ -9,9 +9,10 @@
 # **`--required-checks` は PR 番号を取らない**ので、**答えるのは `main` 側だけ**である。
 #
 #   exit 0 = 必須がすべて決着して成功
-#   exit 1 = 決着して失敗 / 必須が見つからない (worker に直させる)
-#   exit 3 = まだ決着していないが、予算の内 (待つ)
+#   exit 1 = 決着して失敗 / 必須の一部が見つからない (worker に直させる)
+#   exit 3 = まだ決着していないが、予算・猶予の内 (待つ)
 #   exit 4 = 決着しないまま予算を超えた (人を呼ぶ)
+#   exit 5 = 必須が 1 件も作られないまま猶予を過ぎた (人を呼ぶ)
 #   exit 2 = 読めない / 使い方の誤り
 #
 # **`status` と `conclusion` は別の軸である。** **実物が 105 分止まった** (#206)——
@@ -54,6 +55,18 @@ readonly OK_CONCLUSIONS="success skipped neutral"
 # **無いのではなく 360 分である。**
 readonly DEFAULT_TIMEOUT_MIN=360
 
+# **「1 件も作られていない」と言い切るまでの猶予** (#297)。
+#
+# **push 直後は必ず 0 件である**ので、猶予が無いと**正常な PR で毎回人を呼ぶ**。
+# **予算 (`timeout-minutes`) は使えない**——**あれは「始まった時刻」から測る**もので、
+# **始まっていないものに始まった時刻は無い**（**だからこの状態は永久に `exit 4` へ
+# 行かない**）。**別の時計が要る**ので、**head が push された時刻から測る。**
+#
+# **10 分に強い根拠は無い。** **言えるのは「通常の起動より十分長い」ことだけ**である
+# ——**実測では push から数十秒で作られており**、**止まった日は 33 分以上 0 件だった**
+# (2026-08-15、#295)。**その 2 つの間で、待ちすぎない側に置いてある。**
+readonly MISSING_GRACE_MIN="${LOOP_CI_MISSING_GRACE_MIN:-10}"
+
 # **指紋は予算を見ない。** **`bin/loop-handoff` は「同じ状態か」だけを見る** ので、
 # **予算を入れると時間の経過だけで指紋が動き、何も変わっていないのに通知が飛ぶ**。
 # **`bucket` のままだと、ゲートが `conclusion` で成功へ変わっても指紋が動かない**
@@ -63,8 +76,8 @@ usage() {
   echo "使い方: bin/loop-ci-status <PR番号>" >&2
   echo "        bin/loop-ci-status --fingerprint <PR番号>" >&2
   echo "        bin/loop-ci-status --required-checks" >&2
-  echo "        exit 0 = 決着して成功 / exit 1 = 失敗・欠け / exit 3 = 待つ" >&2
-  echo "        exit 4 = 予算を超えた / exit 2 = 読めない・使い方の誤り" >&2
+  echo "        exit 0 = 決着して成功 / exit 1 = 失敗・一部欠け / exit 3 = 待つ" >&2
+  echo "        exit 4 = 予算を超えた / exit 5 = 1 件も作られない / exit 2 = 読めない・使い方の誤り" >&2
   exit 2
 }
 
@@ -350,6 +363,34 @@ done
 if ((FINGERPRINT == 1)); then
   printf '%s\n' "${states%,}"
   exit 0
+fi
+
+# **「1 件も作られていない」を、決着した失敗から分ける** (#297)。
+#
+# **落ちた検査は worker が直せる**が、**作られていないものは PR に足すもので直る
+# 保証が無い**——**実測では 33 分以上 run が 1 件も作られず、worker が空 commit まで
+# 試して尽きた**（2026-08-15、#295）。**同じ `exit 1` に落とすと、直せない相手へ
+# 渡し続ける形になる。**
+#
+# **一部だけ欠けているのは、こちらへ入れない。** **名前の食い違いなど、PR 側で
+# 直りうる**ので、**緩める向きを広げない。**
+if ((${#missing[@]} > 0 && ${#missing[@]} == ${#required[@]})); then
+  # **猶予は、head が push された時刻から測る**（上の定数を参照）。
+  if ! pushed_at="$(gh api "repos/{owner}/{repo}/commits/$head_sha" \
+    --jq '.commit.committer.date' 2>/dev/null)" || [[ -z $pushed_at ]] \
+    || ! pushed_epoch="$(date -d "$pushed_at" +%s 2>/dev/null)" \
+    || ! [[ $pushed_epoch =~ ^[0-9]+$ ]]; then
+    # **「待つ」へ倒さない** (#297)。**猶予の内か外かが決まらないまま待つと、
+    # この状態は永久に人へ届かない**——**この Issue が消しに来た形そのもの**である。
+    echo "[FAIL] head が push された時刻を読めません: $head_sha" >&2
+    exit 2
+  fi
+  if ((now_epoch - pushed_epoch <= MISSING_GRACE_MIN * 60)); then
+    echo "必須チェックがまだ作られていません（push から ${MISSING_GRACE_MIN} 分の猶予の内）: ${missing[*]}"
+    exit 3
+  fi
+  echo "必須チェックが 1 件も作られていません（push から ${MISSING_GRACE_MIN} 分を超えました）: ${missing[*]}"
+  exit 5
 fi
 
 # **決着した失敗が先。** **待ちに混ぜると、直せるものを待ち続ける。**
