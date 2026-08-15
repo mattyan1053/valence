@@ -122,6 +122,24 @@ scan_alive_scopes() {
     alive_scopes["$scope"]="$scope_started"
   done
 
+  # **握っている lease は、時刻の窓より先に見る** (#303 のレビュー)。
+  #
+  # **印は「周回を*始めた*時刻」しか言わない**——**途中では動かず、実測は `release`
+  # まで書かれない**ので、**初めての周回と、過去より長い周回は、走っている最中に
+  # 窓から出る**（`./task loop:worker:add` の直後がまさにそれ）。**落ちる先が悪い**：
+  # **`bin/loop-handoff` の手の本数が減り、空いている worker を起こさなくなる**（#302）。
+  #
+  # **判定は足さない。** **期限は `bin/loop-lease` が 1 箇所で持っている**
+  # （`alive` は #298 で同じ形にした）——**ここは並べてもらって混ぜるだけ**である。
+  #
+  # **印が読めなかった作業場は、ここでも数えない。** **時刻が無いと「前回から進んだか」
+  # を言えない**（`all_scopes_advanced`）ので、**基準を作り話で埋めない。**
+  while read -r scope; do
+    [[ -n $scope ]] || continue
+    [[ -n ${scope_started_at[$scope]-} ]] || continue
+    alive_scopes["$scope"]="${scope_started_at[$scope]}"
+  done < <("$script_dir/loop-lease" running worker 2>/dev/null)
+
   # **生きている作業場の実測は、自分のでなくても効かせる**（#200 のレビュー 3 周目）。
   # **自分の実測が短い作業場は、長い周回の途中で自分の窓から出る**——
   # **いちばん守りたい場面（#129 / #142 の「長い周回の途中で止めない」）で

@@ -892,9 +892,126 @@ describe("worker が作業しているあいだは数えない", () => {
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
-  beforeEach(setup);
+  /** 足した作業場。**worktree なので、消し忘れると次の試験へ漏れる。** */
+  let extraWorkspaces: string[] = [];
+
+  beforeEach(() => {
+    setup();
+    extraWorkspaces = [];
+  });
   afterEach(() => {
+    for (const workspace of extraWorkspaces) {
+      rmSync(workspace, { recursive: true, force: true });
+    }
     rmSync(repo, { recursive: true, force: true });
+  });
+
+  /**
+   * **走っている lease を握ったまま、周回の印だけを窓の外へ置く。**
+   *
+   * **印は「周回を*始めた*時刻」しか言わない**——**途中では動かず、実測は `release`
+   * まで書かれない**ので、**初めての周回と、過去より長い周回は走っている最中に
+   * 窓から出る**（`./task loop:worker:add` の直後がまさにそれ）。
+   */
+  function holdPastWindow(workspace: string = repo): void {
+    const lease = join(repo, "bin", "loop-lease");
+    const stamp = spawnSync(join(REPO_ROOT, "bin/loop-procedure-stamp"), ["worker"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const held = spawnSync(lease, ["acquire", "worker", stamp], {
+      cwd: workspace,
+      encoding: "utf8",
+    });
+    expect(held.status, `lease を取れない: ${held.stderr}`).toBe(0);
+    // **名前の作り方を写さない**（#99）。**本物に訊く**
+    const scope = spawnSync(lease, ["scope", "worker"], {
+      cwd: workspace,
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(scope, "作業場の名前を作れない").not.toBe("");
+    const ttl = Number(spawnSync(lease, ["ttl"], { cwd: repo, encoding: "utf8" }).stdout.trim());
+    expect(Number.isFinite(ttl) && ttl > 0, "期限を読めない").toBe(true);
+    writeFileSync(
+      join(repo, ".git", `valence-loop-rounds-${scope}`),
+      `${Math.floor(Date.now() / 1000) - ttl - 60}\n`,
+    );
+  }
+
+  /** worktree で 2 つ目の作業場を足す。**git の共通ディレクトリは同じ。** */
+  function addWorkspace(): string {
+    for (const args of [
+      [
+        "-c",
+        "user.email=loop@example.invalid",
+        "-c",
+        "user.name=loop",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "根",
+      ],
+    ]) {
+      expect(spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" }).status).toBe(0);
+    }
+    const other = `${repo}-b`;
+    expect(
+      spawnSync("git", ["-C", repo, "worktree", "add", "--quiet", "--detach", other, "HEAD"], {
+        encoding: "utf8",
+      }).status,
+      "2 つ目の作業場を作れない",
+    ).toBe(0);
+    extraWorkspaces.push(other);
+    return other;
+  }
+
+  /** いま数えられている作業場の数（`bin/loop-handoff` が訊く口）。 */
+  function aliveWorkers(): Run {
+    const result = spawnSync(join(repo, "bin", "loop-stall"), ["--alive-workers"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    return { status: result.status ?? -1, stdout: result.stdout.trim(), stderr: result.stderr };
+  }
+
+  describe("生きている作業場の数え方", () => {
+    /**
+     * **口を 1 つにしたのに、その 1 つが古いほうを指していた**（#303 のレビュー）。
+     *
+     * **`bin/loop-lease alive` は #298 で「まず生きている lease を見る」形にした**が、
+     * **ここは時刻の窓しか見ていない**——**握って走っている最中の作業場が「死んだ」に
+     * 落ちる。** **落ちる先が悪い**：**`hands` が減り、空いている worker を
+     * 起こさなくなる**（#302 が直そうとしたもの）。
+     */
+    it("lease を握っていれば、印が窓を越えていても数える", () => {
+      holdPastWindow();
+
+      expect(aliveWorkers().stdout, "走っている作業場を死んだ扱いにしている").toBe("1");
+    });
+
+    it("返したあとに窓を越えたら、数えない", () => {
+      // **常に生きている扱いにしない。** **返した作業場は、窓を過ぎれば外れる**
+      // ——**外れなければ、作業場を作って消すたびに上限が増えて二度と減らない**（#239）
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) - 100_000 });
+
+      expect(aliveWorkers().stdout, "返した作業場を数え続けている").toBe("0");
+    });
+
+    it("上限も同じ数え方になる", () => {
+      // **`bin/loop-handoff` と `bin/loop-stall` の上限は、同じ数を読む**
+      // （#239 の「同時に走るループ数 + 1」）——**片方だけ直すと食い違う。**
+      //
+      // **作業場は 2 つ要る。** **1 つだと、数えても数えなくても下限の 3 に丸められる**
+      // ——**判別できない試験になる。**
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
+      holdPastWindow(addWorkspace());
+
+      expect(aliveWorkers().stdout, "2 つとも数えていない").toBe("2");
+      // 走っているループ = master 1 + 生きている worker 2、上限はそれに 1 を足す
+      expect(stall().stderr + stall().stdout, "上限が生きている作業場を映していない").toContain(
+        "max=4",
+      );
+    });
   });
 
   it("worker が 1 周しかしていなければ、master が何周しても止めない", () => {
