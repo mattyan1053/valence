@@ -59,7 +59,7 @@ alive_scan_failed=""
 scan_alive_scopes() {
   local common_dir="$1" script_dir="$2"
   local lease_ttl scope scope_rounds scope_started scope_window seconds len now_epoch
-  local shared_window
+  local shared_window running_scopes
   # **数えられなかったなら、そう言う** (#304)。**0 件へ倒さない**（`AGENTS.md` §5）。
   if [[ -z $script_dir || ! -x "$script_dir/loop-lease" ]]; then
     alive_scan_failed="bin/loop-lease を実行できません（${script_dir:-スクリプトの場所が不明}）"
@@ -148,11 +148,20 @@ scan_alive_scopes() {
   #
   # **印が読めなかった作業場は、ここでも数えない。** **時刻が無いと「前回から進んだか」
   # を言えない**（`all_scopes_advanced`）ので、**基準を作り話で埋めない。**
+  #
+  # **終了コードを受ける** (#308 のレビュー)。**process substitution の中で呼ぶと、
+  # 落ちても `while` は 0 行を読んだだけに見える**——**握ったまま窓を越えた作業場が
+  # 丸ごと欠けても、`--alive-workers` は少ない件数を exit 0 で返していた**
+  # （**この PR が消しに来た「判定不能を 0 に倒す」が、隣の呼び出しに残っていた**）。
+  if ! running_scopes="$("$script_dir/loop-lease" running worker 2>/dev/null)"; then
+    alive_scan_failed="bin/loop-lease running worker を読めません"
+    return 1
+  fi
   while read -r scope; do
     [[ -n $scope ]] || continue
     [[ -n ${scope_started_at[$scope]-} ]] || continue
     alive_scopes["$scope"]="${scope_started_at[$scope]}"
-  done < <("$script_dir/loop-lease" running worker 2>/dev/null)
+  done <<<"$running_scopes"
 
   # **生きている作業場の実測は、自分のでなくても効かせる**（#200 のレビュー 3 周目）。
   # **自分の実測が短い作業場は、長い周回の途中で自分の窓から出る**——

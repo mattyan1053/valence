@@ -1064,27 +1064,39 @@ describe("worker が作業しているあいだは数えない", () => {
     });
 
     /**
-     * **期限を答えない `bin/loop-lease`。** **窓の広さが分からなければ、生死は言えない。**
+     * **その問いにだけ答えない `bin/loop-lease`。**
      *
      * **消さずに、答えない形にする**——**`bin/loop-stall` はこの作業場の名前も
      * `bin/loop-lease` へ訊く**ので、**丸ごと消すと数える手前で落ちる**（**見たいのは
      * 「数えられなかったまま先へ進む」ほう**である）。
+     *
+     * **`bin/loop-lease` は判定できないとき exit 2 を返す**ので、**その形に揃える。**
      */
-    function leaseWithoutTtl(): void {
+    function leaseFailingOn(subcommand: string): void {
       const lease = join(repo, "bin", "loop-lease");
       const real = join(repo, "bin", "loop-lease-real");
       renameSync(lease, real);
       writeFileSync(
         lease,
-        `#!/usr/bin/env bash\n[[ \${1-} == ttl ]] && exit 1\nexec '${real}' "$@"\n`,
+        `#!/usr/bin/env bash\n[[ \${1-} == ${subcommand} ]] && exit 2\nexec '${real}' "$@"\n`,
         { mode: 0o755 },
       );
     }
 
-    it("数えられなかったときは、0 件と見分けが付く", () => {
+    /**
+     * **訊く先は 2 つある**（#308 のレビュー）。**`ttl`（窓の広さ）と
+     * `running`（いま握っている作業場）**で、**どちらが落ちても数は足りなくなる。**
+     *
+     * **`running` は process substitution の中で呼んでいた**——**終了コードは
+     * どこにも出ず、stderr も捨てていた**ので、**握ったまま窓を越えた worker が
+     * 落ちても、`--alive-workers` は少ない件数を exit 0 で返していた。**
+     */
+    const COUNTING_QUESTIONS = ["ttl", "running"];
+
+    it.each(COUNTING_QUESTIONS)("%s を読めなかったときは、0 件と見分けが付く", (subcommand) => {
       // **生きている作業場を作ってから、数える手立てだけを奪う**
       workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
-      leaseWithoutTtl();
+      leaseFailingOn(subcommand);
 
       const unknown = aliveWorkers();
 
@@ -1102,9 +1114,9 @@ describe("worker が作業しているあいだは数えない", () => {
       expect(none.status, "0 件が「判定不能」に倒れている").toBe(0);
     });
 
-    it("上限を決められなかったことも、その場で言う", () => {
+    it.each(COUNTING_QUESTIONS)("%s を読めないと、上限のほうもその場で言う", (subcommand) => {
       workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
-      leaseWithoutTtl();
+      leaseFailingOn(subcommand);
 
       const stalled = stall();
 
