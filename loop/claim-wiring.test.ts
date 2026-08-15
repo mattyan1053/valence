@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -12,9 +13,7 @@ function read(path: string): string {
 
 /** 着手を決めている節。**文書全体で見ない**——別の節の同じ言い回しで満たされる。 */
 function claimSection(): string {
-  const section = read(".claude/commands/loop-worker.md").split(
-    "## 4. `ready` から 1 件を取って実装する",
-  )[1];
+  const section = procedureText("worker").split("## 4. `ready` から 1 件を取って実装する")[1];
   if (section === undefined) {
     throw new Error("worker の手順書に着手の節がありません");
   }
@@ -23,9 +22,7 @@ function claimSection(): string {
 
 /** 着手中の Issue を再開する節。**ここが claim を通らない入口だった。** */
 function resumeSection(): string {
-  const section = read(".claude/commands/loop-worker.md").split(
-    "### 2.2 公開に失敗した周回を再開する",
-  )[1];
+  const section = procedureText("worker").split("### 2.2 公開に失敗した周回を再開する")[1];
   if (section === undefined) {
     throw new Error("worker の手順書に再開の節がありません");
   }

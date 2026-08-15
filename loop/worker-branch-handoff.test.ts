@@ -12,16 +12,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const PROCEDURE = ".claude/commands/loop-worker.md";
 
 /**
  * 手順書の bash ブロックを全部取り出す。**書き写さない**（#181 / #183）——
  * **写すと、手順書を直さなくても緑のまま通る**。
  */
 function bashBlocks(): string[] {
-  const body = readFileSync(join(REPO_ROOT, PROCEDURE), "utf8");
+  const body = procedureText("worker");
   return [...body.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => match[1] ?? "");
 }
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -24,9 +25,7 @@ describe("./task check の読み方", () => {
     //
     // **言い換えるたびに落ちて邪魔になる、という反対もある。それでもこちらへ倒す。**
     // 落ちたときは**人が見て直せば済む**が、**緩いほうは消えても誰も気づかない**。
-    expect(read(".claude/commands/loop-worker.md")).toMatch(
-      /`\.\/task check` の合否は終了コードで決める/,
-    );
+    expect(procedureText("worker")).toMatch(/`\.\/task check` の合否は終了コードで決める/);
   });
 
   it("書いてあるとおりに打つと、失敗が失敗として残る", () => {
@@ -40,7 +39,7 @@ describe("./task check の読み方", () => {
     // **1 つ目だけを取らない**（#147）。**`find` で 1 つ取ると名指しと同じ**になり、
     // **打つところが増えても気づけない**——**実際に 4 箇所ある**（rebase・対応後・
     // 実装中・PR を作る前）。**穴（`<…>`）は埋めて、全部走らせる。**
-    const blocks = read(".claude/commands/loop-worker.md")
+    const blocks = procedureText("worker")
       .split("```bash")
       .slice(1)
       .map((chunk) => chunk.split("```")[0] ?? "")

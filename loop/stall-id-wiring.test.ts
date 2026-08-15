@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { type LoopRole, procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -28,15 +29,15 @@ function read(path: string): string {
  */
 const STALL_CALL = /bin\/loop-stall (?:"([^"]+)"|([a-z][\w:<>-]*))/g;
 
-function identifiersIn(path: string): string[] {
-  return [...read(path).matchAll(STALL_CALL)].map((match) => match[1] ?? match[2] ?? "");
+function identifiersIn(role: LoopRole): string[] {
+  return [...procedureText(role).matchAll(STALL_CALL)].map((match) => match[1] ?? match[2] ?? "");
 }
 
 /** 節ごとに、そこで打つ識別子を並べる。**絞らずに全部出す**（列挙が主題である）。 */
-function identifiersWithSection(path: string): [string, string][] {
+function identifiersWithSection(role: LoopRole): [string, string][] {
   const pairs: [string, string][] = [];
   let section = "";
-  for (const line of read(path).split("\n")) {
+  for (const line of procedureText(role).split("\n")) {
     if (/^#{2,4} /.test(line)) {
       section = line.trim();
     }
@@ -85,10 +86,7 @@ describe("停止識別子", () => {
   it("手順書は、一覧にある識別子だけを打つ", () => {
     // **綴りが 1 文字違うだけで、別状態として数え直される**（3 周続いても止まらない）
     const specs = new Set(listedSpecs());
-    const used = [
-      ...identifiersIn(".claude/commands/loop-master.md"),
-      ...identifiersIn(".claude/commands/loop-worker.md"),
-    ];
+    const used = [...identifiersIn("master"), ...identifiersIn("worker")];
 
     expect(used.filter((id) => !specs.has(id))).toEqual([]);
   });
@@ -103,7 +101,7 @@ describe("停止識別子", () => {
     // 違うものを同じ名前で打っていないかも、並べれば目に入る——
     // **`awaiting-worker` は `WORKER_FIXES` に入る**ので、**worker が解けない状態に
     // 打つと、worker の周回が動いている間ずっと数えられない**。
-    expect(identifiersWithSection(".claude/commands/loop-master.md")).toEqual([
+    expect(identifiersWithSection("master")).toEqual([
       // **配られた手順書がディスクより古い**（#241 / #243）。**入口の `acquire` が受ける**
       ["### 1.0 同じ役の周回が走っていないか確かめる", "procedure-stale"],
       ["### 1.0 同じ役の周回が走っていないか確かめる", "wrong-worktree"],
@@ -199,10 +197,7 @@ describe("停止識別子", () => {
     // **打つ場所が消えても、一覧だけが残る**（#162 で `review-exhausted` の分岐が
     // 括弧書きへ落ち、**いつ使うのかが消えた**）。**一覧は「使える識別子」の正**なので、
     // **誰も打たないものが混ざると、読む人は「まだ使うのだろう」と思う**
-    const used = new Set([
-      ...identifiersIn(".claude/commands/loop-master.md"),
-      ...identifiersIn(".claude/commands/loop-worker.md"),
-    ]);
+    const used = new Set([...identifiersIn("master"), ...identifiersIn("worker")]);
     // **`used` に worker のぶんは既に入っている。** 同じものをもう一度除いても
     // **後半は常に true** で、**「worker 側も見ている」ように読めるぶん、
     // 次に触る人が二重に守られていると思う**（#164 のレビューで見送ったもの）
@@ -259,8 +254,10 @@ describe("止められなかったときの終了コード", () => {
     // **値は写さず、本物に返させたものを探す**
     const status = statusWhenStopFails();
 
-    for (const path of [".claude/commands/loop-master.md", ".claude/commands/loop-worker.md"]) {
-      expect(read(path), `${path} に exit ${status} が無い`).toContain(`- exit ${status} →`);
+    for (const role of ["master", "worker"] as const) {
+      expect(procedureText(role), `${role} に exit ${status} が無い`).toContain(
+        `- exit ${status} →`,
+      );
     }
   });
 });

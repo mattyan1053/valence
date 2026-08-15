@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# **手順書の本体を、ディスクから読む** (#319)。
+#
+#   bin/loop-procedure-body <役>
+#
+#   exit 0 = 本体を標準出力へ出した
+#   exit 2 = 読めない（本体が無い / 使い方の誤り）——**この周回は何もせず終わる**
+#
+# **`/loop <間隔> /loop-worker` は、登録した時点の本文を cron で再生する。**
+# **ディスクの `.claude/commands/loop-<役>.md` を毎回読み直すわけではない**ので、
+# **手順書を直すたびに、走っているセッションの本文が古くなる**——
+# **実測で 1 日 5 回、版ずれで周回が捨てられた。**
+#
+# **検出は正しい** (#241 / #243)。**変えるのは頻度である。**
+# **入口だけを cron に運ばせ、本体はここから読む**——**入口はめったに変わらない**ので、
+# **古い本文を運ばれても、中身は最新になる。**
+#
+# **読めなければ止まる。** **入口には本体が無い**ので、**「読めないまま進む」は
+# 「手順の大半を飛ばす」ことと同じ**である——**黙って古い手順で走らせない。**
+#
+# **成功と失敗を、終了コードで分ける。** **本体が空でも出力は空**なので、
+# **出力の有無で判断させない**（**読む側は終了コードを見る**）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+readonly ROLES=(master worker)
+
+usage() {
+  echo "使い方: bin/loop-procedure-body <役>" >&2
+  echo "        役: ${ROLES[*]}" >&2
+  echo "        exit 0 本体を出した / exit 2 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+
+ROLE="$1"
+known=0
+for role in "${ROLES[@]}"; do
+  [[ $ROLE == "$role" ]] && known=1
+done
+((known == 1)) || usage
+readonly ROLE
+
+# **スクリプトの隣から辿る。** **cwd からではない**——**このスクリプトが属する
+# チェックアウトの本体**を読みたい（`bin/loop-procedure-stamp` と同じ理由）。
+readonly BODY="${BASH_SOURCE[0]%/*}/../loop/procedure/$ROLE.md"
+
+if [[ ! -f $BODY ]]; then
+  echo "[FAIL] 手順書の本体が見つかりません: $BODY" >&2
+  exit 2
+fi
+
+if ! cat "$BODY"; then
+  echo "[FAIL] 手順書の本体を読めません: $BODY" >&2
+  exit 2
+fi
