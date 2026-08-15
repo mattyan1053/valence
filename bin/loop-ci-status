@@ -9,9 +9,10 @@
 # **`--required-checks` は PR 番号を取らない**ので、**答えるのは `main` 側だけ**である。
 #
 #   exit 0 = 必須がすべて決着して成功
-#   exit 1 = 決着して失敗 / 必須が見つからない (worker に直させる)
-#   exit 3 = まだ決着していないが、予算の内 (待つ)
+#   exit 1 = 決着して失敗 / 必須の一部が見つからない (worker に直させる)
+#   exit 3 = まだ決着していないが、予算・猶予の内 (待つ)
 #   exit 4 = 決着しないまま予算を超えた (人を呼ぶ)
+#   exit 5 = 必須が 1 件も作られないまま猶予を過ぎた (人を呼ぶ)
 #   exit 2 = 読めない / 使い方の誤り
 #
 # **`status` と `conclusion` は別の軸である。** **実物が 105 分止まった** (#206)——
@@ -54,6 +55,27 @@ readonly OK_CONCLUSIONS="success skipped neutral"
 # **無いのではなく 360 分である。**
 readonly DEFAULT_TIMEOUT_MIN=360
 
+# **「1 件も作られていない」と言い切るまでの猶予** (#297)。
+#
+# **push 直後は必ず 0 件である**ので、猶予が無いと**正常な PR で毎回人を呼ぶ**。
+# **予算 (`timeout-minutes`) は使えない**——**あれは「始まった時刻」から測る**もので、
+# **始まっていないものに始まった時刻は無い**（**だからこの状態は永久に `exit 4` へ
+# 行かない**）。**別の時計が要る。**
+#
+# **commit の時刻も使えない** (#305 のレビュー)。**`committer.date` は push の時刻では
+# ない**——**手元で commit してから時間を置いて push すると、押した直後から猶予の外**
+# になり、**未来の日付を持つ commit では永久に猶予を抜けない**
+# (`bin/loop-review-commits` も同じことを書いている)。
+#
+# **測れる時計は「こちらが初めてその head を見た時刻」だけ**である。**遅れて見た場合は
+# 猶予の起点も遅れる**が、**倒れる先は「人を呼ぶのが遅い」側**——**正常な PR で
+# 人を呼ぶ側へは倒れない。**
+#
+# **10 分に強い根拠は無い。** **言えるのは「通常の起動より十分長い」ことだけ**である
+# ——**実測では push から数十秒で作られており**、**止まった日は 33 分以上 0 件だった**
+# (2026-08-15、#295)。**その 2 つの間で、待ちすぎない側に置いてある。**
+readonly MISSING_GRACE_MIN="${LOOP_CI_MISSING_GRACE_MIN:-10}"
+
 # **指紋は予算を見ない。** **`bin/loop-handoff` は「同じ状態か」だけを見る** ので、
 # **予算を入れると時間の経過だけで指紋が動き、何も変わっていないのに通知が飛ぶ**。
 # **`bucket` のままだと、ゲートが `conclusion` で成功へ変わっても指紋が動かない**
@@ -63,8 +85,8 @@ usage() {
   echo "使い方: bin/loop-ci-status <PR番号>" >&2
   echo "        bin/loop-ci-status --fingerprint <PR番号>" >&2
   echo "        bin/loop-ci-status --required-checks" >&2
-  echo "        exit 0 = 決着して成功 / exit 1 = 失敗・欠け / exit 3 = 待つ" >&2
-  echo "        exit 4 = 予算を超えた / exit 2 = 読めない・使い方の誤り" >&2
+  echo "        exit 0 = 決着して成功 / exit 1 = 失敗・一部欠け / exit 3 = 待つ" >&2
+  echo "        exit 4 = 予算を超えた / exit 5 = 1 件も作られない / exit 2 = 読めない・使い方の誤り" >&2
   exit 2
 }
 
@@ -350,6 +372,103 @@ done
 if ((FINGERPRINT == 1)); then
   printf '%s\n' "${states%,}"
   exit 0
+fi
+
+# **「1 件も作られていない」を、決着した失敗から分ける** (#297)。
+#
+# **落ちた検査は worker が直せる**が、**作られていないものは PR に足すもので直る
+# 保証が無い**——**実測では 33 分以上 run が 1 件も作られず、worker が空 commit まで
+# 試して尽きた**（2026-08-15、#295）。**同じ `exit 1` に落とすと、直せない相手へ
+# 渡し続ける形になる。**
+#
+# **一部だけ欠けているのは、こちらへ入れない。** **名前の食い違いなど、PR 側で
+# 直りうる**ので、**緩める向きを広げない。**
+if ((${#missing[@]} > 0 && ${#missing[@]} == ${#required[@]})); then
+  # **コンフリクトしているなら、これまでどおり worker が直せる側へ倒す**
+  # (#305 のレビュー)。**`on: pull_request` の実行はマージ結果
+  # （`refs/pull/N/merge`）に対して走る**ので、**コンフリクトしていると ref が作れず、
+  # 実行そのものが作られない**——**「PR に足すもので直る保証が無い」という人待ちの
+  # 前提が、そこだけ当てはまらない**（**rebase すれば作られる**）。
+  #
+  # **猶予より先に見る。** **猶予は「そのうち作られるかもしれない」ための待ち**で、
+  # **コンフリクトしている限り作られない**——**待つ理由が無い。**
+  #
+  # **`UNKNOWN` を「コンフリクトしていない」へ倒さない。** **GitHub は計算中に
+  # これを返す**（実測）——**倒すと、計算中の PR がそのまま人待ちへ行く。**
+  #
+  # **かといって、そこで `exit 2` にもしない** (#305 のレビュー 2 周目)。
+  # **`bin/loop-gate` は `*)` で畳んで `exit 1` を返す**が、**master の手順書の
+  # exit 1 の表に「判定できません」の行が無い**——**分けた先が未定義の分岐へ落ちる**
+  # （**この判定が消しに来た形そのもの**）。**しかも push 直後は「1 件も無い」と
+  # 同時に起きる**ので、**日常的に踏む。**
+  #
+  # **`UNKNOWN` と「まだ作られていない」は、どちらも『まだ決まっていない』**である。
+  # **同じ時計で測る**——**猶予の内なら待ち、過ぎれば人待ちへ出る**ので、
+  # **新しい配線を足さずに「待つ → 届く」が閉じる。**
+  if ! mergeable="$(gh pr view "$PR" --json mergeable --jq '.mergeable' 2>/dev/null)" \
+    || [[ -z $mergeable ]]; then
+    echo "[FAIL] PR #$PR がコンフリクトしているか読めません" >&2
+    exit 2
+  fi
+  # **`UNKNOWN` だったことを、読む側にも残す**（文面で分岐させるためではなく、
+  # **人が来たときに何を見ればよいかが分かるように**）。
+  missing_note=""
+  case "$mergeable" in
+    CONFLICTING)
+      echo "必須チェックが 1 件も作られていません（コンフリクトしているため実行が作られない）: ${missing[*]}"
+      exit 1
+      ;;
+    MERGEABLE) ;;
+    # **計算中である。** **猶予の時計に乗せる**（上記）。
+    UNKNOWN) missing_note="（コンフリクトの有無も計算中）" ;;
+    *)
+      # **知らない値は止まる側へ** (#90 の逆向き)。**意味が分からないものを
+      # 「コンフリクトしていない」へ倒さない。**
+      echo "[FAIL] PR #$PR がコンフリクトしているか判定できません: $mergeable" >&2
+      exit 2
+      ;;
+  esac
+
+  # **猶予は、この head を初めて見た時刻から測る**（上の定数を参照）。
+  # **記録は共通ディレクトリに置く**——**master は worktree から走る**ので、
+  # **作業ツリーごとに分けると、周回のたびに「初めて見た」に戻る。**
+  if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]] \
+    || ! common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)"; then
+    echo "[FAIL] 観測を記録する場所を特定できません" >&2
+    exit 2
+  fi
+  first_seen="$common_dir/valence-loop-ci-firstseen-$PR"
+  seen_sha=""
+  seen_at=""
+  if [[ -f $first_seen ]]; then
+    IFS=$'\t' read -r seen_sha seen_at <"$first_seen" || {
+      echo "[FAIL] 観測の記録を読めません: $first_seen" >&2
+      exit 2
+    }
+    # **別の head の記録は使わない。** **push し直せば検査は作り直される**ので、
+    # **前の head で溜めた時間を持ち越すと、新しい head の直後に人を呼ぶ。**
+    if [[ $seen_sha != "$head_sha" ]]; then
+      seen_sha=""
+    elif ! [[ $seen_at =~ ^[0-9]+$ ]]; then
+      # **「待つ」へ倒さない** (#297)。**猶予の内か外かが決まらないまま待つと、
+      # この状態は永久に人へ届かない**——**この Issue が消しに来た形そのもの**である。
+      echo "[FAIL] 観測の記録を読めません: $first_seen" >&2
+      exit 2
+    fi
+  fi
+  if [[ -z $seen_sha ]]; then
+    if ! printf '%s\t%s\n' "$head_sha" "$now_epoch" >"$first_seen"; then
+      echo "[FAIL] 観測を記録できません: $first_seen" >&2
+      exit 2
+    fi
+    seen_at="$now_epoch"
+  fi
+  if ((now_epoch - seen_at <= MISSING_GRACE_MIN * 60)); then
+    echo "必須チェックがまだ作られていません${missing_note}（初めて見てから ${MISSING_GRACE_MIN} 分の猶予の内）: ${missing[*]}"
+    exit 3
+  fi
+  echo "必須チェックが 1 件も作られていません${missing_note}（初めて見てから ${MISSING_GRACE_MIN} 分を超えました）: ${missing[*]}"
+  exit 5
 fi
 
 # **決着した失敗が先。** **待ちに混ぜると、直せるものを待ち続ける。**

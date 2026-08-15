@@ -195,10 +195,56 @@ describe("bin/loop-ci-status", () => {
       "    exit 1",
       "  fi",
       '  if [[ $args == *"@base64"* ]]; then',
+      // **1 件も無い状態を作れるようにする**（#297）。**空の分岐は bash の構文誤り**で、
+      // **スタブが落ちた結果を「読めない」として受け取ることになる**
+      "    :",
       ...checks.map((check) => row(Buffer.from(check.name, "utf8").toString("base64"), check)),
       "  else",
+      "    :",
       ...checks.map((check) => row(check.name, check)),
       "  fi",
+      "  exit 0",
+      "fi",
+    ];
+  }
+
+  /**
+   * **その head を初めて観測した時刻の記録**（#297。#305 のレビューで直した）。
+   *
+   * **commit の時刻は push の時刻ではない**——**手元で commit してから時間を置いて
+   * push すると、押した直後から猶予の外**になり、**未来の日付を持つ commit では
+   * 永久に猶予を抜けない**（`bin/loop-review-commits` も同じことを書いている）。
+   * **始まった時刻でも測れない**——**始まっていないものに、始まった時刻は無い。**
+   *
+   * **測れる時計は「こちらが初めて見た時刻」だけ**である。
+   */
+  function firstSeen(sha: string, agoSec: number): void {
+    writeFileSync(
+      join(sandbox, ".git", "valence-loop-ci-firstseen-42"),
+      `${sha}\t${Math.floor(Date.now() / 1000) - agoSec}\n`,
+    );
+  }
+
+  /** 記録そのもの（読めない形も置ける）。 */
+  function writeFirstSeen(body: string): void {
+    writeFileSync(join(sandbox, ".git", "valence-loop-ci-firstseen-42"), body);
+  }
+
+  function readFirstSeen(): string {
+    return readFileSync(join(sandbox, ".git", "valence-loop-ci-firstseen-42"), "utf8");
+  }
+
+  /**
+   * **コンフリクトしているか**を返す枝（#305 のレビュー）。
+   *
+   * **`on: pull_request` の実行はマージ結果（`refs/pull/N/merge`）に対して走る**ので、
+   * **コンフリクトしていると ref が作れず、実行そのものが作られない**——
+   * **「1 件も作られない＝GitHub 側の状態」という前提が、そこだけ当てはまらない。**
+   */
+  function mergeableBranch(value: string, fails: boolean): string[] {
+    return [
+      'if [[ $args == *"mergeable"* ]]; then',
+      ...(fails ? ["  exit 1"] : [`  printf '%s\\n' ${JSON.stringify(value)}`]),
       "  exit 0",
       "fi",
     ];
@@ -210,6 +256,10 @@ describe("bin/loop-ci-status", () => {
     ghFails?: boolean;
     /** head を読めない。 */
     headFails?: boolean;
+    /** `mergeable` の値（GitHub は計算中に `UNKNOWN` を返す）。 */
+    mergeable?: string;
+    /** `mergeable` を読めない。 */
+    mergeableFails?: boolean;
     /** 指紋だけを尋ねる（`bin/loop-handoff` が使う）。 */
     fingerprint?: boolean;
   }): { status: number; stdout: string; stderr: string } {
@@ -231,6 +281,7 @@ describe("bin/loop-ci-status", () => {
         `  printf '%s\\n' "deadbeef"`,
         "  exit 0",
         "fi",
+        ...mergeableBranch(options.mergeable ?? "MERGEABLE", options.mergeableFails === true),
         ...headScriptBranch(headScriptPath),
         ...workflowBranches(),
         ...checkRunsBranch(options.checks ?? [], options.ghFails === true),
@@ -544,6 +595,165 @@ describe("bin/loop-ci-status", () => {
     });
 
     expect(result.status, "必須が欠けたまま通している").toBe(1);
+  });
+
+  describe("1 件も作られていない状態（#297）", () => {
+    // **「チェックが 1 件も作られていない」と「チェックが落ちた」は行き先が違う。**
+    // **落ちたものは worker が直せる**が、**作られていないものは PR に足すもので
+    // 直る保証が無い**——**実測では 33 分以上 run が 1 件も作られず、worker が
+    // 空 commit まで試して尽きた**（2026-08-15、#295）。
+    //
+    // **予算（exit 4）では拾えない。** **あれは「始まった時刻」から測る**ので、
+    // **始まっていないものは永久に超えない**——**待っていても人を呼ぶ経路に乗らない。**
+
+    it("猶予を過ぎても 1 件も作られていなければ、人を呼ぶ側へ倒す", () => {
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [] });
+
+      expect(result.status, "落ちた検査と同じ行き先に落ちている").toBe(5);
+    });
+
+    it("初めて見た周回では、人を呼ばない", () => {
+      // **push 直後は必ず 0 件である。** **猶予が無いと、正常な PR で毎回人を呼ぶ。**
+      // **測る起点は「こちらが初めて見た時刻」**なので、**初めて見た周回は必ず猶予の内**
+      workflows([5]);
+
+      const result = run({ checks: [] });
+
+      expect(result.status, "初めて見た周回で人を呼んでいる").toBe(3);
+      expect(readFirstSeen(), "観測を記録していない").toContain("deadbeef");
+    });
+
+    it("commit の時刻は使わない（push の時刻ではない）", () => {
+      // **#305 のレビュー。** **手元で commit してから時間を置いて push すると、
+      // 押した直後から猶予の外**になり、**未来の日付を持つ commit では永久に
+      // 猶予を抜けない**——**`bin/loop-review-commits` も同じことを書いている。**
+      //
+      // **`gh` へ commit の日付を尋ねていないこと**で見る（スタブは答えない）。
+      workflows([5]);
+
+      const result = run({ checks: [] });
+
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(3);
+      expect(
+        readFileSync(join(sandbox, "gh.calls"), "utf8"),
+        "commit の時刻を push の時刻として使っている",
+      ).not.toContain("committer");
+    });
+
+    it("head が変われば、猶予は測り直す", () => {
+      // **別の head の記録で数えない。** **push し直せば検査は作り直される**ので、
+      // **前の head で溜めた時間を持ち越すと、新しい head の直後に人を呼ぶ。**
+      workflows([5]);
+      firstSeen("f".repeat(40), 3600);
+
+      const result = run({ checks: [] });
+
+      expect(result.status, "別の head の記録で数えている").toBe(3);
+    });
+
+    it("一部だけ欠けているのは、これまでどおり直せる側へ倒す", () => {
+      // **「1 件も無い」と「1 件足りない」は別**である——**後者は名前の食い違いなど、
+      // PR 側で直りうる。** **緩める向きを広げない。**
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({
+        checks: [{ name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 }],
+      });
+
+      expect(result.status, "欠けを全部「人を呼ぶ」へ倒している").toBe(1);
+    });
+
+    it("コンフリクトしていれば、これまでどおり worker が直せる側へ倒す", () => {
+      // **#305 のレビュー。** **`on: pull_request` の実行はマージ結果
+      // （`refs/pull/N/merge`）に対して走る**ので、**コンフリクトしていると ref が
+      // 作れず、実行そのものが作られない**——**この PR 自身が、作られてから
+      // 45 分・head 3 回で 0 件だった**（2026-08-15、#305）。
+      //
+      // **人待ちの前提は「PR に足すもので直る保証が無い」**である。
+      // **コンフリクトはそこに当てはまらない**——**rebase すれば検査は作られる。**
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [], mergeable: "CONFLICTING" });
+
+      expect(result.status, "worker が解ける状態を人待ちへ送っている").toBe(1);
+      expect(result.stdout).toContain("コンフリクト");
+    });
+
+    it("猶予の内側でも、コンフリクトなら worker へ倒す", () => {
+      // **猶予は「そのうち作られるかもしれない」ための待ちである。**
+      // **コンフリクトしている限り作られない**ので、**待つ理由が無い。**
+      workflows([5]);
+
+      const result = run({ checks: [], mergeable: "CONFLICTING" });
+
+      expect(result.status, "作られない state を待っている").toBe(1);
+    });
+
+    it("mergeable が UNKNOWN なら、猶予の内では待つ", () => {
+      // **GitHub は計算中に `UNKNOWN` を返す**（実測）。**push 直後は
+      // 「必須チェックが 1 件も無い」と同時に起きる**ので、**この分岐は日常的に通る。**
+      //
+      // **前の版は `exit 2`（判定できない）へ倒していた**が、**その先に行き先が無かった**
+      // ——**`bin/loop-gate` は `*)` で畳んで `exit 1` を返し、master の手順書の
+      // exit 1 の表には「判定できません」の行が無い**（#305 のレビュー 2 周目）。
+      // **この PR が消しに来た形（分けた先が未定義の分岐へ落ちる）そのもの**である。
+      //
+      // **`UNKNOWN` と「まだ作られていない」は、どちらも『まだ決まっていない』**なので、
+      // **同じ時計で測る**——**新しい配線を足さずに「待つ → 届く」が閉じる。**
+      workflows([5]);
+
+      const result = run({ checks: [], mergeable: "UNKNOWN" });
+
+      expect(result.status, "計算中の PR を未定義の分岐へ落としている").toBe(3);
+    });
+
+    it("UNKNOWN のまま猶予を過ぎたら、人へ届く", () => {
+      // **待ちが無限にならないこと。** **`UNKNOWN` のまま止まった PR も、
+      // 猶予を過ぎれば人待ちへ出る**（**同じ時計**）。
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [], mergeable: "UNKNOWN" });
+
+      expect(result.status, "UNKNOWN のまま永久に待っている").toBe(5);
+    });
+
+    it("知らない値なら、判定できないとして返す", () => {
+      // **`CONFLICTING` / `MERGEABLE` / `UNKNOWN` 以外が来たら、意味が分からない**
+      // ——**「コンフリクトしていない」へ倒さない**（#90「並べ忘れた値がどの分岐にも
+      // 入らない」の逆で、**知らない値は止まる側へ**）。
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [], mergeable: "SOMETHING_NEW" });
+
+      expect(result.status, "知らない値を通している").toBe(2);
+    });
+
+    it("mergeable を読めなければ、判定できないとして返す", () => {
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [], mergeableFails: true });
+
+      expect(result.status).toBe(2);
+    });
+
+    it("観測の記録を読めなければ、判定できないとして返す", () => {
+      // **猶予の内か外かが決まらない。** **「待つ」へ倒すと、この状態は永久に
+      // 人へ届かない**——**この Issue が消しに来た形そのもの**である。
+      workflows([5]);
+      writeFirstSeen("deadbeef\tこわれている\n");
+
+      const result = run({ checks: [] });
+
+      expect(result.status, "判定できないものを待ちへ倒している").toBe(2);
+    });
   });
 
   it("取得できなければ、止める側へ倒さない", () => {

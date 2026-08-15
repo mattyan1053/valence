@@ -145,6 +145,9 @@ case "$ci_status" in
   1) fail "GHA CI: $ci_out" ;;
   3) fail "GHA CI: pending。$ci_out" ;;
   4) fail "GHA CI: pending のまま予算を超えました。$ci_out" ;;
+  # **「1 件も作られていない」は、落ちた検査とは別の行にする** (#297)。
+  # **PR に足すもので直る保証が無い**ので、**worker ではなく人へ渡す。**
+  5) fail "GHA CI: 必須チェックが 1 件も作られていません。$ci_out" ;;
   *) fail "GHA CI: 判定できません (bin/loop-ci-status が exit $ci_status)" ;;
 esac
 
