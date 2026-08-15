@@ -1108,6 +1108,35 @@ describe("bin/loop-claim", () => {
      * **`--jq` の後ろの形で返す。** `audit` の偽物と同じ約束である
      * （**本物の `gh` が絞ったあとの行**を、そのまま出す）。
      */
+    /**
+     * **いま直接読んだら返る label** を、Issue ごとに置く。
+     *
+     * **一覧と直読みは、別のものを返しうる**（索引は遅れる）。**既定では揃えて置き**、
+     * **`nowLabels` を渡した分だけ食い違わせる。**
+     */
+    function writeLabelFixtures(options: {
+      inProgress?: { number: number; labels?: string[] }[];
+      nowLabels?: Record<number, string[]>;
+    }): string {
+      const labelsDir = join(repo, "labels-idle");
+      mkdirSync(labelsDir, { recursive: true });
+      for (const issue of options.inProgress ?? []) {
+        const now = options.nowLabels?.[issue.number] ?? issue.labels ?? ["in-progress"];
+        writeFileSync(join(labelsDir, String(issue.number)), `${now.join("\n")}\n`);
+      }
+      return labelsDir;
+    }
+
+    /** **その Issue を参照している open PR** を、Issue ごとに置く (#321)。 */
+    function writeReferenceFixtures(referencedBy?: Record<number, number[]>): string {
+      const refsDir = join(repo, "refs-idle");
+      mkdirSync(refsDir, { recursive: true });
+      for (const [number, prs] of Object.entries(referencedBy ?? {})) {
+        writeFileSync(join(refsDir, number), `${prs.join("\n")}\n`);
+      }
+      return refsDir;
+    }
+
     function withIdle(options: {
       inProgress?: { number: number; labels?: string[] }[];
       /** open PR が閉じる予定の Issue。**別リポジトリのものも置ける。** */
@@ -1120,12 +1149,19 @@ describe("bin/loop-claim", () => {
        */
       nowLabels?: Record<number, string[]>;
       /**
+       * その Issue を参照している open PR の番号 (#321)。
+       *
+       * **`Closes` を書かない PR も実装である**——**割った PR は親を閉じない**ので、
+       * **`closingIssuesReferences` には出てこない。** **参照は GitHub が持っている。**
+       */
+      referencedBy?: Record<number, number[]>;
+      /**
        * この一覧だけが読めない。**「0 件」と読み違えないこと**を見る。
        *
        * **全部の `gh` を落とさない。** **手前の呼び出しで止まると、
        * 見たかった経路まで届かない**（届いていないのに緑になる）。
        */
-      failOn?: "issue list" | "pr list" | "issue view";
+      failOn?: "issue list" | "pr list" | "issue view" | "api graphql";
     }): void {
       const issues = (options.inProgress ?? [])
         .map((issue) => `${issue.number}\t${(issue.labels ?? ["in-progress"]).join(",")}`)
@@ -1133,20 +1169,15 @@ describe("bin/loop-claim", () => {
       const closes = (options.prs ?? [])
         .flatMap((pr) => pr.closes.map((number) => `${pr.repo ?? "owner/repo"}\t${number}`))
         .join("\n");
-      const labelsDir = join(repo, "labels-idle");
-      mkdirSync(labelsDir, { recursive: true });
-      for (const issue of options.inProgress ?? []) {
-        // **一覧と直読みは、別のものを返しうる**（索引は遅れる）。**既定では揃えて置き**、
-        // **`nowLabels` を渡した分だけ食い違わせる**
-        const now = options.nowLabels?.[issue.number] ?? issue.labels ?? ["in-progress"];
-        writeFileSync(join(labelsDir, String(issue.number)), `${now.join("\n")}\n`);
-      }
+      const labelsDir = writeLabelFixtures(options);
+      const refsDir = writeReferenceFixtures(options.referencedBy);
 
       writeFileSync(
         join(path, "gh"),
         [
           "#!/usr/bin/env bash",
           `labels_dir=${JSON.stringify(labelsDir)}`,
+          `refs_dir=${JSON.stringify(refsDir)}`,
           ...(options.failOn === undefined
             ? []
             : [`if [[ $* == *${JSON.stringify(options.failOn)}* ]]; then exit 1; fi`]),
@@ -1163,6 +1194,16 @@ describe("bin/loop-claim", () => {
           'if [[ $* == *"pr list"* ]]; then',
           `  printf '%b' ${JSON.stringify(closes)}`,
           `  [[ -n ${JSON.stringify(closes)} ]] && echo`,
+          "  exit 0",
+          "fi",
+          // **その Issue を参照している open PR**（#321）。**番号は `-F number=<N>` で来る**
+          'if [[ $* == *"api graphql"* ]]; then',
+          "  for word in $*; do",
+          '    if [[ $word == number=* && -f "$refs_dir/${word#number=}" ]]; then',
+          '      cat "$refs_dir/${word#number=}"',
+          "      exit 0",
+          "    fi",
+          "  done",
           "  exit 0",
           "fi",
           'if [[ $* == *"issue view"* ]]; then',
@@ -1210,6 +1251,46 @@ describe("bin/loop-claim", () => {
       const [kind, number, elapsed] = (idle.stdout.split("\n")[0] ?? "").split("\t");
       expect([kind, number]).toEqual(["stalled", "264"]);
       expect(Number(elapsed)).toBeGreaterThanOrEqual(9000);
+    });
+
+    it("`Closes` が無くても、実装が出ていれば並べない", () => {
+      // **割った PR は親 Issue を閉じない**（**途中の 1/3 に `Closes` を書くと、
+      // そこが入った時点で親が閉じる**）ので、**`closingIssuesReferences` には出てこない**
+      // ——**`Closes` だけを見ていると、実装が出ているのに「出ていない」と報告する**（#321）。
+      //
+      // **人が呼ばれる理由が変わる**のが悪い：**実際は人の判断待ち**なのに、
+      // **「実装が出ていない」と書いて呼ぶ**——**来た人は違う場所を見る。**
+      withIdle({ inProgress: [{ number: 315 }], referencedBy: { 315: [317] } });
+      writeClaim(315, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status, "実装が出ているのに stalled と報告している").toBe(1);
+    });
+
+    it("参照している PR が 1 本も無ければ、これまでどおり並べる", () => {
+      // **緩めすぎない側の担保。** **参照を見に行くようにしたせいで、
+      // 本物の停止まで見逃したら、この検出器そのものが死ぬ**
+      withIdle({ inProgress: [{ number: 264 }], referencedBy: { 264: [] } });
+      writeClaim(264, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status).toBe(0);
+      expect(run(["idle"]).stdout.split("\n")[0]).toMatch(/^stalled\t264\t/);
+    });
+
+    it("参照を読めなければ、黙らずに止まる", () => {
+      // **倒す向きは「言う」でも「言わない」でもなく、「読めなかったと言う」**である
+      // ——**このファイルは既に、一覧が読めないときを exit 2 にしている**
+      // （**測れないことを、健全と同じ出口にしない**）。
+      //
+      // **`stalled` と言いすぎれば、人が誤った理由で呼ばれる**。
+      // **言わなすぎれば、本物の停止を見逃す**——**どちらへも倒さずに済むなら、
+      // 倒さないのが正しい。**
+      withIdle({ inProgress: [{ number: 315 }], failOn: "api graphql" });
+      writeClaim(315, { touched: NOW, taken: NOW - 9000 });
+
+      const idle = run(["idle"]);
+
+      expect(idle.status, "読めなかったのに答えを返している").toBe(2);
+      expect(idle.stderr).not.toBe("");
     });
 
     it("着手して間もない Issue は並べない", () => {

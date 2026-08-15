@@ -284,6 +284,39 @@ if [[ $ACTION == "idle" ]]; then
     ! has_label "blocked" "$fresh"
   }
 
+  # **`Closes` だけに頼らない** (#321)。**割った PR は親 Issue を閉じない**
+  # （**途中の 1/3 に書くと、そこが入った時点で親が閉じる**）ので、
+  # **`closingIssuesReferences` には出てこない**——**それでも実装は出ている。**
+  #
+  # **参照も GitHub に訊く。** **本文を自分で解析しない**のは、すぐ上の
+  # `closingIssuesReferences` と同じ理由である（**書き分けを写した規則は必ずずれる**）。
+  #
+  # **読めなかったら止める。** **倒す向きは「言う」でも「言わない」でもなく、
+  # 「読めなかったと言う」**である——**`stalled` と言いすぎれば人が誤った理由で呼ばれ**
+  # （**「実装が出ていない」と書いてあるのに、実際は人待ち**）、**言わなすぎれば本物の
+  # 停止を見逃す。** **このファイルは既に、一覧が読めないときを exit 2 にしている**
+  # （**測れないことを、健全と同じ出口にしない**）。
+  #
+  # **絞ったあとの数件にしか投げない**ので、往復は増えない。
+  referenced_by_open_pr() {
+    local number="$1" refs
+    if ! refs="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+      -F number="$number" \
+      -f query='query($owner:String!,$repo:String!,$number:Int!){
+        repository(owner:$owner,name:$repo){
+          issue(number:$number){
+            timelineItems(itemTypes:CROSS_REFERENCED_EVENT, last:100){
+              nodes{... on CrossReferencedEvent{source{... on PullRequest{
+                number state repository{nameWithOwner}}}}}}}}}' \
+      --jq ".data.repository.issue.timelineItems.nodes[]
+        | select(.source.state == \"OPEN\" and .source.repository.nameWithOwner == \"$HERE\")
+        | .source.number")"; then
+      echo "[FAIL] #$number を参照している PR を読めません" >&2
+      exit 2
+    fi
+    [[ -n $refs ]]
+  }
+
   now="$(date +%s)"
   idle_found=0
   while IFS=$'\t' read -r number labels; do
@@ -324,6 +357,8 @@ if [[ $ACTION == "idle" ]]; then
       exit 2
     fi
     ((now - held_taken >= IDLE_SEC)) || continue
+    # **`Closes` を書かない PR も実装である** (#321)。**閾値を超えたものだけに訊く**
+    referenced_by_open_pr "$number" && continue
     still_in_progress "$number" || continue
     printf '%s\t%s\t%s\n' "stalled" "$number" "$((now - held_taken))"
     idle_found=1
