@@ -85,7 +85,15 @@ case "$ROLE" in
     ;;
 esac
 readonly ROLE
-readonly WATCHED=(".claude/commands/loop-${ROLE}.md" "${COMMON[@]}")
+# **入口と本体の両方を見る** (#319)。**本体を別ファイルへ移したので、入口だけを見ると
+# 「本体が入れ替わったのに気づかない」へ倒れる**——**周回の途中で手順が入れ替わるのは、
+# 移す前と何も変わっていない。** **cron が運ばなくなったのは入口の話**であって、
+# **ディスクの本体は同期のたびに入れ替わりうる。**
+readonly WATCHED=(
+  ".claude/commands/loop-${ROLE}.md"
+  "loop/procedure/${ROLE}.md"
+  "${COMMON[@]}"
+)
 
 # 指定された rev を解決する。**解決できないものを黙って通さない。**
 resolve() {

@@ -4,28 +4,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type LoopRole, procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 /** **両方の手順書を通しで見る**（#136 の「やること」）。 */
-const PROCEDURES = [".claude/commands/loop-master.md", ".claude/commands/loop-worker.md"];
+const PROCEDURES: readonly LoopRole[] = ["master", "worker"];
 
 function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
 }
 
 /** 一覧を読む bash ブロックと、それが属する節。 */
-type ReadBlock = { procedure: string; section: string; body: string };
+type ReadBlock = { procedure: LoopRole; section: string; body: string };
 
 /**
  * **一覧を読んでいるブロックを、全部並べる。**
  *
  * **名指ししない**（#166 で同じことを直した）——**名指しは、名指ししなかった経路を隠す**。
  */
-function blocksIn(procedure: string): ReadBlock[] {
+function blocksIn(procedure: LoopRole): ReadBlock[] {
   const blocks: ReadBlock[] = [];
   let section = "";
   let body: string[] | undefined;
-  for (const line of read(procedure).split("\n")) {
+  for (const line of procedureText(procedure).split("\n")) {
     if (/^#{2,4} /.test(line)) {
       section = line.trim();
     }
@@ -139,10 +140,7 @@ describe("一覧の取得に失敗した周回", () => {
     // **絞ってから見ない。** **読んでいるのに受けていない節**が 1 つでもあれば、
     // そこから「0 件」に化ける
     expect(
-      readBlocks().map((block) => [
-        `${block.procedure.replace(/^.*loop-/, "").replace(/\.md$/, "")} ${block.section}`,
-        disposition(block),
-      ]),
+      readBlocks().map((block) => [`${block.procedure} ${block.section}`, disposition(block)]),
     ).toEqual([
       ["master ## 2. open PR を見て、見る順番を決める", "止める"],
       // **保留の一覧も止める**（#70）。**0 件と読むと、ループの外の著者が対応した

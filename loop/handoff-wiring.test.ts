@@ -2,13 +2,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { type LoopRole, procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
-const PROCEDURES = [
-  { role: "master", path: ".claude/commands/loop-master.md" },
-  { role: "worker", path: ".claude/commands/loop-worker.md" },
-] as const;
+const PROCEDURES = [{ role: "master" }, { role: "worker" }] as const;
 
 function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
@@ -25,32 +23,32 @@ function exitCount(doc: string): number {
 }
 
 describe("周回の出口", () => {
-  it.each(PROCEDURES)("$role は出口で持ち手を決める", ({ role, path }) => {
-    const doc = read(path);
+  it.each(PROCEDURES)("$role は出口で持ち手を決める", ({ role }) => {
+    const doc = procedureText(role);
 
     expect(doc).toContain("### 周回の出口");
     expect(doc).toContain(`bin/loop-handoff ${role}`);
   });
 
-  it.each(PROCEDURES)("$role は出口の判断を手順書に書き写さない", ({ path }) => {
+  it.each(PROCEDURES)("$role は出口の判断を手順書に書き写さない", ({ role }) => {
     // **判断はスクリプトが持つ。** 2 箇所に持つと、片方だけ直して食い違う
-    const section = read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+    const section = procedureText(role).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
 
     expect(section).not.toMatch(/changes-requested の PR があれば/);
     expect(section).not.toMatch(/backlog が/);
   });
 
-  it.each(PROCEDURES)("$role の出口が複数あることを、手順書が前提にしている", ({ path }) => {
+  it.each(PROCEDURES)("$role の出口が複数あることを、手順書が前提にしている", ({ role }) => {
     // **出口は 1 つではない。** だからこそ「必ず通す」と書く必要がある。
     // ここが 1 つ以下になったら、出口の書き方が変わったということなので読み直す
-    expect(exitCount(read(path))).toBeGreaterThan(1);
+    expect(exitCount(procedureText(role))).toBeGreaterThan(1);
   });
 
-  it.each(PROCEDURES)("$role の出口は、自分自身へ送ると読めない", ({ role, path }) => {
+  it.each(PROCEDURES)("$role の出口は、自分自身へ送ると読めない", ({ role }) => {
     // **`bin/loop-handoff` は自分自身を除く**ので、exit 0 で出るのは相手役だけである。
     // ここに自分の役を書くと、**書いてあるとおり実行して自分へ送ろうとする**
     // （**役の名前が逆**は文面だけで判定できる種類の誤りである）
-    const section = read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+    const section = procedureText(role).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
     const exitZero = section.split("- **exit 0**")[1]?.split("- **exit 1**")[0] ?? "";
 
     expect(exitZero).not.toContain(`\`${role}\``);
@@ -59,43 +57,43 @@ describe("周回の出口", () => {
 
 describe("送れたときだけ記録する", () => {
   /** 出口の節。**送る手順が書いてあるのはここだけ**である。 */
-  function exitSection(path: string): string {
-    return read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+  function exitSection(role: LoopRole): string {
+    return procedureText(role).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
   }
 
-  it.each(PROCEDURES)("$role は、送信が成功したあとに --sent を通す", ({ role, path }) => {
+  it.each(PROCEDURES)("$role は、送信が成功したあとに --sent を通す", ({ role }) => {
     // **判断した周回が「送信済み」を書いていた**ので、**送信が失敗しても記録だけが残る**
     // （#258）——**同じ状態では 2 通目を送らない**ので、**その状態では二度と送られない**。
     // **記録を上げるのは、送れたことを知っている側**である
-    expect(exitSection(path)).toContain(`bin/loop-handoff ${role} --sent`);
+    expect(exitSection(role)).toContain(`bin/loop-handoff ${role} --sent`);
   });
 
-  it.each(PROCEDURES)("$role は、送れなかったら --sent を通さないと書いてある", ({ path }) => {
+  it.each(PROCEDURES)("$role は、送れなかったら --sent を通さないと書いてある", ({ role }) => {
     // **書いていないと、「送った扱い」に倒れる**——**倒れる向きが悪い**
     // （送っていないのに二度と送られない）
-    expect(exitSection(path)).toMatch(/送れなかった|失敗した/);
+    expect(exitSection(role)).toMatch(/送れなかった|失敗した/);
   });
 
-  it.each(PROCEDURES)("$role は、送る直前に宛先を引き直す", ({ path }) => {
+  it.each(PROCEDURES)("$role は、送る直前に宛先を引き直す", ({ role }) => {
     // **セッションの表示名は変わる**（`valence-master-d4` → `loop-master`）。
     // **古い名前で送ると明確に失敗する**ので、**キャッシュした名前を使わない**。
     // **2.1 にしか書いていないと、出口からは読まれない**（実際にそうなっていた）
-    expect(exitSection(path)).toContain("ListAgents");
+    expect(exitSection(role)).toContain("ListAgents");
   });
 
-  it.each(PROCEDURES)("$role は、宛先を引けないことも送信の失敗として扱う", ({ path }) => {
+  it.each(PROCEDURES)("$role は、宛先を引けないことも送信の失敗として扱う", ({ role }) => {
     // **引けなかったのに `--sent` を通すと、届いていない状態が送信済みになる**
-    const section = exitSection(path);
+    const section = exitSection(role);
 
     expect(section).toMatch(/引けなかった|居なければ/);
   });
 });
 
 describe("状態が矛盾したとき", () => {
-  it.each(PROCEDURES)("$role の出口に exit 3 の行き先が書いてある", ({ path }) => {
+  it.each(PROCEDURES)("$role の出口に exit 3 の行き先が書いてある", ({ role }) => {
     // **「送るものが無い」と「状態が矛盾している」を混ぜない**（#105）。
     // 混ぜると、食い違いが起きても**どこにも記録が残らない**
-    const section = read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+    const section = procedureText(role).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
 
     expect(section).toMatch(/- \*\*exit 3\*\*/);
     expect(section).toContain("handoff-mismatch");
@@ -173,9 +171,9 @@ describe("状態が矛盾したとき", () => {
     });
   });
 
-  it.each(PROCEDURES)("$role は exit 3 でも送ると書いてある", ({ path }) => {
+  it.each(PROCEDURES)("$role は exit 3 でも送ると書いてある", ({ role }) => {
     // **記録するために黙ると、#105 が塞ごうとした沈黙をそのまま作る**
-    const section = read(path).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+    const section = procedureText(role).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
     const exitThree = section.split("- **exit 3**")[1]?.split("\n\n")[0] ?? "";
 
     expect(exitThree).toMatch(/送/);

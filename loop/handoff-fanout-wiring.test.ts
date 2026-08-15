@@ -21,17 +21,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { type LoopRole, procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
-const PROCEDURES = [
-  { role: "master", path: ".claude/commands/loop-master.md" },
-  { role: "worker", path: ".claude/commands/loop-worker.md" },
-] as const;
+const PROCEDURES = [{ role: "master" }, { role: "worker" }] as const;
 
 /** 出口の節。**送る手順が書いてあるのはここだけ**である。 */
-function exitSection(path: string): string {
-  const doc = readFileSync(join(REPO_ROOT, path), "utf8");
+function exitSection(role: LoopRole): string {
+  const doc = procedureText(role);
   return doc.split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
 }
 
@@ -106,16 +104,16 @@ const MUTATIONS: {
 ];
 
 describe("worker へ渡すときは、空いている側に届くまで決める", () => {
-  it.each(PROCEDURES)("$role の出口が、条件をすべて満たしている", ({ path }) => {
-    expect(readFanoutRule(exitSection(path))).toEqual(SATISFIED);
+  it.each(PROCEDURES)("$role の出口が、条件をすべて満たしている", ({ role }) => {
+    expect(readFanoutRule(exitSection(role))).toEqual(SATISFIED);
   });
 
-  describe.each(PROCEDURES)("$role の出口を壊すと落ちる", ({ path }) => {
+  describe.each(PROCEDURES)("$role の出口を壊すと落ちる", ({ role }) => {
     it.each(MUTATIONS)("$name", ({ apply, breaks }) => {
-      const mutated = apply(exitSection(path));
+      const mutated = apply(exitSection(role));
 
       // **変異が当たっていること。** **置換が空振りすると、緑のまま何も試していない**
-      expect(mutated, "変異が当たっていない（手順書の文面が変わった）").not.toBe(exitSection(path));
+      expect(mutated, "変異が当たっていない（手順書の文面が変わった）").not.toBe(exitSection(role));
       expect(readFanoutRule(mutated)[breaks], `${breaks} が壊れたと言えていない`).toBe(false);
     });
   });

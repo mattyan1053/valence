@@ -15,6 +15,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -30,7 +31,10 @@ function read(path: string): string {
  * **増えた文書が自動で入る**ようにする。
  */
 function docs(): string[] {
-  const dirs = [".claude/commands", "loop"];
+  // **下の階層まで見る** (#319)。**手順書の本体を `loop/procedure/` へ移した**ので、
+  // **1 階層だけ読むと、いちばん長い文書が走査から外れる**——
+  // **この関数が塞ごうとした「足した検査が届かない」が、そのまま戻る。**
+  const dirs = [".claude/commands", "loop", "loop/procedure"];
   return dirs.flatMap((dir) =>
     readdirSync(join(REPO_ROOT, dir))
       .filter((name) => name.endsWith(".md"))
@@ -59,13 +63,21 @@ describe("`ready` の上限は 2 件", () => {
     expect(line, "止める件数が上限と噛み合っていない").toContain("3 件以上");
   });
 
+  for (const role of ["master", "worker"] as const) {
+    it(`${role} は、3 件以上で止めると書いている`, () => {
+      // **上限そのものは、役ごとに 1 回書いてあればよい** (#319)。
+      // **入口と本体に分かれた**ので、**ファイルごとに求めると入口が必ず落ちる**——
+      // **見るのは「その役が 1 周で読むもの」**である
+      expect(procedureText(role), "3 件以上で止めると書いていない").toMatch(/3 件以上/);
+    });
+  }
+
   for (const doc of docs()) {
     it(`${doc} が、2 件を正常として扱っている`, () => {
       const body = read(doc);
 
       // **古い規則が残っていないこと。** **1 つ残っていれば、そこで止まる**
       expect(body, "2 件で止める規則が残っている").not.toMatch(/`ready` が 2 件以上/);
-      expect(body, "3 件以上で止めると書いていない").toMatch(/3 件以上/);
       // **分岐だけ直しても、語り口が残る** (#85 の周回で実際に残した)——
       // **見出しと導入は、分岐より先に読まれる**
       expect(body, "「1 件だけ」と語っているところが残っている").not.toMatch(
@@ -93,7 +105,7 @@ describe("worker の PR は、作業場ごとに数える", () => {
   it("手順書が、自分の作業場のものだけを数えている", () => {
     // **`--author @me` は 2 人分を返す**ので、**そのまま数えると
     // 2 人目が動いているだけで 1 人目が止まる**
-    const body = read(".claude/commands/loop-worker.md");
+    const body = procedureText("worker");
 
     expect(body, "数えるところで持ち主を確かめていない").toContain("bin/loop-claim mine");
   });
@@ -105,7 +117,7 @@ describe("worker の PR は、作業場ごとに数える", () => {
     // **寝ているのと死んだのは区別が付かない。**
     // **数えている節の中を見る。** **別の節（ステップ 3）に `bin/loop-claim pr` が
     // あるのは当たり前**なので、そこまで含めると、**何も書かなくても緑になる**
-    const body = read(".claude/commands/loop-worker.md");
+    const body = procedureText("worker");
     const section = body.slice(
       body.indexOf("### 2.1 master へ知らせる"),
       body.indexOf("### 2.2 公開に失敗した周回を再開する"),
@@ -122,7 +134,7 @@ describe("worker の PR は、作業場ごとに数える", () => {
   it("作った PR を、その場で自分のものにしている", () => {
     // **記録が無いと「誰の持ち物か」を後から決められない。**
     // **作った直後が、いちばん確かな場所**である
-    const body = read(".claude/commands/loop-worker.md");
+    const body = procedureText("worker");
     const created = body.indexOf("gh pr create");
     const claimed = body.indexOf("bin/loop-claim pr <PR番号>", created);
 

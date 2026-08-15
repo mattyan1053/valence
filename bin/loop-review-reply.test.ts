@@ -401,7 +401,7 @@ describe("返信の投稿口は、両方の役から辿れる", () => {
   const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
   for (const doc of [
-    ".claude/commands/loop-worker.md",
+    "loop/procedure/worker.md",
     ".claude/commands/loop-master.md",
     ".claude/skills/respond-to-review/SKILL.md",
   ]) {
