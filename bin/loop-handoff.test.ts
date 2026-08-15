@@ -812,6 +812,69 @@ describe("bin/loop-handoff", () => {
       expect(run("worker").status, "ゲートが回せるようになったのに黙った").toBe(0);
     });
 
+    it.each([12, 13])("同じ枝の PR #%i が動けば送る（選ばれた 1 件だけを見ない）", (moved) => {
+      // **選ぶのは 1 件でも、指紋はその枝の候補ぜんぶから作る** (#292 のレビュー)。
+      //
+      // **選ばれた 1 件ぶんだけを指紋にすると、もう 1 件の head が動いても
+      // 指摘が増えても `STATE` は同じ**——**送らない。** **選ばれている側が動かない
+      // かぎり、もう 1 件はずっと指紋に現れない**（**`changes-requested` は
+      // master 待ちで何日でも止まりうる**）。
+      //
+      // **踏む一歩手前にいる**——**#80（worker 2 セッション）が入れば、
+      // 「同じ枝に 2 件」が普通の状態になる。**
+      //
+      // **倒れる向きで決める**（#124 / #125 / #258）——**送りすぎは読み飛ばされるだけ**
+      // だが、**黙るほうは誰も気づけない。** **#274 は前者を減らす Issue で、
+      // 後者を作ってよい理由にはならない。**
+      withState({
+        prs: [
+          { number: 12, labels: ["changes-requested"], head: "a".repeat(40) },
+          { number: 13, labels: ["changes-requested"], head: "b".repeat(40) },
+        ],
+      });
+      expect(cycle("master").status, "worker へ渡せていない").toBe(0);
+
+      // **どちらが動いても送る。** **「先頭だけ」「最後だけ」のどちらへ寄せても
+      // 捕まえられるように、両方を試す**（**片方だけだと、寄せた変異が生き残る**）
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: ["changes-requested"],
+            head: moved === 12 ? "c".repeat(40) : "a".repeat(40),
+          },
+          {
+            number: 13,
+            labels: ["changes-requested"],
+            head: moved === 13 ? "c".repeat(40) : "b".repeat(40),
+          },
+        ],
+      });
+
+      expect(run("master").status, `PR #${moved} が動いても黙る`).toBe(0);
+    });
+
+    it("並びが変わっただけでは、2 通目を送らない", () => {
+      // **`gh` の返す順に依存しない** (#292 のレビュー)。**並び順で別状態になると、
+      // 何も変わっていないのに通知が飛ぶ**——**#274 が減らそうとした側へ戻る**
+      withState({
+        prs: [
+          { number: 12, labels: ["changes-requested"], head: "a".repeat(40) },
+          { number: 13, labels: ["changes-requested"], head: "b".repeat(40) },
+        ],
+      });
+      expect(cycle("master").status).toBe(0);
+
+      withState({
+        prs: [
+          { number: 13, labels: ["changes-requested"], head: "b".repeat(40) },
+          { number: 12, labels: ["changes-requested"], head: "a".repeat(40) },
+        ],
+      });
+
+      expect(run("master").status, "並びが変わっただけで 2 通目が出た").toBe(1);
+    });
+
     it("いちど作業が尽きたあと、同じ理由が戻ってきたら送る", () => {
       // **狭めた指紋では、記録が古くならないと黙る** (#274)。
       //
