@@ -694,16 +694,45 @@ describe("bin/loop-ci-status", () => {
       expect(result.status, "作られない state を待っている").toBe(1);
     });
 
-    it("mergeable が UNKNOWN なら、コンフリクトしていない側へ倒さない", () => {
-      // **GitHub は計算中に `UNKNOWN` を返す**（実測）。**「コンフリクトしていない」
-      // へ倒すと、計算中の PR がそのまま人待ちへ行く**——**判定できないものは
-      // 判定できないと言う。**
+    it("mergeable が UNKNOWN なら、猶予の内では待つ", () => {
+      // **GitHub は計算中に `UNKNOWN` を返す**（実測）。**push 直後は
+      // 「必須チェックが 1 件も無い」と同時に起きる**ので、**この分岐は日常的に通る。**
+      //
+      // **前の版は `exit 2`（判定できない）へ倒していた**が、**その先に行き先が無かった**
+      // ——**`bin/loop-gate` は `*)` で畳んで `exit 1` を返し、master の手順書の
+      // exit 1 の表には「判定できません」の行が無い**（#305 のレビュー 2 周目）。
+      // **この PR が消しに来た形（分けた先が未定義の分岐へ落ちる）そのもの**である。
+      //
+      // **`UNKNOWN` と「まだ作られていない」は、どちらも『まだ決まっていない』**なので、
+      // **同じ時計で測る**——**新しい配線を足さずに「待つ → 届く」が閉じる。**
+      workflows([5]);
+
+      const result = run({ checks: [], mergeable: "UNKNOWN" });
+
+      expect(result.status, "計算中の PR を未定義の分岐へ落としている").toBe(3);
+    });
+
+    it("UNKNOWN のまま猶予を過ぎたら、人へ届く", () => {
+      // **待ちが無限にならないこと。** **`UNKNOWN` のまま止まった PR も、
+      // 猶予を過ぎれば人待ちへ出る**（**同じ時計**）。
       workflows([5]);
       firstSeen("deadbeef", 3600);
 
       const result = run({ checks: [], mergeable: "UNKNOWN" });
 
-      expect(result.status, "UNKNOWN を「コンフリクトしていない」と読んでいる").toBe(2);
+      expect(result.status, "UNKNOWN のまま永久に待っている").toBe(5);
+    });
+
+    it("知らない値なら、判定できないとして返す", () => {
+      // **`CONFLICTING` / `MERGEABLE` / `UNKNOWN` 以外が来たら、意味が分からない**
+      // ——**「コンフリクトしていない」へ倒さない**（#90「並べ忘れた値がどの分岐にも
+      // 入らない」の逆で、**知らない値は止まる側へ**）。
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [], mergeable: "SOMETHING_NEW" });
+
+      expect(result.status, "知らない値を通している").toBe(2);
     });
 
     it("mergeable を読めなければ、判定できないとして返す", () => {

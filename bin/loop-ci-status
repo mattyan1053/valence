@@ -395,18 +395,35 @@ if ((${#missing[@]} > 0 && ${#missing[@]} == ${#required[@]})); then
   #
   # **`UNKNOWN` を「コンフリクトしていない」へ倒さない。** **GitHub は計算中に
   # これを返す**（実測）——**倒すと、計算中の PR がそのまま人待ちへ行く。**
+  #
+  # **かといって、そこで `exit 2` にもしない** (#305 のレビュー 2 周目)。
+  # **`bin/loop-gate` は `*)` で畳んで `exit 1` を返す**が、**master の手順書の
+  # exit 1 の表に「判定できません」の行が無い**——**分けた先が未定義の分岐へ落ちる**
+  # （**この判定が消しに来た形そのもの**）。**しかも push 直後は「1 件も無い」と
+  # 同時に起きる**ので、**日常的に踏む。**
+  #
+  # **`UNKNOWN` と「まだ作られていない」は、どちらも『まだ決まっていない』**である。
+  # **同じ時計で測る**——**猶予の内なら待ち、過ぎれば人待ちへ出る**ので、
+  # **新しい配線を足さずに「待つ → 届く」が閉じる。**
   if ! mergeable="$(gh pr view "$PR" --json mergeable --jq '.mergeable' 2>/dev/null)" \
     || [[ -z $mergeable ]]; then
     echo "[FAIL] PR #$PR がコンフリクトしているか読めません" >&2
     exit 2
   fi
+  # **`UNKNOWN` だったことを、読む側にも残す**（文面で分岐させるためではなく、
+  # **人が来たときに何を見ればよいかが分かるように**）。
+  missing_note=""
   case "$mergeable" in
     CONFLICTING)
       echo "必須チェックが 1 件も作られていません（コンフリクトしているため実行が作られない）: ${missing[*]}"
       exit 1
       ;;
     MERGEABLE) ;;
+    # **計算中である。** **猶予の時計に乗せる**（上記）。
+    UNKNOWN) missing_note="（コンフリクトの有無も計算中）" ;;
     *)
+      # **知らない値は止まる側へ** (#90 の逆向き)。**意味が分からないものを
+      # 「コンフリクトしていない」へ倒さない。**
       echo "[FAIL] PR #$PR がコンフリクトしているか判定できません: $mergeable" >&2
       exit 2
       ;;
@@ -447,10 +464,10 @@ if ((${#missing[@]} > 0 && ${#missing[@]} == ${#required[@]})); then
     seen_at="$now_epoch"
   fi
   if ((now_epoch - seen_at <= MISSING_GRACE_MIN * 60)); then
-    echo "必須チェックがまだ作られていません（初めて見てから ${MISSING_GRACE_MIN} 分の猶予の内）: ${missing[*]}"
+    echo "必須チェックがまだ作られていません${missing_note}（初めて見てから ${MISSING_GRACE_MIN} 分の猶予の内）: ${missing[*]}"
     exit 3
   fi
-  echo "必須チェックが 1 件も作られていません（初めて見てから ${MISSING_GRACE_MIN} 分を超えました）: ${missing[*]}"
+  echo "必須チェックが 1 件も作られていません${missing_note}（初めて見てから ${MISSING_GRACE_MIN} 分を超えました）: ${missing[*]}"
   exit 5
 fi
 
