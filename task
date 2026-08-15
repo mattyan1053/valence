@@ -3,7 +3,7 @@
 # 開発タスクランナー。
 #
 # ホストに何もインストールしない方針のため、make ではなく素の bash で書いてある
-# (bash / docker / git 以外はホストに要求しない)。
+# (bash / docker / git / flock 以外はホストに要求しない)。
 # 実処理はすべて開発コンテナ内で走る。
 #
 #   ./task help
@@ -251,6 +251,16 @@ db_lock_path() {
   printf '%s' "$common/valence-db.lock"
 }
 
+# **この直列化は `flock` が要る。前提は Linux で、macOS / BSD は対象外**である (#220)。
+#
+# **`flock` は macOS / BSD の標準環境に無い**が、**`AGENTS.md` §2 は「ホストには何も
+# インストールしない」**なので、**入れて回避する道も無い。** **代わりを手作りすると、
+# 「止まった状態から出られるか」を自分で用意することになる**（#184 の形）——
+# **踏んでいないうちに先回りで作らない**（§5）。
+#
+# **`task:14` が BSD / macOS を避けると書いているのは、そこの `readlink -f` の話**である。
+# **ここは避けきれていない**ので、**避けているふりをせず、対象外だと書く。**
+#
 # **諦めるまでの待ち時間（秒）。** `db:reset` と DB 試験の合計より長く取る。
 DB_LOCK_WAIT_SECONDS="${DB_LOCK_WAIT_SECONDS:-900}"
 
@@ -268,8 +278,24 @@ with_db_lock() {
     echo "==> DB の直列化に使うロックを開けません: $path" >&2
     return 1
   fi
-  if ! flock -w "$DB_LOCK_WAIT_SECONDS" "$lock_fd"; then
+  # **無いことと、待って取れなかったことを分ける** (#220)。**`flock` が無いと
+  # `command not found`（127）になり、まとめて扱うと「別の作業場が使っています」に化ける**
+  # ——**誰も掴んでいないのに、である**（**判定不能が、別の理由に化ける**形）。
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "==> flock がありません。DB を触るコマンドは flock で直列化します" >&2
+    echo "    ホストに要るのは bash / docker / git / flock です（既定で無い macOS / BSD は対象外）" >&2
+    return 1
+  fi
+  local locked=0
+  flock -w "$DB_LOCK_WAIT_SECONDS" "$lock_fd" || locked=$?
+  if ((locked == 1)); then
+    # **待ち時間の超過は `flock` の 1 だけ**である
     echo "==> 別の作業場が DB を使っています (${DB_LOCK_WAIT_SECONDS} 秒待って諦めました): $path" >&2
+    return 1
+  fi
+  if ((locked != 0)); then
+    # **知らない終わり方を、掴まれていることにしない**——**分からないと言う**
+    echo "==> ロックを取れたか分かりません (flock が $locked で終わりました): $path" >&2
     return 1
   fi
   "$@"
