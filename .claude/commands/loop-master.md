@@ -1,4 +1,4 @@
-<!-- 版: ac5511aecbf8 -->
+<!-- 版: 9d1d816a7435 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -1059,22 +1059,42 @@ printf 'ready: %s\nin-progress: %s\nbacklog: %s\n' "$ready" "$in_progress" "$bac
 「永久に後回し」を master 側で作り直す**ことになる。`--search "sort:created-asc"` で
 古い順へ倒し、`--limit` も明示する（ステップ 2 の PR 取得と同じ理由）。
 
-**`parked` な PR に紐づく Issue は「着手中」に数えない。** 保留した PR の Issue は
+**`parked` な PR が食っている枠は「着手中」に数えない。** 保留した PR の Issue は
 `in-progress` のまま残るので、数えると **先行 Issue を `ready` へ昇格させられず、
 worker は PR-B を作れない**（worker 側で 2.2 を抜けても、`ready` が無ければ止まる）。
 **両側で外して初めて経路が通る。**
 
+**数え方は `bin/loop-parked-issues` が持っている** (#318)。**ここに書き写さない**
+——**出口（`bin/loop-handoff`）と同じ数え方を 2 箇所に置いていた**ので、
+**片方だけ直すと食い違う**（`AGENTS.md` §5）。
+
 ```bash
-# parked な PR が閉じる予定の Issue（PR 本文の Closes #N）
-# **先に変数へ受ける。** パイプで繋ぐと `$?` は `grep` のものになり、
+# 開いている PR の一覧（1 行 1 件。`<PR番号><US><label><US><本文>`）
+# **先に変数へ受ける。** パイプで繋ぐと `$?` は数える側のものになり、
 # **取得できなかった周回が「parked は 0 件」と見分けが付かない**
 if ! parked="$(gh pr list --state open --limit 200 --json number,labels,body \
-  --jq '.[] | select([.labels[].name] | index("parked")) | .body')"; then
+  --jq '.[] | "\(.number)\u001f\([.labels[].name] | join(","))\u001f\((.body // "") | gsub("\\s+"; " "))"')"; then
   bin/loop-stall pr-lookup-failed
   exit
 fi
-printf '%s' "$parked" | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+'
+printf '%s\n' "$parked"
 ```
+
+**取ってから数える。** **取る側と数える側を 1 つのブロックに畳まない**——
+**取れた一覧をそのまま出しておけば、数え方が変わっても「何を見て決めたか」は残る。**
+
+```bash
+if ! parked_slots="$(printf '%s\n' "$parked" | bin/loop-parked-issues)"; then
+  bin/loop-stall pr-lookup-failed
+  exit
+fi
+printf '%s\n' "$parked_slots"
+```
+
+**`Closes` が無くても引く。** **1 PR に収まらない Issue は割ってよく、元の Issue は
+親として残す**（ステップ 5）——**親として残すとは `Closes` を書かないこと**なので、
+**割った PR を保留にした瞬間、必ず「着手中のまま数えられる」状態になる**（#318 で実測）。
+**`unknown:<PR番号>` も 1 枠として引く**（**引き損ねると誰も呼ばれない**）。
 
 **ここで 0 件と読み違えると、`in-progress` を引きすぎない**——**保留した PR の Issue が
 「着手中」に数え直され、次の 1 件を `ready` へ昇格させられない**（worker は止まる）。

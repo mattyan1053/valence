@@ -497,27 +497,29 @@ promotable=$((backlog - waiting))
 
 # 判断に使う状態。**指紋もここから作る**（別の値から作ると、判断が変わっていないのに
 # 指紋だけ変わって 2 通目が飛ぶ）。
-# **`parked` な PR に紐づく Issue は「着手中」に数えない**（master のステップ 6 と同じ理由）。
+# **`parked` な PR が食っている枠は「着手中」に数えない**（master のステップ 6 と同じ理由）。
 # 保留した PR の Issue は `in-progress` のまま残るので、数えると
 # **保留中はいつも「渡すものが無い」**になり、**保留がいちばん埋めたかった沈黙を作る**。
-# **同じ一覧から数える。** 別の口で取り直すと、そこだけ古い値になりうる。
-# **「一致なし」を失敗として扱わない。** `grep` の exit 1 は**「無かった」**であって
-# 「読めなかった」ではない。パイプの終了コードで全体を捨てると、
-# **最後の `parked` PR に `Closes` が無いだけで、数えたぶんまで 0 になる**——
-# そのとき `parked` の Issue が引かれず、**保留がいちばん埋めたかった沈黙**が戻る。
 #
-# **読めなかったときの受け皿は上にある**（`$prs` の取得が失敗すれば `fail_unknown`）。
-# ここは**取れている本文から数えるだけ**なので、失敗しうる操作を挟まない。
-declare -A parked_seen=()
-while IFS="$FIELD" read -r _number labels _head _labeled_at body; do
-  [[ ",$labels," == *",parked,"* ]] || continue
-  rest="$body"
-  while [[ $rest =~ Closes[[:space:]]+#([0-9]+) ]]; do
-    parked_seen[${BASH_REMATCH[1]}]=1
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
-  done
-done <<<"$prs"
-parked_issues=${#parked_seen[@]}
+# **数え方は `bin/loop-parked-issues` が 1 つだけ持つ** (#318)。**ここと master の
+# ステップ 6 が同じ数え方を書いていた**ので、**片方だけ直すと食い違う**（`AGENTS.md` §5）
+# ——**`Closes` の無い保留 PR も枠を食う**という判断は、そちらに書いてある。
+#
+# **同じ一覧から数える。** **取り直さず、いま取れているものを渡す**——
+# **別の口で取り直すと、そこだけ古い値になりうる。**
+# **読めなければ止める**（`fail_unknown`）。**0 件へ倒すと、着手中が引かれないまま
+# 「渡すものがある」に見える。**
+parked_slots="$(
+  while IFS="$FIELD" read -r number labels _head _labeled_at body || [[ -n $number ]]; do
+    [[ -n $number ]] || continue
+    printf '%s%s%s%s%s\n' "$number" "$FIELD" "$labels" "$FIELD" "$body"
+  done <<<"$prs" | "${BASH_SOURCE[0]%/*}/loop-parked-issues"
+)" || fail_unknown "保留した PR が食っている枠"
+parked_issues=0
+if [[ -n $parked_slots ]]; then
+  mapfile -t parked_lines <<<"$parked_slots"
+  parked_issues=${#parked_lines[@]}
+fi
 ((in_progress -= parked_issues))
 ((in_progress < 0)) && in_progress=0
 

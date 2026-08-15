@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# 保留した PR が食っている「着手中」の枠を並べる。
+#
+#   bin/loop-parked-issues < <open PR の一覧>
+#
+#   標準入力: 1 行 1 PR。`<PR番号><US><label をカンマで繋いだもの><US><本文>`
+#   標準出力: 引く枠を 1 行 1 件（`<Issue番号>` / `unknown:<PR番号>`）
+#
+#   exit 0 = 並べた (0 件でも 0)
+#   exit 2 = 入力を読めない / 使い方の誤り
+#
+# **`Closes` だけに頼らない** (#318)。**保留した PR が `Closes` を書いていないと、
+# その Issue は `in-progress` のまま数えられる**——**ready 0 / backlog 0 で
+# worker が 2 人とも待っているのに、`no-work` が積まれない**（**3 周で人を呼ぶ経路に
+# 乗らない**）。**ループは正常に動きながら、何も進まないまま、誰も呼ばない。**
+#
+# **書いていないのが普通である。** **1 PR に収まらない Issue は割ってよく、
+# 元の Issue は親として残す**（手順書のステップ 5）——**親として残すとは
+# `Closes` を書かないこと**で、**途中の 1/3 に書くと、そこが入った時点で親が閉じる。**
+# **勧めている運用と、保留の数え方が噛み合っていなかった。**
+#
+# **番号が分からない枠は `unknown:<PR番号>` として並べる。** **引く側へ倒す**
+# （#312 と同じ向き）——**引きすぎても worker が 2 件目を取りうるだけ**で、
+# **worker 自身が「同時に持つ PR は 1 本」で止まる**。**引き損ねると誰も呼ばれない。**
+# **番号を騙らない**のは、**「引いた」と「どれを引いたか」は別**だからである。
+#
+# **数えるのはここだけ** (`AGENTS.md` §5)。**出口（`bin/loop-handoff`）と master の
+# ステップ 6 が同じ数え方を持っていた**ので、**片方だけ直すと食い違う。**
+#
+# **GitHub を引かない。** **呼ぶ側は既に open PR の一覧を取っている**ので、
+# **ここで取り直すと、同じ周回の中に 2 つの一覧ができる**——**そこだけ古い値になりうる。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-parked-issues < <open PR の一覧>" >&2
+  echo "        1 行 1 PR: <PR番号><US><label をカンマで繋いだもの><US><本文>" >&2
+  echo "        exit 0 = 並べた / exit 2 = 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || usage
+
+# 列の区切り。**タブを使わない**（`bin/loop-handoff` と同じ理由——**IFS の空白は
+# 連続すると 1 区切りに畳まれ**、**label が 1 つも無い PR で列が左へずれる**）。
+readonly FIELD=$'\037'
+
+declare -A seen=()
+slots=()
+
+# **最後の行に改行が無くても読む。** **`read` は改行で終わっていない行を読むと
+# 変数へは入れたまま非 0 を返す**ので、**そのまま `while` の条件にすると最後の 1 件が
+# 落ちる**——**保留 PR が 1 本だけの周回は、まさにその 1 件である。**
+while IFS="$FIELD" read -r number labels body || [[ -n $number ]]; do
+  # **空行は飛ばす。** **一覧が 0 件のとき、呼ぶ側からは空文字が来る**
+  [[ -n $number ]] || continue
+  # **読めない行を 0 件へ倒さない。** **区切りが無い行は、この形式ではない**
+  # ——**飲み込むと「保留は無い」に化け、着手中が引かれないまま先へ進む**
+  if [[ -z $labels && -z $body && $number == *" "* ]]; then
+    echo "[FAIL] PR の一覧を読めません（区切りが見つかりません）: $number" >&2
+    exit 2
+  fi
+  if ! [[ $number =~ ^[0-9]+$ ]]; then
+    echo "[FAIL] PR 番号を読めません: $number" >&2
+    exit 2
+  fi
+
+  [[ ",$labels," == *",parked,"* ]] || continue
+
+  # **`Closes #N` を全部拾う。** **1 本で 2 件閉じる PR もある**
+  found=0
+  rest="$body"
+  while [[ $rest =~ Closes[[:space:]]+#([0-9]+) ]]; do
+    issue="${BASH_REMATCH[1]}"
+    found=1
+    # **同じ Issue を 2 回引かない**——**着手中が負に振れる**
+    if [[ -z ${seen[$issue]-} ]]; then
+      seen[$issue]=1
+      slots+=("$issue")
+    fi
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  done
+
+  # **書いていない保留 PR も、枠は食っている**（このファイルの冒頭）
+  ((found == 1)) || slots+=("unknown:$number")
+done
+
+((${#slots[@]} == 0)) || printf '%s\n' "${slots[@]}"
+exit 0
