@@ -16,6 +16,7 @@
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
 import type { ReviewOutcome, ReviewRefusal } from "../ports/pull-request-review";
+import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type { VisibleRepositories, VisibleRepository } from "../ports/visible-repositories";
 
@@ -25,6 +26,13 @@ export type ApprovePullRequestResult =
   | { readonly kind: "unavailable" }
   /** **見えない。** **「権限がありません」と「ありません」を分けない**（§6）。 */
   | { readonly kind: "not-found" }
+  /**
+   * **見えるが、その人に承認する権限が無い**（#317 のレビュー）。
+   *
+   * **read-only の承認は保護ルールに数えられない**ので、**App 経由で通すと、
+   * その人が持っていない効き目を与えることになる。**
+   */
+  | { readonly kind: "forbidden" }
   | { readonly kind: "approved" }
   /** **押せたが、GitHub が断った。** **理由ごとにできることが違う。** */
   | { readonly kind: "refused"; readonly reason: ReviewRefusal };
@@ -35,8 +43,10 @@ export type ApprovePullRequestInput = {
   readonly pullRequestNumber: number;
   readonly openStore: () => Promise<UserTokenStore | undefined>;
   readonly ensure: (store: UserTokenStore) => Promise<UsableToken>;
-  /** **そのユーザーの目**。**押してよいかは、これだけで決める。** */
+  /** **そのユーザーの目**。**見えるかどうかを決める。** */
   readonly repositories: VisibleRepositories;
+  /** **そのユーザーの権限の高さ。** **書き込みなので、ここまで確かめる。** */
+  readonly permissions: RepositoryPermissions;
   /**
    * Approve を出す手続き。**installation トークンを使う側**である。
    *
@@ -51,9 +61,19 @@ export async function approvePullRequest({
   openStore,
   ensure,
   repositories,
+  permissions,
   approve,
 }: ApprovePullRequestInput): Promise<ApprovePullRequestResult> {
-  const authorization = await authorizeRepository({ repository, openStore, ensure, repositories });
+  // **書き込みなので `write` を要求する** (#317 のレビュー)。**「見える」で通すと、
+  // read-only の人が App の権限で承認を出せる**——**代理ではなく権限の格上げ**である。
+  const authorization = await authorizeRepository({
+    repository,
+    openStore,
+    ensure,
+    repositories,
+    permissions,
+    require: "write",
+  });
   if (authorization.kind !== "authorized") {
     return authorization;
   }

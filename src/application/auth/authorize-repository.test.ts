@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { RepositoryAccessLevel, RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type { VisibleRepositories, VisibleRepositoryListing } from "../ports/visible-repositories";
 import { authorizeRepository } from "./authorize-repository";
@@ -34,23 +35,44 @@ function repositories(listing: VisibleRepositoryListing): VisibleRepositories & 
   };
 }
 
+/** 権限の高さを決められる口。**誰の目で引いたか**も控える。 */
+function permissions(
+  level: RepositoryAccessLevel | (() => Promise<never>),
+): RepositoryPermissions & { seen: string[] } {
+  const seen: string[] = [];
+  return {
+    seen,
+    async levelFor(userAccessToken: string) {
+      seen.push(userAccessToken);
+      if (typeof level === "function") {
+        return level();
+      }
+      return level;
+    },
+  };
+}
+
 function authorize(input: {
   readonly listing?: VisibleRepositoryListing;
   readonly usable?: UsableToken;
   readonly store?: UserTokenStore | undefined;
   readonly openStore?: () => Promise<UserTokenStore | undefined>;
-  readonly listing_?: never;
-  readonly seen?: string[];
+  readonly require?: "read" | "write";
+  readonly level?: RepositoryAccessLevel | (() => Promise<never>);
 }) {
   const visible = repositories(input.listing ?? VISIBLE);
+  const level = permissions(input.level ?? "write");
   return {
     visible,
+    level,
     run: () =>
       authorizeRepository({
         repository: TARGET,
         openStore: input.openStore ?? (async () => ("store" in input ? input.store : STORE)),
         ensure: async () => input.usable ?? { kind: "usable", accessToken: "user-token" },
         repositories: visible,
+        permissions: level,
+        require: input.require ?? "read",
       }),
   };
 }
@@ -120,8 +142,58 @@ describe("そのリポジトリを触ってよいか", () => {
         openStore: async () => STORE,
         ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
         repositories: failing,
+        permissions: permissions("write"),
+        require: "read",
       }),
     ).toEqual({ kind: "unavailable" });
+  });
+
+  it("read でよいなら、権限の高さは引かない", async () => {
+    // **盤面は read のまま**（#317 のレビュー）。**write を要求すると、
+    // read-only の人が盤面を見られなくなり、レビュアーの交通整理そのものが壊れる**
+    const { level, run } = authorize({ require: "read" });
+
+    expect((await run()).kind).toBe("authorized");
+    expect(level.seen, "read なのに権限を引いている").toEqual([]);
+  });
+
+  it("write が要るなら、ユーザーの目で権限を引く", async () => {
+    // **installation トークンで代用しない**（§6）——**渡るのはユーザートークン**
+    const { level, run } = authorize({ require: "write", level: "write" });
+
+    expect((await run()).kind).toBe("authorized");
+    expect(level.seen, "ユーザートークンで引いていない").toEqual(["user-token"]);
+  });
+
+  it.each<RepositoryAccessLevel>(["admin", "write"])("%s なら、書き込みを許す", async (granted) => {
+    const { run } = authorize({ require: "write", level: granted });
+
+    expect((await run()).kind).toBe("authorized");
+  });
+
+  it.each<RepositoryAccessLevel>(["read", "none"])(
+    "%s では、見えていても書かせない",
+    async (denied) => {
+      // **read-only の collaborator / org member もここへ来る**——**その人が
+      // 自分で出しても保護ルールに数えられない承認が、App 経由だと数えられる**
+      // （**代理ではなく、権限の格上げ**）
+      const { run } = authorize({ require: "write", level: denied });
+
+      expect(await run()).toEqual({ kind: "forbidden" });
+    },
+  );
+
+  it("権限を引けなかったら、許さない", async () => {
+    // **判定不能を「許す」へ倒さない**（master の指示）。**書き込みなので、
+    // 倒れる向きを間違えると取り返せない**
+    const { run } = authorize({
+      require: "write",
+      level: async () => {
+        throw new Error("GitHub が落ちている");
+      },
+    });
+
+    expect(await run()).toEqual({ kind: "unavailable" });
   });
 
   it("大文字小文字は区別しない", async () => {

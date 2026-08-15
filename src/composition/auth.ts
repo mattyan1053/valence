@@ -28,6 +28,7 @@ import { readAppCredentials, readOAuthCredentials } from "../infrastructure/gith
 import { createGitHubChangeSummarySource } from "../infrastructure/github/github-change-summary-source";
 import { createGitHubPullRequestReview } from "../infrastructure/github/github-pull-request-review";
 import { createGitHubPullRequestSource } from "../infrastructure/github/github-pull-request-source";
+import { createUserRepositoryPermissions } from "../infrastructure/github/user-repository-permissions";
 import { refreshUserTokens } from "../infrastructure/github/user-token";
 import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
 import { reportLoginFailure } from "../infrastructure/observability/login-failure";
@@ -261,6 +262,9 @@ export async function repositoryBoardForCurrentUser(repository: {
       }),
     // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない。**
     repositories: createUserVisibleRepositories(),
+    // **その人の権限の高さ**（#317 のレビュー）。**盤面では引かれない**（read）が、
+    // **Approve では引く**（write）——**判断は `authorizeRepository` が持つ。**
+    permissions: createUserRepositoryPermissions(),
     // **App の資格を読むのはここだけ。** **見てよいと分かるまで、1 度も呼ばれない**
     plan: () => {
       const { app } = appSettings();
@@ -312,6 +316,9 @@ export async function approvePullRequestForCurrentUser(input: {
       }),
     // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない。**
     repositories: createUserVisibleRepositories(),
+    // **その人の権限の高さ**（#317 のレビュー）。**盤面では引かれない**（read）が、
+    // **Approve では引く**（write）——**判断は `authorizeRepository` が持つ。**
+    permissions: createUserRepositoryPermissions(),
     // **App の資格を読むのはここだけ。** **押してよいと分かるまで、1 度も呼ばれない**
     approve: () => {
       const { app } = appSettings();

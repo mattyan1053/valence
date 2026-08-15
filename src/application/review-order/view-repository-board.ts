@@ -17,6 +17,7 @@
 
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
+import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type { VisibleRepositories, VisibleRepository } from "../ports/visible-repositories";
 import type { ReviewOrderPlan } from "./plan-review-order";
@@ -49,6 +50,13 @@ export type ViewRepositoryBoardInput = {
   /** **そのユーザーの目**。**見てよいかは、これだけで決める。** */
   readonly repositories: VisibleRepositories;
   /**
+   * **読むだけなので、ここでは引かれない** (#317 のレビュー)。
+   *
+   * **盤面に `write` を要求しない**——**read-only の人が見られなくなり、
+   * 「レビュアー側の交通整理」そのものが壊れる**（§1）。
+   */
+  readonly permissions: RepositoryPermissions;
+  /**
    * 盤面を組み立てる手続き。**installation トークンを使う側**である。
    *
    * **手続きごと受けるのは、「見てよい」と分かるまで 1 度も呼ばないため**——
@@ -62,13 +70,23 @@ export async function viewRepositoryBoard({
   openStore,
   ensure,
   repositories,
+  permissions,
   plan,
 }: ViewRepositoryBoardInput): Promise<RepositoryBoardResult> {
   // **認可は共有の判断が持つ** (#315)。**ここへ写すと、Approve / Merge 側と
   // 片方だけ直したときに食い違う**——**症状は「他人のものが見える / 触れる」**である。
-  const authorization = await authorizeRepository({ repository, openStore, ensure, repositories });
+  const authorization = await authorizeRepository({
+    repository,
+    openStore,
+    ensure,
+    repositories,
+    permissions,
+    // **見るだけなので `read`。** **`write` にすると read-only の人が締め出される**
+    require: "read",
+  });
   if (authorization.kind !== "authorized") {
-    return authorization;
+    // **`forbidden` は read では起きない**（引かないので）——**型のために並べる**
+    return authorization.kind === "forbidden" ? { kind: "unavailable" } : authorization;
   }
 
   try {

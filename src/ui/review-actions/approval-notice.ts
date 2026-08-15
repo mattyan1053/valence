@@ -20,6 +20,7 @@ export const APPROVAL_OUTCOMES = [
   "needs-login",
   "unavailable",
   "not-found",
+  "forbidden",
   "not-permitted",
   "not-reviewable",
   "gone",
@@ -45,6 +46,11 @@ export function approvalNotice(outcome: ApprovalOutcome): string {
     case "not-found":
       // **「見えない」と「無い」を分けない**（§6）——**分けた瞬間に存在を教える**
       return "そのリポジトリは見つかりませんでした。";
+    case "forbidden":
+      // **その人自身に承認する権限が無い**（#317 のレビュー）——**App の権限とは別**
+      // である。**read-only の承認は保護ルールに数えられない**ので、
+      // **App 経由で出すと、その人が持っていない効き目を与えることになる。**
+      return "このリポジトリへ書き込む権限がないため、Approve できません。";
     case "not-permitted":
       return "この App には Approve の権限がありません。インストール時の権限を確認してください。";
     case "not-reviewable":

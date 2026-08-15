@@ -13,6 +13,7 @@
  * 操作そのものは持たない**——**呼ぶ側が `authorized` を受けてから動く。**
  */
 
+import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type {
   VisibleRepositories,
@@ -35,8 +36,23 @@ export type RepositoryAuthorization =
    * 見えないほうの存在を教えることになる。**
    */
   | { readonly kind: "not-found" }
+  /**
+   * **見えるが、その操作をしてよい権限が無い**（#317 のレビュー）。
+   *
+   * **`not-found` へ倒さない。** **見えていることは本人も知っている**ので、
+   * **隠す理由が無い**——**隠すと「なぜ押せないか」が誰にも分からなくなる。**
+   */
+  | { readonly kind: "forbidden" }
   /** 触ってよい。**誰の目で確かめたか**も返す（続けて使う側があるため）。 */
   | { readonly kind: "authorized"; readonly userAccessToken: string };
+
+/**
+ * **どこまでの権限が要るか。**
+ *
+ * **読むだけなら「見える」で足りる**が、**書き込みは足りない**——
+ * **read-only の人も「見える」ので、そのまま通すと権限が上がる**（#317 のレビュー）。
+ */
+export type RequiredAccess = "read" | "write";
 
 export type AuthorizeRepositoryInput = {
   /** どのリポジトリか。**要求ごとに決まる**（設定に固定しない。§1）。 */
@@ -47,8 +63,18 @@ export type AuthorizeRepositoryInput = {
    */
   readonly openStore: () => Promise<UserTokenStore | undefined>;
   readonly ensure: (store: UserTokenStore) => Promise<UsableToken>;
-  /** **そのユーザーの目**。**触ってよいかは、これだけで決める。** */
+  /** **そのユーザーの目**。**見えるかどうかは、これだけで決める。** */
   readonly repositories: VisibleRepositories;
+  /**
+   * **そのユーザーの権限の高さ。** **`write` を要求するときだけ引く**
+   * ——**読むだけの経路に往復を足さない。**
+   */
+  readonly permissions: RepositoryPermissions;
+  /**
+   * **この操作に要る権限。** **呼ぶ側が必ず書く**（既定を置かない）——
+   * **書き忘れが「読むだけ」へ倒れると、書き込みが素通りする。**
+   */
+  readonly require: RequiredAccess;
 };
 
 /**
@@ -70,6 +96,8 @@ export async function authorizeRepository({
   openStore,
   ensure,
   repositories,
+  permissions,
+  require,
 }: AuthorizeRepositoryInput): Promise<RepositoryAuthorization> {
   let store: UserTokenStore | undefined;
   try {
@@ -104,7 +132,7 @@ export async function authorizeRepository({
   }
 
   if (isVisible(listing, repository)) {
-    return { kind: "authorized", userAccessToken: usable.accessToken };
+    return await grantFor(usable.accessToken);
   }
   // **判定不能を「無い」に倒さない**（§5）。**読めなかった行があるなら、
   // その中に居たかどうかを言えない**——**漏れはしない**（**`unavailable` は
@@ -113,4 +141,29 @@ export async function authorizeRepository({
     return { kind: "unavailable" };
   }
   return { kind: "not-found" };
+
+  /**
+   * **見えることは分かった。** **書き込みなら、その人自身の権限まで確かめる。**
+   *
+   * **許すのは「その人が自分で出しても有効になる」権限のときだけ**である
+   * ——**read-only の承認は保護ルールに数えられない**ので、**App 経由で通すと、
+   * その人が持っていない効き目を与えることになる。**
+   */
+  async function grantFor(userAccessToken: string): Promise<RepositoryAuthorization> {
+    if (require === "read") {
+      return { kind: "authorized", userAccessToken };
+    }
+    let level: Awaited<ReturnType<RepositoryPermissions["levelFor"]>>;
+    try {
+      level = await permissions.levelFor(userAccessToken, repository);
+    } catch {
+      // **判定不能を「許す」へ倒さない。** **書き込みは取り消せない**
+      return { kind: "unavailable" };
+    }
+    // **書ける側を並べ、それ以外は下へ倒す** (#90)——**GitHub が値を増やしても、
+    // 知らない値が「書ける」にはならない。**
+    return level === "admin" || level === "write"
+      ? { kind: "authorized", userAccessToken }
+      : { kind: "forbidden" };
+  }
 }

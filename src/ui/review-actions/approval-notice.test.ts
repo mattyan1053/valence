@@ -18,6 +18,7 @@ const OUTCOMES: readonly ApprovalOutcome[] = [
   "needs-login",
   "unavailable",
   "not-found",
+  "forbidden",
   "not-permitted",
   "not-reviewable",
   "gone",

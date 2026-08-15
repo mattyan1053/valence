@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import type { UsableToken } from "../auth/ensure-usable-token";
 import type { ReviewOutcome, ReviewRefusal } from "../ports/pull-request-review";
+import type { RepositoryAccessLevel, RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type { VisibleRepositories, VisibleRepositoryListing } from "../ports/visible-repositories";
 import { approvePullRequest } from "./approve-pull-request";
@@ -46,11 +47,21 @@ function approver(outcome: ReviewOutcome | (() => Promise<never>)) {
   return state;
 }
 
+/** その人の権限の高さ。**既定は「書ける」**（そこは別の本が見る）。 */
+function permissions(level: RepositoryAccessLevel): RepositoryPermissions {
+  return {
+    async levelFor() {
+      return level;
+    },
+  };
+}
+
 function run(input: {
   readonly listing?: VisibleRepositoryListing;
   readonly usable?: UsableToken;
   readonly store?: UserTokenStore | undefined;
   readonly outcome?: ReviewOutcome | (() => Promise<never>);
+  readonly level?: RepositoryAccessLevel;
 }) {
   const approve = approver(input.outcome ?? { kind: "approved" });
   return {
@@ -61,6 +72,7 @@ function run(input: {
       openStore: async () => ("store" in input ? input.store : STORE),
       ensure: async () => input.usable ?? { kind: "usable", accessToken: "user-token" },
       repositories: repositories(input.listing ?? VISIBLE),
+      permissions: permissions(input.level ?? "write"),
       approve: () => approve.approve(),
     }),
   };
@@ -100,6 +112,20 @@ describe("Approve は、押してよいと分かってから出す", () => {
     expect(await result).toEqual({ kind: "unavailable" });
     expect(approve.calls, "判定できないのに Approve を出している").toBe(0);
   });
+
+  it.each<RepositoryAccessLevel>(["read", "none"])(
+    "見えても %s の人には、Approve を出させない",
+    async (level) => {
+      // **完了条件が測っているのはここ** (#317 のレビュー)。**「見えない」だけを
+      // 試験にしていたので、「見えるが権限が無い」を 1 本も置いていなかった**
+      // ——**read-only の承認は保護ルールに数えられない**ので、**App 経由で通すと
+      // その人が持っていない効き目を与える。**
+      const { approve, result } = run({ level });
+
+      expect(await result).toEqual({ kind: "forbidden" });
+      expect(approve.calls, "承認する権限が無いのに Approve を出している").toBe(0);
+    },
+  );
 
   it("見えるリポジトリなら、Approve を出す", async () => {
     const { approve, result } = run({});
