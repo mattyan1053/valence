@@ -1114,6 +1114,58 @@ describe("worker が作業しているあいだは数えない", () => {
       expect(none.status, "0 件が「判定不能」に倒れている").toBe(0);
     });
 
+    /**
+     * **途中まで数えた結果が残っていた**（#308 のレビュー 2 周目）。
+     *
+     * **`running` が落ちる時点で、時刻の窓のぶんは既に `alive_scopes` に入っている**
+     * ——**`return 1` しても配列は消えず、呼ぶ側は `|| true` で握りつぶす。**
+     * **上限も周回の判定も、その部分集合を「全員」と読む。**
+     */
+    /**
+     * **2 つとも、時刻の窓の内側で周回を始めている状態。**
+     *
+     * **`holdPastWindow` では足りない**——**窓を越えた作業場は前半に入らない**ので、
+     * **`running` が落ちたときに残る部分集合が 1 件になり、上限は下限と同じ 3 になる**
+     * （**判別できない試験になる**）。
+     */
+    function twoRoundsInWindow(): void {
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
+      const other = addWorkspace();
+      const held = spawnSync(
+        join(repo, "bin", "loop-lease"),
+        [
+          "acquire",
+          "worker",
+          spawnSync(join(REPO_ROOT, "bin/loop-procedure-stamp"), ["worker"], {
+            encoding: "utf8",
+          }).stdout.trim(),
+        ],
+        { cwd: other, encoding: "utf8" },
+      );
+      expect(held.status, `lease を取れない: ${held.stderr}`).toBe(0);
+    }
+
+    it("走査に失敗したら、途中まで数えた結果で上限を決めない", () => {
+      twoRoundsInWindow();
+      leaseFailingOn("running");
+
+      const stalled = stall();
+
+      // **`ttl` では前半に入る前に落ちる**ので、**部分集合が残るのは `running` だけ**
+      expect(stalled.stdout, "部分集合で数えた上限を使っている").toContain("max=3");
+      expect(stalled.stderr, "数えられなかったことを黙っている").toContain("alive-workers=unknown");
+    });
+
+    it("走査に失敗した周回は、周回の猶予に入れない", () => {
+      // **残った作業場だけを見て「worker は回っている」に倒れると、欠けた側が
+      // 止まっていても数えられない**——**第 4 層が黙って死ぬ**
+      twoRoundsInWindow();
+      leaseFailingOn("running");
+
+      expect(stall().stdout, "1 周目から猶予へ倒れている").toContain("count=1");
+      expect(stall().stdout, "数えられていないのに、猶予へ倒れている").toContain("count=2");
+    });
+
     it.each(COUNTING_QUESTIONS)("%s を読めないと、上限のほうもその場で言う", (subcommand) => {
       workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
       leaseFailingOn(subcommand);

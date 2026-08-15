@@ -56,18 +56,31 @@ alive_scan_failed=""
 # **worker の作業ツリーは読まない。** 見るのは worker 自身が git の共通ディレクトリへ
 # 書いた記録だけである。master が相手の作業場を覗く形にすると、
 # 「GitHub を唯一の正とする」という設計に穴が開く。
+# **数えられなかったなら、そう言う** (#304)。**0 件へ倒さない**（`AGENTS.md` §5）。
+#
+# **途中まで数えた結果も残さない** (#308 のレビュー)。**時刻の窓のぶんは走査の前半で
+# 既に入っている**ので、**理由を立てるだけでは部分集合が生き残る**——**上限も、
+# 周回が動いているかの判定も、その部分集合を「全員」と読む**（**欠けた作業場が
+# 止まっていても、残ったほうが進めば「全員進んだ」になる**）。
+fail_scan() {
+  alive_scopes=()
+  scope_started_at=()
+  scope_windows=()
+  alive_scan_failed="$1"
+  return 1
+}
+
 scan_alive_scopes() {
   local common_dir="$1" script_dir="$2"
   local lease_ttl scope scope_rounds scope_started scope_window seconds len now_epoch
   local shared_window running_scopes
-  # **数えられなかったなら、そう言う** (#304)。**0 件へ倒さない**（`AGENTS.md` §5）。
   if [[ -z $script_dir || ! -x "$script_dir/loop-lease" ]]; then
-    alive_scan_failed="bin/loop-lease を実行できません（${script_dir:-スクリプトの場所が不明}）"
+    fail_scan "bin/loop-lease を実行できません（${script_dir:-スクリプトの場所が不明}）"
     return 1
   fi
   if ! lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" ||
     [[ ! $lease_ttl =~ ^[0-9]+$ ]]; then
-    alive_scan_failed="bin/loop-lease ttl を読めません"
+    fail_scan "bin/loop-lease ttl を読めません"
     return 1
   fi
 
@@ -154,7 +167,7 @@ scan_alive_scopes() {
   # 丸ごと欠けても、`--alive-workers` は少ない件数を exit 0 で返していた**
   # （**この PR が消しに来た「判定不能を 0 に倒す」が、隣の呼び出しに残っていた**）。
   if ! running_scopes="$("$script_dir/loop-lease" running worker 2>/dev/null)"; then
-    alive_scan_failed="bin/loop-lease running worker を読めません"
+    fail_scan "bin/loop-lease running worker を読めません"
     return 1
   fi
   while read -r scope; do
