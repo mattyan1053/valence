@@ -15,13 +15,10 @@
  * 故障）——**行き先が違うものを 1 つにまとめない**という理由がそのまま当たる。
  */
 
+import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
 import type { UserTokenStore } from "../ports/user-token-store";
-import type {
-  VisibleRepositories,
-  VisibleRepository,
-  VisibleRepositoryListing,
-} from "../ports/visible-repositories";
+import type { VisibleRepositories, VisibleRepository } from "../ports/visible-repositories";
 import type { ReviewOrderPlan } from "./plan-review-order";
 
 export type RepositoryBoardResult =
@@ -60,20 +57,6 @@ export type ViewRepositoryBoardInput = {
   readonly plan: () => Promise<ReviewOrderPlan>;
 };
 
-/**
- * **見えるものの中に、その 1 件があるか。**
- *
- * **大文字小文字は区別しない。** **GitHub の owner / name は区別しない**ので、
- * **ここで区別すると、見られる人が「ありません」を受け取る。**
- */
-function isVisible(listing: VisibleRepositoryListing, repository: VisibleRepository): boolean {
-  return listing.repositories.some(
-    (visible) =>
-      visible.owner.toLowerCase() === repository.owner.toLowerCase() &&
-      visible.name.toLowerCase() === repository.name.toLowerCase(),
-  );
-}
-
 export async function viewRepositoryBoard({
   repository,
   openStore,
@@ -81,59 +64,23 @@ export async function viewRepositoryBoard({
   repositories,
   plan,
 }: ViewRepositoryBoardInput): Promise<RepositoryBoardResult> {
-  let store: UserTokenStore | undefined;
+  // **認可は共有の判断が持つ** (#315)。**ここへ写すと、Approve / Merge 側と
+  // 片方だけ直したときに食い違う**——**症状は「他人のものが見える / 触れる」**である。
+  const authorization = await authorizeRepository({ repository, openStore, ensure, repositories });
+  if (authorization.kind !== "authorized") {
+    return authorization;
+  }
+
   try {
-    store = await openStore();
+    return { kind: "board", plan: await plan() };
   } catch {
-    // **開けなかったことを「見えない」にも「期限切れ」にも化けさせない**
+    // **`planReviewOrder` は一覧を取れないと投げる**（**空の計画にすると
+    // 「取得できなかった」が「PR が 0 件」に化ける**ため）——**そのまま通すと、
+    // 見てよい人にまでフレームワークのエラー画面が出て、
+    // 用意してある「読み込み直してください」へ届かない**（#316 のレビュー）。
+    //
+    // **`not-found` へは倒さない。** **ここへ来た時点で「見える」と分かっている**
+    // ので、**故障を「ありません」に化けさせる理由が無い。**
     return { kind: "unavailable" };
-  }
-  if (store === undefined) {
-    return { kind: "signed-out" };
-  }
-
-  const usable = await ensure(store);
-  switch (usable.kind) {
-    case "needs-login":
-      // **使えないトークンで叩きに行かない。** **症状が「権限が無い」と混ざる**
-      return { kind: "needs-login" };
-    case "unavailable":
-      // **`kind` を並べて書くのは、次に増えたときここで型が落ちるため**
-      return { kind: "unavailable" };
-    case "usable":
-      return await boardFor(usable.accessToken);
-  }
-
-  async function boardFor(userAccessToken: string): Promise<RepositoryBoardResult> {
-    let listing: VisibleRepositoryListing;
-    try {
-      listing = await repositories.list(userAccessToken);
-    } catch {
-      // **投げたものを `not-found` へ倒さない。** **故障が
-      // 「そんなリポジトリはありません」に化ける**
-      return { kind: "unavailable" };
-    }
-
-    if (isVisible(listing, repository)) {
-      try {
-        return { kind: "board", plan: await plan() };
-      } catch {
-        // **`planReviewOrder` は一覧を取れないと投げる**（**空の計画にすると
-        // 「取得できなかった」が「PR が 0 件」に化ける**ため）——**そのまま通すと、
-        // 見てよい人にまでフレームワークのエラー画面が出て、
-        // 用意してある「読み込み直してください」へ届かない**（#316 のレビュー）。
-        //
-        // **`not-found` へは倒さない。** **ここへ来た時点で「見える」と分かっている**
-        // ので、**故障を「ありません」に化けさせる理由が無い。**
-        return { kind: "unavailable" };
-      }
-    }
-    // **判定不能を「無い」に倒さない**（§5）。**読めなかった行があるなら、
-    // その中に居たかどうかを言えない**——**漏れはしない**（**`unavailable` は
-    // 対象が在るかどうかに関係なく返る**ので、**存在を教えない**）
-    if (listing.invalid.length > 0) {
-      return { kind: "unavailable" };
-    }
-    return { kind: "not-found" };
   }
 }

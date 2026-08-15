@@ -10,7 +10,9 @@
 
 import { notFound } from "next/navigation";
 import { repositoryBoardForCurrentUser } from "../../../../composition/auth";
+import { approvalNotice, isApprovalOutcome } from "../../../../ui/review-actions/approval-notice";
 import { ReviewBoard } from "../../../../ui/review-board/review-board";
+import { approveAction } from "./approve";
 
 /**
  * **要求ごとに描く。静的に生成させない**（入口の画面と同じ理由）。
@@ -45,10 +47,14 @@ function notice(kind: "signed-out" | "needs-login" | "unavailable"): string {
 
 export default async function RepositoryBoardPage({
   params,
+  searchParams,
 }: {
   readonly params: Promise<{ readonly owner: string; readonly name: string }>;
+  /** **押した結果が戻ってくる口。** **中身は検証してから使う**（§6）。 */
+  readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { owner, name } = await params;
+  const approved = (await searchParams).approve;
   const result = await repositoryBoardForCurrentUser({ owner, name });
 
   if (result.kind === "not-found") {
@@ -61,6 +67,12 @@ export default async function RepositoryBoardPage({
       <h1 className="font-mono text-2xl font-bold tracking-tight">
         {owner}/{name}
       </h1>
+      {/* **押した結果を黙って捨てない**（#315）。**知らない値は結果として扱わない** */}
+      {isApprovalOutcome(approved) ? (
+        <p className="text-sm" role="status">
+          {approvalNotice(approved)}
+        </p>
+      ) : undefined}
       {result.kind === "board" ? (
         <>
           <ReviewBoard
@@ -74,6 +86,31 @@ export default async function RepositoryBoardPage({
           {result.plan.invalid.length > 0 ? (
             <p className="text-sm opacity-70">{unreadableNote(result.plan.invalid.length)}</p>
           ) : undefined}
+          {/*
+            **1 クリックで Approve する**（#315）。**盤面の描画には手を入れない**
+            （#314 が作ったものを、そのまま出すのがあちらの Issue である）。
+            **押してよいかの判断はここに無い**——**`approvePullRequest` が持つ。**
+          */}
+          <section className="flex flex-col gap-2">
+            <h2 className="text-sm font-bold">Approve</h2>
+            {result.plan.pullRequests.map((pullRequest) => (
+              <form
+                action={approveAction}
+                className="flex items-center gap-2"
+                key={pullRequest.number}
+              >
+                <input name="owner" type="hidden" value={owner} />
+                <input name="name" type="hidden" value={name} />
+                <input name="pullRequestNumber" type="hidden" value={pullRequest.number} />
+                <span className="font-mono text-sm" id={`pr-${pullRequest.number}`}>
+                  #{pullRequest.number}
+                </span>
+                <button className="rounded border px-2 py-1 text-sm" type="submit">
+                  Approve
+                </button>
+              </form>
+            ))}
+          </section>
         </>
       ) : (
         <p className="text-sm">

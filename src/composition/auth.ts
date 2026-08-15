@@ -18,12 +18,15 @@ import { signOut } from "../application/auth/sign-out";
 import type { UserTokenStore } from "../application/ports/user-token-store";
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
 import { listVisibleRepositories } from "../application/repositories/list-visible-repositories";
+import type { ApprovePullRequestResult } from "../application/review-actions/approve-pull-request";
+import { approvePullRequest } from "../application/review-actions/approve-pull-request";
 import { planReviewOrder } from "../application/review-order/plan-review-order";
 import type { RepositoryBoardResult } from "../application/review-order/view-repository-board";
 import { viewRepositoryBoard } from "../application/review-order/view-repository-board";
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
 import { readAppCredentials, readOAuthCredentials } from "../infrastructure/github/app-credentials";
 import { createGitHubChangeSummarySource } from "../infrastructure/github/github-change-summary-source";
+import { createGitHubPullRequestReview } from "../infrastructure/github/github-pull-request-review";
 import { createGitHubPullRequestSource } from "../infrastructure/github/github-pull-request-source";
 import { refreshUserTokens } from "../infrastructure/github/user-token";
 import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
@@ -270,6 +273,50 @@ export async function repositoryBoardForCurrentUser(repository: {
         // 一覧の取得ぶんが材料の期限から引かれる**——**決め方はここに残したまま、
         // 数え始める位置だけ後ろへ動かす。**
         { changesDeadline: () => AbortSignal.timeout(CHANGES_DEADLINE_MS) },
+      );
+    },
+  });
+}
+
+/**
+ * **いまログインしている人として、1 件の PR を Approve する**（#315）。
+ *
+ * **順序が本体である**（§6）。**押してよいかはユーザートークンで決め、
+ * Approve そのものは installation トークンで出す**——**installation だけで実行すると、
+ * ログインしていれば誰でも他人のリポジトリへ Approve を出せる。**
+ *
+ * **確かめる前に GitHub を変えない。** **`approve` は手続きごと渡す**ので、
+ * **`approvePullRequest` が「押してよい」と分かってから初めて呼ばれる**
+ * ——**App の資格を読むのも、そのとき**である。
+ */
+export async function approvePullRequestForCurrentUser(input: {
+  readonly owner: string;
+  readonly name: string;
+  readonly pullRequestNumber: number;
+}): Promise<ApprovePullRequestResult> {
+  const { credentials, connection, key } = settings();
+  const client = await sessionClient(connection);
+  const budget = createWinnersSaveBudget();
+  const repository = { owner: input.owner, name: input.name };
+  return approvePullRequest({
+    repository,
+    pullRequestNumber: input.pullRequestNumber,
+    openStore: () => storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
+    ensure: (store) =>
+      ensureUsableToken({
+        store,
+        refresh: (refreshToken) =>
+          refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+        now: new Date(),
+        waitForWinnersSave: createWaitForWinnersSave({ budget }),
+      }),
+    // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない。**
+    repositories: createUserVisibleRepositories(),
+    // **App の資格を読むのはここだけ。** **押してよいと分かるまで、1 度も呼ばれない**
+    approve: () => {
+      const { app } = appSettings();
+      return createGitHubPullRequestReview({ credentials: app, repository }).approve(
+        input.pullRequestNumber,
       );
     },
   });
