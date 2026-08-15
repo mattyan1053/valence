@@ -726,6 +726,124 @@ describe("bin/loop-handoff", () => {
     expect(run("master").status).toBe(0);
   });
 
+  describe("同じ理由は、無関係な数では立ち上がらない", () => {
+    // **指紋が「その周回が見た世界のほぼ全部」だった** (#274)。**PR の一覧・head・本文、
+    // スレッドの数、検査 7 件の状態、`ready` / `in-progress` / `backlog` の件数**——
+    // **どれか 1 つでも動けば、理由が同じでも「新しい状態」として送られる。**
+    //
+    // **害は「うるさい」だけではない。** **毎回同じ理由が届くと、受け取る側は本文を
+    // 読まなくなる**——**本当に新しい状態のときの 1 通が、その中に埋もれる。**
+    //
+    // **狭めすぎない**ことが同じくらい大事である（#258 が塞いだのは逆向き）ので、
+    // **「状況が変われば必ず送る」側も、下で同じだけ押さえる。**
+
+    it("backlog が動いただけでは、2 通目を送らない", () => {
+      // **master が別の Issue を起票／昇格しただけ**で、**worker 宛ての同じ理由が
+      // もう一度立ち上がっていた**（実測。14 → 13）
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }], backlog: 14 });
+      expect(cycle("master").status).toBe(0);
+
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }], backlog: 13 });
+
+      expect(run("master").status, "無関係な件数で 2 通目が出た").toBe(1);
+    });
+
+    it("CI が進んだだけでは、2 通目を送らない", () => {
+      // **`checks=` が動いた**——**CI が pending から success へ変わっただけ**で
+      // 再送されていた（実測）。**worker から見た「やること」は 1 文字も変わっていない**
+      withState({
+        prs: [
+          { number: 12, labels: ["changes-requested"], checks: { [REQUIRED[0] ?? ""]: "pending" } },
+        ],
+      });
+      expect(cycle("master").status).toBe(0);
+
+      withState({
+        prs: [
+          { number: 12, labels: ["changes-requested"], checks: { [REQUIRED[0] ?? ""]: "pass" } },
+        ],
+      });
+
+      expect(run("master").status, "CI が進んだだけで 2 通目が出た").toBe(1);
+    });
+
+    it("その PR が動いたら、これまでどおり送る", () => {
+      // **狭めた結果、状況が変わったのに黙るようになってはいけない**（#274 の動かせない 1 点）。
+      // **worker が push すれば head は変わる**——**同じ理由の文面でも、別の状況である**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], head: "a".repeat(40) }] });
+      expect(cycle("master").status).toBe(0);
+
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], head: "b".repeat(40) }] });
+
+      expect(run("master").status, "push したのに黙った").toBe(0);
+    });
+
+    it("新しい指摘が付いたら、これまでどおり送る", () => {
+      // **文面は同じでも、スレッドが増えれば別の状況である**——
+      // **理由だけを鍵にすると、ここで黙る**（それが「同じ文面になる別の状況」）
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"], lastComment: 1 }],
+      });
+      expect(cycle("master").status).toBe(0);
+
+      withState({
+        prs: [
+          {
+            number: 12,
+            labels: ["changes-requested"],
+            unresolvedBy: ["bot", "bot"],
+            lastComment: 2,
+          },
+        ],
+      });
+
+      expect(run("master").status, "新しい指摘が付いたのに黙った").toBe(0);
+    });
+
+    it("ゲートは CI で動く（狭めすぎない）", () => {
+      // **枝ごとに、見ているものが違う。** **ゲートを回せるかどうかは CI で決まる**
+      // ので、**そこでは checks が動いたら送る**——**一律に外すと、マージできるように
+      // なった、まさにその瞬間に黙る** (#125 / #173 のレビュー)
+      withState({ prs: [{ number: 12, checks: { [REQUIRED[0] ?? ""]: "pending" } }] });
+      expect(cycle("worker").status).toBe(0);
+
+      withState({ prs: [{ number: 12, checks: { [REQUIRED[0] ?? ""]: "pass" } }] });
+
+      expect(run("worker").status, "ゲートが回せるようになったのに黙った").toBe(0);
+    });
+
+    it("いちど作業が尽きたあと、同じ理由が戻ってきたら送る", () => {
+      // **狭めた指紋では、記録が古くならないと黙る** (#274)。
+      //
+      // **`ready` を渡す → worker が取る → 作業が尽きる → また `ready` が 2 件**
+      // という並びは普通に起きる。**間に挟まる「何もしない周回」で記録を置き直さないと、
+      // 最後に送った `ready` の記録がそのまま残り**、**同じ状態として黙る**——
+      // **worker は起こされない。**
+      withState({ ready: 2 });
+      expect(cycle("master").status, "worker へ渡せていない").toBe(0);
+
+      // worker が取った（`ready` が減り、着手中になった）→ 渡すものが無い周回
+      withState({ ready: 0, inProgress: 1 });
+      expect(run("master").status, "渡すものがあると読んでいる").toBe(1);
+
+      // また 2 件溜まり、手も空いた（**前と同じ状態だが、間に別の状態を挟んでいる**）
+      withState({ ready: 2 });
+
+      expect(run("master").status, "作業が尽きた周回を挟んだのに黙った").toBe(0);
+    });
+
+    it("送っていなければ、次の周回で同じ状態にまた送る", () => {
+      // **#258 の向きは変えない。** **`--sent` を通していない周回は、記録が上がらない**
+      // ので、**同じ状態でもう一度立ち上がる**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }], backlog: 14 });
+      expect(run("master").status).toBe(0);
+
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }], backlog: 13 });
+
+      expect(run("master").status, "送っていないのに抑止された").toBe(0);
+    });
+  });
+
   it("送り合いにならない", () => {
     // **これが本体。** 「暇 → 起こす → 暇 → 起こす」で焼き切れた事故と同じ形を作らない。
     // 交互に呼び続けても、送るのは持ち物がある側への 1 通だけである
@@ -1043,29 +1161,31 @@ describe("bin/loop-handoff", () => {
   describe("CI の状態", () => {
     // **ゲートは CI で落とすのに、handoff からは同じ状態に見えていた**（#125）。
     // **#115 で head SHA と未解決スレッドを足したときと同じ形が、CI に残っていた**。
+    //
+    // **見るのはゲートを回せる PR である** (#274)。**以前はどの枝でも CI を指紋に
+    // 入れていた**ので、**`changes-requested` の PR でも CI が進んだだけで再送されていた**
+    // ——**worker から見た「やること」は 1 文字も変わっていない。**
+    // **枝ごとに、読んだものだけを指紋にする**ようにしたので、**CI を確かめるのは
+    // 「CI で決まる枝」で行う**（狙いは #125 / #173 のまま）。
     const first = REQUIRED[0] ?? "";
 
     it("pass から fail に変われば、また送る", () => {
-      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
-      expect(cycle("master").status).toBe(0);
+      withState({ prs: [{ number: 12 }] });
+      expect(cycle("worker").status).toBe(0);
 
       // **label も head も未解決スレッドも動かない。** 動いたのは CI だけである
-      withState({
-        prs: [{ number: 12, labels: ["changes-requested"], checks: { [first]: "fail" } }],
-      });
+      withState({ prs: [{ number: 12, checks: { [first]: "fail" } }] });
 
-      expect(run("master").status, "ゲートが落とす条件が指紋に入っていない").toBe(0);
+      expect(run("worker").status, "ゲートが落とす条件が指紋に入っていない").toBe(0);
     });
 
     it("CI が同じままなら、2 通目を送らない", () => {
       // **毎回変わる値を入れない**（`bin/loop-stall` の識別子と同じ制約）。
       // **CI の状態は「変われば前へ進んだ」を表す**ので、その条件を満たす
-      withState({
-        prs: [{ number: 12, labels: ["changes-requested"], checks: { [first]: "pending" } }],
-      });
-      expect(cycle("master").status).toBe(0);
+      withState({ prs: [{ number: 12, checks: { [first]: "pending" } }] });
+      expect(cycle("worker").status).toBe(0);
 
-      expect(run("master").status, "同じ CI で送っている").toBe(1);
+      expect(run("worker").status, "同じ CI で送っている").toBe(1);
     });
 
     it("必須でないチェックが落ちていても、必須が pass に変われば送る", () => {
@@ -1075,59 +1195,37 @@ describe("bin/loop-handoff", () => {
       // **マージできるようになった、まさにその瞬間に黙る**
       const optional = "CodeQL"; // **必須の一覧に無い**チェック
       withState({
-        prs: [
-          {
-            number: 12,
-            labels: ["changes-requested"],
-            checks: { [optional]: "fail", [first]: "pending" },
-          },
-        ],
+        prs: [{ number: 12, checks: { [optional]: "fail", [first]: "pending" } }],
       });
-      expect(cycle("master").status).toBe(0);
+      expect(cycle("worker").status).toBe(0);
 
       // 必須だけが pass に変わった（**必須でないものは落ちたまま**）
-      withState({
-        prs: [{ number: 12, labels: ["changes-requested"], checks: { [optional]: "fail" } }],
-      });
+      withState({ prs: [{ number: 12, checks: { [optional]: "fail" } }] });
 
-      expect(run("master").status, "集約値を見ていて、合格に変わった瞬間に黙る").toBe(0);
+      expect(run("worker").status, "集約値を見ていて、合格に変わった瞬間に黙る").toBe(0);
     });
 
     it("必須でないチェックだけが変わっても、2 通目を送らない", () => {
       // **逆向きも見る。** ゲートの合否が動かないものを指紋に入れると、
       // **無関係な揺れで通知が飛ぶ**（`bin/loop-stall` の識別子と同じ制約）
-      withState({
-        prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "pass" } }],
-      });
-      expect(cycle("master").status).toBe(0);
+      withState({ prs: [{ number: 12, checks: { CodeQL: "pass" } }] });
+      expect(cycle("worker").status).toBe(0);
 
-      withState({
-        prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "fail" } }],
-      });
+      withState({ prs: [{ number: 12, checks: { CodeQL: "fail" } }] });
 
-      expect(run("master").status, "必須でないチェックで指紋が動いている").toBe(1);
+      expect(run("worker").status, "必須でないチェックで指紋が動いている").toBe(1);
     });
 
     it("必須の一覧は、ゲートから取る", () => {
       // **書き写さない**（#159 と同じ理由）。**上書きした環境で、そちらへ追随するか**を見る
       const env = { LOOP_REQUIRED_CHECKS: "CodeQL" };
-      withState({
-        prs: [{ number: 12, labels: ["changes-requested"], checks: { CodeQL: "pending" } }],
-      });
-      expect(cycle("master", env).status).toBe(0);
+      withState({ prs: [{ number: 12, checks: { CodeQL: "pending" } }] });
+      expect(cycle("worker", env).status).toBe(0);
 
       // **上書きした一覧の外**（既定では必須）だけが動いた
-      withState({
-        prs: [
-          {
-            number: 12,
-            labels: ["changes-requested"],
-            checks: { CodeQL: "pending", [first]: "fail" },
-          },
-        ],
-      });
+      withState({ prs: [{ number: 12, checks: { CodeQL: "pending", [first]: "fail" } }] });
 
-      expect(run("master", env).status, "自前の一覧で見ている").toBe(1);
+      expect(run("worker", env).status, "自前の一覧で見ている").toBe(1);
     });
 
     it("CI を読めなければ、送らない側へ倒さない", () => {
