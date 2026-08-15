@@ -420,6 +420,10 @@ describe("bin/loop-handoff", () => {
       // **無いと `bin/loop-lease check` が「読めない」へ倒れ、飛ばした周回を記録しない**
       // ——**この一覧は本物の依存そのもの**なので、増えたら足す
       "sha256sum",
+      // **生きている作業場を数えるのに使う**（`bin/loop-stall` がスクリプトの場所を
+      // これで決める）。**無いと数え方が黙って 0 件へ倒れる**ので、**手が何本あっても
+      // 1 本として扱われる**（#302）
+      "dirname",
     ]) {
       const found = spawnSync("which", [command], { encoding: "utf8" }).stdout.trim();
       if (found !== "") {
@@ -697,12 +701,80 @@ describe("bin/loop-handoff", () => {
       expect(run("master").status, "件数を緩めたら重複が増えた").toBe(1);
     });
 
-    it("着手中があれば、これまでどおり送らない", () => {
-      // **`in-progress` の条件までは緩めない**（それは #264 の担当）
+    it("着手中があれば、作業場が 1 つのあいだは送らない", () => {
+      // **手が 1 本しか無ければ、着手中 1 件で塞がっている**（#302 でもここは変えない）
       withState({ ready: 2, inProgress: 1 });
 
       expect(run("master").status).toBe(1);
     });
+  });
+
+  /**
+   * **`in-progress == 0` は「worker が 1 人」を前提にした条件だった**（#302）。
+   *
+   * **1 人なら「着手中が 1 件ある＝その 1 人は塞がっている」で正しい。**
+   * **2 人いると、着手中 1 件は「片方が塞がっている」でしかない**——
+   * **空いた側は `ready` に仕事があっても起こされず、自分の cron まで動かない。**
+   *
+   * **#267 が `ready` の側を件数で絞るのをやめたとき、`in-progress` はそのまま残した。**
+   * **そのときはまだ 1 人**で、**#241 で 2 人になったが数え直していない**——
+   * **worker を増やした diff に、この行は出てこない**（`AGENTS.md` §5）。
+   */
+  describe("作業場が 2 つ動いているとき", () => {
+    /** その作業場が周回を回している状態にする。**印を書くのは `acquire`** である。 */
+    function beginCycleIn(workspace: string): void {
+      const stamp = spawnSync(STAMP, ["worker"], { encoding: "utf8" }).stdout.trim();
+      const acquired = spawnSync(LEASE, ["acquire", "worker", stamp], {
+        cwd: workspace,
+        encoding: "utf8",
+      });
+      expect(acquired.status, `周回を始められない: ${acquired.stderr}`).toBe(0);
+      const released = spawnSync(LEASE, ["release", "worker", acquired.stdout.trim()], {
+        cwd: workspace,
+        encoding: "utf8",
+      });
+      expect(released.status, `周回を返せない: ${released.stderr}`).toBe(0);
+    }
+
+    /** **手を 2 本にする。** 両方の作業場が周回を回している形にする。 */
+    function twoHands(): void {
+      const other = addWorkspace();
+      beginCycleIn(repo);
+      beginCycleIn(other);
+    }
+
+    it("着手が 1 件でも、空いている側へ渡す", () => {
+      // **実測の形**（2026-08-15 08:14Z。`ready=1` / `in-progress=1` / 手は 2 本）
+      twoHands();
+      withState({ ready: 1, inProgress: 1 });
+
+      expect(run("master").stdout, "空いている worker を起こしていない").toMatch(/^worker\t/);
+    });
+
+    it("全員が塞がっていれば、これまでどおり送らない", () => {
+      // **緩めすぎない。** **渡す相手が居ないのに起こすと、騒いでいるのが普通になる**
+      twoHands();
+      withState({ ready: 1, inProgress: 2 });
+
+      expect(run("master").status, "全員塞がっているのに起こしている").toBe(1);
+    });
+
+    it("同じ状態で 2 通目を送らない", () => {
+      // **緩めた瞬間に送り合いへ倒れても気づけない**ので、ここを見る
+      twoHands();
+      withState({ ready: 1, inProgress: 1 });
+      expect(cycle("master").status).toBe(0);
+
+      expect(run("master").status, "条件を緩めたら重複が増えた").toBe(1);
+    });
+  });
+
+  it("手の数を、ここで数え直さない", () => {
+    // **同じ生死を 2 箇所で数えない**（#302）。**`bin/loop-stall` が既に持っている**
+    // ——**写しを持つと、片方だけ直したときに食い違う**（`AGENTS.md` §5）
+    const body = readFileSync(SCRIPT, "utf8");
+
+    expect(body, "周回の印を自分で走査している").not.toContain("valence-loop-rounds");
   });
 
   it("backlog はあるが ready が 0 なら master へ渡す（昇格の番）", () => {

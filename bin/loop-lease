@@ -65,6 +65,7 @@ usage() {
   echo "        bin/loop-lease ttl              期限（秒）を出す" >&2
   echo "        bin/loop-lease scope <役>       その役の記録を分ける単位（作業場）を出す" >&2
   echo "        bin/loop-lease alive <作業場>    その作業場が周回を回しているか（読むだけ）" >&2
+  echo "        bin/loop-lease running <役>     いま lease を握っている作業場の名前を並べる（読むだけ）" >&2
   echo "        役: ${ROLES[*]}" >&2
   echo "        master は役ごとに 1 つ（判定を並列にしない）" >&2
   echo "        worker は作業場ごとに 1 つ（作業場が増えたぶん並列になる）" >&2
@@ -602,6 +603,39 @@ if [[ $ACTION == "scope" ]]; then
   [[ $# -eq 2 ]] || usage
   set_role_paths "$ROLE" || exit 2
   printf '%s\n' "$lease_scope"
+  exit 0
+fi
+
+# **いま lease を握っている作業場の名前を並べる** (#303 のレビュー)。
+#
+# **期限の判定を渡すための口である。** **`bin/loop-stall` は周回の印（時刻の窓）でしか
+# 生死を測っていなかった**——**印は「周回を*始めた*時刻」しか言わない**ので、
+# **初めての周回と、過去より長い周回は、走っている最中に窓から出る。**
+# **`alive` は #298 で「まず生きている lease を見る」形にした**のに、**数える側は
+# 古いほうだけを見ていた**——**同じ生死を 2 通りに測っていた**ことになる。
+#
+# **判定そのものは足さない。** **期限は `read_lease` が 1 箇所で持っている**
+# （`busy` / `alive` と同じ）——**ここは並べるだけ**である。
+#
+#   exit 0 = 並べた（0 件でも 0）/ exit 2 = 判定できない
+if [[ $ACTION == "running" ]]; then
+  [[ $# -eq 2 ]] || usage
+  for running_state in "$common_dir/valence-loop-lease-$ROLE"*; do
+    [[ -f $running_state ]] || continue
+    [[ $running_state != *.lock ]] || continue
+    running_scope="${running_state##*/valence-loop-lease-}"
+    SCOPE_LABEL="$running_scope"
+    STATE="$running_state"
+    ACTIVITY="$common_dir/valence-loop-activity-$running_scope"
+    lock_state || exit 2
+    read_lease quiet || {
+      exec 9>&-
+      exit 2
+    }
+    exec 9>&-
+    [[ -n $held_token ]] || continue
+    printf '%s\n' "$running_scope"
+  done
   exit 0
 fi
 
