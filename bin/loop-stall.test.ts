@@ -1967,15 +1967,68 @@ describe("作業場ごとに数える", () => {
   it("上限は、走っているループの数から決まる", () => {
     // **安全な下限は「同時に走るループ数 + 1」**である（スクリプト自身が書いている）。
     // **作業場が増えたら、上限も増える**——**数を書き写さない**（§5）
+    const now = Math.floor(Date.now() / 1000);
     for (const scope of ["worker-aaa", "worker-bbb"]) {
-      writeFileSync(join(repo, ".git", `valence-loop-rounds-${scope}`), "1\n");
+      writeFileSync(join(repo, ".git", `valence-loop-rounds-${scope}`), `${now}\n`);
     }
 
-    const counts = [1, 2, 3].map((_, index) => stall(repo, ["no-work"]).stdout);
+    const counts = [1, 2, 3].map(() => stall(repo, ["no-work"]).stdout);
 
     expect(counts[2], "3 周で止まっている（master + worker 2 人なら 4 が下限）").not.toContain(
       "[STOP]",
     );
     expect(counts[0], "上限が増えていない").toContain("max=4");
+  });
+
+  it("使われなくなった作業場は、上限を押し上げない", () => {
+    // **印は消さない設計**（すぐ下の走査が「消さないのも意図的」と書いている）で、
+    // **`./task loop:worker:remove` も消さない**——**作って消すたびに上限が 1 増え、
+    // 二度と減らない。** **過去に 5 つ使った環境では、1 人で回していても上限 6** に
+    // なり、**症状は「止まらない」**なので気づけない（#239 のレビュー）。
+    //
+    // **新しい閾値は作らない。** **生死の判定は、窓の走査が既に持っている**
+    const ancient = Math.floor(Date.now() / 1000) - 86_400;
+    for (const scope of ["worker-aaa", "worker-bbb"]) {
+      writeFileSync(join(repo, ".git", `valence-loop-rounds-${scope}`), `${ancient}\n`);
+    }
+
+    const counts = [1, 2, 3].map(() => stall(repo, ["no-work"]).stdout);
+
+    expect(counts[0], "終わった作業場が上限を押し上げている").toContain("max=3");
+    expect(counts[2], "3 周続いても止まらない").toContain("[STOP]");
+  });
+
+  it("別の作業場から再開しても、止めた当人のカウンタが消える", () => {
+    // **STOP は全 worktree へ配られて全部消えるのに、カウンタは共有と呼び出し元の
+    // ぶんしか消えていなかった** (#239 のレビュー)。**止めた当人が上限のまま残り、
+    // 次の 1 回で即座に止め直す**——**`--resumed` が消しに来た当のもの**である
+    for (const _ of [1, 2, 3]) {
+      stall(repo, ["local-ci-failed:42"]);
+    }
+    expect(stall(repo, ["local-ci-failed:42"]).stdout, "止まっていない").toContain("[STOP]");
+
+    // 人は 2 人目の作業場から再開した
+    expect(stall(other, ["--resumed"]).status).toBe(0);
+
+    expect(
+      stall(repo, ["local-ci-failed:42"]).stdout,
+      "止めた当人のカウンタが残っている（1 回で止まり直す）",
+    ).toContain("count=1");
+  });
+
+  it("別の作業場で止まったことも、繰り返しとして残る", () => {
+    // **拾わないと、止めた当人の識別子が履歴に残らない**——**人が同じ判断を
+    // 繰り返していることに、誰も気づけない**（`--resumed` の狙いそのもの）
+    for (const _ of [1, 2, 3]) {
+      stall(repo, ["local-ci-failed:42"]);
+    }
+    expect(stall(other, ["--resumed"]).status).toBe(0);
+
+    let last = "";
+    for (const _ of [1, 2, 3]) {
+      last = stall(repo, ["local-ci-failed:42"]).stdout;
+    }
+
+    expect(last, "2 回目だと分かる形になっていない").toContain("2 回目");
   });
 });

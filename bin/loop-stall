@@ -16,22 +16,129 @@
 #
 set -uo pipefail
 
-# 上限。**同時に走るループの数から決める** (#239)。
+# **生きている作業場**。**周回の印と、その作業場の窓を、同じ 1 つの走査で取る** (#144)。
 #
-# **安全な下限は「同時に走るループ数 + 1」**である——**`loop:resume` の直後、
-# 冒頭の STOP 検査を通過した周回がそれぞれ同じ停止を積むと、再開した瞬間にまた止まる。**
-# **数を書き写さない**（`AGENTS.md` §5）——**作業場が増えれば、上限も増える。**
+# 読み手は 2 つある。**上限**（同時に走るループの数。すぐ下）と、**数え方**
+# （worker が同じ周回の中かどうか。ずっと下）である。**生死の判定を 2 箇所に持つと、
+# 片方だけ直して食い違う**ので、**歩くのはここ 1 回だけ**にする (#239 のレビュー)。
+declare -A alive_scopes=() scope_started_at=() scope_windows=()
+
+# **数える単位を「相手の周回」にする。**
 #
-# **走っているループの数は、周回の印から数える**（`bin/loop-lease acquire` が書く）
-# ——**master が 1 つと、周回を始めたことのある worker の作業場**である。
-# **3 を下回らない**（**1 人で回している間は、これまでと同じ**）。
-loop_count() {
-  local rounds found=1
-  for rounds in "$1"/valence-loop-rounds-worker*; do
-    [[ -f $rounds ]] || continue
-    found=$((found + 1))
+# 第 4 層は master の周回で数えるが、**前へ進めるのは worker の周回**である。
+# master は何倍も速く回るので、**指摘の修正に master の何周ぶんもかかる作業は
+# 必ず止まる** (実測で 5 回。5 回とも worker は 1 周も終えておらず、5 回とも人が
+# 手で再開した)。**難しい指摘ほど踏む**——レビューが良い仕事をするほど罰される (#126)。
+#
+# **見るのは「worker の周回が動いているか」であって「誰かが `./task` を叩いたか」ではない。**
+# 心拍 (bin/loop-lease の活動の記録) は **人が worker の作業場で `./task` を叩いても
+# 新しくなる**ので、**worker が死んだあとも「作業中」に見え続ける**。それを使うと
+# **カウンタが永久に止まる**——**第 4 層が黙って死ぬ側**の壊れ方である。
+#
+# **周回だけが出せる信号を使う。** `bin/loop-lease acquire` が書く印 (ROUNDS) は
+# **周回の開始でしか動かない**。人が `./task` を叩いても動かない。
+#
+#   印が動いた           … 1 周終えて次が始まった → **数える**
+#   印が同じで、まだ窓の内 … その周回が続いている   → **数えない**
+#   印が窓より古い       … 周回が始まっていない     → **数える** (worker が死んだ場合もここ)
+#
+# **窓は書き写した閾値ではない。** `bin/loop-lease` が release のたびに残す
+# **いちばん長かった周回の実測**の 2 倍を使う (記録が無ければ lease の期限で代用)。
+# **1 周が長い機械では窓も広がる**ので、**長い周回の途中で止められない**。
+#
+# **worker の作業ツリーは読まない。** 見るのは worker 自身が git の共通ディレクトリへ
+# 書いた記録だけである。master が相手の作業場を覗く形にすると、
+# 「GitHub を唯一の正とする」という設計に穴が開く。
+scan_alive_scopes() {
+  local common_dir="$1" script_dir="$2"
+  local lease_ttl scope scope_rounds scope_started scope_window seconds len now_epoch
+  local shared_window
+  [[ -n $script_dir && -x "$script_dir/loop-lease" ]] || return 0
+  lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" || return 0
+  [[ $lease_ttl =~ ^[0-9]+$ ]] || return 0
+
+  # **始めた周回の印。** lease と違って返しても消えないので、
+  # **周回と周回の間でも「どの周回まで始めたか」が読める**。
+  # **作業場ごとに、前回からの進みを見る** (#144)。**最大値を取ると、無関係な worker が
+  # 周回を始めるたびに数が進む**——**PR を直している worker が同じ長い周回にいても、
+  # 別 worker の 3 周だけで全ループを誤停止しうる。**
+  #
+  # **最小値でも足りない** (#200 のレビュー)。**最小値を持っていた作業場が動けば
+  # それだけで動く**ので、**開始時刻がずれていると、片方が 2 周・もう片方が 1 周でも
+  # 上限に達する**。**「いちばん遅い値が動いたか」は「全員が動いたか」ではない。**
+  #
+  # **担当を突き止めない。** **どの作業場がどの PR を見ているかは、ここからは分からない**
+  # （PR 番号から作業場を引くには GitHub が要る）。**代わりに「全員が新しい周回を
+  # 始めたか」を見る**——**担当している作業場も必ずその中にいる**ので、
+  # **無関係な周回だけでは進まない。**
+  #
+  # **止まらなくなる形にはしない。** **見るのは生きている作業場だけ**なので、
+  # **周回を始めなくなった作業場は、その窓を過ぎた時点で外れる**（すぐ下と同じ判定）。
+
+  # 窓 = いちばん長かった周回 × 2。**実測が無ければ lease の期限で代用する。**
+  #
+  # **生きている作業場のものだけを見る** (#175 のレビュー)。記録は**作業場ごと**にあり
+  # (scope はパスから作る)、**書き換えるのはその作業場の周回だけ**である——
+  # **長い周回を記録した作業場が使われなくなると、その値は誰も更新しない**ので、
+  # **別の作業場で何周しても落ちず、窓は永久に広いまま**になる。
+  # **この機械には既に worker 役の scope が 2 つある**ので、**#82 を待たずに踏む。**
+  #
+  # **1 つに絞らない**（いちばん新しい周回の作業場だけ、にはしない）。
+  # **軽い Issue の作業場が新しく、重い Issue の作業場が少し古い**とき、
+  # **重いほうが窓の外へ出る**——**長い周回の途中で止めない**という性質を壊す。
+  #
+  # **生死は「周回の印」で見る。活動の記録は使えない**（このすぐ上に書いてある）——
+  # **`./task` は lease の有無に関係なく毎回 heartbeat を打つ**ので、
+  # **使われなくなった作業場で人が 1 回叩けば、長い実測が窓へ戻る**。
+  # **周回の開始でしか動かない印**だけが、周回が生きていることを表す。
+  #
+  # **期限は「その作業場自身の窓」で測る。** lease の期限で一律に切ると、
+  # **30 分を超える周回の途中にある作業場が「死んだ」に落ちる**——
+  # **いちばん守りたい場面で窓が縮む**という、向きが逆の壊れ方になる。
+  # **新しい閾値は作っていない**（**下と同じ式・同じ既定**を、作業場ごとに当てるだけ）。
+  #
+  # **消さない**のも意図的である（**削除は戻せない**）。読むときに外すだけにする。
+  now_epoch="$(date +%s)"
+  for scope_rounds in "$common_dir"/valence-loop-rounds-worker*; do
+    [[ -f $scope_rounds ]] || continue
+    read -r scope_started <"$scope_rounds" 2>/dev/null || continue
+    [[ $scope_started =~ ^[0-9]+$ ]] || continue
+    scope="${scope_rounds##*/valence-loop-rounds-}"
+    # **実測が無い作業場もいる**（一度も返していない）。**そのときは既定の窓で見る**
+    seconds=""
+    len="$common_dir/valence-loop-roundlen-$scope"
+    if [[ -f $len ]]; then
+      read -r seconds <"$len" 2>/dev/null || seconds=""
+      [[ $seconds =~ ^[0-9]+$ ]] || seconds=""
+    fi
+    scope_window="$lease_ttl"
+    if [[ -n $seconds ]]; then
+      scope_window=$((seconds * 2))
+      ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
+    fi
+    scope_started_at["$scope"]="$scope_started"
+    scope_windows["$scope"]="$scope_window"
+    ((now_epoch - scope_started < scope_window)) || continue
+    alive_scopes["$scope"]="$scope_started"
   done
-  printf '%s' "$found"
+
+  # **生きている作業場の実測は、自分のでなくても効かせる**（#200 のレビュー 3 周目）。
+  # **自分の実測が短い作業場は、長い周回の途中で自分の窓から出る**——
+  # **いちばん守りたい場面（#129 / #142 の「長い周回の途中で止めない」）で
+  # 窓が縮む**という、向きが逆の壊れ方になる。**新しい閾値は作らない**——
+  # **上と同じ式・同じ既定**を、いちばん広い窓で当て直すだけである。
+  #
+  # **広げても戻らない。** **この窓で生き返る作業場は、自分の窓が既に
+  # それより狭い**（狭いから落ちた）ので、**最大を押し上げない。**
+  shared_window="$lease_ttl"
+  for scope in "${!alive_scopes[@]}"; do
+    ((scope_windows[$scope] > shared_window)) && shared_window="${scope_windows[$scope]}"
+  done
+  for scope in "${!scope_started_at[@]}"; do
+    [[ -z ${alive_scopes[$scope]-} ]] || continue
+    ((now_epoch - scope_started_at[$scope] < shared_window)) || continue
+    alive_scopes["$scope"]="${scope_started_at[$scope]}"
+  done
 }
 
 # 停止識別子の正はここ。`.claude/commands/loop-*.md` の判定箇所は、識別子を
@@ -299,12 +406,39 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
   exit 2
 }
-# **上限は共通ディレクトリが分かってから決める**（周回の印を数えるため。#239）。
+# スクリプトのある場所。**ここで決める**——**上限も、数え方も、`bin/loop-lease` へ
+# 訊いてから決まる**ので、**両方より前に要る**（#239 のレビュー）。
+# 失敗した代入で変数を壊さない。`var="$(cmd)"` は cmd が失敗しても空を代入するので、
+# それをフォールバックの入力に使うと `cd ""` になる。**これは成功して cwd を返す**ため、
+# 「同じリポジトリの worktree」が「別のリポジトリ」に化ける。実際に踏んだ。
+script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
+
+# **生きている作業場を、ここで 1 回だけ数える。** 読み手は上限と数え方の 2 つで、
+# **どちらも同じ生死を見る**（#239 のレビュー）。
+scan_alive_scopes "$common_dir" "$script_dir"
+
+# 上限。**同時に走るループの数から決める** (#239)。
+#
+# **安全な下限は「同時に走るループ数 + 1」**である——**`loop:resume` の直後、
+# 冒頭の STOP 検査を通過した周回がそれぞれ同じ停止を積むと、再開した瞬間にまた止まる。**
+# **数を書き写さない**（`AGENTS.md` §5）——**作業場が増えれば、上限も増える。**
+#
+# **走っているループの数は、周回の印から数える**（`bin/loop-lease acquire` が書く）
+# ——**master が 1 つと、いま周回を回している worker の作業場**である。
+# **3 を下回らない**（**1 人で回している間は、これまでと同じ**）。
+#
+# **数えるのは生きている作業場だけ** (#239 のレビュー)。**印は消さない設計**で、
+# **`./task loop:worker:remove` も消さない**——**存在だけを見ると、作業場を作って
+# 消すたびに上限が 1 増え、二度と減らない**（**過去に 5 つ使った環境では、1 人で
+# 回していても上限 6**）。**症状は「止まらない」**なので、**気づく手立てが無い。**
+#
+# **上限は共通ディレクトリが分かってから決める**（周回の印を数えるため）。
 # **設定で渡されたらそれが正**——**試験と、人が絞りたいときのため**である。
 if [[ -n ${LOOP_MAX_STALL_REPEATS-} ]]; then
   MAX_REPEATS="$LOOP_MAX_STALL_REPEATS"
 else
-  MAX_REPEATS=$(($(loop_count "$common_dir") + 1))
+  # 走っているループ = master 1 つ + 生きている worker の作業場。上限はそれに 1 を足す
+  MAX_REPEATS=$((1 + ${#alive_scopes[@]} + 1))
   ((MAX_REPEATS >= 3)) || MAX_REPEATS=3
 fi
 readonly MAX_REPEATS
@@ -387,10 +521,7 @@ readonly TASK="$toplevel/task"
 # 相対パス (.git / ../.git)、**リンクされた worktree では絶対パス**を返す。
 # 両方を通さないと、master (worktree で動く) だけ判定が壊れる。
 #
-# 失敗した代入で変数を壊さない。`var="$(cmd)"` は cmd が失敗しても空を代入するので、
-# それをフォールバックの入力に使うと `cd ""` になる。**これは成功して cwd を返す**ため、
-# 「同じリポジトリの worktree」が「別のリポジトリ」に化ける。実際に踏んだ。
-script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
+# **`script_dir` は上で決めてある**（上限を決めるより前に要るため）。
 script_common_dir=""
 if [[ -n $script_dir ]]; then
   if raw_common_dir="$(git -C "$script_dir" rev-parse --git-common-dir 2>/dev/null)" \
@@ -465,9 +596,22 @@ fi
 # (消すだけだと「1 回目と同じ」に見え、**人が同じ判断を繰り返していることに誰も
 # 気づけない**)。
 if [[ $ID == "--resumed" ]]; then
-  # **どちらのカウンタも見る** (#239)。**片方だけ見ると、作業場ぶんで止まった状態が
-  # 「繰り返し」として残らない。**
-  for resumed_state in "$STATE" "$LOCAL_STATE"; do
+  # **全部のカウンタを見る** (#239 のレビュー)。**STOP は全 worktree へ配られ、
+  # ここで全部消える**——**カウンタだけ呼び出し元のぶんしか消さないと、止めた当人が
+  # 上限のまま残り、次の 1 回で即座に止め直す**（**`cmd_loop_resume` が消しに来た
+  # 当のもの**。`AGENTS.md` §5 #184「止める仕組みを入れたら、止まった状態から
+  # 出られるかを見る」）。
+  #
+  # **繰り返しの記録も全作業場から拾う**——**でないと、止めた当人の識別子が履歴に
+  # 残らず、「同じところで何度目か」が出せない**（この節の狙いそのもの）。
+  #
+  # **同じロックの中で行う。** 下の STOP の撤去まで含めて 1 つの区間である。
+  resumed_states=("$STATE")
+  for resumed_state in "$common_dir"/valence-loop-stall-worker-*; do
+    [[ -f $resumed_state ]] || continue
+    resumed_states+=("$resumed_state")
+  done
+  for resumed_state in "${resumed_states[@]}"; do
     [[ -f $resumed_state ]] || continue
     while IFS=$'\t' read -r prev_count prev_id _prev_epoch; do
       [[ $prev_count =~ ^[0-9]+$ && -n $prev_id ]] || continue
@@ -485,8 +629,8 @@ if [[ $ID == "--resumed" ]]; then
   #
   # **`rm -f` は「ファイルが無い」では失敗しない**ので、**まだ 1 度も記録していない
   # 状態の resume は、これまでどおり通る**。
-  rm -f "$STATE" "$LOCAL_STATE" || {
-    echo "[FAIL] 停止カウンタを消せません: $STATE / $LOCAL_STATE" >&2
+  rm -f "${resumed_states[@]}" || {
+    echo "[FAIL] 停止カウンタを消せません: ${resumed_states[*]}" >&2
     exit 2
   }
   echo "stall resumed"
@@ -556,123 +700,6 @@ if [[ -f $counted_state ]]; then
       others+=("$prev_count"$'\t'"$prev_id"$'\t'"$prev_id_epoch")
     fi
   done < "$counted_state"
-fi
-
-# **数える単位を「相手の周回」にする。**
-#
-# 第 4 層は master の周回で数えるが、**前へ進めるのは worker の周回**である。
-# master は何倍も速く回るので、**指摘の修正に master の何周ぶんもかかる作業は
-# 必ず止まる** (実測で 5 回。5 回とも worker は 1 周も終えておらず、5 回とも人が
-# 手で再開した)。**難しい指摘ほど踏む**——レビューが良い仕事をするほど罰される (#126)。
-#
-# **見るのは「worker の周回が動いているか」であって「誰かが `./task` を叩いたか」ではない。**
-# 心拍 (bin/loop-lease の活動の記録) は **人が worker の作業場で `./task` を叩いても
-# 新しくなる**ので、**worker が死んだあとも「作業中」に見え続ける**。それを使うと
-# **カウンタが永久に止まる**——**第 4 層が黙って死ぬ側**の壊れ方である。
-#
-# **周回だけが出せる信号を使う。** `bin/loop-lease acquire` が書く印 (ROUNDS) は
-# **周回の開始でしか動かない**。人が `./task` を叩いても動かない。
-#
-#   印が動いた           … 1 周終えて次が始まった → **数える**
-#   印が同じで、まだ窓の内 … その周回が続いている   → **数えない**
-#   印が窓より古い       … 周回が始まっていない     → **数える** (worker が死んだ場合もここ)
-#
-# **窓は書き写した閾値ではない。** `bin/loop-lease` が release のたびに残す
-# **いちばん長かった周回の実測**の 2 倍を使う (記録が無ければ lease の期限で代用)。
-# **1 周が長い機械では窓も広がる**ので、**長い周回の途中で止められない**。
-#
-# **worker の作業ツリーは読まない。** 見るのは worker 自身が git の共通ディレクトリへ
-# 書いた記録だけである。master が相手の作業場を覗く形にすると、
-# 「GitHub を唯一の正とする」という設計に穴が開く。
-declare -A alive_scopes=() scope_started_at=() scope_windows=()
-if [[ -n $script_dir && -x "$script_dir/loop-lease" ]] \
-  && lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" \
-  && [[ $lease_ttl =~ ^[0-9]+$ ]]; then
-  # **始めた周回の印。** lease と違って返しても消えないので、
-  # **周回と周回の間でも「どの周回まで始めたか」が読める**。
-  # **作業場ごとに、前回からの進みを見る** (#144)。**最大値を取ると、無関係な worker が
-  # 周回を始めるたびに数が進む**——**PR を直している worker が同じ長い周回にいても、
-  # 別 worker の 3 周だけで全ループを誤停止しうる。**
-  #
-  # **最小値でも足りない** (#200 のレビュー)。**最小値を持っていた作業場が動けば
-  # それだけで動く**ので、**開始時刻がずれていると、片方が 2 周・もう片方が 1 周でも
-  # 上限に達する**。**「いちばん遅い値が動いたか」は「全員が動いたか」ではない。**
-  #
-  # **担当を突き止めない。** **どの作業場がどの PR を見ているかは、ここからは分からない**
-  # （PR 番号から作業場を引くには GitHub が要る）。**代わりに「全員が新しい周回を
-  # 始めたか」を見る**——**担当している作業場も必ずその中にいる**ので、
-  # **無関係な周回だけでは進まない。**
-  #
-  # **止まらなくなる形にはしない。** **見るのは生きている作業場だけ**なので、
-  # **周回を始めなくなった作業場は、その窓を過ぎた時点で外れる**（すぐ下と同じ判定）。
-
-  # 窓 = いちばん長かった周回 × 2。**実測が無ければ lease の期限で代用する。**
-  #
-  # **生きている作業場のものだけを見る** (#175 のレビュー)。記録は**作業場ごと**にあり
-  # (scope はパスから作る)、**書き換えるのはその作業場の周回だけ**である——
-  # **長い周回を記録した作業場が使われなくなると、その値は誰も更新しない**ので、
-  # **別の作業場で何周しても落ちず、窓は永久に広いまま**になる。
-  # **この機械には既に worker 役の scope が 2 つある**ので、**#82 を待たずに踏む。**
-  #
-  # **1 つに絞らない**（いちばん新しい周回の作業場だけ、にはしない）。
-  # **軽い Issue の作業場が新しく、重い Issue の作業場が少し古い**とき、
-  # **重いほうが窓の外へ出る**——**長い周回の途中で止めない**という性質を壊す。
-  #
-  # **生死は「周回の印」で見る。活動の記録は使えない**（このすぐ上に書いてある）——
-  # **`./task` は lease の有無に関係なく毎回 heartbeat を打つ**ので、
-  # **使われなくなった作業場で人が 1 回叩けば、長い実測が窓へ戻る**。
-  # **周回の開始でしか動かない印**だけが、周回が生きていることを表す。
-  #
-  # **期限は「その作業場自身の窓」で測る。** lease の期限で一律に切ると、
-  # **30 分を超える周回の途中にある作業場が「死んだ」に落ちる**——
-  # **いちばん守りたい場面で窓が縮む**という、向きが逆の壊れ方になる。
-  # **新しい閾値は作っていない**（**下と同じ式・同じ既定**を、作業場ごとに当てるだけ）。
-  #
-  # **消さない**のも意図的である（**削除は戻せない**）。読むときに外すだけにする。
-  # **印と窓を、同じ 1 つの走査で取る** (#144)。**生死の判定を 2 箇所に持つと、
-  # 片方だけ直して食い違う**——**印の側だけ生死を見ないと、周回を始めなくなった
-  # 作業場が数を永久に止める。**
-  now_epoch="$(date +%s)"
-  for scope_rounds in "$common_dir"/valence-loop-rounds-worker*; do
-    [[ -f $scope_rounds ]] || continue
-    read -r scope_started <"$scope_rounds" 2>/dev/null || continue
-    [[ $scope_started =~ ^[0-9]+$ ]] || continue
-    scope="${scope_rounds##*/valence-loop-rounds-}"
-    # **実測が無い作業場もいる**（一度も返していない）。**そのときは既定の窓で見る**
-    seconds=""
-    len="$common_dir/valence-loop-roundlen-$scope"
-    if [[ -f $len ]]; then
-      read -r seconds <"$len" 2>/dev/null || seconds=""
-      [[ $seconds =~ ^[0-9]+$ ]] || seconds=""
-    fi
-    scope_window="$lease_ttl"
-    if [[ -n $seconds ]]; then
-      scope_window=$((seconds * 2))
-      ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
-    fi
-    scope_started_at["$scope"]="$scope_started"
-    scope_windows["$scope"]="$scope_window"
-    ((now_epoch - scope_started < scope_window)) || continue
-    alive_scopes["$scope"]="$scope_started"
-  done
-
-  # **生きている作業場の実測は、自分のでなくても効かせる**（#200 のレビュー 3 周目）。
-  # **自分の実測が短い作業場は、長い周回の途中で自分の窓から出る**——
-  # **いちばん守りたい場面（#129 / #142 の「長い周回の途中で止めない」）で
-  # 窓が縮む**という、向きが逆の壊れ方になる。**新しい閾値は作らない**——
-  # **上と同じ式・同じ既定**を、いちばん広い窓で当て直すだけである。
-  #
-  # **広げても戻らない。** **この窓で生き返る作業場は、自分の窓が既に
-  # それより狭い**（狭いから落ちた）ので、**最大を押し上げない。**
-  shared_window="$lease_ttl"
-  for scope in "${!alive_scopes[@]}"; do
-    ((scope_windows[$scope] > shared_window)) && shared_window="${scope_windows[$scope]}"
-  done
-  for scope in "${!scope_started_at[@]}"; do
-    [[ -z ${alive_scopes[$scope]-} ]] || continue
-    ((now_epoch - scope_started_at[$scope] < shared_window)) || continue
-    alive_scopes["$scope"]="${scope_started_at[$scope]}"
-  done
 fi
 
 # **識別子ごとに「各 scope の前回時刻」を持つ。** `<scope>=<時刻>` を `,` で並べ、
