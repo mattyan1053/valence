@@ -12,6 +12,9 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -100,6 +103,78 @@ describe("保留した PR が食っている枠を数える", () => {
 
     expect(listed.status).toBe(0);
     expect(listed.stdout).toEqual([]);
+  });
+
+  describe("ループの外から出た PR", () => {
+    /**
+     * **著者の判定を差し替えて走らせる。**
+     *
+     * **判定そのものは `bin/loop-outside-author` が持っている**（`loop/README.md` が
+     * 名指ししている口）——**ここで見たいのは「その答えをどう使うか」**である。
+     * **写しを置いて隣で走らせる**ので、**配られている本物には触らない**（#186）。
+     */
+    function runWithAuthor(status: number, input: string): ReturnType<typeof run> {
+      const workspace = mkdtempSync(join(tmpdir(), "parked-author-"));
+      try {
+        const copied = join(workspace, "loop-parked-issues");
+        copyFileSync(SCRIPT, copied);
+        writeFileSync(
+          join(workspace, "loop-outside-author"),
+          ["#!/usr/bin/env bash", `exit ${status}`, ""].join("\n"),
+          { mode: 0o755 },
+        );
+        const result = spawnSync(copied, { input, encoding: "utf8" });
+        return {
+          status: result.status ?? -1,
+          stdout: result.stdout.split("\n").filter((line) => line !== ""),
+          stderr: result.stderr,
+        };
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    }
+
+    const OUTSIDE = 0;
+    const INSIDE = 1;
+    const UNREADABLE = 2;
+
+    it("外の著者の保留は、枠を食わない", () => {
+      // **ループの外から出た PR も `parked` + `awaiting-human` になる**（#70）が、
+      // **その PR にループの Issue は無い**——**誰も `take` していない。**
+      // **数えると、無関係な `in-progress` が 1 件引かれる**（#320 のレビュー）
+      const listed = runWithAuthor(OUTSIDE, lines([{ number: 317, labels: ["parked"], body: "" }]));
+
+      expect(listed.status).toBe(0);
+      expect(listed.stdout, "外の PR で枠を引いている").toEqual([]);
+    });
+
+    it("中の著者の保留は、これまでどおり食う", () => {
+      const listed = runWithAuthor(INSIDE, lines([{ number: 317, labels: ["parked"], body: "" }]));
+
+      expect(listed.stdout).toEqual(["unknown:317"]);
+    });
+
+    it("著者を判定できないときは、食う側へ倒す", () => {
+      // **引きすぎると `ready` が 1 件多く立つだけ**（**worker は 1 本で止まる**）だが、
+      // **引き損ねると誰も呼ばれない**——**重さが違う**（#312 と同じ向き）
+      const listed = runWithAuthor(
+        UNREADABLE,
+        lines([{ number: 317, labels: ["parked"], body: "" }]),
+      );
+
+      expect(listed.stdout, "判定できないのに枠を外している").toEqual(["unknown:317"]);
+    });
+
+    it("外の著者でも、`Closes` があればその Issue は挙げる", () => {
+      // **書いてあるものは証拠である。** **「Issue が無い」と言えるのは、
+      // 書いていないときだけ**——**書いてあるほうを推測で捨てない**
+      const listed = runWithAuthor(
+        OUTSIDE,
+        lines([{ number: 317, labels: ["parked"], body: "Closes #315" }]),
+      );
+
+      expect(listed.stdout).toEqual(["315"]);
+    });
   });
 
   it("読めない行が来たら、0 件に倒さない", () => {

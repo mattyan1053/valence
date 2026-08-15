@@ -27,8 +27,12 @@
 # **数えるのはここだけ** (`AGENTS.md` §5)。**出口（`bin/loop-handoff`）と master の
 # ステップ 6 が同じ数え方を持っていた**ので、**片方だけ直すと食い違う。**
 #
-# **GitHub を引かない。** **呼ぶ側は既に open PR の一覧を取っている**ので、
+# **一覧は引き直さない。** **呼ぶ側は既に open PR の一覧を取っている**ので、
 # **ここで取り直すと、同じ周回の中に 2 つの一覧ができる**——**そこだけ古い値になりうる。**
+#
+# **著者だけは訊く** (#320 のレビュー)。**`bin/loop-outside-author` が持っている判定**で、
+# **一覧には無い**（**label と本文からは、中の著者か外の著者かが分からない**）——
+# **訊くのは `Closes` が無い保留 PR のときだけ**である。
 #
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
 set -uo pipefail
@@ -82,8 +86,23 @@ while IFS="$FIELD" read -r number labels body || [[ -n $number ]]; do
     rest="${rest#*"${BASH_REMATCH[0]}"}"
   done
 
-  # **書いていない保留 PR も、枠は食っている**（このファイルの冒頭）
-  ((found == 1)) || slots+=("unknown:$number")
+  # **書いていない保留 PR も、枠は食っている**（このファイルの冒頭）——
+  # **ただし、ループの外から出た PR は別**（#320 のレビュー）。**あちらも
+  # `parked` + `awaiting-human` になる**（#70）が、**その PR にループの Issue は無い**
+  # ——**誰も `bin/loop-claim take` していない。** **数えると、無関係な `in-progress` が
+  # 1 件引かれ、上限が埋まっているのに次の `ready` が上がる。**
+  #
+  # **判定は `bin/loop-outside-author` が持っている**（`loop/README.md` が名指しする口）。
+  # **ここに書き写さない**——**アカウントの比べ方を 2 箇所に持つと、片方だけ古くなる。**
+  #
+  # **外だと確かめられたときだけ外す。** **判定できなければ食う側へ倒す**
+  # ——**引きすぎると `ready` が 1 件多く立つだけ**（**worker は「同時に持つ PR は
+  # 1 本」で止まる**）だが、**引き損ねると誰も呼ばれない。**
+  if ((found == 0)); then
+    outside=0
+    "${BASH_SOURCE[0]%/*}/loop-outside-author" "$number" >/dev/null 2>&1 || outside=$?
+    ((outside == 0)) || slots+=("unknown:$number")
+  fi
 done
 
 ((${#slots[@]} == 0)) || printf '%s\n' "${slots[@]}"
