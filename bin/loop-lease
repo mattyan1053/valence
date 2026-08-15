@@ -194,6 +194,46 @@ worker_scope_of() {
   printf 'worker-%s' "${digest%% *}"
 }
 
+# その名前は、この作業場のものか (#298 のレビュー)。
+#
+# **記録は版をまたいで共有される**（`AGENTS.md` §5。#240 / #290 で 2 度踏んだ）——
+# **持ち主が前の版で周回を始めていると、印は前の名前で残る。** **いまの名前だけを見ると
+# 「回っていない」に落ち、生きている持ち主から Issue を取り上げる**（**この直しが
+# 消しに来たものが、版の側から戻ってくる**）。
+#
+# **前の名前は、こちらから組み立てる**——**残っている名前を解釈するのではなく、
+# 「この作業場が名乗りえた名前」を数える**（**他人の印を自分のものにしない**）。
+#
+#   worker<パスの / を _ にしたもの>  … #98 以前
+#   worker-<digest の頭>              … 切り詰めていた版（実物に 26 桁が残っている）
+#   worker-<digest 64 桁>             … いまの版
+# その名前は、**こちらが知っている形か** (#298 のレビュー)。
+#
+# **知らない形は「自分のではない」と「まだ知らない」の区別が付かない**——
+# **次の版が別の名前を使えば、この作業場の印がそこに入りうる。**
+# **回っていない側へ倒すと、また生きている持ち主から取り上げる**ので、
+# **判定できない側へ倒す**（呼ぶ側は引き継がない）。
+worker_name_is_known_form() {
+  local name="$1" hex
+  [[ $name == worker_* ]] && return 0   # パスを畳んだ版
+  [[ $name == worker-* ]] || return 1
+  hex="${name#worker-}"
+  [[ $hex =~ ^[0-9a-f]+$ ]]             # digest（頭でも全部でも）
+}
+
+worker_name_is_mine() {
+  local name="$1" resolved="$2" digest hex
+  [[ $name == "worker${resolved//\//_}" ]] && return 0
+  [[ $name == worker-* ]] || return 1
+  hex="${name#worker-}"
+  [[ $hex =~ ^[0-9a-f]+$ ]] || return 1
+  # **短すぎる頭では照合しない**（**別の作業場と当たりうる**）
+  ((${#hex} >= 8)) || return 1
+  digest="$(printf '%s' "$resolved" | sha256sum)" || return 1
+  digest="${digest%% *}"
+  [[ $digest == "$hex"* ]]
+}
+
 set_role_paths() {
   local role="$1" toplevel digest
   lease_scope="$role"
@@ -580,28 +620,46 @@ fi
 # **「読めない」を「回っていない」に倒さない**——**取り上げる側へ倒れる。**
 if [[ $ACTION == "alive" ]]; then
   [[ $# -eq 2 ]] || usage
-  if ! alive_scope="$(worker_scope_of "$2")"; then
+  # **消えた作業場は、回っていない** (#298 のレビュー)。**`./task loop:worker:remove` で
+  # worktree を消しても claim の記録は残る**ので、**「判定できない」に倒すと、
+  # 公開に失敗した `in-progress` の Issue を誰も回収できない。**
+  [[ -d $2 ]] || exit 1
+  if ! alive_path="$(cd "$2" 2>/dev/null && pwd -P)" || [[ -z $alive_path ]]; then
     echo "[FAIL] 作業場を特定できません: $2" >&2
     exit 2
   fi
-  alive_rounds="$common_dir/valence-loop-rounds-$alive_scope"
-  # **印が無いのは「一度も周回を始めていない」**である。**引き継げなくなると、
-  # 落ちた周回の Issue を誰も拾えない**ので、**回っていない側へ倒す。**
-  [[ -f $alive_rounds ]] || exit 1
-  if ! read -r alive_started <"$alive_rounds" 2>/dev/null \
-    || ! [[ $alive_started =~ ^[0-9]+$ ]]; then
-    echo "[FAIL] 周回の印を読めません: $alive_rounds" >&2
+  # **前の版の名前も見る**（`worker_name_is_mine`）。**印が無いのは「一度も周回を
+  # 始めていない」**である——**引き継げなくなると、落ちた周回の Issue を誰も拾えない**
+  # ので、**回っていない側へ倒す。**
+  alive_unknown=0
+  for alive_rounds in "$common_dir"/valence-loop-rounds-worker*; do
+    [[ -f $alive_rounds ]] || continue
+    alive_name="${alive_rounds##*/valence-loop-rounds-}"
+    if ! worker_name_is_mine "$alive_name" "$alive_path"; then
+      # **知らない形は素通りしない**（上記）。**この作業場のものかもしれない**
+      worker_name_is_known_form "$alive_name" || alive_unknown=1
+      continue
+    fi
+    if ! read -r alive_started <"$alive_rounds" 2>/dev/null \
+      || ! [[ $alive_started =~ ^[0-9]+$ ]]; then
+      echo "[FAIL] 周回の印を読めません: $alive_rounds" >&2
+      exit 2
+    fi
+    # **実測があれば、それで窓を広げる**（**長い周回の途中で「死んだ」に落とさない**）
+    alive_window="$TTL_SEC"
+    alive_len="${alive_rounds/valence-loop-rounds-/valence-loop-roundlen-}"
+    if [[ -f $alive_len ]] && read -r alive_seconds <"$alive_len" 2>/dev/null \
+      && [[ $alive_seconds =~ ^[0-9]+$ ]]; then
+      ((alive_seconds * 2 <= alive_window)) || alive_window=$((alive_seconds * 2))
+    fi
+    # **1 つでも窓の内なら回っている**（**前の版で始めた周回も、いまの周回である**）
+    ((now - alive_started < alive_window)) && exit 0
+  done
+  if ((alive_unknown == 1)); then
+    echo "[FAIL] 知らない形の周回の印があります（この作業場のものか判定できません）" >&2
     exit 2
   fi
-  # **実測があれば、それで窓を広げる**（**長い周回の途中で「死んだ」に落とさない**）
-  alive_window="$TTL_SEC"
-  alive_len="$common_dir/valence-loop-roundlen-$alive_scope"
-  if [[ -f $alive_len ]] && read -r alive_seconds <"$alive_len" 2>/dev/null \
-    && [[ $alive_seconds =~ ^[0-9]+$ ]]; then
-    ((alive_seconds * 2 <= alive_window)) || alive_window=$((alive_seconds * 2))
-  fi
-  ((now - alive_started < alive_window)) || exit 1
-  exit 0
+  exit 1
 fi
 
 if [[ $ACTION == "busy" ]]; then

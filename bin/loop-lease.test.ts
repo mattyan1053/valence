@@ -1479,6 +1479,87 @@ describe("bin/loop-lease", () => {
       expect(run(["alive", sandbox]).status).toBe(1);
     });
 
+    it("前の版の名前で置かれた印も、この作業場のものとして読む", () => {
+      // **記録は版をまたいで共有される** (#298 のレビュー。#240 / #290 と同じ形)。
+      // **持ち主が前の版で周回を始めていると、印は前の名前で残る**——
+      // **いまの名前だけを見ると「回っていない」に落ち、生きている持ち主から
+      // Issue を取り上げる**（**この PR が消しに来たもの**が、版の側から戻ってくる）。
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: sandbox, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      // **digest を切り詰めていた版**（実物の共通ディレクトリに残っている形）
+      const truncated = scope.stdout.trim().slice(0, "worker-".length + 26);
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${truncated}`),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "前の版の印を読み落としている").toBe(0);
+    });
+
+    it("パスを畳んでいた版の印も読む", () => {
+      // **いちばん古い版**（#98 以前）。**`worker` の直後が `_` で、digest ではない**
+      const folded = `worker${sandbox.replaceAll("/", "_")}`;
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${folded}`),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status).toBe(0);
+    });
+
+    it("別の作業場の印は、この作業場のものにしない", () => {
+      // **前の版の名前も見る**ようにしたぶん、**広く拾いすぎない**ことを見る
+      // ——**他人が回っているだけで「この作業場が回っている」と答えると、
+      // 落ちた作業場の Issue が誰にも拾えなくなる**
+      const other = mkdtempSync(join(tmpdir(), "loop-lease-other-"));
+      expect(spawnSync("git", ["init", "--quiet", other]).status).toBe(0);
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: other, encoding: "utf8" });
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${scope.stdout.trim()}`),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+      rmSync(other, { recursive: true, force: true });
+
+      expect(run(["alive", sandbox]).status, "別の作業場の印を自分のものにしている").toBe(1);
+    });
+
+    it("digest の頭が短すぎる名前は、この作業場のものにしない", () => {
+      // **前の版の名前も見る**ようにしたので、**どこまでを「同じ作業場」と認めるか**を
+      // 決めておく。**2 文字の頭は 256 分の 1 で他人と当たる**——**実在した版
+      // （26 桁 / 64 桁）だけを認め、短すぎるものは別物として扱う。**
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: sandbox, encoding: "utf8" });
+      const tooShort = scope.stdout.trim().slice(0, "worker-".length + 2);
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${tooShort}`),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "短い頭で他人と当たりうる").toBe(1);
+    });
+
+    it("知らない形の印があれば、判定できないと答える", () => {
+      // **次の版が別の名前を使うかもしれない** (#298 のレビュー)。**こちらは
+      // 「この作業場が名乗りえた名前」を数えている**ので、**知らない形は
+      // 「自分のではない」と「まだ知らない」の区別が付かない**——
+      // **回っていない側へ倒すと、また生きている持ち主から取り上げる。**
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-rounds-worker@まだ知らない形"),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "知らない形を素通りしている").toBe(2);
+    });
+
+    it("作業場そのものが消えていれば、走っていないと答える", () => {
+      // **`./task loop:worker:remove` で worktree を消しても、claim の記録は残る**
+      // (#298 のレビュー)。**「判定できない」に倒すと、公開に失敗した `in-progress` の
+      // Issue を誰も回収できない**——**消えた作業場は、回っていない。**
+      const gone = mkdtempSync(join(tmpdir(), "loop-lease-gone-"));
+      rmSync(gone, { recursive: true, force: true });
+
+      expect(run(["alive", gone]).status, "消えた作業場で止まっている").toBe(1);
+    });
+
     it("印が無ければ、走っていないと答える", () => {
       // **一度も周回を始めていない作業場**である。**引き継げなくなっては、
       // 落ちた周回の Issue が誰にも拾えない**
@@ -1492,8 +1573,10 @@ describe("bin/loop-lease", () => {
       expect(run(["alive", sandbox]).status).toBe(2);
     });
 
-    it("作業場が無ければ、判定できないと答える", () => {
-      expect(run(["alive", join(sandbox, "no-such-workspace")]).status).toBe(2);
+    it("作業場が無ければ、走っていないと答える", () => {
+      // **前は「判定できない」にしていた**が、**それだと消えた作業場の claim を
+      // 誰も回収できない** (#298 のレビュー)——**無い作業場は回っていない。**
+      expect(run(["alive", join(sandbox, "no-such-workspace")]).status).toBe(1);
     });
 
     it("窓は実測から決まる（書き写した閾値を置かない）", () => {
