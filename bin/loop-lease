@@ -64,6 +64,7 @@ usage() {
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
   echo "        bin/loop-lease ttl              期限（秒）を出す" >&2
   echo "        bin/loop-lease scope <役>       その役の記録を分ける単位（作業場）を出す" >&2
+  echo "        bin/loop-lease alive <作業場>    その作業場が周回を回しているか（読むだけ）" >&2
   echo "        役: ${ROLES[*]}" >&2
   echo "        master は役ごとに 1 つ（判定を並列にしない）" >&2
   echo "        worker は作業場ごとに 1 つ（作業場が増えたぶん並列になる）" >&2
@@ -116,8 +117,11 @@ readonly ACTION="$1"
 # **正常な master の周回のたびに「worker が飛ばした」と記録が 1 件増え、
 # 上限 20 件を偽物が埋める**（実測で確認した master の指摘）。
 # **見るのは「この周回が、どれかの役の lease を自分として持っているか」だけ**である。
+# **`alive` も役を取らない** (#296)。**見るのは作業場そのもの**で、
+# **worker の scope は作業場から作る**——**役を渡させると、呼ぶ側が
+# 「どの役の作業場か」を判断することになる**（**worker しか作業場を持たない**）。
 ROLE=""
-if [[ $ACTION != "check" ]]; then
+if [[ $ACTION != "check" && $ACTION != "alive" ]]; then
   [[ $# -ge 2 ]] || usage
   ROLE="$2"
   if ! role_is_known "$ROLE"; then
@@ -180,6 +184,56 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
 #
 # **1 度きりの組み立てにしない。** `check` は**役をまたいで**見るので、
 # **同じ組み立てを 2 度使う**——書き写すと、片方だけ直して食い違う（#159 で踏んだ）。
+# 作業場のパスから scope を作る。**式はここ 1 つ** (#296)——**`alive` も同じ名前で
+# 印を引く**ので、**書き写すと片方だけ直して食い違う** (#159 の形)。
+worker_scope_of() {
+  local path="$1" resolved digest
+  resolved="$(cd "$path" 2>/dev/null && pwd -P)" || return 2
+  digest="$(printf '%s' "$resolved" | sha256sum)" || return 2
+  [[ -n ${digest%% *} ]] || return 2
+  printf 'worker-%s' "${digest%% *}"
+}
+
+# その名前は、この作業場のものか (#298 のレビュー)。
+#
+# **記録は版をまたいで共有される**（`AGENTS.md` §5。#240 / #290 で 2 度踏んだ）——
+# **持ち主が前の版で周回を始めていると、印は前の名前で残る。** **いまの名前だけを見ると
+# 「回っていない」に落ち、生きている持ち主から Issue を取り上げる**（**この直しが
+# 消しに来たものが、版の側から戻ってくる**）。
+#
+# **前の名前は、こちらから組み立てる**——**残っている名前を解釈するのではなく、
+# 「この作業場が名乗りえた名前」を数える**（**他人の印を自分のものにしない**）。
+#
+#   worker<パスの / を _ にしたもの>  … #98 以前
+#   worker-<digest の頭>              … 切り詰めていた版（実物に 26 桁が残っている）
+#   worker-<digest 64 桁>             … いまの版
+# その名前は、**こちらが知っている形か** (#298 のレビュー)。
+#
+# **知らない形は「自分のではない」と「まだ知らない」の区別が付かない**——
+# **次の版が別の名前を使えば、この作業場の印がそこに入りうる。**
+# **回っていない側へ倒すと、また生きている持ち主から取り上げる**ので、
+# **判定できない側へ倒す**（呼ぶ側は引き継がない）。
+worker_name_is_known_form() {
+  local name="$1" hex
+  [[ $name == worker_* ]] && return 0   # パスを畳んだ版
+  [[ $name == worker-* ]] || return 1
+  hex="${name#worker-}"
+  [[ $hex =~ ^[0-9a-f]+$ ]]             # digest（頭でも全部でも）
+}
+
+worker_name_is_mine() {
+  local name="$1" resolved="$2" digest hex
+  [[ $name == "worker${resolved//\//_}" ]] && return 0
+  [[ $name == worker-* ]] || return 1
+  hex="${name#worker-}"
+  [[ $hex =~ ^[0-9a-f]+$ ]] || return 1
+  # **短すぎる頭では照合しない**（**別の作業場と当たりうる**）
+  ((${#hex} >= 8)) || return 1
+  digest="$(printf '%s' "$resolved" | sha256sum)" || return 1
+  digest="${digest%% *}"
+  [[ $digest == "$hex"* ]]
+}
+
 set_role_paths() {
   local role="$1" toplevel digest
   lease_scope="$role"
@@ -549,6 +603,107 @@ if [[ $ACTION == "scope" ]]; then
   set_role_paths "$ROLE" || exit 2
   printf '%s\n' "$lease_scope"
   exit 0
+fi
+
+# **その作業場が周回を回しているか** (#296)。
+#
+# **`bin/loop-claim` は「claim の記録を触った時刻」で測っていた**——**PR を持つ worker は
+# `mine <PR>` からステップ 3 へ入り `resume` を打たない**ので、**作業場が生きていても
+# 記録だけ古くなり、着手中の Issue を取り上げてしまう**（2026-08-15 に実測）。
+#
+# **測るのは周回の印**（`acquire` が書き、**返しても消さない**）——**lease と違って
+# 周回と周回の間でも読める**ので、**「次の周回で戻ってくる作業場」を生きていると読める。**
+# **窓の式は `bin/loop-stall` と同じ**（**いちばん長かった周回の 2 倍。既定は lease の期限**）。
+#
+#   exit 0 = 回っている / exit 1 = 回っていない / exit 2 = 判定できない
+#
+# **「読めない」を「回っていない」に倒さない**——**取り上げる側へ倒れる。**
+if [[ $ACTION == "alive" ]]; then
+  [[ $# -eq 2 ]] || usage
+  # **消えた作業場は、回っていない** (#298 のレビュー)。**`./task loop:worker:remove` で
+  # worktree を消しても claim の記録は残る**ので、**「判定できない」に倒すと、
+  # 公開に失敗した `in-progress` の Issue を誰も回収できない。**
+  [[ -d $2 ]] || exit 1
+  if ! alive_path="$(cd "$2" 2>/dev/null && pwd -P)" || [[ -z $alive_path ]]; then
+    echo "[FAIL] 作業場を特定できません: $2" >&2
+    exit 2
+  fi
+  # **先に lease を見る** (#298 の 2 周目のレビュー)。**印は「周回を始めた」しか
+  # 言わない**——**`acquire` が書いたきり途中で更新されず、実測は `release` まで
+  # 書かれない**ので、**初めての周回と、過去より長い周回は走っている最中に窓から出る。**
+  # **当たるのはいちばん守りたい側**（長い実装を抱えた周回。#129 / #142 と同じ形）。
+  #
+  # **lease は「いま走っている」を言う**——**別のことを測っているので、併せて見る。**
+  # **活動の記録そのものは見ない**（`bin/loop-stall` が避けた理由がそのまま当たる。
+  # **人が `./task` を叩いても新しくなる**）——**#283 で heartbeat は持ち主に限られた**
+  # ので、**lease を握っているかどうかは信じてよい。**
+  for alive_state in "$common_dir/valence-loop-lease-worker"*; do
+    [[ -f $alive_state ]] || continue
+    [[ $alive_state != *.lock ]] || continue
+    # **期限の判定を書き写さない。** `read_lease` が 1 箇所で持っている（`busy` と同じ）
+    lease_scope="${alive_state##*/valence-loop-lease-}"
+    SCOPE_LABEL="$lease_scope"
+    STATE="$alive_state"
+    ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+    lock_state || exit 2
+    read_lease quiet || {
+      exec 9>&-
+      exit 2
+    }
+    exec 9>&-
+    [[ -n $held_token ]] || continue
+    # **どの作業場かは、名前ではなく中身で照らす** (#291)。**帰属できない lease は
+    # この作業場のものかもしれない**ので、**「走っていない」へ倒さない**——
+    # **印と違って lease は期限で切れる**ので、**待たせても永久には残らない。**
+    if [[ -z $held_workspace ]]; then
+      echo "[FAIL] 走っている lease に作業場が入っていません: $alive_state" >&2
+      echo "       この作業場のものか判定できません" >&2
+      exit 2
+    fi
+    [[ $held_workspace == "$alive_path" ]] && exit 0
+  done
+  # **前の版の名前も見る**（`worker_name_is_mine`）。**印が無いのは「一度も周回を
+  # 始めていない」**である——**引き継げなくなると、落ちた周回の Issue を誰も拾えない**
+  # ので、**回っていない側へ倒す。**
+  alive_unknown=0
+  alive_known_mine=0
+  for alive_rounds in "$common_dir"/valence-loop-rounds-worker*; do
+    [[ -f $alive_rounds ]] || continue
+    alive_name="${alive_rounds##*/valence-loop-rounds-}"
+    if ! worker_name_is_mine "$alive_name" "$alive_path"; then
+      # **知らない形は素通りしない**（上記）。**この作業場のものかもしれない**
+      worker_name_is_known_form "$alive_name" || alive_unknown=1
+      continue
+    fi
+    # **この作業場の名乗りが 1 つでも見えたか**（下の「判定できない」を狭める）
+    alive_known_mine=1
+    if ! read -r alive_started <"$alive_rounds" 2>/dev/null \
+      || ! [[ $alive_started =~ ^[0-9]+$ ]]; then
+      echo "[FAIL] 周回の印を読めません: $alive_rounds" >&2
+      exit 2
+    fi
+    # **実測があれば、それで窓を広げる**（**長い周回の途中で「死んだ」に落とさない**）
+    alive_window="$TTL_SEC"
+    alive_len="${alive_rounds/valence-loop-rounds-/valence-loop-roundlen-}"
+    if [[ -f $alive_len ]] && read -r alive_seconds <"$alive_len" 2>/dev/null \
+      && [[ $alive_seconds =~ ^[0-9]+$ ]]; then
+      ((alive_seconds * 2 <= alive_window)) || alive_window=$((alive_seconds * 2))
+    fi
+    # **1 つでも窓の内なら回っている**（**前の版で始めた周回も、いまの周回である**）
+    ((now - alive_started < alive_window)) && exit 0
+  done
+  # **知らない形を、無関係な作業場の判定にまで混ぜない** (#298 の 2 周目のレビュー)。
+  # **印は消えない**ので、**1 つ置かれた瞬間からどの作業場も判定できなくなり、
+  # 落ちた持ち主の `in-progress` を誰も回収できない**——**「取り上げるより待つ」は
+  # 正しいが、待ち続けて誰も拾えないのは別の壊れ方**である（#291 の「消せない保留」）。
+  #
+  # **この作業場の名乗りが既に見えているなら、知らない形はその作業場のものではない。**
+  # **走っている周回は、上の lease で捕まる。**
+  if ((alive_unknown == 1 && alive_known_mine == 0)); then
+    echo "[FAIL] 知らない形の周回の印があります（この作業場のものか判定できません）" >&2
+    exit 2
+  fi
+  exit 1
 fi
 
 if [[ $ACTION == "busy" ]]; then

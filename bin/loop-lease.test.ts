@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -1445,6 +1446,219 @@ describe("bin/loop-lease", () => {
       rmSync(repo, { recursive: true, force: true });
 
       expect(activity).toHaveLength(1);
+    });
+  });
+
+  describe("alive — その作業場が周回を回しているか", () => {
+    // **生死の判定を 1 箇所に置く** (#296)。**`bin/loop-claim` は「claim の記録を
+    // 触った時刻」で測っていた**——**PR を持つ worker は `resume` を打たない**ので、
+    // **作業場が生きていても記録だけ古くなり、着手中の Issue を取り上げてしまう**
+    // （2026-08-15 に実測）。
+    //
+    // **測るものは「周回を始めた印」**である（`bin/loop-stall` が使っているものと同じ）。
+    // **lease と違って、返しても消えない**ので、**周回と周回の間でも読める。**
+
+    /** その作業場の周回の印を、指定の時刻で置く。**名前の作り方は写さない。** */
+    function markRound(dir: string, epoch: number | string): void {
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: dir, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${scope.stdout.trim()}`),
+        `${epoch}\n`,
+      );
+    }
+
+    it("周回の印が新しければ、走っていると答える", () => {
+      markRound(sandbox, Math.floor(Date.now() / 1000));
+
+      expect(run(["alive", sandbox]).status).toBe(0);
+    });
+
+    it("印が窓より古ければ、走っていないと答える", () => {
+      markRound(sandbox, Math.floor(Date.now() / 1000) - 100_000);
+
+      expect(run(["alive", sandbox]).status).toBe(1);
+    });
+
+    it("前の版の名前で置かれた印も、この作業場のものとして読む", () => {
+      // **記録は版をまたいで共有される** (#298 のレビュー。#240 / #290 と同じ形)。
+      // **持ち主が前の版で周回を始めていると、印は前の名前で残る**——
+      // **いまの名前だけを見ると「回っていない」に落ち、生きている持ち主から
+      // Issue を取り上げる**（**この PR が消しに来たもの**が、版の側から戻ってくる）。
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: sandbox, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      // **digest を切り詰めていた版**（実物の共通ディレクトリに残っている形）
+      const truncated = scope.stdout.trim().slice(0, "worker-".length + 26);
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${truncated}`),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "前の版の印を読み落としている").toBe(0);
+    });
+
+    it("パスを畳んでいた版の印も読む", () => {
+      // **いちばん古い版**（#98 以前）。**`worker` の直後が `_` で、digest ではない**
+      const folded = `worker${sandbox.replaceAll("/", "_")}`;
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${folded}`),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status).toBe(0);
+    });
+
+    it("別の作業場の印は、この作業場のものにしない", () => {
+      // **前の版の名前も見る**ようにしたぶん、**広く拾いすぎない**ことを見る
+      // ——**他人が回っているだけで「この作業場が回っている」と答えると、
+      // 落ちた作業場の Issue が誰にも拾えなくなる**
+      const other = mkdtempSync(join(tmpdir(), "loop-lease-other-"));
+      expect(spawnSync("git", ["init", "--quiet", other]).status).toBe(0);
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: other, encoding: "utf8" });
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${scope.stdout.trim()}`),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+      rmSync(other, { recursive: true, force: true });
+
+      expect(run(["alive", sandbox]).status, "別の作業場の印を自分のものにしている").toBe(1);
+    });
+
+    it("digest の頭が短すぎる名前は、この作業場のものにしない", () => {
+      // **前の版の名前も見る**ようにしたので、**どこまでを「同じ作業場」と認めるか**を
+      // 決めておく。**2 文字の頭は 256 分の 1 で他人と当たる**——**実在した版
+      // （26 桁 / 64 桁）だけを認め、短すぎるものは別物として扱う。**
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: sandbox, encoding: "utf8" });
+      const tooShort = scope.stdout.trim().slice(0, "worker-".length + 2);
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-rounds-${tooShort}`),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "短い頭で他人と当たりうる").toBe(1);
+    });
+
+    it("自分の印が 1 つも無いところに知らない形があれば、判定できないと答える", () => {
+      // **次の版が別の名前を使うかもしれない** (#298 のレビュー)。**こちらは
+      // 「この作業場が名乗りえた名前」を数えている**ので、**知らない形は
+      // 「自分のではない」と「まだ知らない」の区別が付かない**——
+      // **回っていない側へ倒すと、また生きている持ち主から取り上げる。**
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-rounds-worker@まだ知らない形"),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "知らない形を素通りしている").toBe(2);
+    });
+
+    it("自分の既知の印があるなら、知らない形が混ざっていても判定できる", () => {
+      // **印は消えない** (#298 の 2 周目のレビュー)。**知らない形が 1 つ置かれた
+      // 瞬間から、どの作業場についても判定できなくなる**——**`bin/loop-claim resume` は
+      // 永久に「判定できません」で、落ちた持ち主の `in-progress` を誰も回収できない。**
+      // **「取り上げるより待つ」は正しいが、待ち続けて誰も拾えないのは別の壊れ方**である。
+      //
+      // **この作業場の名乗りが既に 1 つ見えているなら、知らない形はその作業場のもの
+      // ではない**（**版が変わったなら、古い名乗りのほうが残る**）。
+      markRound(sandbox, Math.floor(Date.now() / 1000) - 100_000);
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-rounds-worker@まだ知らない形"),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(
+        run(["alive", sandbox]).status,
+        "無関係な作業場の印で、この作業場が判定できなくなっている",
+      ).toBe(1);
+    });
+
+    it("作業場そのものが消えていれば、走っていないと答える", () => {
+      // **`./task loop:worker:remove` で worktree を消しても、claim の記録は残る**
+      // (#298 のレビュー)。**「判定できない」に倒すと、公開に失敗した `in-progress` の
+      // Issue を誰も回収できない**——**消えた作業場は、回っていない。**
+      const gone = mkdtempSync(join(tmpdir(), "loop-lease-gone-"));
+      rmSync(gone, { recursive: true, force: true });
+
+      expect(run(["alive", gone]).status, "消えた作業場で止まっている").toBe(1);
+    });
+
+    it("印が無ければ、走っていないと答える", () => {
+      // **一度も周回を始めていない作業場**である。**引き継げなくなっては、
+      // 落ちた周回の Issue が誰にも拾えない**
+      expect(run(["alive", sandbox]).status).toBe(1);
+    });
+
+    it("印を読めなければ、判定できないと答える", () => {
+      // **「読めない」を「走っていない」に倒さない**——**取り上げる側へ倒れる**
+      markRound(sandbox, "こわれている");
+
+      expect(run(["alive", sandbox]).status).toBe(2);
+    });
+
+    it("作業場が無ければ、走っていないと答える", () => {
+      // **前は「判定できない」にしていた**が、**それだと消えた作業場の claim を
+      // 誰も回収できない** (#298 のレビュー)——**無い作業場は回っていない。**
+      expect(run(["alive", join(sandbox, "no-such-workspace")]).status).toBe(1);
+    });
+
+    it("印が窓から出ていても、lease を握っていれば走っていると答える", () => {
+      // **印は「周回を始めた」しか言わない** (#298 の 2 周目のレビュー)。
+      // **`acquire` が書いたきり周回の途中で更新されず、実測は `release` まで
+      // 書かれない**——**初めての周回と、過去より長い周回は、走っている最中に
+      // 窓から出る。** **当たるのはいちばん守りたい側**（長い実装を抱えた周回）で、
+      // **#296 が消しに来た穴がそのまま戻る。**
+      //
+      // **lease は「いま走っている」を言う**——**別のことを測っているので、
+      // 併せて見る。**
+      expect(acquire().status).toBe(0);
+      markRound(sandbox, Math.floor(Date.now() / 1000) - 100_000);
+
+      expect(run(["alive", sandbox]).status, "走っている周回を止まっていると読んでいる").toBe(0);
+    });
+
+    it("期限切れの lease は、走っている根拠にしない", () => {
+      // **落ちた周回の跡である。** **抱えたままの記録を「走っている」と読むと、
+      // その作業場の Issue を誰も引き継げなくなる**——**引き継ぎのために期限を
+      // 置いてあるのに、こちらだけが永久に生きていると答えることになる。**
+      const stale = Math.floor(Date.now() / 1000) - Number(run(["ttl"]).stdout.trim()) - 600;
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-lease-worker-0123456789abcdef0123456789"),
+        `deadbeef\t${stale}\np:1:1\n${realpathSync(sandbox)}\n`,
+      );
+      markRound(sandbox, stale);
+
+      expect(run(["alive", sandbox]).status, "期限切れの lease を握っていると読んでいる").toBe(1);
+    });
+
+    it("持ち主の分からない lease が握られていれば、判定できないと答える", () => {
+      // **どの作業場かは、名前ではなく中身で照らす** (#291)。**作業場の行が無い
+      // 前の版の lease は帰属できない**——**この作業場のものかもしれない**ので、
+      // **「走っていない」に倒すと、また生きている持ち主から取り上げる。**
+      //
+      // **印と違って、lease は期限で切れる**ので、**ここで待たせても永久には残らない。**
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-lease-worker-0123456789abcdef0123456789"),
+        `deadbeef\t${Math.floor(Date.now() / 1000)}\np:1:1\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "帰属できない lease を素通りしている").toBe(2);
+    });
+
+    it("窓は実測から決まる（書き写した閾値を置かない）", () => {
+      // **`bin/loop-stall` と同じ式**——**いちばん長かった周回の 2 倍**（既定は lease の期限）。
+      // **長い周回の途中で「死んだ」に落とさない**
+      const ttl = Number(run(["ttl"]).stdout.trim());
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: sandbox, encoding: "utf8" });
+      const started = Math.floor(Date.now() / 1000) - (ttl + 600);
+      markRound(sandbox, started);
+      expect(run(["alive", sandbox]).status, "実測が無ければ既定の窓で切れる").toBe(1);
+
+      // 実測（いちばん長かった周回）を置くと、窓が広がる
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-roundlen-${scope.stdout.trim()}`),
+        `${ttl + 1200}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "実測が窓に効いていない").toBe(0);
     });
   });
 

@@ -290,12 +290,19 @@ describe("bin/loop-claim", () => {
   describe("resume — in-progress の Issue を続けてよいか", () => {
     it("別の作業場が取った Issue は再開しない", () => {
       // **これが #100 のレビューで見つかった穴。** ステップ 2.2 は label しか見ておらず、
-      // **claim を通らずに実装へ入れた**。取った側がブランチを作る前の窓がそのまま重複になる
+      // **claim を通らずに実装へ入れた**。取った側がブランチを作る前の窓がそのまま重複になる。
+      //
+      // **取るのは周回の中である** (#296)。**`take` を打つのは `acquire` を通った周回**
+      // なので、**周回の印を置いてから試す**——**印の無い作業場は「回っていない」**である
       withGh({ labels: ["ready"], viewDelay: "0" });
       const other = addWorkspace("other");
       expect(run(["take", "84"], { cwd: other }).status).toBe(0);
+      const token = startRoundOutside(other);
 
-      expect(run(["resume", "84"]).status).toBe(1);
+      const resumed = run(["resume", "84"]);
+
+      endRoundOutside(other, token);
+      expect(resumed.status).toBe(1);
     });
 
     it("自分が取った Issue は再開できる", () => {
@@ -314,16 +321,64 @@ describe("bin/loop-claim", () => {
       expect(run(["resume", "84"]).status).toBe(0);
     });
 
-    it("期限を過ぎた記録は引き継げる", () => {
-      // **落ちた周回の跡である。** 黙って上書きせず、引き継いだことを標準エラーに残す
+    it("周回を回していない持ち主からは引き継げる", () => {
+      // **落ちた周回の跡である。** 黙って上書きせず、引き継いだことを標準エラーに残す。
+      //
+      // **時間では測らない** (#296)。**持ち主の作業場が周回を回しているか**で決める
+      // ——**ここでは `other` が周回を始めていない**ので、引き継げる
       withGh({ labels: ["ready"], viewDelay: "0" });
       const other = addWorkspace("other");
       expect(run(["take", "84"], { cwd: other }).status).toBe(0);
 
-      const resumed = run(["resume", "84"], { env: { LOOP_CLAIM_TTL_SEC: "0" } });
+      const resumed = run(["resume", "84"]);
 
       expect(resumed.status).toBe(0);
       expect(resumed.stderr).toContain("WARN");
+    });
+
+    it("持ち主が周回を回していれば、記録が古くても引き継がない", () => {
+      // **これが #296。** **claim の記録を触った時刻で測っていた**ので、
+      // **PR を持つ worker（`mine <PR>` からステップ 3 へ入り `resume` を打たない）**が
+      // **生きたまま Issue を取り上げられた**（2026-08-15 に実測）。
+      //
+      // **期限を 0 にしても引き継がない**——**測るものが時刻ではなくなったからである**
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      const other = addWorkspace("other");
+      expect(run(["take", "84"], { cwd: other }).status).toBe(0);
+      const token = startRoundOutside(other);
+
+      const resumed = run(["resume", "84"], { env: { LOOP_CLAIM_TTL_SEC: "0" } });
+
+      endRoundOutside(other, token);
+      expect(resumed.status, "生きている持ち主から取り上げている").toBe(1);
+      expect(resumed.stderr).toContain("実装中");
+    });
+
+    it("周回を終えた直後の持ち主からも、引き継がない", () => {
+      // **worker は周回と周回の間、lease を持っていない** (#296)。
+      // **「いま lease を握っているか」で測ると、次の周回で戻ってくる作業場から
+      // 取り上げる**——**周回の印は返しても消えない**ので、そちらで測る
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      const other = addWorkspace("other");
+      expect(run(["take", "84"], { cwd: other }).status).toBe(0);
+      endRoundOutside(other, startRoundOutside(other));
+
+      expect(run(["resume", "84"], { env: { LOOP_CLAIM_TTL_SEC: "0" } }).status).toBe(1);
+    });
+
+    it("持ち主が生きているか読めなければ、引き継がない", () => {
+      // **判定不能は、取り上げる側へ倒さない**（#296。**待つほうが安い**）
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      const other = addWorkspace("other");
+      expect(run(["take", "84"], { cwd: other }).status).toBe(0);
+      const scope = spawnSync(LEASE, ["scope", "worker"], { cwd: other, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      writeFileSync(
+        join(repo, ".git", `valence-loop-rounds-${scope.stdout.trim()}`),
+        "こわれている\n",
+      );
+
+      expect(run(["resume", "84"]).status, "読めないのに取り上げている").toBe(2);
     });
 
     it("引き継いだら、持ち主は自分になる", () => {
@@ -332,9 +387,14 @@ describe("bin/loop-claim", () => {
       withGh({ labels: ["ready"], viewDelay: "0" });
       const other = addWorkspace("other");
       expect(run(["take", "84"], { cwd: other }).status).toBe(0);
-      expect(run(["resume", "84"], { env: { LOOP_CLAIM_TTL_SEC: "0" } }).status).toBe(0);
+      // **`other` は周回を回していない**ので引き継げる（#296）
+      expect(run(["resume", "84"]).status).toBe(0);
+      const token = startRoundOutside(repo);
 
-      expect(run(["resume", "84"], { cwd: other }).status).toBe(1);
+      const back = run(["resume", "84"], { cwd: other });
+
+      endRoundOutside(repo, token);
+      expect(back.status).toBe(1);
     });
 
     it("in-progress でなければ再開しない", () => {
@@ -350,6 +410,10 @@ describe("bin/loop-claim", () => {
       // take が先なら記録の持ち主が違うので譲る
       withGh({ labels: ["ready"] });
       const other = addWorkspace("other");
+      // **取るのは周回の中である** (#296)。**`take` を打つ側は `acquire` を通っている**
+      // ので、**その印を置いてから競わせる**——**置かないと「回っていない持ち主」に
+      // なり、resume が正しく引き継いでしまう**（**競合の試験にならない**）
+      const token = startRoundOutside(other);
 
       const results = await race([
         { args: ["take", "84"], cwd: other },
@@ -358,6 +422,7 @@ describe("bin/loop-claim", () => {
         { args: ["resume", "84"] },
       ]);
 
+      endRoundOutside(other, token);
       expect(overlapped()).toBe(true);
       expect(results.filter((result) => result.status === 0)).toHaveLength(1);
     });
