@@ -628,10 +628,45 @@ if [[ $ACTION == "alive" ]]; then
     echo "[FAIL] 作業場を特定できません: $2" >&2
     exit 2
   fi
+  # **先に lease を見る** (#298 の 2 周目のレビュー)。**印は「周回を始めた」しか
+  # 言わない**——**`acquire` が書いたきり途中で更新されず、実測は `release` まで
+  # 書かれない**ので、**初めての周回と、過去より長い周回は走っている最中に窓から出る。**
+  # **当たるのはいちばん守りたい側**（長い実装を抱えた周回。#129 / #142 と同じ形）。
+  #
+  # **lease は「いま走っている」を言う**——**別のことを測っているので、併せて見る。**
+  # **活動の記録そのものは見ない**（`bin/loop-stall` が避けた理由がそのまま当たる。
+  # **人が `./task` を叩いても新しくなる**）——**#283 で heartbeat は持ち主に限られた**
+  # ので、**lease を握っているかどうかは信じてよい。**
+  for alive_state in "$common_dir/valence-loop-lease-worker"*; do
+    [[ -f $alive_state ]] || continue
+    [[ $alive_state != *.lock ]] || continue
+    # **期限の判定を書き写さない。** `read_lease` が 1 箇所で持っている（`busy` と同じ）
+    lease_scope="${alive_state##*/valence-loop-lease-}"
+    SCOPE_LABEL="$lease_scope"
+    STATE="$alive_state"
+    ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+    lock_state || exit 2
+    read_lease quiet || {
+      exec 9>&-
+      exit 2
+    }
+    exec 9>&-
+    [[ -n $held_token ]] || continue
+    # **どの作業場かは、名前ではなく中身で照らす** (#291)。**帰属できない lease は
+    # この作業場のものかもしれない**ので、**「走っていない」へ倒さない**——
+    # **印と違って lease は期限で切れる**ので、**待たせても永久には残らない。**
+    if [[ -z $held_workspace ]]; then
+      echo "[FAIL] 走っている lease に作業場が入っていません: $alive_state" >&2
+      echo "       この作業場のものか判定できません" >&2
+      exit 2
+    fi
+    [[ $held_workspace == "$alive_path" ]] && exit 0
+  done
   # **前の版の名前も見る**（`worker_name_is_mine`）。**印が無いのは「一度も周回を
   # 始めていない」**である——**引き継げなくなると、落ちた周回の Issue を誰も拾えない**
   # ので、**回っていない側へ倒す。**
   alive_unknown=0
+  alive_known_mine=0
   for alive_rounds in "$common_dir"/valence-loop-rounds-worker*; do
     [[ -f $alive_rounds ]] || continue
     alive_name="${alive_rounds##*/valence-loop-rounds-}"
@@ -640,6 +675,8 @@ if [[ $ACTION == "alive" ]]; then
       worker_name_is_known_form "$alive_name" || alive_unknown=1
       continue
     fi
+    # **この作業場の名乗りが 1 つでも見えたか**（下の「判定できない」を狭める）
+    alive_known_mine=1
     if ! read -r alive_started <"$alive_rounds" 2>/dev/null \
       || ! [[ $alive_started =~ ^[0-9]+$ ]]; then
       echo "[FAIL] 周回の印を読めません: $alive_rounds" >&2
@@ -655,7 +692,14 @@ if [[ $ACTION == "alive" ]]; then
     # **1 つでも窓の内なら回っている**（**前の版で始めた周回も、いまの周回である**）
     ((now - alive_started < alive_window)) && exit 0
   done
-  if ((alive_unknown == 1)); then
+  # **知らない形を、無関係な作業場の判定にまで混ぜない** (#298 の 2 周目のレビュー)。
+  # **印は消えない**ので、**1 つ置かれた瞬間からどの作業場も判定できなくなり、
+  # 落ちた持ち主の `in-progress` を誰も回収できない**——**「取り上げるより待つ」は
+  # 正しいが、待ち続けて誰も拾えないのは別の壊れ方**である（#291 の「消せない保留」）。
+  #
+  # **この作業場の名乗りが既に見えているなら、知らない形はその作業場のものではない。**
+  # **走っている周回は、上の lease で捕まる。**
+  if ((alive_unknown == 1 && alive_known_mine == 0)); then
     echo "[FAIL] 知らない形の周回の印があります（この作業場のものか判定できません）" >&2
     exit 2
   fi

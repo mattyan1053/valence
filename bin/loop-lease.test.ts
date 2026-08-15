@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -1537,7 +1538,7 @@ describe("bin/loop-lease", () => {
       expect(run(["alive", sandbox]).status, "短い頭で他人と当たりうる").toBe(1);
     });
 
-    it("知らない形の印があれば、判定できないと答える", () => {
+    it("自分の印が 1 つも無いところに知らない形があれば、判定できないと答える", () => {
       // **次の版が別の名前を使うかもしれない** (#298 のレビュー)。**こちらは
       // 「この作業場が名乗りえた名前」を数えている**ので、**知らない形は
       // 「自分のではない」と「まだ知らない」の区別が付かない**——
@@ -1548,6 +1549,26 @@ describe("bin/loop-lease", () => {
       );
 
       expect(run(["alive", sandbox]).status, "知らない形を素通りしている").toBe(2);
+    });
+
+    it("自分の既知の印があるなら、知らない形が混ざっていても判定できる", () => {
+      // **印は消えない** (#298 の 2 周目のレビュー)。**知らない形が 1 つ置かれた
+      // 瞬間から、どの作業場についても判定できなくなる**——**`bin/loop-claim resume` は
+      // 永久に「判定できません」で、落ちた持ち主の `in-progress` を誰も回収できない。**
+      // **「取り上げるより待つ」は正しいが、待ち続けて誰も拾えないのは別の壊れ方**である。
+      //
+      // **この作業場の名乗りが既に 1 つ見えているなら、知らない形はその作業場のもの
+      // ではない**（**版が変わったなら、古い名乗りのほうが残る**）。
+      markRound(sandbox, Math.floor(Date.now() / 1000) - 100_000);
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-rounds-worker@まだ知らない形"),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(
+        run(["alive", sandbox]).status,
+        "無関係な作業場の印で、この作業場が判定できなくなっている",
+      ).toBe(1);
     });
 
     it("作業場そのものが消えていれば、走っていないと答える", () => {
@@ -1577,6 +1598,49 @@ describe("bin/loop-lease", () => {
       // **前は「判定できない」にしていた**が、**それだと消えた作業場の claim を
       // 誰も回収できない** (#298 のレビュー)——**無い作業場は回っていない。**
       expect(run(["alive", join(sandbox, "no-such-workspace")]).status).toBe(1);
+    });
+
+    it("印が窓から出ていても、lease を握っていれば走っていると答える", () => {
+      // **印は「周回を始めた」しか言わない** (#298 の 2 周目のレビュー)。
+      // **`acquire` が書いたきり周回の途中で更新されず、実測は `release` まで
+      // 書かれない**——**初めての周回と、過去より長い周回は、走っている最中に
+      // 窓から出る。** **当たるのはいちばん守りたい側**（長い実装を抱えた周回）で、
+      // **#296 が消しに来た穴がそのまま戻る。**
+      //
+      // **lease は「いま走っている」を言う**——**別のことを測っているので、
+      // 併せて見る。**
+      expect(acquire().status).toBe(0);
+      markRound(sandbox, Math.floor(Date.now() / 1000) - 100_000);
+
+      expect(run(["alive", sandbox]).status, "走っている周回を止まっていると読んでいる").toBe(0);
+    });
+
+    it("期限切れの lease は、走っている根拠にしない", () => {
+      // **落ちた周回の跡である。** **抱えたままの記録を「走っている」と読むと、
+      // その作業場の Issue を誰も引き継げなくなる**——**引き継ぎのために期限を
+      // 置いてあるのに、こちらだけが永久に生きていると答えることになる。**
+      const stale = Math.floor(Date.now() / 1000) - Number(run(["ttl"]).stdout.trim()) - 600;
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-lease-worker-0123456789abcdef0123456789"),
+        `deadbeef\t${stale}\np:1:1\n${realpathSync(sandbox)}\n`,
+      );
+      markRound(sandbox, stale);
+
+      expect(run(["alive", sandbox]).status, "期限切れの lease を握っていると読んでいる").toBe(1);
+    });
+
+    it("持ち主の分からない lease が握られていれば、判定できないと答える", () => {
+      // **どの作業場かは、名前ではなく中身で照らす** (#291)。**作業場の行が無い
+      // 前の版の lease は帰属できない**——**この作業場のものかもしれない**ので、
+      // **「走っていない」に倒すと、また生きている持ち主から取り上げる。**
+      //
+      // **印と違って、lease は期限で切れる**ので、**ここで待たせても永久には残らない。**
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-lease-worker-0123456789abcdef0123456789"),
+        `deadbeef\t${Math.floor(Date.now() / 1000)}\np:1:1\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "帰属できない lease を素通りしている").toBe(2);
     });
 
     it("窓は実測から決まる（書き写した閾値を置かない）", () => {
