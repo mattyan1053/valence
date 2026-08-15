@@ -61,6 +61,20 @@ describe("設定を読む順番", () => {
     expect(read, "設定の読み取りが交換より後に来ている").toBeLessThan(exchange);
   });
 
+  it("ログインの経路は、App の資格を要求しない", () => {
+    // **一緒に読むと、鍵が置かれていない環境ではログインまで落ちる** (#314)
+    // ——**症状は「盤面が出ない」ではなく「入れない」**になり、
+    // **原因から最も遠い場所で止まる。** **読む場所は 1 つのまま分けておく。**
+    expect(settingsBody(), "App の資格が settings() に入っている").not.toContain(
+      "readAppCredentials",
+    );
+    expect(completeGithubLoginBody(), "ログインが App の資格を読んでいる").not.toContain(
+      "readAppCredentials",
+    );
+    const occurrences = SOURCE.split("readAppCredentials(process.env)").length - 1;
+    expect(occurrences, "App の資格を読む場所が 1 つではない").toBe(1);
+  });
+
   it("置き場は、開く手続きごと渡す", () => {
     // **開いた結果だけを渡すと、開く手前で落ちたときに `completeLogin` へ入らない**
     // ——**畳む経路が、その 1 本にだけ効かなくなる。**
