@@ -115,7 +115,18 @@ export async function viewRepositoryBoard({
     }
 
     if (isVisible(listing, repository)) {
-      return { kind: "board", plan: await plan() };
+      try {
+        return { kind: "board", plan: await plan() };
+      } catch {
+        // **`planReviewOrder` は一覧を取れないと投げる**（**空の計画にすると
+        // 「取得できなかった」が「PR が 0 件」に化ける**ため）——**そのまま通すと、
+        // 見てよい人にまでフレームワークのエラー画面が出て、
+        // 用意してある「読み込み直してください」へ届かない**（#316 のレビュー）。
+        //
+        // **`not-found` へは倒さない。** **ここへ来た時点で「見える」と分かっている**
+        // ので、**故障を「ありません」に化けさせる理由が無い。**
+        return { kind: "unavailable" };
+      }
     }
     // **判定不能を「無い」に倒さない**（§5）。**読めなかった行があるなら、
     // その中に居たかどうかを言えない**——**漏れはしない**（**`unavailable` は

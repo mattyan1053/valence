@@ -202,6 +202,24 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
     expect(board.calls, "使えないトークンのまま PR を取りに行っている").toBe(0);
   });
 
+  it("盤面を取れなかったら、案内へ倒す", async () => {
+    // **`planReviewOrder` は一覧を取れないと投げる**（**空の計画にすると
+    // 「取得できなかった」が「PR が 0 件」に化ける**ため）——**そのまま通すと、
+    // 見てよい人にまでフレームワークのエラー画面が出る**（#316 のレビュー）。
+    // **用意してある「読み込み直してください」へ届かない。**
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      plan: async () => {
+        throw new Error("PR 一覧を取得できませんでした (HTTP 502)");
+      },
+    });
+
+    expect(result).toEqual({ kind: "unavailable" });
+  });
+
   it("置き場を開けなかったら、期限切れと分ける", async () => {
     const board = plan();
 
