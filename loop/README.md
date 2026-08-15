@@ -50,8 +50,10 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
 ループの外で作られた PR には作成時の記録が無いので、master が「SHA の分からない実行」を
 1 件だけ埋める（分からない head を推測で埋めない。対応した応答は数えずに消費する）。
 
-**「着手できる作業が尽きた」も第 4 層で数える**（識別子 `no-work`）。open PR も
-`backlog` / `ready` / `in-progress` も 0 件なら、両ループは正常に動いたまま何もしない。
+**「着手できる作業が尽きた」も第 4 層で数える**（識別子 `no-work`）。open PR と
+`ready` / `in-progress` が 0 件で、**昇格できる `backlog` も無い**なら、両ループは
+正常に動いたまま何もしない。**`waiting-condition` が付いた `backlog` は数に入れない**
+——**完了条件がまだ満たせないもの**で、**残っていても渡せない**（#312）。
 これを数えないと**第 4 層が永久に発火せず、人が来るまで空回りし続ける**。
 数えるのは **master 側だけ**。worker は昇格の前後で必ず 1 周「`ready` なし」になるので、
 両側で数えると 2 倍の速さで 3 周に達する。
@@ -205,6 +207,7 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 | `ready` | **次にやる 2 件まで**（上限 2 件。#85） | master |
 | `in-progress` | worker が着手中 | worker |
 | `blocked` | 判断が要る。ループは触らない | どちらでも |
+| `waiting-condition` | **`backlog` に付ける。** いまは昇格できない（完了条件が満たせない） | master |
 | `parked` | **PR に付ける。** 待って保留中（先行 PR / 人の判断） | master |
 | `awaiting-human` | **PR に付ける。** 人の判断を待っている（`parked` と一緒に付く） | master |
 | `changes-requested` | **PR に付ける。** master が出した要求が未処理 | master |

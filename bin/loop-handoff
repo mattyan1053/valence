@@ -435,10 +435,11 @@ counts="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}
     repository(owner:$owner,name:$repo){
       ready: issues(states:OPEN, labels:["ready"], first:50){nodes{number}}
       inProgress: issues(states:OPEN, labels:["in-progress"], first:50){nodes{number}}
-      backlog: issues(states:OPEN, labels:["backlog"]){totalCount}}}' \
-  --jq '.data.repository | "\([.ready.nodes[].number] | join(","))\u001f\([.inProgress.nodes[].number] | join(","))\u001f\(.backlog.totalCount)"')" ||
+      backlog: issues(states:OPEN, labels:["backlog"]){totalCount}
+      waiting: issues(states:OPEN, labels:["backlog","waiting-condition"]){totalCount}}}' \
+  --jq '.data.repository | "\([.ready.nodes[].number] | join(","))\u001f\([.inProgress.nodes[].number] | join(","))\u001f\(.backlog.totalCount)\u001f\(.waiting.totalCount)"')" ||
   fail_unknown "Issue の件数"
-IFS="$FIELD" read -r ready_numbers progress_numbers backlog <<<"$counts"
+IFS="$FIELD" read -r ready_numbers progress_numbers backlog waiting <<<"$counts"
 
 # **報告に載せる直前だけ、直接読んで数え直す** (#285。#281 と同じ形)。
 #
@@ -472,9 +473,27 @@ count_labelled() {
 ready="$(count_labelled "ready" "$ready_numbers")" || fail_unknown "ready の label"
 in_progress="$(count_labelled "in-progress" "$progress_numbers")" || fail_unknown "in-progress の label"
 
-for count in "$ready" "$in_progress" "$backlog"; do
+for count in "$ready" "$in_progress" "$backlog" "$waiting"; do
   [[ $count =~ ^[0-9]+$ ]] || fail_unknown "件数が数値ではありません: $count"
 done
+
+# **「渡せるものが無い」と「渡す番だ」を分ける** (#312)。
+#
+# **`backlog > 0` だけを見ていたので、どちらも同じに見えていた。** **条件がまだ来て
+# いない Issue しか残っていないと、master は毎周回「昇格の番」と言われながら
+# 何も昇格させられない**——**その間 `no-work` は 1 度も積まれない**ので、
+# **3 周で人を呼ぶ仕掛けが、呼ぶべき場面で黙る**（#47 が塞いだ形が、別の場所に開いていた）。
+#
+# **判断は state から取る。** **`waiting-condition` は master が「今は渡さない」と
+# 決めた時点で付ける印**である——**記憶に置くと、セッションが落ちた時点で消え、
+# 次の周回は同じ判断をやり直すだけ**になる（どこにも出てこない）。
+#
+# **負に振れても、そのまま渡さない側へ落ちる。** **数え直しの隙間で `waiting` が
+# `backlog` を超えうる**（label の付け替えの途中）——**下の判定は `> 0` なので、
+# 負は「渡せない」へ倒れる。** **0 で丸めない**——**丸めても判定は変わらず、
+# 試験で守れない枝が 1 つ増えるだけ**である（**積みすぎても人が呼ばれるだけだが、
+# 積み損ねると誰も来ない**——**倒れる向きはこのままで正しい**）。
+promotable=$((backlog - waiting))
 
 # 判断に使う状態。**指紋もここから作る**（別の値から作ると、判断が変わっていないのに
 # 指紋だけ変わって 2 通目が飛ぶ）。
@@ -700,12 +719,12 @@ elif ((ready >= 1 && in_progress < hands)); then
   # **`backlog` は読んでいない。** **起票や昇格で動くだけ**で、渡す理由は変わらない
   branch="ready"
   witness="ready=${ready}|in-progress=${in_progress}"
-elif ((backlog > 0 && ready == 0)); then
+elif ((promotable > 0 && ready == 0)); then
   to="master"
-  reason="backlog はあるが ready が 0 件（昇格の番）"
+  reason="昇格できる backlog が ${promotable} 件あり、ready が 0 件（昇格の番）"
   # **件数までは見ない。** **「1 件でもあるか」しか判断に使っていない**
   branch="promote"
-  witness="ready=${ready}|backlog=$((backlog > 0))"
+  witness="ready=${ready}|promotable=$((promotable > 0))"
 else
   # ここは `bin/loop-stall` が `no-work` として数える領域である。
   #
@@ -715,7 +734,9 @@ else
   to=""
   reason=""
   branch="no-work"
-  witness="ready=${ready}|in-progress=${in_progress}|backlog=${backlog}"
+  # **昇格できない `backlog` は、ここへ落ちる** (#312)。**件数も残す**——
+  # **条件待ちが解けた瞬間に指紋が動く**ので、**そのとき master が起こされる**
+  witness="ready=${ready}|in-progress=${in_progress}|backlog=${backlog}|promotable=${promotable}"
 fi
 
 # **どの枝に入ったかと、その枝が読んだ入力**を 1 つの鍵にする (#274)。

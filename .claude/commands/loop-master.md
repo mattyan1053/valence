@@ -1,4 +1,4 @@
-<!-- 版: 12ac10b8549e -->
+<!-- 版: ac5511aecbf8 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -1040,7 +1040,7 @@ Issue には次を書く（`.github/ISSUE_TEMPLATE/task.yml` の形）。
 ```bash
 if ! ready="$(gh issue list --label ready --limit 200 --json number,title)" \
   || ! in_progress="$(gh issue list --label in-progress --limit 200 --json number,title)" \
-  || ! backlog="$(gh issue list --label backlog --limit 200 --search "sort:created-asc" --json number,title,body)"; then
+  || ! backlog="$(gh issue list --label backlog --limit 200 --search "sort:created-asc" --json number,title,body,labels)"; then
   bin/loop-stall issue-lookup-failed
   exit
 fi
@@ -1087,8 +1087,21 @@ printf '%s' "$parked" | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+'
   `bin/loop-stall "too-many-ready:<件数>"` を通して停止する
 - **`ready` と `in-progress`（上で除いた残り）の合計が 2 件以上** → 手は埋まっている。
   何もしない。この周回は終わり
-- **合計が 2 件未満で、`backlog` に 1 件以上** → 次の 1 件を昇格させる
-- **`backlog` も 0 件** → **着手できる作業が尽きている。** 下の「作業が尽きたとき」へ
+- **合計が 2 件未満で、`backlog` に昇格できるものが 1 件以上** → 次の 1 件を昇格させる
+- **昇格できるものが 0 件**（`backlog` が空か、**残りが全部 `waiting-condition`**）
+  → **着手できる作業が尽きている。** 下の「作業が尽きたとき」へ
+
+**`waiting-condition` が付いているものは数に入れない** (#312)。**完了条件がまだ
+満たせない Issue** で、**渡しても「まだ足りない」と書いて返ってくるだけ**である。
+
+**だから `labels` まで取る** (#313 のレビュー)。**散文で「数に入れない」と書いても、
+取得が `number,title,body` のままでは、どれが条件待ちかを判別する材料が手元に無い**
+——**出口の判定は正しく配線されていても、ここを実行する側が条件待ちを昇格させられる。**
+
+```bash
+# 昇格できる候補だけを並べる（**条件待ちを除いた `backlog`**）
+printf '%s' "$backlog" | jq -r '.[] | select(any(.labels[]; .name == "waiting-condition") | not) | "#\(.number) \(.title)"'
+```
 
 **3 人目を先回りしない。** **まず 2 人で成立させ、測ってから考える**（#80）。
 
@@ -1103,10 +1116,34 @@ gh issue edit <N> --remove-label backlog --add-label ready
 2. **無人運転を止めているもの** — 人の介入が要る状態を作っているもの
 3. **小さいもの** — 同じ効きなら、早く回るほうを先にする
 
+### 昇格できないものを、待たせておく
+
+**完了条件が「いまは満たせない」Issue は、`waiting-condition` を付けて理由を残す** (#312)。
+
+```bash
+gh issue edit <N> --add-label waiting-condition
+gh issue comment <N> --body-file <file>   # **何を待っているか**（誰が見ても分かる形で）
+```
+
+**判断を記憶に置かない。** **セッションが落ちれば消える**ので、**次の周回は同じ判断を
+やり直すだけ**になり、**「今は渡さない」と決めたことがどこにも出てこない。**
+
+**条件が満たされたら外す。** **外した瞬間に、出口が「昇格の番」と言い始める。**
+
+```bash
+gh issue edit <N> --remove-label waiting-condition
+```
+
+**外れるかどうかを、自分で確かめられる形にしておくこと。** **#80 は「マージ数が 15 件で
+測り直す」だったが、その数はループが PR を出したときだけ増える**——**`backlog` に
+それしか無ければ、渡すものが無く、PR が出ず、母数も増えない。** **永久に昇格できない
+1 件が、`no-work` を永久に抑えていた。**
+
 ### 作業が尽きたとき
 
-**open PR が 0 件で、`backlog` / `ready` / `in-progress` がすべて 0 件**なら、
-どちらのループも正常に動いたまま何もしない周回になる。ここは `bin/loop-stall` を通す。
+**open PR が 0 件で、`ready` / `in-progress` が 0 件、かつ `backlog` に昇格できるものが
+無い**（空か、**残りが全部 `waiting-condition`**）なら、どちらのループも正常に動いたまま
+何もしない周回になる。ここは `bin/loop-stall` を通す。
 
 ```bash
 bin/loop-stall no-work

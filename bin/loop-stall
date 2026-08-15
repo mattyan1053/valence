@@ -286,7 +286,7 @@ readonly STOP_IDS=(
   # **ブランチ名を入れる。** 別のブランチで起きたら数え直すのが正しく、
   # **名前は状態が同じなら変わらない**（時刻のように毎回変わる値ではない）。
   "stray-branch:<ブランチ>|master: push されたのに PR が無いブランチがある (人へ渡す)"
-  "no-work|master: 着手できる作業が無い (open PR も backlog / ready / in-progress も 0 件)"
+  "no-work|master: 着手できる作業が無い (open PR / ready / in-progress が 0 件で、昇格できる backlog も無い)"
   # 件数を付けない。**溜まるほど件数が変わる**ので、付けると連続回数が数え直しになり、
   # 3 周続いても止まらない (`bin/loop-deferred-budget` が件数を出す)。
   "deferred-overflow|master: 外出しした指摘が溜まりすぎている (deferred-finding が上限超え)"
