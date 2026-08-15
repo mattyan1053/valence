@@ -205,6 +205,7 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 | `ready` | **次にやる 2 件まで**（上限 2 件。#85） | master |
 | `in-progress` | worker が着手中 | worker |
 | `blocked` | 判断が要る。ループは触らない | どちらでも |
+| `waiting-condition` | **`backlog` に付ける。** いまは昇格できない（完了条件が満たせない） | master |
 | `parked` | **PR に付ける。** 待って保留中（先行 PR / 人の判断） | master |
 | `awaiting-human` | **PR に付ける。** 人の判断を待っている（`parked` と一緒に付く） | master |
 | `changes-requested` | **PR に付ける。** master が出した要求が未処理 | master |

@@ -131,6 +131,13 @@ type State = {
   inProgress?: number;
   backlog?: number;
   /**
+   * そのうち**いま昇格できないもの**（`backlog` かつ `waiting-condition`）。
+   *
+   * **master が「今は渡さない」と判断した印**である (#312)。**記憶に置くと、
+   * セッションが落ちた時点で消え、次の周回は同じ判断をやり直すだけ**になる。
+   */
+  waitingCondition?: number;
+  /**
    * **いま直接読んだら返る label**（番号ごと）。省くと索引と同じものが返る。
    *
    * **索引は遅れる** (#285)。**label を外した直後でも、一覧はまだ返す**——
@@ -282,6 +289,7 @@ describe("bin/loop-handoff", () => {
             readyNumbers(state).join(","),
             progressNumbers(state).join(","),
             String(state.backlog ?? 0),
+            String(state.waitingCondition ?? 0),
           ].join(FIELD),
         ),
         // **直接読んだ label。** **索引と食い違わせられる**ようにしてある
@@ -859,6 +867,42 @@ describe("bin/loop-handoff", () => {
     withState({ backlog: 3 });
 
     expect(run("worker").stdout).toMatch(/^master\t/);
+  });
+
+  it("いま昇格できないものしか無ければ、昇格の番と言わない", () => {
+    // **「渡せるものが無い」と「渡す番だ」を、`backlog > 0` で同じに見ていた** (#312)。
+    // **条件がまだ来ていない Issue しか残っていないと、master は毎周回
+    // 「昇格の番」と言われながら何も昇格させられない**——**その間 `no-work` は
+    // 1 度も積まれない**ので、**3 周で人を呼ぶ仕掛けが、呼ぶべき場面で黙る** (#47 の形)
+    withState({ backlog: 2, waitingCondition: 2 });
+
+    const handoff = run("worker");
+
+    expect(handoff.status, "渡すものが無いのに渡している").toBe(1);
+    expect(handoff.stdout, "昇格の番だと言っている").toBe("");
+  });
+
+  it("条件待ちを除いても残るなら、これまでどおり昇格の番である", () => {
+    // **止めすぎない。** **1 件でも渡せるなら、昇格は master の番のまま**である
+    withState({ backlog: 2, waitingCondition: 1 });
+
+    expect(run("worker").stdout, "渡せるものがあるのに黙っている").toMatch(/^master\t/);
+  });
+
+  it("条件待ちが `backlog` より多くても、渡せることにしない", () => {
+    // **数えられない状態は「渡せない」へ倒す** (#312 の「倒す向きは数える側」)。
+    // **引き算が負に振れたときに「渡せる」へ倒すと、鳴りっぱなしになる**——
+    // **積みすぎても人が呼ばれるだけだが、積み損ねると誰も来ない**
+    withState({ backlog: 1, waitingCondition: 3 });
+
+    expect(run("worker").status, "数えられないのに渡している").toBe(1);
+  });
+
+  it("条件待ちがあっても、`ready` があれば worker へ渡す", () => {
+    // **条件待ちは昇格の話**であって、**いま渡せる仕事の有無とは別**である
+    withState({ ready: 1, backlog: 2, waitingCondition: 2 });
+
+    expect(run("master").stdout, "ready があるのに渡していない").toMatch(/^worker\t/);
   });
 
   it("自分自身へは渡さない", () => {
