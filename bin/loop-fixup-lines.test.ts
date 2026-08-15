@@ -55,13 +55,36 @@ function run(args: string[]): Run {
   return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
+/** この PR の base ブランチ。**スレッドの問い合わせが同じ 1 回で返す。** */
+const BASE_REF = "main";
+
+/**
+ * **base を取り込んでいない普通の PR**（`files` に出てくるものは全部、枝のぶん）。
+ * **既存の試験が数え方だけを見ていられるようにするための既定**である。
+ */
+function allFilesAreBranchOnly(files: string[]): string[] {
+  return [
+    "T\\tarray",
+    ...files.filter((line) => line.startsWith("F\t")).map((line) => `B\\t${line.split("\t")[2]}`),
+  ];
+}
+
 type Fake = {
   /** compare が返す行（`T\t<型>`、`C\t<窓の中の commit>`、`F\t…`）。 */
   files: string[];
-  /** レビュースレッドの取得が返す行（`T\t<型>` と `P\t…`）。 */
+  /** レビュースレッドの取得が返す行（`R\t<base>`、`T\t<型>` と `P\t…`）。 */
   threads?: string[];
+  /**
+   * base から見た枝のぶん（`T\t<型>` と `B\t<符号化したパス>`）。
+   * **省略したら `files` に出てくるものが全部そこに居る**——**既存の試験が
+   * 数え方だけを見ていられるようにする**（base を取り込んでいない普通の PR）。
+   */
+  branchOnly?: string[];
+  /** base ブランチ名。`null` を渡すと、その行を出さない（読めない場合）。 */
+  baseRef?: string | null;
   compareExit?: number;
   threadsExit?: number;
+  branchExit?: number;
   /** 最後にレビューされた commit。短縮形も来る。 */
   reviewed?: string;
 };
@@ -106,9 +129,20 @@ function runWithLines(fake: Fake): Run {
       // **レビュースレッドの取得。** 何を「要求された変更」と見なすかを決める問い合わせで、
       // **パスは符号化したまま**受け取る（復号すると、区切りを含む名前で数が狂う）
       '  "api graphql"*)',
-      '    require "--jq" "reviewThreads" ".path" "@base64" "pageInfo" "originalCommit" "author"',
-      ...emit(fake.threads ?? ["T\\tarray"]).map((line) => `    ${line}`),
+      // **base ブランチ名も同じ 1 回で受け取る**（#299）——**別の呼び出しにすると、
+      // 2 回の間に base が付け替えられたときに食い違う**
+      '    require "--jq" "reviewThreads" ".path" "@base64" "pageInfo" "originalCommit" "author" "baseRefName"',
+      ...emit([
+        ...(fake.baseRef === null ? [] : [`R\\t${fake.baseRef ?? BASE_REF}`]),
+        ...(fake.threads ?? ["T\\tarray"]),
+      ]).map((line) => `    ${line}`),
       `    exit ${fake.threadsExit ?? 0}`,
+      "    ;;",
+      // **base から見た枝のぶん**（#299）。**三点比較なので、base から入ったものは出ない**
+      `  *"compare/${fake.baseRef ?? BASE_REF}..."*)`,
+      '    require "--jq" ".filename" "@base64"',
+      ...emit(fake.branchOnly ?? allFilesAreBranchOnly(fake.files)).map((line) => `    ${line}`),
+      `    exit ${fake.branchExit ?? 0}`,
       "    ;;",
       "  *)",
       // **--jq の式まで見る。** ファイル名を符号化しているのは gh 側の --jq なので、
@@ -677,8 +711,11 @@ describe("bin/loop-fixup-lines が gh に渡す判定式", () => {
    */
   const EXPECTED_FILES_JQ = `"T\\t\\(.files | type)", (.commits[]? | "C\\t\\(.sha)"), (.files[]? | "F\\t\\(.filename | endswith(".test.ts"))\\t\\(.filename | @base64)\\t\\(.additions)\\t\\(.deletions)"), (.files[]? | select(.status == "added") | "N\\t\\(.filename | @base64)"), (.files[]? | "D\\t\\(.filename | @base64)\\t\\((.patch // "") | @base64)")`;
 
-  /** レビュースレッドの側も同じ理由で固定する。 */
-  const EXPECTED_THREADS_JQ = `"T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\((.comments.nodes[0].originalCommit.oid) // "-")\\t\\((.comments.nodes[0].author.login) // "-")\\t\\(.path | @base64)")`;
+  /** レビュースレッドの側も同じ理由で固定する（base ブランチ名も同じ 1 回で取る）。 */
+  const EXPECTED_THREADS_JQ = `"R\\t\\((.data.repository.pullRequest.baseRefName) // "-")", "T\\t\\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\\t\\((.comments.nodes[0].originalCommit.oid) // "-")\\t\\((.comments.nodes[0].author.login) // "-")\\t\\(.path | @base64)")`;
+
+  /** base から見た枝のぶん（#299）。**ここも生の値だけを出させる。** */
+  const EXPECTED_BRANCH_JQ = `"T\\t\\(.files | type)", (.files[]? | "B\\t\\(.filename | @base64)")`;
 
   it("判定式が想定どおりであること", () => {
     const script = readFileSync(SCRIPT, "utf8");
@@ -687,6 +724,7 @@ describe("bin/loop-fixup-lines が gh に渡す判定式", () => {
 
     expect(found).toContain(EXPECTED_FILES_JQ);
     expect(found).toContain(EXPECTED_THREADS_JQ);
+    expect(found).toContain(EXPECTED_BRANCH_JQ);
   });
 });
 
@@ -730,6 +768,103 @@ describe("bin/loop-fixup-lines の files 検査", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe("0\t0\t0");
+  });
+});
+
+describe("bin/loop-fixup-lines は base から入った変更を数えない", () => {
+  // **base を取り込むと、第 3 層が必ず超える** (#299)。**取り込んだぶんを
+  // 「レビュー後の本体変更」として数えていた**——**そのぶんは別の PR として
+  // レビューされ、既に main に入っているもの**である。
+  //
+  // **実測（2026-08-15、#295）**: 枝の中身はレビュー時と同じなのに、
+  // **370 行（#294 の中身）**を手直しと数えて人の判断へ回した。
+  //
+  // **窓（レビュー済み commit → head）の比較では外せない。** **レビュー済み commit は
+  // head の祖先**なので、**三点比較にしても merge-base はそこ**——**base のぶんは必ず出る。**
+  // **外れるのは、base から見た枝のぶん（`base...head`）に出てこないファイル**である。
+
+  /** base から見て枝に出てくるファイル（`B\t<符号化したパス>`）。 */
+  function branchFiles(...paths: string[]): string[] {
+    return ["T\tarray", ...paths.map((path) => `B\t${b64(path)}`)];
+  }
+
+  it("base を取り込んだだけのファイルは数えない", () => {
+    const result = runWithLines({
+      files: [
+        "T\tarray",
+        row("bin/loop-handoff", false, 370, 0), // base から入った（#294 の中身）
+        row("bin/loop-lease", false, 12, 3), // 枝で直した
+      ],
+      branchOnly: branchFiles("bin/loop-lease"),
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "base のぶんを手直しとして数えている").toBe("15\t0\t0");
+  });
+
+  it("枝のぶんが上限を超えるときは、これまでどおり全部数える", () => {
+    // **緩めるのは base 由来だけ**である——**枝で書いた行は 1 行も落とさない。**
+    const result = runWithLines({
+      files: ["T\tarray", row("bin/loop-gate", false, 200, 40)],
+      branchOnly: branchFiles("bin/loop-gate"),
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("240\t0\t0");
+  });
+
+  it("base から入ったテストの削除も数えない", () => {
+    // **守りが減ったことは見えなくならない**（テストの削除は数える）**が、
+    // それは枝が消したときの話**である——**別の PR が消したものを、
+    // この PR の手直しとして数えない。**
+    const result = runWithLines({
+      files: ["T\tarray", row("bin/loop-handoff.test.ts", true, 0, 80)],
+      branchOnly: branchFiles(),
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "base が消したテストを数えている").toBe("0\t0\t0");
+  });
+
+  it("base の一覧を取れなければ、0 行として返さない", () => {
+    // **「取れない」を「全部 base 由来」に倒すと、手直し量が黙って 0 になる**
+    // ——**ゲートはそれを「手直しの範囲」と読んでマージへ進む。**
+    const result = runWithLines({
+      files: ["T\tarray", row("bin/loop-gate", false, 200, 0)],
+      branchExit: 1,
+    });
+
+    expect(result.status).toBe(1);
+  });
+
+  it("base の一覧が配列でなければ、判定できないとして落ちる", () => {
+    const result = runWithLines({
+      files: ["T\tarray", row("bin/loop-gate", false, 200, 0)],
+      branchOnly: ["T\tnull"],
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("配列");
+  });
+
+  it("型の行そのものが無ければ落ちる", () => {
+    // **空を「枝のぶんが 0 件」と読むと、全部が base 由来になる**
+    const result = runWithLines({
+      files: ["T\tarray", row("bin/loop-gate", false, 200, 0)],
+      branchOnly: [],
+    });
+
+    expect(result.status).toBe(1);
+  });
+
+  it("base のブランチ名が読めなければ、判定できないとして落ちる", () => {
+    // **比べる先が分からないまま推測で `main` を使わない**——**base は PR ごとに違う。**
+    const result = runWithLines({
+      files: ["T\tarray", row("bin/loop-gate", false, 200, 0)],
+      baseRef: null,
+    });
+
+    expect(result.status).toBe(1);
   });
 });
 

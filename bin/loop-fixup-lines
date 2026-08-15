@@ -152,6 +152,7 @@ if ! threads_out="$(gh api graphql --paginate -f query='
 query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
+      baseRefName
       reviewThreads(first: 100, after: $endCursor) {
         pageInfo { hasNextPage endCursor }
         nodes { comments(first: 1) { nodes { author { login } originalCommit { oid } } } path }
@@ -159,7 +160,7 @@ query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
     }
   }
 }' -F owner='{owner}' -F repo='{repo}' -F pr="$PR" \
-  --jq '"T\t\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\t\((.comments.nodes[0].originalCommit.oid) // "-")\t\((.comments.nodes[0].author.login) // "-")\t\(.path | @base64)")' \
+  --jq '"R\t\((.data.repository.pullRequest.baseRefName) // "-")", "T\t\(.data.repository.pullRequest.reviewThreads.nodes | type)", (.data.repository.pullRequest.reviewThreads.nodes[]? | "P\t\((.comments.nodes[0].originalCommit.oid) // "-")\t\((.comments.nodes[0].author.login) // "-")\t\(.path | @base64)")' \
   2>/dev/null)"; then
   echo "[FAIL] PR #$PR のレビュースレッドを取得できません" >&2
   exit 1
@@ -171,11 +172,20 @@ thread_commits=()
 thread_authors=()
 thread_paths=()
 seen_threads=0
+base_ref=""
 # ログイン名は英数字とハイフン (と bot の `[bot]`) しか取れない。**タブや改行は入らない**
 # ので、パスと違って符号化せずに列へ出せる。形が違うものは弾く。
 readonly LOGIN_PATTERN='([A-Za-z0-9._-]+(\[bot\])?|-)'
 while IFS= read -r row; do
   [[ -n $row ]] || continue
+  if [[ $row == R$'\t'* ]]; then
+    # **base のブランチ名。** **ここで受け取るのは、スレッドと同じ 1 回で読むため**である
+    # ——**別の呼び出しにすると、2 回の間に base が付け替えられたときに食い違う。**
+    # **ref に使える文字だけを通す**（compare の URL に入る。SHA と同じ扱い）。
+    base_ref="${row#R$'\t'}"
+    [[ $base_ref =~ ^[A-Za-z0-9._/-]+$ ]] || base_ref=""
+    continue
+  fi
   if [[ $row == T$'\t'* ]]; then
     [[ $row == $'T\tarray' ]] || {
       echo "[FAIL] レビュースレッドの一覧を配列として読めません: ${row#T$'\t'}" >&2
@@ -196,6 +206,59 @@ done <<<"$threads_out"
 
 if ((seen_threads == 0)); then
   echo "[FAIL] レビュースレッドの一覧を取得できません (nodes の型が返っていません)" >&2
+  exit 1
+fi
+
+if [[ -z $base_ref ]]; then
+  echo "[FAIL] PR #$PR の base ブランチを読めません" >&2
+  exit 1
+fi
+readonly base_ref
+
+# --- base から入った変更 -------------------------------------------------------
+# **base を取り込むと、窓の差分に base のぶんが入る** (#299)。**それは別の PR として
+# レビューされ、既に base に入っているもの**である——**手直しとして数えると、
+# 中身が何も変わっていない PR が「人の判断が要ります」で止まる** (2026-08-15、#295 で実測)。
+#
+# **窓の側では外せない。** **レビュー済み commit は head の祖先**なので、
+# **三点比較にしても merge-base はそこ**——**base のぶんは必ず出る。**
+#
+# **`base...head` の三点比較なら出てこない** (merge-base は取り込んだ base の commit)。
+# **そこに出てこないファイルは、この枝が base から離れていない**ということなので、
+# **未レビューの分岐は無い**——**数えない。**
+#
+# **粒度はファイルである**（この層のほかの判断と同じ）。**枝と base が同じファイルを
+# 触っていれば、窓のぶんを丸ごと数える**——**混ざったら止まる側へ倒す。**
+if ! branch_out="$(gh api "repos/{owner}/{repo}/compare/${base_ref}...${HEAD_SHA}" \
+  --jq '"T\t\(.files | type)", (.files[]? | "B\t\(.filename | @base64)")' \
+  2>/dev/null)"; then
+  echo "[FAIL] base ($base_ref) から head までの差分を取得できません" >&2
+  exit 1
+fi
+
+declare -A branch_only=()
+seen_branch=0
+while IFS= read -r row; do
+  [[ -n $row ]] || continue
+  if [[ $row == T$'\t'* ]]; then
+    [[ $row == $'T\tarray' ]] || {
+      echo "[FAIL] base から見た差分を配列として読めません: ${row#T$'\t'}" >&2
+      exit 1
+    }
+    seen_branch=1
+    continue
+  fi
+  [[ $row =~ ^B$'\t'([A-Za-z0-9+/=]+)$ ]] || {
+    echo "[FAIL] base から見た差分のパスを読めません: $row" >&2
+    exit 1
+  }
+  branch_only["${BASH_REMATCH[1]}"]=1
+done <<<"$branch_out"
+
+# **「取れなかった」を「全部 base 由来」に倒さない。** **手直し量が黙って 0 になり、
+# ゲートはそれを「手直しの範囲」と読んでマージへ進む**（files の型を見るのと同じ理由）。
+if ((seen_branch == 0)); then
+  echo "[FAIL] base から見た差分を取得できません (files の型が返っていません)" >&2
   exit 1
 fi
 
@@ -372,6 +435,11 @@ while IFS= read -r row; do
   path_b64="${BASH_REMATCH[2]}"
   additions="${BASH_REMATCH[3]}"
   deletions="${BASH_REMATCH[4]}"
+  # **base から入っただけのファイルは、どの欄にも入れない** (#299)。**除外ではなく、
+  # この PR の変更ではない**——**テストの削除も同じ**（消したのは別の PR である）。
+  if [[ -z ${branch_only[$path_b64]-} ]]; then
+    continue
+  fi
   if [[ $is_test == "true" ]]; then
     ((counted += 10#$deletions, excluded_tests += 10#$additions))
   elif [[ -n ${requested[$path_b64]-} ]] || requested_by_reference "$path_b64"; then
