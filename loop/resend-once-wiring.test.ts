@@ -7,15 +7,24 @@
  *
  * **記録の側は既に正しい**（#258。**送れたときだけ `--sent` を通す**）ので、
  * **失敗した状態は次の周回でもう一度立ち上がる。** **問題は、その「次の周回」が
- * 30 分後だということ**である——**出口の 1 通は相手を起こすためのもの**なので、
- * **落ちると相手は自分の cron まで動かない。**
+ * 次の cron だということ**である——**出口の 1 通は相手を起こすためのもの**なので、
+ * **落ちると相手はそこまで動かない。**
  *
  * **手順書は master と worker の両方にある。** **片方だけ直すと食い違う**ので、
  * **両方を同じ走査で見る。**
  *
- * **「送り直す」を数えない。** **出口には前から「同名が複数あるときは `[ref]` を
- * 付けて送り直す」がある**ので、**語だけを探すと、何も足さなくても緑になる**
- * ——**落ちたことに紐づく段落だけを見る。**
+ * ## 語を数えない（#300 のレビュー）
+ *
+ * **最初の版は「段落のどこかに `引き直` がある」「どこかに `2 回目` がある」しか
+ * 見ていなかった**——**順序を逆に書いても、`--sent` を「通す」へ反転させても緑**である。
+ * **「待ってから送り直すとは書かない」に至っては negative しか無く、段落を丸ごと
+ * 消しても緑**だった。**名前が言っていることと、実際に測っているものが違う。**
+ *
+ * **判定を関数へ出し、実物と変異の両方を食わせる。** **変異は手で書く**——
+ * **壊れた形はコードのどこにも残らず、書いた本人しか知らない**（`AGENTS.md` §5）。
+ *
+ * **実物の手順書は壊さない。** **配られている手順書を書き換えると、走っている周回と
+ * 競る**（#186 の形）——**読み取った文字列の写しの上で変異させる。**
  */
 
 import { readFileSync } from "node:fs";
@@ -39,45 +48,134 @@ function exitSection(path: string): string {
 /**
  * **落ちたときの送り直しを説明している段落**（空行で区切られた塊）。
  *
- * **`[ref]` の言い換えと混ざらないよう、「落ちた / 失敗した」と同じ塊にあるものだけを取る。**
+ * **`[ref]` の言い換えと混ざらないよう、「落ちた / 失敗した」と同じ塊にあるものだけを取る**
+ * ——**出口には前から「同名が複数あるときは `[ref]` を付けて送り直す」がある。**
  */
-function resendParagraphs(path: string): string[] {
-  return exitSection(path)
+function resendBlocks(section: string): string[] {
+  return section
     .split(/\n\s*\n/)
     .filter((block) => /送り直/.test(block) && /落ち|失敗/.test(block));
 }
 
+/** 文に割る。**改行は跨ぐ**（手順書は 1 文を複数行に折り返している）。 */
+function sentences(text: string): string[] {
+  return text.replace(/\n/g, "").split("。");
+}
+
+type ResendRule = {
+  /** 落ちたときに送り直すと書いてあるか。 */
+  resendsWhenSendFails: boolean;
+  /** 送り直しは 1 回だけか。 */
+  onlyOnce: boolean;
+  /** **送り直す前に**宛先を引き直すか（**順序まで見る**）。 */
+  refetchesBeforeResend: boolean;
+  /** **2 回目も落ちたら `--sent` を通さない**か（**反転を弾く**）。 */
+  leavesSentUnrecordedOnSecondFailure: boolean;
+  /** **待ってから送り直す形になっていない**か。 */
+  doesNotWaitBeforeResend: boolean;
+};
+
+/**
+ * 出口の節を読んで、#293 の完了条件を満たしているかを返す。
+ *
+ * **語の有無ではなく、順序と行き先を読む。** **一致させるのは 1 文の中**である
+ * ——**別々の文に散らばっていると、片方を反転させても気づけない。**
+ */
+function readResendRule(section: string): ResendRule {
+  const blocks = resendBlocks(section);
+  const joined = blocks.join("\n");
+  const lines = blocks.flatMap((block) => sentences(block));
+
+  return {
+    resendsWhenSendFails: blocks.length > 0,
+    onlyOnce: /1 回だけ[^。]*送り直/.test(joined.replace(/\n/g, "")),
+    // **「送り直す前に…引き直す」か「引き直して(から)…送り直す」**のどちらかであること。
+    // **「送り直したあとに引き直す」は弾く**
+    refetchesBeforeResend: lines.some(
+      (line) =>
+        (/送り直[^。]*前に[^。]*引き直/.test(line) ||
+          /引き直[^。]*(てから|たうえで|た上で)[^。]*送り直/.test(line)) &&
+        !/送り直[^。]*(あと|後)に[^。]*引き直/.test(line),
+    ),
+    // **同じ文の中で「2 回目」と `--sent` と「通さない」が揃うこと。**
+    // **「通す」へ反転させると崩れる**
+    leavesSentUnrecordedOnSecondFailure: lines.some(
+      (line) => /2 回目/.test(line) && /--sent/.test(line) && /通さ(ず|ない)/.test(line),
+    ),
+    // **待ってから送り直す形が無いこと**（「送り直さない」は未然形なので当たらない）
+    doesNotWaitBeforeResend: !lines.some((line) => /待って(から)?[^。]*送り直[すし]/.test(line)),
+  };
+}
+
+/** すべて満たしている状態。 */
+const SATISFIED: ResendRule = {
+  resendsWhenSendFails: true,
+  onlyOnce: true,
+  refetchesBeforeResend: true,
+  leavesSentUnrecordedOnSecondFailure: true,
+  doesNotWaitBeforeResend: true,
+};
+
+/**
+ * **手で書いた変異。** **実物を壊さず、読み取った写しの上で当てる。**
+ *
+ * `expect` は「その変異で false に倒れる項目」。**どこか 1 つでも false になれば、
+ * この走査は壊れたことに気づける。**
+ */
+const MUTATIONS: {
+  name: string;
+  apply: (section: string) => string;
+  breaks: keyof ResendRule;
+}[] = [
+  {
+    name: "送り直しの段落を丸ごと消す",
+    apply: (section) =>
+      section
+        .split(/\n\s*\n/)
+        .filter((block) => !(/送り直/.test(block) && /落ち|失敗/.test(block)))
+        .join("\n\n"),
+    breaks: "resendsWhenSendFails",
+  },
+  {
+    name: "回数を「何度でも」にする",
+    apply: (section) => section.replace(/1 回だけ送り直す/g, "落ちなくなるまで送り直す"),
+    breaks: "onlyOnce",
+  },
+  {
+    name: "順序を逆にする（送り直したあとに引き直す）",
+    apply: (section) =>
+      section.replace(
+        /\*\*送り直す前に `ListAgents` を引き直す。\*\*/g,
+        "**送り直したあとに `ListAgents` を引き直す。**",
+      ),
+    breaks: "refetchesBeforeResend",
+  },
+  {
+    name: "2 回目でも --sent を通す形に反転させる",
+    apply: (section) =>
+      section.replace(/`--sent` を通さずに終える/g, "`--sent` を通してから終える"),
+    breaks: "leavesSentUnrecordedOnSecondFailure",
+  },
+  {
+    name: "待ってから送り直す形にする",
+    apply: (section) =>
+      section.replace(/\*\*待ってから送り直さない\*\*/g, "**少し待ってから送り直す**"),
+    breaks: "doesNotWaitBeforeResend",
+  },
+];
+
 describe("落ちたら、その周回のうちに 1 回だけ送り直す", () => {
-  it.each(PROCEDURES)("$role の出口に、落ちたら送り直すと書いてある", ({ path }) => {
-    // **書いていなければ、落ちた周回はそのまま終わる**——**相手は次の cron まで動かない**
-    expect(resendParagraphs(path), "落ちたときに送り直すと書いていない").not.toEqual([]);
+  it.each(PROCEDURES)("$role の出口が、条件をすべて満たしている", ({ path }) => {
+    expect(readResendRule(exitSection(path))).toEqual(SATISFIED);
   });
 
-  it.each(PROCEDURES)("$role は、送り直す回数を 1 回に限っている", ({ path }) => {
-    // **粘ると、そのぶん判定が遅れる**（#293 の「やらないこと」）。
-    // **落ち続けるなら、待つより次の周回に任せるほうが安い**
-    expect(resendParagraphs(path).join("\n"), "送り直しが 1 回だと読めない").toMatch(/1 回だけ/);
-  });
+  describe.each(PROCEDURES)("$role の出口を壊すと落ちる", ({ path }) => {
+    it.each(MUTATIONS)("$name", ({ apply, breaks }) => {
+      const mutated = apply(exitSection(path));
 
-  it.each(PROCEDURES)("$role は、送り直す前に宛先を引き直す", ({ path }) => {
-    // **表示名は変わる**（`valence-master-d4` → `loop-master`）。**1 通目と同じ名前を
-    // 使い回すと、名前が原因で落ちていた場合に 2 通目も必ず落ちる**
-    expect(resendParagraphs(path).join("\n"), "送り直す前に宛先を引き直すと書いていない").toMatch(
-      /引き直/,
-    );
-  });
-
-  it.each(PROCEDURES)("$role は、2 回目も落ちたら --sent を通さない", ({ path }) => {
-    // **これまでと変わっていないこと**（#258 が塞いだもの）。**握りつぶして通すと、
-    // 届いていない状態が「送信済み」になり、その状態では二度と送られない**
-    expect(resendParagraphs(path).join("\n"), "2 回目が落ちたときの行き先が無い").toMatch(/2 回目/);
-  });
-
-  it.each(PROCEDURES)("$role は、待ってから送り直すとは書かない", ({ path }) => {
-    // **周回の中で粘ると、そのぶん判定が遅れる**（#293 の「やらないこと」）。
-    // **打ち消し（「待ってから送り直さない」）と読み違えない**——**未然形は外す**
-    expect(exitSection(path), "待ってから送り直すと読める").not.toMatch(
-      /待って(から)?送り直[すし]/,
-    );
+      // **変異が当たっていること。** **置換が空振りすると、緑のまま何も試していない**
+      expect(mutated, "変異が当たっていない（手順書の文面が変わった）").not.toBe(exitSection(path));
+      expect(readResendRule(mutated)[breaks], `${breaks} が壊れたと言えていない`).toBe(false);
+    });
   });
 });
