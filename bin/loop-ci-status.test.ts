@@ -234,12 +234,32 @@ describe("bin/loop-ci-status", () => {
     return readFileSync(join(sandbox, ".git", "valence-loop-ci-firstseen-42"), "utf8");
   }
 
+  /**
+   * **コンフリクトしているか**を返す枝（#305 のレビュー）。
+   *
+   * **`on: pull_request` の実行はマージ結果（`refs/pull/N/merge`）に対して走る**ので、
+   * **コンフリクトしていると ref が作れず、実行そのものが作られない**——
+   * **「1 件も作られない＝GitHub 側の状態」という前提が、そこだけ当てはまらない。**
+   */
+  function mergeableBranch(value: string, fails: boolean): string[] {
+    return [
+      'if [[ $args == *"mergeable"* ]]; then',
+      ...(fails ? ["  exit 1"] : [`  printf '%s\\n' ${JSON.stringify(value)}`]),
+      "  exit 0",
+      "fi",
+    ];
+  }
+
   function run(options: {
     checks?: Check[];
     /** `gh` が落ちる。 */
     ghFails?: boolean;
     /** head を読めない。 */
     headFails?: boolean;
+    /** `mergeable` の値（GitHub は計算中に `UNKNOWN` を返す）。 */
+    mergeable?: string;
+    /** `mergeable` を読めない。 */
+    mergeableFails?: boolean;
     /** 指紋だけを尋ねる（`bin/loop-handoff` が使う）。 */
     fingerprint?: boolean;
   }): { status: number; stdout: string; stderr: string } {
@@ -261,6 +281,7 @@ describe("bin/loop-ci-status", () => {
         `  printf '%s\\n' "deadbeef"`,
         "  exit 0",
         "fi",
+        ...mergeableBranch(options.mergeable ?? "MERGEABLE", options.mergeableFails === true),
         ...headScriptBranch(headScriptPath),
         ...workflowBranches(),
         ...checkRunsBranch(options.checks ?? [], options.ghFails === true),
@@ -644,6 +665,54 @@ describe("bin/loop-ci-status", () => {
       });
 
       expect(result.status, "欠けを全部「人を呼ぶ」へ倒している").toBe(1);
+    });
+
+    it("コンフリクトしていれば、これまでどおり worker が直せる側へ倒す", () => {
+      // **#305 のレビュー。** **`on: pull_request` の実行はマージ結果
+      // （`refs/pull/N/merge`）に対して走る**ので、**コンフリクトしていると ref が
+      // 作れず、実行そのものが作られない**——**この PR 自身が、作られてから
+      // 45 分・head 3 回で 0 件だった**（2026-08-15、#305）。
+      //
+      // **人待ちの前提は「PR に足すもので直る保証が無い」**である。
+      // **コンフリクトはそこに当てはまらない**——**rebase すれば検査は作られる。**
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [], mergeable: "CONFLICTING" });
+
+      expect(result.status, "worker が解ける状態を人待ちへ送っている").toBe(1);
+      expect(result.stdout).toContain("コンフリクト");
+    });
+
+    it("猶予の内側でも、コンフリクトなら worker へ倒す", () => {
+      // **猶予は「そのうち作られるかもしれない」ための待ちである。**
+      // **コンフリクトしている限り作られない**ので、**待つ理由が無い。**
+      workflows([5]);
+
+      const result = run({ checks: [], mergeable: "CONFLICTING" });
+
+      expect(result.status, "作られない state を待っている").toBe(1);
+    });
+
+    it("mergeable が UNKNOWN なら、コンフリクトしていない側へ倒さない", () => {
+      // **GitHub は計算中に `UNKNOWN` を返す**（実測）。**「コンフリクトしていない」
+      // へ倒すと、計算中の PR がそのまま人待ちへ行く**——**判定できないものは
+      // 判定できないと言う。**
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [], mergeable: "UNKNOWN" });
+
+      expect(result.status, "UNKNOWN を「コンフリクトしていない」と読んでいる").toBe(2);
+    });
+
+    it("mergeable を読めなければ、判定できないとして返す", () => {
+      workflows([5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({ checks: [], mergeableFails: true });
+
+      expect(result.status).toBe(2);
     });
 
     it("観測の記録を読めなければ、判定できないとして返す", () => {
