@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -10,6 +11,66 @@ const PROCEDURE = ".claude/commands/loop-master.md";
 
 function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
+}
+
+/** その節の bash ブロック（**打つところで見る**）。 */
+function blocks(text: string): string[] {
+  return text
+    .split("```bash")
+    .slice(1)
+    .map((chunk) => chunk.split("```")[0] ?? "");
+}
+
+/**
+ * 昇格候補を取るブロックを、偽の `gh` で走らせる。
+ *
+ * **「書いてある」ではなく「走る」を見る**（`loop/fixup-limit-basis.test.ts` と同じ形）。
+ * **散文に「`waiting-condition` は数に入れない」と書いても、打つコマンドが label を
+ * 取っていなければ、実行する側には判別する材料が無い**——**実際にそうなっていた**
+ * （#313 のレビュー。**出口の判定は正しいのに、人が読んで実行するほうだけが壊れていた**）。
+ */
+function runFetch(): { status: number; stdout: string; stderr: string } {
+  const [block = ""] = blocks(read(PROCEDURE).split("## 6. 着手順を決める")[1] ?? "").filter(
+    (chunk) => chunk.includes("--label backlog"),
+  );
+  const workspace = mkdtempSync(join(tmpdir(), "promotable-"));
+  try {
+    const stub = join(workspace, "stub");
+    mkdirSync(stub, { recursive: true });
+    mkdirSync(join(workspace, "bin"), { recursive: true });
+    writeFileSync(
+      join(stub, "gh"),
+      [
+        "#!/usr/bin/env bash",
+        // **`backlog` を取るときは label まで取ること。** 取っていなければ、
+        // **どれが条件待ちかを実行する側が判別できない**
+        'if [[ $* == *"--label backlog"* ]]; then',
+        '  [[ $* == *"labels"* ]] || { echo "スタブ: backlog の label を取っていない: $*" >&2; exit 1; }',
+        `  printf '%s\\n' '[]'`,
+        "  exit 0",
+        "fi",
+        `printf '%s\\n' '[]'`,
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    // **落ちたら停止を積む側も偽物にする**（本物を呼ぶと、試験がカウンタを動かす）
+    writeFileSync(
+      join(workspace, "bin/loop-stall"),
+      ["#!/usr/bin/env bash", 'echo "stall $*" >&2', "exit 0", ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const result = spawnSync("bash", ["-c", block], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 }
 
 /** 見出しで区切った 1 節（**節の外の散文で条件が満たされない**ようにする）。 */
@@ -72,6 +133,40 @@ describe("いま昇格できない backlog", () => {
     const blocked = readme.split("\n").filter((line) => /^\|\s*`blocked`/.test(line))[0] ?? "";
 
     expect(blocked, "blocked の説明が条件待ちへ広がっている").not.toMatch(/条件/);
+  });
+
+  it("昇格候補を取るときに、印まで取っている", () => {
+    // **散文だけでは効かない** (#313 のレビュー。優先度 1)。**「`waiting-condition` は
+    // 数に入れない」と書いても、取得が `number,title,body` のままなら、
+    // 実行する側にはどれが条件待ちか分からない**——**条件待ちの Issue を `ready` へ
+    // 上げられる。** **出口の判定は正しく配線されていた**ので、
+    // **壊れていたのは人が読んで実行するほうだけ**である
+    // **終了コードでは見ない。** **取得が落ちるとブロックは `bin/loop-stall` を通って
+    // `exit` する**ので、**最後に走ったコマンドの成否がそのまま出る**——**落ちた周回でも
+    // 0 になりうる**（**この本を最初に書いたとき、実際に空振りしていた**）。
+    // **最後まで走ったときにだけ出るもの**を見る
+    const result = runFetch();
+
+    expect(result.stdout, `候補の取得が label を取っていない: ${result.stderr}`).toContain(
+      "backlog:",
+    );
+  });
+
+  it("人へ届く説明が、いまの条件と揃っている", () => {
+    // **`--list` は、止まった人が読む唯一の説明**である (#313 のレビュー。優先度 2)。
+    // **古い条件のままだと、`backlog` が 1 件あるのに「作業が無い」と言っているように
+    // 見え**、**調べる側が「見落とし」を疑って時間を使う**
+    const listed = execFileSync(join(REPO_ROOT, "bin/loop-stall"), ["--list"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    const noWork = listed.split("\n").filter((line) => line.includes("no-work"))[0] ?? "";
+
+    expect(noWork.trimStart(), "識別子そのものが変わっている").toMatch(/^no-work\s/);
+    expect(noWork, "説明が古い条件のままである").toMatch(/昇格できる/);
+    expect(read("loop/README.md"), "README が古い条件のままである").toMatch(
+      /昇格できる `backlog`|昇格できるものが/,
+    );
   });
 
   it("作業が尽きた判定が、昇格できるかで決まっている", () => {

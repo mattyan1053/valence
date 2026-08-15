@@ -1,4 +1,4 @@
-<!-- 版: 673f526ddb72 -->
+<!-- 版: ac5511aecbf8 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -1040,7 +1040,7 @@ Issue には次を書く（`.github/ISSUE_TEMPLATE/task.yml` の形）。
 ```bash
 if ! ready="$(gh issue list --label ready --limit 200 --json number,title)" \
   || ! in_progress="$(gh issue list --label in-progress --limit 200 --json number,title)" \
-  || ! backlog="$(gh issue list --label backlog --limit 200 --search "sort:created-asc" --json number,title,body)"; then
+  || ! backlog="$(gh issue list --label backlog --limit 200 --search "sort:created-asc" --json number,title,body,labels)"; then
   bin/loop-stall issue-lookup-failed
   exit
 fi
@@ -1093,6 +1093,15 @@ printf '%s' "$parked" | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+'
 
 **`waiting-condition` が付いているものは数に入れない** (#312)。**完了条件がまだ
 満たせない Issue** で、**渡しても「まだ足りない」と書いて返ってくるだけ**である。
+
+**だから `labels` まで取る** (#313 のレビュー)。**散文で「数に入れない」と書いても、
+取得が `number,title,body` のままでは、どれが条件待ちかを判別する材料が手元に無い**
+——**出口の判定は正しく配線されていても、ここを実行する側が条件待ちを昇格させられる。**
+
+```bash
+# 昇格できる候補だけを並べる（**条件待ちを除いた `backlog`**）
+printf '%s' "$backlog" | jq -r '.[] | select(any(.labels[]; .name == "waiting-condition") | not) | "#\(.number) \(.title)"'
+```
 
 **3 人目を先回りしない。** **まず 2 人で成立させ、測ってから考える**（#80）。
 
