@@ -300,12 +300,17 @@ if [[ $ACTION == "idle" ]]; then
   # **絞ったあとの数件にしか投げない**ので、往復は増えない。
   referenced_by_open_pr() {
     local number="$1" refs
-    if ! refs="$(gh api graphql -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+    # **内側の connection もページングする** (#322 のレビュー)。**`last:100` で打ち切ると、
+    # 参照が 100 件を超えた Issue で、唯一の実装 PR を取りこぼす**——**そのとき出るのは
+    # 「実装が出ていない」**で、**この PR が消しに来た誤報がそのまま戻る。**
+    # **`bin/loop-handoff` も同じ理由で内側を明示的に進めている。**
+    if ! refs="$(gh api graphql --paginate -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
       -F number="$number" \
-      -f query='query($owner:String!,$repo:String!,$number:Int!){
+      -f query='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){
         repository(owner:$owner,name:$repo){
           issue(number:$number){
-            timelineItems(itemTypes:CROSS_REFERENCED_EVENT, last:100){
+            timelineItems(itemTypes:CROSS_REFERENCED_EVENT, first:100, after:$endCursor){
+              pageInfo{hasNextPage endCursor}
               nodes{... on CrossReferencedEvent{source{... on PullRequest{
                 number state repository{nameWithOwner}}}}}}}}}' \
       --jq ".data.repository.issue.timelineItems.nodes[]

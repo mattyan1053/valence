@@ -1127,9 +1127,17 @@ describe("bin/loop-claim", () => {
       return labelsDir;
     }
 
-    /** **その Issue を参照している open PR** を、Issue ごとに置く (#321)。 */
-    function writeReferenceFixtures(referencedBy?: Record<number, number[]>): string {
-      const refsDir = join(repo, "refs-idle");
+    /**
+     * **その Issue を参照している open PR** を、Issue ごとに置く (#321)。
+     *
+     * **`dir` を分けて、1 ページ目と「その先」を書き分ける** (#322 のレビュー)
+     * ——**打ち切ったら見えないもの**を置くために要る。
+     */
+    function writeReferenceFixtures(
+      referencedBy: Record<number, number[]> | undefined,
+      dir: string,
+    ): string {
+      const refsDir = join(repo, dir);
       mkdirSync(refsDir, { recursive: true });
       for (const [number, prs] of Object.entries(referencedBy ?? {})) {
         writeFileSync(join(refsDir, number), `${prs.join("\n")}\n`);
@@ -1156,6 +1164,13 @@ describe("bin/loop-claim", () => {
        */
       referencedBy?: Record<number, number[]>;
       /**
+       * **1 ページ目より先にしか出てこない参照** (#322 のレビュー)。
+       *
+       * **内側を辿らない要求には返らない**ので、**`last:100` で打ち切る実装では
+       * 取りこぼす**——**「実装は出ているのに `stalled`」がそのまま出る。**
+       */
+      referencedBeyondFirstPage?: Record<number, number[]>;
+      /**
        * この一覧だけが読めない。**「0 件」と読み違えないこと**を見る。
        *
        * **全部の `gh` を落とさない。** **手前の呼び出しで止まると、
@@ -1170,7 +1185,11 @@ describe("bin/loop-claim", () => {
         .flatMap((pr) => pr.closes.map((number) => `${pr.repo ?? "owner/repo"}\t${number}`))
         .join("\n");
       const labelsDir = writeLabelFixtures(options);
-      const refsDir = writeReferenceFixtures(options.referencedBy);
+      const refsDir = writeReferenceFixtures(options.referencedBy, "refs-idle");
+      const refsTailDir = writeReferenceFixtures(
+        options.referencedBeyondFirstPage,
+        "refs-tail-idle",
+      );
 
       writeFileSync(
         join(path, "gh"),
@@ -1178,6 +1197,7 @@ describe("bin/loop-claim", () => {
           "#!/usr/bin/env bash",
           `labels_dir=${JSON.stringify(labelsDir)}`,
           `refs_dir=${JSON.stringify(refsDir)}`,
+          `refs_tail_dir=${JSON.stringify(refsTailDir)}`,
           ...(options.failOn === undefined
             ? []
             : [`if [[ $* == *${JSON.stringify(options.failOn)}* ]]; then exit 1; fi`]),
@@ -1197,12 +1217,21 @@ describe("bin/loop-claim", () => {
           "  exit 0",
           "fi",
           // **その Issue を参照している open PR**（#321）。**番号は `-F number=<N>` で来る**
+          //
+          // **1 ページ目と、その先を分けて置く**（#322 のレビュー）。**本物の
+          // `--paginate` は内側の `pageInfo` を辿って続きを読む**ので、
+          // **辿る形になっていない要求には、1 ページ目しか返さない**
+          // ——**「100 件で打ち切ると取りこぼす」を、そのまま再現する。**
           'if [[ $* == *"api graphql"* ]]; then',
           "  for word in $*; do",
-          '    if [[ $word == number=* && -f "$refs_dir/${word#number=}" ]]; then',
-          '      cat "$refs_dir/${word#number=}"',
-          "      exit 0",
+          "    [[ $word == number=* ]] || continue",
+          '    issue="${word#number=}"',
+          '    [[ -f "$refs_dir/$issue" ]] && cat "$refs_dir/$issue"',
+          // **続きは、内側を辿る要求にだけ返す**（`--paginate` と `pageInfo` と `after:`）
+          '    if [[ $* == *"--paginate"* && $* == *"pageInfo"* && $* == *"after:"* ]]; then',
+          '      [[ -f "$refs_tail_dir/$issue" ]] && cat "$refs_tail_dir/$issue"',
           "    fi",
+          "    exit 0",
           "  done",
           "  exit 0",
           "fi",
@@ -1274,6 +1303,24 @@ describe("bin/loop-claim", () => {
 
       expect(run(["idle"]).status).toBe(0);
       expect(run(["idle"]).stdout.split("\n")[0]).toMatch(/^stalled\t264\t/);
+    });
+
+    it("1 ページ目より先にある実装 PR も見つける", () => {
+      // **`last:100` だと、参照が 100 件を超えた Issue で唯一の実装 PR を取りこぼす**
+      // ——**「実装が出ていない」へ化ける**（#322 のレビュー）。
+      // **長く開いている親 Issue がいちばん当たりやすい**（**このループは番号を
+      // 引き合いに出しながら回る**ので、cross-reference は増え続ける）。
+      //
+      // **1 ページ目には、このリポジトリの open PR が 1 本も無い**状態を作る
+      // ——**続きを読まなければ「実装が出ていない」と答える。**
+      withIdle({
+        inProgress: [{ number: 315 }],
+        referencedBy: { 315: [] },
+        referencedBeyondFirstPage: { 315: [317] },
+      });
+      writeClaim(315, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status, "打ち切って「実装が出ていない」と答えている").toBe(1);
     });
 
     it("参照を読めなければ、黙らずに止まる", () => {
