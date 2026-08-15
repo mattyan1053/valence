@@ -102,9 +102,17 @@ type State = {
    * **`bin/loop-silent-park` が挙げるもの**を、そのまま並べる。
    */
   silentPark?: number[];
+  /** 索引が返す件数。**番号は 901.. / 951.. で作られる**（下記 `nowLabelsOf`）。 */
   ready?: number;
   inProgress?: number;
   backlog?: number;
+  /**
+   * **いま直接読んだら返る label**（番号ごと）。省くと索引と同じものが返る。
+   *
+   * **索引は遅れる** (#285)。**label を外した直後でも、一覧はまだ返す**——
+   * **そこで数えると「手が埋まっている」と読み、渡すものがあるのに黙る。**
+   */
+  nowLabelsOf?: Record<number, string[]>;
   /** `gh` が失敗する（判定不能）。 */
   fails?: boolean;
   /** その取得だけが失敗する。**最初の 1 つだけを試すと、後ろの取得を試せない。** */
@@ -191,6 +199,16 @@ describe("bin/loop-handoff", () => {
     ];
   }
 
+  /** 索引が「ready」として返す番号。**件数から作る**（試験ごとに書き分けない）。 */
+  function readyNumbers(state: State): number[] {
+    return Array.from({ length: state.ready ?? 0 }, (_, index) => 901 + index);
+  }
+
+  /** 索引が「in-progress」として返す番号。 */
+  function progressNumbers(state: State): number[] {
+    return Array.from({ length: state.inProgress ?? 0 }, (_, index) => 951 + index);
+  }
+
   function withState(state: State): void {
     // **本文は最後に置く。** 途中に置くと、本文に混じった空白で列がずれる
     const prs = (state.prs ?? [])
@@ -232,9 +250,26 @@ describe("bin/loop-handoff", () => {
         ),
         // **件数は検索を通さない口から取る。** 一覧側（下）はわざと 0 を返すので、
         // ここを見ていなければ「ready が 1 件ある」に到達しない
+        //
+        // **番号も返す** (#285)。**件数だけでは、報告の直前に確かめ直せない**
         ...answerLines(
           "totalCount",
-          `${state.ready ?? 0}${FIELD}${state.inProgress ?? 0}${FIELD}${state.backlog ?? 0}`,
+          [
+            readyNumbers(state).join(","),
+            progressNumbers(state).join(","),
+            String(state.backlog ?? 0),
+          ].join(FIELD),
+        ),
+        // **直接読んだ label。** **索引と食い違わせられる**ようにしてある
+        ...[...readyNumbers(state), ...progressNumbers(state)].flatMap((number) =>
+          answerLines(
+            `issue view ${number}`,
+            (
+              state.nowLabelsOf?.[number] ?? [
+                readyNumbers(state).includes(number) ? "ready" : "in-progress",
+              ]
+            ).join("\n"),
+          ),
         ),
         // **CI は PR ごとに引く**（判定は `bin/loop-ci-status` が持つ）。
         // **名前は @base64 で受け渡す**——区切りを含む job 名で行を増やされないため
@@ -425,6 +460,26 @@ describe("bin/loop-handoff", () => {
 
       expect(second.status, "指紋が変わらず、直したのに黙っている").toBe(0);
       expect(second.stdout).toMatch(/^worker\t/);
+    });
+
+    it("索引が遅れていても、いま着手中でなければ数えない", () => {
+      // **これが本題** (#285)。**マージした周回の出口で起きる**——**閉じた Issue から
+      // `in-progress` を外した数コマンド後**に打つと、**索引はまだ返す。**
+      // **そこで「手が埋まっている」と読むと、渡すものがあるのに黙る**——
+      // **worker は次の cron まで動かない**（実測で同じ日に 3 回）。
+      withState({ ready: 1, inProgress: 1, nowLabelsOf: { 951: [] } });
+
+      const handoff = run("master");
+
+      expect(handoff.status, "渡すものがあるのに送らないと判定している").toBe(0);
+      expect(handoff.stdout, "worker へ渡していない").toMatch(/^worker\t/);
+    });
+
+    it("label を読み直せなければ、送らない側へ倒さない", () => {
+      // **「0 件」に倒さない**（#281 と同じ判断）——**読めないあいだ黙る**
+      withState({ ready: 1, inProgress: 1, failsOn: "issue view" });
+
+      expect(run("master").status).toBe(2);
     });
 
     it("理由が投稿されている保留では、何も言わない", () => {
