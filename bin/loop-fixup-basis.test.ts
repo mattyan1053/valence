@@ -21,10 +21,60 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
  *
  * **測る側は偽物にするが、記録は本物を置く。** **写しを作ると、写しだけを見て緑になる。**
  */
-function run(options: { lying?: string; failing?: string; record?: string } = {}) {
+function run(
+  options: {
+    lying?: string;
+    failing?: string;
+    record?: string;
+    /** その PR のマージ commit が、記録と違う値で返る。 */
+    otherMerge?: string;
+    /** その PR がマージされていない（人の結論は `main` の履歴に無い）。 */
+    notMerged?: string;
+    /** そのマージ commit が `main` の履歴に含まれていない。 */
+    notInHistory?: string;
+    /** `gh` そのものが落ちる。 */
+    ghFails?: boolean;
+  } = {},
+) {
   const workspace = mkdtempSync(join(tmpdir(), "fixup-basis-"));
   try {
     mkdirSync(join(workspace, "bin"), { recursive: true });
+    // **`gh` は偽物。** **本物を叩くのは CI の専用 job の仕事**で、
+    // **ここで見るのは「照合する側が働くか」**である
+    const stub = join(workspace, "stub");
+    mkdirSync(stub, { recursive: true });
+    const recorded = readExamples(readFileSync(join(REPO_ROOT, "bin/loop-gate"), "utf8"));
+    writeFileSync(
+      join(stub, "gh"),
+      [
+        "#!/usr/bin/env bash",
+        ...(options.ghFails ? ["exit 1"] : []),
+        'if [[ $* == *"mergeCommit"* ]]; then',
+        "  case $* in",
+        ...recorded.map(
+          (example) =>
+            `    *" ${example.pr} "*) printf '%s\\t%s\\n' ` +
+            `"${options.notMerged === example.pr ? "CLOSED" : "MERGED"}" ` +
+            `"${options.otherMerge === example.pr ? "f".repeat(40) : example.merge}" ;;`,
+        ),
+        '    *) echo "スタブ: 知らない PR: $*" >&2; exit 1 ;;',
+        "  esac",
+        "  exit 0",
+        "fi",
+        'if [[ $* == *"compare/"* ]]; then',
+        "  case $* in",
+        ...recorded
+          .filter((example) => options.notInHistory === example.pr)
+          .map((example) => `    *"${example.merge}"*) printf 'diverged\\n'; exit 0 ;;`),
+        "    *) printf 'ahead\\n'; exit 0 ;;",
+        "  esac",
+        "fi",
+        'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
     for (const name of ["loop-fixup-basis", "loop-gate"]) {
       writeFileSync(
         join(workspace, "bin", name),
@@ -62,6 +112,7 @@ function run(options: { lying?: string; failing?: string; record?: string } = {}
     const result = spawnSync(join(workspace, "bin/loop-fixup-basis"), [], {
       cwd: workspace,
       encoding: "utf8",
+      env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
     });
     return { ...result, status: result.status ?? -1 };
   } finally {
@@ -103,6 +154,42 @@ describe("記録した実例を、測り直して突き合わせる", () => {
     const result = run({ failing: first().pr });
 
     expect(result.status, "測れなかったのに通っている").not.toBe(0);
+  });
+
+  it("マージ commit が、その PR のものでなければ落ちる", () => {
+    // **前の周回で潰したのは「測った値」のほう**（#309 のレビュー 2 周目）。
+    // **マージ commit の列は空でないことしか見ておらず、`$merge` は 1 度も使われなかった**
+    // ——**無関係な 40 桁へ差し替えても「一致」で終わる**
+    const result = run({ otherMerge: first().pr });
+
+    expect(result.status, "別の commit なのに通っている").not.toBe(0);
+    expect(result.stderr, "どの記録が食い違うのかが出ない").toContain(first().pr);
+  });
+
+  it("マージされていない PR は、人の結論として通らない", () => {
+    // **この列が持っているのは「人が通した」という結論**である——
+    // **`main` の履歴に残ることがその証拠**なので、**閉じただけの PR では成り立たない**
+    const result = run({ notMerged: first().pr });
+
+    expect(result.status, "マージされていないのに通っている").not.toBe(0);
+  });
+
+  it("マージ commit が `main` の履歴に無ければ落ちる", () => {
+    // **PR が指す commit であることと、それが残っていることは別**である——
+    // **`compare` の `status` で見る。** **squash マージなので head や
+    // レビュー済み SHA は `main` に無く、履歴で確かめられるのはこの列だけ**
+    const result = run({ notInHistory: first().pr });
+
+    expect(result.status, "履歴に無いのに通っている").not.toBe(0);
+  });
+
+  it("確かめられなかったら、「一致」にしない", () => {
+    // **`gh` が落ちたのを飛ばすと、確かめていない行が照合済みになる**——
+    // **測り直せなかったときと同じ扱いにする**
+    const result = run({ ghFails: true });
+
+    expect(result.status, "確かめられていないのに通っている").not.toBe(0);
+    expect(result.stdout, "確かめていない行を「一致」と書いている").not.toContain("一致");
   });
 
   it("記録が 1 行も無ければ、照合できたことにしない", () => {
