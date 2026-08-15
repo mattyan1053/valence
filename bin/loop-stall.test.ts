@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -884,10 +885,11 @@ describe("worker が作業しているあいだは数えない", () => {
   /** worker が解く状態の識別子（`bin/loop-stall` の `WORKER_FIXES` にあるもの）。 */
   const WORKER_FIXES_ID = "awaiting-worker:142@abc1234";
 
-  function stall(id = WORKER_FIXES_ID): Run {
+  function stall(id = WORKER_FIXES_ID, env: NodeJS.ProcessEnv = process.env): Run {
     const result = spawnSync(join(repo, "bin", "loop-stall"), [id], {
       cwd: repo,
       encoding: "utf8",
+      env,
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
@@ -966,12 +968,26 @@ describe("worker が作業しているあいだは数えない", () => {
   }
 
   /** いま数えられている作業場の数（`bin/loop-handoff` が訊く口）。 */
-  function aliveWorkers(): Run {
+  function aliveWorkers(env: NodeJS.ProcessEnv = process.env): Run {
     const result = spawnSync(join(repo, "bin", "loop-stall"), ["--alive-workers"], {
       cwd: repo,
       encoding: "utf8",
+      env,
     });
     return { status: result.status ?? -1, stdout: result.stdout.trim(), stderr: result.stderr };
+  }
+
+  /**
+   * **`dirname` が引けない環境**（#304）。**PATH の先頭に落ちる `dirname` を置く。**
+   *
+   * **一覧から外すのではなく、落とす。** **必要な道具を数え上げると、その一覧自体が
+   * 試験の前提になる**——**本物が新しい道具を使い始めると、一覧の側だけが古くなる。**
+   */
+  function withoutDirname(): NodeJS.ProcessEnv {
+    const stubs = join(repo, "stubs");
+    mkdirSync(stubs, { recursive: true });
+    writeFileSync(join(stubs, "dirname"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+    return { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` };
   }
 
   describe("生きている作業場の数え方", () => {
@@ -1011,6 +1027,92 @@ describe("worker が作業しているあいだは数えない", () => {
       expect(stall().stderr + stall().stdout, "上限が生きている作業場を映していない").toContain(
         "max=4",
       );
+    });
+  });
+
+  /**
+   * **数えられなかったことが「0 件」に化けていた**（#304）。
+   *
+   * **`script_dir` は `dirname` で決めていた**ので、**引けないと空になる**——
+   * **`scan_alive_scopes` は即座に return し、`alive_scopes` は空のまま**である。
+   * **倒れる先が両方とも「気づけない側」**：**上限は下限の 3 に張り付き**（正常時と
+   * 同じ見た目）、**`--alive-workers` は 0 を返す**（呼ぶ側は手 1 本へ倒す）。
+   *
+   * **実際に踏んでいる**（PR #303 の試験の制限 PATH に `dirname` が無かった）。
+   */
+  describe("数える道具が引けなくても、黙って 0 件にしない", () => {
+    /** 2 つとも生きている状態。**1 つだと上限が下限の 3 に丸められ、判別できない。** */
+    function twoAliveWorkspaces(): void {
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
+      holdPastWindow(addWorkspace());
+    }
+
+    it("dirname が引けなくても、同じ数を数える", () => {
+      twoAliveWorkspaces();
+
+      // **引ける状態の答えを先に取る**——**片方だけ見ると、2 になるべきかが分からない**
+      expect(aliveWorkers().stdout, "前提が崩れている").toBe("2");
+      expect(aliveWorkers(withoutDirname()).stdout, "dirname が引けないと 0 件に化ける").toBe("2");
+    });
+
+    it("dirname が引けなくても、上限は同じ", () => {
+      twoAliveWorkspaces();
+
+      const broken = stall(WORKER_FIXES_ID, withoutDirname());
+
+      expect(broken.stderr + broken.stdout, "上限が下限へ張り付いている").toContain("max=4");
+    });
+
+    /**
+     * **期限を答えない `bin/loop-lease`。** **窓の広さが分からなければ、生死は言えない。**
+     *
+     * **消さずに、答えない形にする**——**`bin/loop-stall` はこの作業場の名前も
+     * `bin/loop-lease` へ訊く**ので、**丸ごと消すと数える手前で落ちる**（**見たいのは
+     * 「数えられなかったまま先へ進む」ほう**である）。
+     */
+    function leaseWithoutTtl(): void {
+      const lease = join(repo, "bin", "loop-lease");
+      const real = join(repo, "bin", "loop-lease-real");
+      renameSync(lease, real);
+      writeFileSync(
+        lease,
+        `#!/usr/bin/env bash\n[[ \${1-} == ttl ]] && exit 1\nexec '${real}' "$@"\n`,
+        { mode: 0o755 },
+      );
+    }
+
+    it("数えられなかったときは、0 件と見分けが付く", () => {
+      // **生きている作業場を作ってから、数える手立てだけを奪う**
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
+      leaseWithoutTtl();
+
+      const unknown = aliveWorkers();
+
+      expect(unknown.stdout, "数えられないのに件数を答えている").toBe("");
+      expect(unknown.status, "数えられなかったことが終了コードに出ていない").toBe(2);
+    });
+
+    it("本当に 0 件のときは、これまでどおり 0 を返す", () => {
+      // **「分からない」を作ると、今度は 0 件がそちらへ倒れうる**——**両方を見る**
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) - 100_000 });
+
+      const none = aliveWorkers();
+
+      expect(none.stdout, "0 件を答えられなくなっている").toBe("0");
+      expect(none.status, "0 件が「判定不能」に倒れている").toBe(0);
+    });
+
+    it("上限を決められなかったことも、その場で言う", () => {
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
+      leaseWithoutTtl();
+
+      const stalled = stall();
+
+      // **上限は下限で動き続けてよい**（**止める理由にはしない**）。**黙るのが問題**
+      expect(stalled.stderr, "上限を決められなかったことを黙っている").toContain(
+        "alive-workers=unknown",
+      );
+      expect(stalled.stdout, "上限が下限へ落ちていない").toContain("max=3");
     });
   });
 

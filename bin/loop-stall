@@ -23,6 +23,13 @@ set -uo pipefail
 # 片方だけ直して食い違う**ので、**歩くのはここ 1 回だけ**にする (#239 のレビュー)。
 declare -A alive_scopes=() scope_started_at=() scope_windows=()
 
+# **数えられなかったことを、0 件と混ぜない** (#304)。**空なら数えられている。**
+#
+# **倒れる先が両方とも「気づけない側」だった**——**上限は下限の 3 に張り付き**
+# （**正常時と同じ見た目**）、**`--alive-workers` は 0 を返す**（**呼ぶ側は手 1 本へ倒す**）。
+# **どちらも「止まらない」「渡さない」で、症状が出ない。**
+alive_scan_failed=""
+
 # **数える単位を「相手の周回」にする。**
 #
 # 第 4 層は master の周回で数えるが、**前へ進めるのは worker の周回**である。
@@ -53,9 +60,16 @@ scan_alive_scopes() {
   local common_dir="$1" script_dir="$2"
   local lease_ttl scope scope_rounds scope_started scope_window seconds len now_epoch
   local shared_window
-  [[ -n $script_dir && -x "$script_dir/loop-lease" ]] || return 0
-  lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" || return 0
-  [[ $lease_ttl =~ ^[0-9]+$ ]] || return 0
+  # **数えられなかったなら、そう言う** (#304)。**0 件へ倒さない**（`AGENTS.md` §5）。
+  if [[ -z $script_dir || ! -x "$script_dir/loop-lease" ]]; then
+    alive_scan_failed="bin/loop-lease を実行できません（${script_dir:-スクリプトの場所が不明}）"
+    return 1
+  fi
+  if ! lease_ttl="$("$script_dir/loop-lease" ttl 2>/dev/null)" ||
+    [[ ! $lease_ttl =~ ^[0-9]+$ ]]; then
+    alive_scan_failed="bin/loop-lease ttl を読めません"
+    return 1
+  fi
 
   # **始めた周回の印。** lease と違って返しても消えないので、
   # **周回と周回の間でも「どの周回まで始めたか」が読める**。
@@ -435,16 +449,28 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
 # 失敗した代入で変数を壊さない。`var="$(cmd)"` は cmd が失敗しても空を代入するので、
 # それをフォールバックの入力に使うと `cd ""` になる。**これは成功して cwd を返す**ため、
 # 「同じリポジトリの worktree」が「別のリポジトリ」に化ける。実際に踏んだ。
-script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
+#
+# **外の道具では引かない** (#304)。**`dirname` が引けないと、まさにその `cd ""` になる**
+# ——**cwd を指したまま `-x "$script_dir/loop-lease"` が偽になり、黙って 0 件へ倒れる**
+# （**PR #303 の試験で実際に踏んだ**）。**同じファイルの `scope` は既にこの形**である。
+script_dir="${BASH_SOURCE[0]%/*}"
+[[ $script_dir != "${BASH_SOURCE[0]}" ]] || script_dir="."
+script_dir="$(cd "$script_dir" 2>/dev/null && pwd -P)" || script_dir=""
 
 # **生きている作業場を、ここで 1 回だけ数える。** 読み手は上限と数え方の 2 つで、
 # **どちらも同じ生死を見る**（#239 のレビュー）。
-scan_alive_scopes "$common_dir" "$script_dir"
+scan_alive_scopes "$common_dir" "$script_dir" || true
 
 # **数えた結果を、外へ 1 つの口から出す** (#302)。**`bin/loop-handoff` は
 # 「手が何本あるか」を知りたいだけ**で、**同じ生死を 2 箇所で数えると、
 # 片方だけ直したときに食い違う**（`AGENTS.md` §5）。**読むだけ**である。
 if [[ $ID == "--alive-workers" ]]; then
+  # **数えられなかったなら、件数を答えない** (#304)。**0 を返すと、呼ぶ側からは
+  # 「本当に誰も回していない」と区別が付かない**——**判定不能は判定不能で返す。**
+  if [[ -n $alive_scan_failed ]]; then
+    echo "[WARN] alive-workers=unknown 生きている作業場を数えられません（$alive_scan_failed）" >&2
+    exit 2
+  fi
   printf '%s\n' "${#alive_scopes[@]}"
   exit 0
 fi
@@ -469,6 +495,12 @@ fi
 if [[ -n ${LOOP_MAX_STALL_REPEATS-} ]]; then
   MAX_REPEATS="$LOOP_MAX_STALL_REPEATS"
 else
+  # **数えられなかったことを、下限に隠さない** (#304)。**下限の 3 は正常時にも出る値**
+  # なので、**黙って落ちると「上限が 3 のまま」としか見えない**——**止めるほどではない
+  # （3 でも動く）が、言わないと次に同じ形が出ても気づけない。**
+  if [[ -n $alive_scan_failed ]]; then
+    echo "[WARN] alive-workers=unknown 上限を生きている作業場から決められません（$alive_scan_failed）。下限で続けます" >&2
+  fi
   # 走っているループ = master 1 つ + 生きている worker の作業場。上限はそれに 1 を足す
   MAX_REPEATS=$((1 + ${#alive_scopes[@]} + 1))
   ((MAX_REPEATS >= 3)) || MAX_REPEATS=3
