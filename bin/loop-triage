@@ -2,10 +2,16 @@
 # レビュー上限に達した PR を、**どこへ渡すか**決める。
 #
 #   bin/loop-triage --findings <件数> --rework-lines <見込み行数> \
+#                   --fixup-lines <実測行数> \
 #                   --security <yes|no> --worse <yes|no> --reachable <yes|no>
 #
 #   → `<行き先>\t<理由>` を stdout に出す
 #     rework = worker へ差し戻す / human = 人を呼ぶ / defer = Issue へ外出ししてマージ
+#     recount = main を取り込み直して、レビューを数え直す
+#
+# **`--rework-lines` と `--fixup-lines` は別物である。** 前者は**これから直す見込み**、
+# 後者は**ゲートが実測した、レビュー後の本体変更**（`bin/loop-fixup-lines` の値）——
+# **同じ「行数」でも、測っている対象が違う。**
 #
 #   exit 0 = 決まった
 #   exit 2 = 判定できない / 使い方の誤り
@@ -21,7 +27,18 @@
 #   1. セキュリティ (AGENTS.md §6)       → 人を呼ぶ
 #   2. 入れる前より悪くなる              → 人を呼ぶ
 #   3. いまの構成で到達可能              → 人を呼ぶ (ここまで来た時点で手直しの範囲は超えている)
-#   4. どれでもない                      → Issue へ外出ししてマージ
+#   4. 指摘 0 件 + 実測が上限超え        → 数え直す
+#   5. どれでもない                      → Issue へ外出ししてマージ
+#
+# **4 が要る理由** (#324。#322 で踏んだ)。**指摘 0 件・CI 全緑・未解決 0 件で、
+# ゲートを塞いでいるのが第 3 層だけ**のとき、**`defer` は答えになっていない**——
+# **外出しする指摘が無い**ので、**Issue が 1 件増えてゲートは落ちたまま**である。
+# **`defer` は「片付いた」と読めるのに、状態は 1 ミリも動かない。**
+#
+# **数え直す道は前からある**（手順書「PR を保留にする / 再開する」）——
+# **`main` を取り込み直すと head が変わり、`bin/loop-review-commits` が
+# 現 head の祖先でないレビューを落とす**ので、**改めてレビューを要求できる。**
+# **無かったのは行き先の名前だけ**である。
 #
 # **0 がいちばん先に来る理由。** 2 行で直るものを Issue にすると、誰かが後で読んで
 # **PR を立て直して、またレビューを通す**ことになり、差し戻しより高くつく。
@@ -43,13 +60,17 @@ readonly MAX_FIXUP_LINES="${LOOP_MAX_FIXUP_LINES:-60}"
 
 usage() {
   echo "使い方: bin/loop-triage --findings <件数> --rework-lines <見込み行数> \\" >&2
+  echo "                        --fixup-lines <実測行数> \\" >&2
   echo "                        --security <yes|no> --worse <yes|no> --reachable <yes|no>" >&2
-  echo "        → rework（差し戻す）/ human（人を呼ぶ）/ defer（外出ししてマージ）" >&2
+  echo "        → rework（差し戻す）/ human（人を呼ぶ）/ recount（数え直す）/" >&2
+  echo "          defer（外出ししてマージ）" >&2
+  echo "        --fixup-lines はゲートが実測した、レビュー後の本体変更の行数" >&2
   exit 2
 }
 
 findings=""
 rework_lines=""
+fixup_lines=""
 security=""
 worse=""
 reachable=""
@@ -58,6 +79,7 @@ while (($# > 0)); do
   case "$1" in
   --findings) findings="${2-}" ;;
   --rework-lines) rework_lines="${2-}" ;;
+  --fixup-lines) fixup_lines="${2-}" ;;
   --security) security="${2-}" ;;
   --worse) worse="${2-}" ;;
   --reachable) reachable="${2-}" ;;
@@ -66,7 +88,10 @@ while (($# > 0)); do
   shift 2 || usage
 done
 
-for number in "$findings" "$rework_lines"; do
+# **実測も必須にする。** **省略を 0 と読むと、いちばん答えられない状況——
+# 「実測を知らない周回」——が、そのまま `defer` へ通ってしまう** (#324)。
+# **古い呼び方は exit 2 で止まる**（黙って前の答えに戻らない）。
+for number in "$findings" "$rework_lines" "$fixup_lines"; do
   [[ $number =~ ^[0-9]+$ ]] || usage
 done
 # **yes / no 以外を通さない。** 空や `maybe` を「no」と読むと、
@@ -94,5 +119,11 @@ fi
 [[ $worse == "yes" ]] && decide human "この PR を入れると、入れる前より悪くなる"
 # 3. いまの構成で踏める。
 [[ $reachable == "yes" ]] && decide human "いまの構成で到達可能で、手直しの範囲を超える"
-# 4. それ以外。
+# 4. **指摘は無いのに、実測が上限を超えている。** **外出しする相手がいない**ので、
+#    **`defer` では 1 ミリも動かない**——**数え直して、レビューを取り直す。**
+if ((findings == 0 && fixup_lines > MAX_FIXUP_LINES)); then
+  decide recount \
+    "指摘は残っていないが、レビュー後の本体変更が上限超え（${fixup_lines} 行 > ${MAX_FIXUP_LINES} 行）。main を取り込み直して数え直す"
+fi
+# 5. それ以外。
 decide defer "上のどれにも当たらない（外出しして記録に残す）"

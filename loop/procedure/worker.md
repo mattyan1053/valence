@@ -389,6 +389,9 @@ if ! bin/loop-sync-main --fetch-only; then
   exit
 fi
 git rebase origin/main        # コンフリクトは master のコメントに従って解消する
+# **`--force-rebase` を頼まれたら、そのとおりに打つ**（#326 のレビュー）。
+# **`origin/main` が既に head の祖先だと、これは「up to date」で何も書き換えない**
+# ——**レビューは live のままなので、数え直したいときに数え直らない。**
 # **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ったとき、後発が先発を
 # truncate して混ざる**——**合否は `$status` なので正しいまま**なので、
 # **読む側は log を疑わず、他方の失敗を自分のものとして読む**

@@ -112,3 +112,94 @@ describe("上限に達したあとの行き先", () => {
     expect(read("loop/README.md")).not.toMatch(/入れる前より悪くなる/);
   });
 });
+
+describe("指摘 0 件で、手直しが上限を超えている（#324）", () => {
+  it("実測を渡している", () => {
+    // **`--rework-lines`（見込み）だけでは、この状態を判定できない**——
+    // **ゲートが実測した行数を渡さないと、スクリプトは exit 2 で止まる**
+    expect(bashBlocks(triageSection())).toContain("--fixup-lines");
+  });
+
+  it("数え直しの行き先が書いてある", () => {
+    // **スクリプトが返す行き先に、手順書側の受け皿が無いと、
+    // 読む側は「知らない答え」を受けて止まる**
+    expect(triageSection()).toContain("recount");
+  });
+
+  it("その行き先が、実際にゲートを通せる手を指している", () => {
+    // **完了条件**（#324）。**「Issue を作る」だけでは通らない**——
+    // **`main` を取り込み直すと head が変わり、レビューが数え直される**
+    const section = triageSection();
+    const from = section.indexOf("recount");
+    expect(from, "recount の節が無い").toBeGreaterThanOrEqual(0);
+    const recount = section.slice(from).split("\n#### ")[0] ?? "";
+
+    expect(recount, "取り込み直す手が書いていない").toMatch(/取り込み直/);
+    expect(recount, "数え直されることに触れていない").toMatch(/数え直/);
+  });
+
+  it("外出しの節が、この状態を引き取ると言っていない", () => {
+    // **`defer` は「片付いた」と読めるのに、状態は 1 ミリも動かない**——
+    // **外出しする指摘が無いときに、そこへ倒す書き方を残さない**
+    const section = triageSection();
+    const from = section.indexOf("#### defer");
+    expect(from, "defer の節が無い").toBeGreaterThanOrEqual(0);
+    const defer = section.slice(from).split("\n#### ")[0] ?? "";
+
+    expect(defer, "指摘が無くても外出しすると読める").not.toMatch(/指摘が無くても|0 件でも/);
+  });
+});
+
+describe("recount の受け皿が、rework と同じ穴を開けていない（#326 のレビュー）", () => {
+  /** `recount` の節。**ここが待ちを作る**ので、節の外で満たさせない。 */
+  function recountSection(): string {
+    const section = triageSection();
+    const from = section.indexOf("#### recount");
+    expect(from, "recount の節が無い").toBeGreaterThanOrEqual(0);
+    return section.slice(from).split("\n#### ")[0] ?? "";
+  }
+
+  it("投稿できた周回でも、対応待ちを記録する", () => {
+    // **落ちた枝にだけ置いても足りない。** **本題は「投稿できて、worker が
+    // まだ push していない」周回**である——**そこで記録しないと、同じ依頼を
+    // 毎周回投稿し続け、3 周のエスカレーションへ到達しない**（`rework` と同じ穴）。
+    // **識別子に head SHA が入る**ので、**push された周回は数え直される**
+    // **依頼を投稿しているブロックを選ぶ。** **最初の 1 つを取ると head の確認に当たり、
+    // **変異を入れても入れなくても落ちる**（試験が主張より弱くなる）
+    const [block = ""] = recountSection()
+      .split("```bash")
+      .slice(1)
+      .map((chunk) => chunk.split("```")[0] ?? "")
+      .filter((chunk) => chunk.includes("gh pr comment"));
+    const success = block.slice(block.lastIndexOf("\nelse"));
+
+    expect(success, "投稿できた枝が見つからない").toContain("else");
+    expect(success, "投稿できた周回で対応待ちを記録していない").toContain(
+      'bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"',
+    );
+  });
+
+  it("投稿できたかを確かめる", () => {
+    // **投稿が落ちても、待ちだけが残る**——**理由の無い待ちを作らない**
+    expect(recountSection(), "投稿の成否を見ていない").toMatch(/if ! gh pr comment/);
+  });
+
+  it("ループの外の著者を、worker へ渡さない", () => {
+    // **worker は `--author @me` で自分の PR だけを列挙する**ので、
+    // **外の著者の PR は誰も rebase しない**——**待つと SHA が変わらないまま
+    // 3 周で `loop/STOP`**（#70。`rework` は既に分けている）
+    expect(recountSection(), "著者を確かめていない").toContain("bin/loop-outside-author");
+    expect(recountSection(), "人待ちへ倒していない").toContain("awaiting-human");
+  });
+
+  it("main が進んでいなくても head が変わる手を指している", () => {
+    // **`origin/main` が既に head の祖先なら、`git rebase origin/main` は
+    // 「up to date」で何も書き換えない**——**レビューは live のままなので、
+    // 次のゲートも同じ行数超過で `recount` に戻る**（行き止まりが続く）。
+    // **レビューが live かは commit が祖先かで決まる**（`bin/loop-review-commits`）ので、
+    // **commit を作り直す形を名指しする**
+    expect(recountSection(), "取り込むものが無いときに head が変わらない").toMatch(
+      /--force-rebase|作り直/,
+    );
+  });
+});

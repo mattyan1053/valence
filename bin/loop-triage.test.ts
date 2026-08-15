@@ -10,6 +10,8 @@ type Verdict = { status: number; stdout: string; stderr: string };
 type Situation = {
   findings?: number;
   reworkLines?: number;
+  /** **ゲートが実測した、レビュー後の本体変更の行数**（`--rework-lines` の見込みとは別物）。 */
+  fixupLines?: number;
   security?: string;
   worse?: string;
   reachable?: string;
@@ -23,6 +25,8 @@ function triage(situation: Situation, env: Record<string, string> = {}): Verdict
       String(situation.findings ?? 0),
       "--rework-lines",
       String(situation.reworkLines ?? 0),
+      "--fixup-lines",
+      String(situation.fixupLines ?? 0),
       "--security",
       situation.security ?? "no",
       "--worse",
@@ -52,10 +56,14 @@ describe("bin/loop-triage", () => {
       },
       {
         name: "#96 — 未レビューが 88 行、指摘は残っていない",
-        // 未解決スレッドは 0 件。止めたのは第 3 層（手直しが上限超え）だけで、
-        // 人の結論は「このままマージ」だった
-        situation: { findings: 0, reworkLines: 88 },
-        expected: "defer",
+        // 未解決スレッドは 0 件。止めたのは第 3 層（手直しが上限超え）だけである。
+        //
+        // **人の結論は「このままマージ」だった**が、**`defer` ではそこへ行けない**
+        // （#324）——**外出しする指摘が無く、ゲートを塞いでいるのは行数**なので、
+        // **Issue を 1 件増やしてゲートは落ちたまま**になる。
+        // **数え直す道（rebase）がその結論へ行ける唯一の手**である。
+        situation: { findings: 0, reworkLines: 88, fixupLines: 88 },
+        expected: "recount",
       },
       {
         name: "#100 — 設計判断を含み、いまの構成では踏めない",
@@ -130,6 +138,8 @@ describe("bin/loop-triage", () => {
         "1",
         "--rework-lines",
         "200",
+        "--fixup-lines",
+        "0",
         "--security",
         "yes",
         "--worse",
@@ -142,5 +152,89 @@ describe("bin/loop-triage", () => {
 
     expect(verdict.stdout).toMatch(/^human\t.+/);
     expect(verdict.stdout).toContain("§6");
+  });
+});
+
+describe("指摘 0 件で、手直しが上限を超えている", () => {
+  // **#322 で踏んだ行き止まり**（#324）。**指摘 0 件・CI 全緑・未解決 0 件**で、
+  // **残っているのは第 3 層だけ**である。
+  it("外出しではなく、数え直しへ渡す", () => {
+    // **`defer` は「片付いた」と読めるのに、状態は 1 ミリも動かない**——
+    // **外出しする指摘が無く、ゲートを塞いでいるのは行数**である
+    expect(triage({ findings: 0, fixupLines: 77 }).stdout).toBe("recount");
+  });
+
+  it("なぜそうなるかを出す", () => {
+    // **記録に残せる形にする**（既にある行き先と同じ）——**実測と上限が読み取れること**
+    const verdict = spawnSync(
+      SCRIPT,
+      [
+        "--findings",
+        "0",
+        "--rework-lines",
+        "0",
+        "--fixup-lines",
+        "77",
+        "--security",
+        "no",
+        "--worse",
+        "no",
+        "--reachable",
+        "no",
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(verdict.stdout).toMatch(/^recount\t.+/);
+    expect(verdict.stdout).toContain("77");
+    expect(verdict.stdout).toContain("取り込み直");
+  });
+
+  it("上限内なら、これまでどおり外出しである", () => {
+    // **第 3 層が止めていないなら、この行き先は出番ではない**
+    expect(triage({ findings: 0, fixupLines: 60 }).stdout).toBe("defer");
+  });
+
+  it("指摘が残っているなら、外出しできるので出番ではない", () => {
+    // **外出しする相手がいる**ときは、これまでどおり `defer` が効く
+    expect(triage({ findings: 1, reworkLines: 200, fixupLines: 77 }).stdout).toBe("defer");
+  });
+
+  it("人を呼ぶ側が先に来る", () => {
+    // **セキュリティ・差し引き・到達可能は、行数より先に見る**——
+    // **数え直しても、その判断は消えない**
+    expect(triage({ findings: 0, fixupLines: 77, security: "yes" }).stdout).toBe("human");
+    expect(triage({ findings: 0, fixupLines: 77, worse: "yes" }).stdout).toBe("human");
+    expect(triage({ findings: 0, fixupLines: 77, reachable: "yes" }).stdout).toBe("human");
+  });
+
+  it("上限はゲートと同じ値を使う", () => {
+    // **2 箇所に閾値を持たない**（`--rework-lines` の判定と同じ理由）
+    expect(triage({ findings: 0, fixupLines: 77 }, { LOOP_MAX_FIXUP_LINES: "100" }).stdout).toBe(
+      "defer",
+    );
+  });
+
+  it("実測を渡さない呼び方は、2 で落ちる", () => {
+    // **判定できない入力を「マージ」へ倒さない**（既にある方針と同じ）——
+    // **古い呼び方は黙って `defer` にならない**
+    const verdict = spawnSync(
+      SCRIPT,
+      [
+        "--findings",
+        "0",
+        "--rework-lines",
+        "0",
+        "--security",
+        "no",
+        "--worse",
+        "no",
+        "--reachable",
+        "no",
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(verdict.status).toBe(2);
   });
 });

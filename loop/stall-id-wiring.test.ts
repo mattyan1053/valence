@@ -163,6 +163,25 @@ describe("停止識別子", () => {
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
       ["#### human — 人を呼ぶ", "review-exhausted:<PR番号>@<SHA>"],
+      // **`rework` と同じ名前を、同じ数だけ打つ**（#326 のレビュー）——
+      // **投稿の失敗 / 記録できない / 保留にできない / 投稿できた周回**の 4 つ。
+      // **投稿できた周回でも打つ**のが本題で、**打たないと同じ依頼を毎周回投稿する**
+      [
+        "#### recount — main を取り込み直して、レビューを数え直す",
+        "awaiting-worker:<PR番号>@<SHA>",
+      ],
+      [
+        "#### recount — main を取り込み直して、レビューを数え直す",
+        "awaiting-worker:<PR番号>@<SHA>",
+      ],
+      [
+        "#### recount — main を取り込み直して、レビューを数え直す",
+        "awaiting-worker:<PR番号>@<SHA>",
+      ],
+      [
+        "#### recount — main を取り込み直して、レビューを数え直す",
+        "awaiting-worker:<PR番号>@<SHA>",
+      ],
       ["#### defer — Issue へ外出ししてマージする", "deferred-overflow"],
       ["## 6. 着手順を決める（`ready` を 2 件までに保つ）", "issue-lookup-failed"],
       ["## 6. 着手順を決める（`ready` を 2 件までに保つ）", "issue-lookup-failed"],

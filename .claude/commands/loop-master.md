@@ -1,4 +1,4 @@
-<!-- 版: 9d1d816a7435 -->
+<!-- 版: 73a77a364241 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -794,9 +794,13 @@ gh pr edit <PR番号> --add-label changes-requested     # 付け直して初め�
 ```bash
 bin/loop-triage --findings <残っている指摘の件数> \
                 --rework-lines <差し戻して直したときの本体の見込み行数> \
+                --fixup-lines <ゲートが出した、レビュー後の本体変更の実測行数> \
                 --security <yes|no> --worse <yes|no> --reachable <yes|no>
 ```
 
+- `--fixup-lines` … **ゲートの第 3 層が出した実測**（`レビュー後の本体変更が N 行` の N）。
+  **`--rework-lines` の見込みとは別物**である——**前者はこれから直す見込み、
+  こちらは既に積まれた変更**。**止められていないなら 0 を渡す**
 - `--security` … `AGENTS.md` §6 に当たるか
 - `--worse` … **この PR を入れると、入れる前より悪くなるか**（優先度ではなく差し引きで見る）
 - `--reachable` … **いまの構成で踏めるか**（別の Issue が入るまで踏めないなら `no`）
@@ -934,6 +938,66 @@ fi
 次の master の周回で**普通の PR としてゲートに乗る**——**master が外す形にすると、
 master が忘れたときに永久に止まる**（`changes-requested` と同じ懸念）。
 **その手順を PR のコメントに書いておくこと。**
+
+#### recount — main を取り込み直して、レビューを数え直す
+
+**指摘は残っていないのに、第 3 層（レビュー後の本体変更）だけがゲートを塞いでいる**
+状態である（#324。#322 で踏んだ）。**外出しする指摘が無い**ので、
+**`defer` では Issue が 1 件増えるだけでゲートは落ちたまま**になる。
+
+**返信する前に、head が動いていないか確かめる。**
+
+```bash
+bin/loop-head same <PR番号> <ゲートが出した head>
+```
+
+**exit 1 / 2 なら書かない。** この PR の周回を終える（行き先はステップ 3.1）——
+**動いていたら、その依頼はもう要らないかもしれない。**
+
+**頼むのは「`main` を取り込み直して push すること」だけ**である（直すものは無い）。
+**`changes-requested` は付けない**——**付けると「指摘が残っている」と読める。**
+
+**取り込むものが無くても、head は変える必要がある。** **レビューが live かどうかは、
+その commit が現 head の祖先かで決まる**（`bin/loop-review-commits`）——
+**`origin/main` が既に祖先なら `git rebase origin/main` は「up to date」で何も
+書き換えず、レビューは live のまま**である。**次のゲートも同じ行数超過で
+ここへ戻ってくる**ので、**commit を作り直す形（`git rebase --force-rebase origin/main`）を
+依頼の本文に書く。** **数え直したい対象は、いま誰もレビューしていない本体**である。
+
+**対応待ちを記録する**（**`<SHA>` はゲートが出した head**）。**記録しないと、
+worker が push する前に次の周回が来たとき、同じ依頼を毎周回投稿し続ける**——
+**投稿の失敗も無応答も数えられず、3 周のエスカレーションへ到達しない**
+（`rework` と同じ穴。**識別子に head SHA が入る**ので、**push された周回は
+別状態として数え直される**）。
+
+```bash
+if ! gh pr comment <PR番号> --body-file <file>; then
+  # **依頼を投稿できなかった。** 待ちだけを残さない——数える
+  bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+# **著者がループの外にいるなら、待たない** (#70)。**worker は `--author @me` で
+# 自分の PR だけを列挙する**ので、**外の著者の PR は誰も rebase しない**——
+# **待つと SHA が変わらないまま 3 周で `loop/STOP`** である。
+elif outside="$(bin/loop-outside-author <PR番号>)"; then
+  gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
+  if ! bin/loop-parked-head record <PR番号> <SHA>; then
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  elif ! gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
+    bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+  fi
+else
+  # **exit 1 = ループのアカウント / exit 2 = 読めない。どちらも数える。**
+  # **判定不能を「外」に倒さない**（`rework` と同じ理由）
+  bin/loop-stall "awaiting-worker:<PR番号>@<SHA>"
+fi
+```
+
+**名前は `rework` と同じ**である——**worker の対応待ち**という状態は同じで、
+**頼んだ中身が違うだけ**（#128。**同じ状態には同じ名前**）。
+
+**rebase すると head が変わり、それまでのレビューは数え直される**——
+**数え直したうえで、改めてレビューを要求できる。**
+
+この周回はここで終わり。worker の push を待つ。
 
 #### defer — Issue へ外出ししてマージする
 
