@@ -27,17 +27,50 @@ set -uo pipefail
 readonly BLOCKED_BY_PENDING="one pending review per pull request"
 
 usage() {
-  echo "使い方: bin/loop-review-reply <PR番号> <スレッドID> <本文ファイル>" >&2
+  echo "使い方: bin/loop-review-reply <役> <PR番号> <スレッドID> <本文ファイル>" >&2
+  echo "        bin/loop-review-reply --mark <役>   その役の印を出す（読む側が引く）" >&2
+  echo "        役は master / worker" >&2
   echo "        exit 0 = 投稿できた / exit 1 = 消してはいけない pending がある" >&2
   echo "        exit 2 = 投稿できなかった・使い方の誤り" >&2
   exit 2
 }
 
-[[ $# -eq 3 ]] || usage
-[[ $1 =~ ^[0-9]+$ ]] || usage
-readonly PR="$1"
-readonly THREAD="$2"
-readonly BODY_FILE="$3"
+# **投稿した役を、GitHub 側から読めるようにする** (#174)。
+#
+# **master と worker は同じアカウントで動く**ので、**発言から役を見分けられない**——
+# **`bin/loop-handoff` は「呼んだ側は書き終えている」で代用していた**が、
+# **それは前提であって事実ではない。** **worker の返信を master の判断として読むと、
+# 当否が判断されていない指摘が「判断済み」に落ちる**（**通す側へ倒れるので気づけない**）。
+#
+# **印は投稿する側が必ず付ける。** **役は引数で受け取り、渡されなければ落とす**
+# ——**「付け忘れたら master 扱い」のような既定を置くと、付け忘れがそのまま誤認になる。**
+#
+# **読む側もここへ訊く**（`--mark`）。**同じ文字列を 2 箇所に持つと、
+# 片方だけ直したときに黙って食い違う** (#159 の形)。
+#
+# **本文には出さない。** HTML コメントなので、**GitHub の表示では見えない**——
+# **人が読む文面を、機械のための印で汚さない。**
+role_mark() {
+  case "$1" in
+    master | worker) printf '<!-- loop-role: %s -->' "$1" ;;
+    *) return 2 ;;
+  esac
+}
+
+if [[ ${1-} == "--mark" ]]; then
+  [[ $# -eq 2 ]] || usage
+  role_mark "$2" || usage
+  echo
+  exit 0
+fi
+
+[[ $# -eq 4 ]] || usage
+MARK="$(role_mark "$1")" || usage
+readonly MARK
+[[ $2 =~ ^[0-9]+$ ]] || usage
+readonly PR="$2"
+readonly THREAD="$3"
+readonly BODY_FILE="$4"
 
 if [[ ! -s $BODY_FILE ]]; then
   echo "[FAIL] 本文が空です: $BODY_FILE" >&2
@@ -50,6 +83,8 @@ if ! body="$(cat -- "$BODY_FILE")"; then
   echo "[FAIL] 本文を読めません: $BODY_FILE" >&2
   exit 2
 fi
+# **印は必ず末尾へ付ける。** **書いた本人が忘れられる形にしない**（上記）
+body="${body}"$'\n\n'"${MARK}"
 
 readonly REPLY_QUERY='mutation($t:ID!,$b:String!){
   addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t, body:$b}){
