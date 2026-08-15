@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +16,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-handoff", import.meta.url));
+/** **本物の `bin/`。** **写して隣を差し替える試験**が使う（#310）。 */
+const BIN_DIR = fileURLToPath(new URL(".", import.meta.url));
 const STAMP = fileURLToPath(new URL("./loop-procedure-stamp", import.meta.url));
 const LEASE = fileURLToPath(new URL("./loop-lease", import.meta.url));
 
@@ -719,29 +722,29 @@ describe("bin/loop-handoff", () => {
    * **そのときはまだ 1 人**で、**#241 で 2 人になったが数え直していない**——
    * **worker を増やした diff に、この行は出てこない**（`AGENTS.md` §5）。
    */
+  /** その作業場が周回を回している状態にする。**印を書くのは `acquire`** である。 */
+  function beginCycleIn(workspace: string): void {
+    const stamp = spawnSync(STAMP, ["worker"], { encoding: "utf8" }).stdout.trim();
+    const acquired = spawnSync(LEASE, ["acquire", "worker", stamp], {
+      cwd: workspace,
+      encoding: "utf8",
+    });
+    expect(acquired.status, `周回を始められない: ${acquired.stderr}`).toBe(0);
+    const released = spawnSync(LEASE, ["release", "worker", acquired.stdout.trim()], {
+      cwd: workspace,
+      encoding: "utf8",
+    });
+    expect(released.status, `周回を返せない: ${released.stderr}`).toBe(0);
+  }
+
+  /** **手を 2 本にする。** 両方の作業場が周回を回している形にする。 */
+  function twoHands(): void {
+    const other = addWorkspace();
+    beginCycleIn(repo);
+    beginCycleIn(other);
+  }
+
   describe("作業場が 2 つ動いているとき", () => {
-    /** その作業場が周回を回している状態にする。**印を書くのは `acquire`** である。 */
-    function beginCycleIn(workspace: string): void {
-      const stamp = spawnSync(STAMP, ["worker"], { encoding: "utf8" }).stdout.trim();
-      const acquired = spawnSync(LEASE, ["acquire", "worker", stamp], {
-        cwd: workspace,
-        encoding: "utf8",
-      });
-      expect(acquired.status, `周回を始められない: ${acquired.stderr}`).toBe(0);
-      const released = spawnSync(LEASE, ["release", "worker", acquired.stdout.trim()], {
-        cwd: workspace,
-        encoding: "utf8",
-      });
-      expect(released.status, `周回を返せない: ${released.stderr}`).toBe(0);
-    }
-
-    /** **手を 2 本にする。** 両方の作業場が周回を回している形にする。 */
-    function twoHands(): void {
-      const other = addWorkspace();
-      beginCycleIn(repo);
-      beginCycleIn(other);
-    }
-
     it("着手が 1 件でも、空いている側へ渡す", () => {
       // **実測の形**（2026-08-15 08:14Z。`ready=1` / `in-progress=1` / 手は 2 本）
       twoHands();
@@ -765,6 +768,82 @@ describe("bin/loop-handoff", () => {
       expect(cycle("master").status).toBe(0);
 
       expect(run("master").status, "条件を緩めたら重複が増えた").toBe(1);
+    });
+  });
+
+  /**
+   * **数えられなかった理由を、唯一の読み手が捨てていた**（#310）。
+   *
+   * **#304 / #308 で `bin/loop-stall` は「数えられなかった」と言うようにした**が、
+   * **その声を受け取るのはここだけ**で、**`2>/dev/null` で捨てていた。**
+   * **倒す向き（`hands=1`）は正しい**——**問題は、静かなこと**である：
+   * **worker が 2 人いるのに 1 本として扱われても、周回の出力に何も出ない**
+   * （**#302 が消しに来た沈黙が戻る**）。
+   */
+  describe("生きている作業場を数えられなかったとき", () => {
+    /** スタブが出す理由。**そのまま流れてくるか**を、この文字列で見る。 */
+    const REASON = "[WARN] alive-workers=unknown 生きている作業場を数えられません（試験）";
+
+    /**
+     * **`bin/loop-stall --alive-workers` が数えられない周回を走らせる。**
+     *
+     * **隣の `bin/` ごと写して、`loop-stall` だけを差し替える**——**本物は
+     * `${BASH_SOURCE[0]%/*}` で隣を引く**ので、**写したほうを走らせれば、
+     * 本物のスクリプトを壊さずに「数えられない」を作れる**（#186）。
+     */
+    function runWithUncountableStall(role: string): Run {
+      const bin = join(repo, "copied-bin");
+      cpSync(BIN_DIR, bin, { recursive: true });
+      writeFileSync(
+        join(bin, "loop-stall"),
+        [
+          "#!/usr/bin/env bash",
+          'if [[ ${1-} == "--alive-workers" ]]; then',
+          `  echo '${REASON}' >&2`,
+          "  exit 2",
+          "fi",
+          "exit 0",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const result = spawnSync(join(bin, "loop-handoff"), [role], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
+
+    it("数えられなかった理由が、周回の出力に出る", () => {
+      twoHands();
+      withState({ ready: 1, inProgress: 1 });
+
+      const handoff = runWithUncountableStall("master");
+
+      expect(handoff.stderr, "理由が捨てられている").toContain("alive-workers=unknown");
+      // **写しではなく、受け取ったものを流していること**（**二重に言わない**）
+      expect(handoff.stderr, "自分で書いた文言に置き換わっている").toContain("試験");
+    });
+
+    it("数えられなくても、手は 1 本のままにする", () => {
+      // **本当は 2 本ある**が、**判定不能を 2 本へ倒すと渡しすぎになる**
+      // ——**`in_progress == 0` と同じ側に残す**（#302 でもここは変えない）
+      twoHands();
+      withState({ ready: 1, inProgress: 1 });
+
+      const handoff = runWithUncountableStall("master");
+
+      expect(handoff.stdout, "判定不能を 2 本へ倒している").not.toMatch(/^worker\t/);
+      expect(handoff.status, "塞がっているのに起こしている").toBe(1);
+    });
+
+    it("数えられた周回では、何も増えない", () => {
+      // **毎周回鳴る警告にしない**（#148 と同じ判断）。**鳴りっぱなしは黙るのと同じ**
+      withState({ ready: 1, inProgress: 1 });
+
+      const handoff = run("master");
+
+      expect(handoff.stderr, "正常な周回でも鳴っている").not.toMatch(/alive-workers|1 本として扱/);
     });
   });
 
