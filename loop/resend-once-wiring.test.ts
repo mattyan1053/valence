@@ -73,6 +73,8 @@ type ResendRule = {
   leavesSentUnrecordedOnSecondFailure: boolean;
   /** **待ってから送り直す形になっていない**か。 */
   doesNotWaitBeforeResend: boolean;
+  /** **引き直した結果が 1 通目と同じ名前でも送る**か（#300 のレビュー）。 */
+  sendsEvenWhenNameIsUnchanged: boolean;
 };
 
 /**
@@ -104,6 +106,14 @@ function readResendRule(section: string): ResendRule {
     ),
     // **待ってから送り直す形が無いこと**（「送り直さない」は未然形なので当たらない）
     doesNotWaitBeforeResend: !lines.some((line) => /待って(から)?[^。]*送り直[すし]/.test(line)),
+    // **同じ名前でも送ると読めること**、**かつ「同じ名前は避ける」が無いこと**。
+    // **根拠にした実測は「名前は合っていたのに落ち、直後に同じ宛先で通った」**なので、
+    // **同じ名前を避ける形にすると、いちばん多い経路で送り直しに行けない**
+    sendsEvenWhenNameIsUnchanged:
+      lines.some((line) => /同じ(名前|宛先)[^。]*(でも|であっても)[^。]*送/.test(line)) &&
+      !lines.some((line) =>
+        /同じ(名前|宛先)[^。]*(使い回さない|避ける|使わない|送らない)/.test(line),
+      ),
   };
 }
 
@@ -114,6 +124,7 @@ const SATISFIED: ResendRule = {
   refetchesBeforeResend: true,
   leavesSentUnrecordedOnSecondFailure: true,
   doesNotWaitBeforeResend: true,
+  sendsEvenWhenNameIsUnchanged: true,
 };
 
 /**
@@ -161,6 +172,15 @@ const MUTATIONS: {
     apply: (section) =>
       section.replace(/\*\*待ってから送り直さない\*\*/g, "**少し待ってから送り直す**"),
     breaks: "doesNotWaitBeforeResend",
+  },
+  {
+    name: "同じ名前を避ける形にする（根拠と食い違う）",
+    apply: (section) =>
+      section.replace(
+        /\*\*引き直した結果をそのまま使う。\*\*/g,
+        "**引き直した結果が 1 通目と同じ名前なら、その宛先には送らない。**",
+      ),
+    breaks: "sendsEvenWhenNameIsUnchanged",
   },
 ];
 
