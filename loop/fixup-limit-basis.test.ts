@@ -34,6 +34,57 @@ function limitSection(): string {
   return before.split(/\n\n/).at(-1) ?? "";
 }
 
+/** いま効いている上限（**実例が上限に触れたか**は、この値と突き合わせて決まる）。 */
+function defaultLimit(): number {
+  const gate = readFileSync(join(REPO_ROOT, "bin/loop-gate"), "utf8");
+  const matched = gate.match(/readonly MAX_FIXUP_LINES="\$\{LOOP_MAX_FIXUP_LINES:-(\d+)\}"/);
+  if (matched?.[1] === undefined) {
+    throw new Error("上限の既定値が読めない");
+  }
+  return Number(matched[1]);
+}
+
+const EXAMPLES_START = "---8<--- いまの数え方で測った実例 ---";
+
+type Example = {
+  pr: string;
+  /** `bin/loop-fixup-lines` の 3 列（数える行 / 除外したテスト追加行 / 除外した要求ぶん）。 */
+  measured: [string, string, string];
+  reviewed: string;
+  head: string;
+  verdict: string;
+  merge: string;
+};
+
+/**
+ * 実例の記録を、列のまま取り出す。
+ *
+ * **散文で書かない。** **測り直せることがこの記録の条件**（#242）で、
+ * **測り直しに要るのは PR 番号と 2 つの SHA** である——**列にしておけば、
+ * 落とした瞬間にここで分かる**。**「70 行だった」とだけ書くと、
+ * 何を入力に測ったのかが誰にも分からなくなる**。
+ */
+function examples(): Example[] {
+  const body = limitSection().split(EXAMPLES_START)[1]?.split("---8<--- ここまで ---")[0] ?? "";
+  return body
+    .split("\n")
+    .map((line) => line.replace(/^#\s?/, "").trim())
+    .filter((line) => line.includes("\t"))
+    .map((line) => {
+      const [
+        pr = "",
+        counted = "",
+        tests = "",
+        requested = "",
+        reviewed = "",
+        head = "",
+        verdict = "",
+        merge = "",
+      ] = line.split("\t");
+      return { pr, measured: [counted, tests, requested], reviewed, head, verdict, merge };
+    });
+}
+
 /**
  * 手直しの上限に、失効した根拠が残っていないこと（#134）。
  *
@@ -75,6 +126,83 @@ describe("手直しの上限の根拠", () => {
 
     expect(section, "実測に基づく根拠が無い").toMatch(/いまの数え方で測った/);
     expect(section, "上限に触れた実例の有無が書かれていない").toMatch(/0 件/);
+  });
+
+  it("上限が止め、人が通した実例が、母数に入っている", () => {
+    // **「止める側の実例は 0 件」は、もう成り立たない**（#242）。**#224 は上限が止め、
+    // 人が「通してよい」と結論した**——**「60 で困らなかった」の反例**である。
+    //
+    // **語で見ない。** **記録した値と、いま効いている上限を突き合わせる**——
+    // **上限を超えた行が 1 件も無ければ、何を書いてあっても実例は付いていない**
+    const stopped = examples().filter((example) => Number(example.measured[0]) > defaultLimit());
+
+    expect(stopped.length, "上限に触れた実例が記録されていない").toBeGreaterThan(0);
+    expect(
+      stopped.map((example) => example.verdict),
+      "上限に触れた実例に、人の結論が記録されていない",
+    ).toContain("人が通した");
+    expect(limitSection(), "止める側が 0 件だという主張が残っている").not.toMatch(
+      /止める側の実例は、いまも 0 件/,
+    );
+  });
+
+  it("記録した実例が、測り直せる形で置いてある", () => {
+    // **手で書いた数字を貼らない**（#242 の完了条件）。**測り直しに要るのは
+    // PR 番号とレビュー済み SHA と head SHA** で、**この 3 つが揃っていれば
+    // `bin/loop-fixup-lines` へそのまま渡せる**——**値だけ残すと、
+    // 次に「本当か」と言われたときに誰も確かめられない**。
+    //
+    // **マージ commit も要る。** **人の結論は PR の状態ではなく `main` の履歴に残る**もので、
+    // **PR が閉じ方を変えても、その commit は動かない**
+    const recorded = examples();
+
+    expect(recorded.length, "実例が 1 件も記録されていない").toBeGreaterThan(0);
+    for (const example of recorded) {
+      expect(example.pr, `PR 番号が読めない: ${JSON.stringify(example)}`).toMatch(/^\d+$/);
+      // **3 列そろって初めて `bin/loop-fixup-lines` の出力である**（除外のぶんも記録に要る）
+      for (const value of example.measured) {
+        expect(value, `測った値が数でない: ${JSON.stringify(example)}`).toMatch(/^\d+$/);
+      }
+      expect(example.reviewed, `レビュー済み SHA が無い: #${example.pr}`).toMatch(/^[0-9a-f]{40}$/);
+      expect(example.head, `head SHA が無い: #${example.pr}`).toMatch(/^[0-9a-f]{40}$/);
+      expect(example.merge, `マージ commit が無い: #${example.pr}`).toMatch(/^[0-9a-f]{40}$/);
+      expect(example.verdict, `その実例をどう扱ったかが無い: #${example.pr}`).not.toBe("");
+    }
+  });
+
+  it("数え方を変える前の実例を、いまの値として並べていない", () => {
+    // **#132 より前の 4 件 (#36 / #41 / #96 / #124) は、いまの数え方の値を持たない**——
+    // **89 行が同じ PR で 37 行になった**（#134）。**結論の向きだけが使えて、
+    // 行数は使えない**ので、**同じ表に並べると、比べられないものが比べられる**
+    const listed = new Set(examples().map((example) => example.pr));
+
+    for (const before of ["36", "41", "96", "124"]) {
+      expect(listed.has(before), `#132 より前の #${before} を、いまの実例として並べている`).toBe(
+        false,
+      );
+    }
+  });
+
+  it("数え方の誤りを、上限の実例と混ぜていない", () => {
+    // **#295 は「上限が厳しすぎた」ではなく「数え方が間違っていた」**（master の指摘）。
+    // **混ぜると、閾値を緩める根拠に見える**——**直したのは数え方のほう** (#299 / PR #301)。
+    //
+    // **当時の 370 行はいま再現できない**（後のレビューが最終 head に載った）ので、
+    // **記録に残せるのは、いまの数え方で測った 0 行のほう**である
+    const miscount = examples().find((example) => example.pr === "295");
+
+    expect(miscount, "数え方の誤りだった実例が記録されていない").toBeDefined();
+    expect(miscount?.verdict, "誤検出を、人が通した実例と同じ扱いで並べている").not.toBe(
+      "人が通した",
+    );
+    expect(limitSection(), "当時の値が再現できないことが書かれていない").toMatch(/再現できない/);
+  });
+
+  it("測った値の上振れが、記録と一緒に残っている", () => {
+    // **除外されるのは「レビューが要求した」と文字列で結び付いた行だけ**なので、
+    // **要求に応じた変更のうち結び付かなかったぶんは本体側に数えられている**。
+    // **但し書きを別の場所に置くと、値だけが独り歩きする**——**同じ節に残す**
+    expect(limitSection(), "除外の取りこぼしに触れていない").toMatch(/結び付かなかった/);
   });
 
   it("人の結論と master の判断を、分けて書いてある", () => {
