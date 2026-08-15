@@ -523,14 +523,72 @@ describe("bin/loop-claim", () => {
       expect(run(["pr", "43"], { cwd: addWorkspace("other") }).status).toBe(0);
     });
 
-    it("持ち主の周回が終わっていれば、引き継げる", () => {
-      // **落ちた周回の跡で、その PR が誰にも直せなくなってはいけない**
-      // （**`release` を作らない**判断は、これで成り立っている）。
-      // **黙って奪わない**ので、引き継いだことは残す
+    /** その作業場の周回の印を、窓の外へ戻す。**落ちた作業場と同じ見え方にする。** */
+    function ageRoundOf(cwd: string): void {
+      const scope = spawnSync(LEASE, ["scope", "worker"], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      }).stdout.trim();
+      expect(scope, "作業場の名前を作れない").not.toBe("");
+      const ttl = Number(
+        spawnSync(LEASE, ["ttl"], {
+          cwd: repo,
+          encoding: "utf8",
+          env: { ...process.env, PATH: path },
+        }).stdout.trim(),
+      );
+      expect(Number.isFinite(ttl) && ttl > 0, "期限を読めない").toBe(true);
+      writeFileSync(
+        join(repo, ".git", `valence-loop-rounds-${scope}`),
+        `${Math.floor(Date.now() / 1000) - ttl - 60}\n`,
+      );
+    }
+
+    it("周回と周回の間にいるだけの持ち主からは、取らない", () => {
+      // **これが #306 の本題。** **`pr` は「いま走っているか」（`busy`）で測っていたので、
+      // 返した直後の持ち主から取れてしまった**——**取られた側は次の周回で自分の PR を
+      // 直せない**（2.1 も 2.2 も `bin/loop-claim pr` が exit 1 になる）。
+      //
+      // **`resume` は同じ場面で「実装中」と答える**（`alive`）。**同じ作業場の生死に
+      // 2 つの答えがあった。**
       withGh({ labels: [] });
       const token = startRound(repo);
       run(["pr", "42"]);
       endRound(repo, token);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("between") });
+
+      expect(second.status, "周回の合間にいる持ち主から取っている").toBe(1);
+    });
+
+    it("PR と Issue で、同じ答えを返す", () => {
+      // **食い違いそのものを見る。** **どちらか一方だけ直しても、この本は落ちる**
+      withGh({ labels: ["in-progress"] });
+      const token = startRound(repo);
+      run(["pr", "42"]);
+      run(["resume", "42"]);
+      endRound(repo, token);
+
+      const other = addWorkspace("both");
+      const asPr = run(["pr", "42"], { cwd: other });
+      const asResume = run(["resume", "42"], { cwd: other });
+
+      expect(asPr.status, `pr=${asPr.status} / resume=${asResume.status}`).toBe(asResume.status);
+    });
+
+    it("持ち主が周回を回さなくなっていれば、引き継げる", () => {
+      // **落ちた周回の跡で、その PR が誰にも直せなくなってはいけない**
+      // （**`release` を作らない**判断は、これで成り立っている）。
+      // **黙って奪わない**ので、引き継いだことは残す。
+      //
+      // **「返した直後」ではなく「周回を回さなくなった」で測る** (#306)——
+      // **窓を過ぎるまでは、次の周回で戻ってくる作業場**である
+      withGh({ labels: [] });
+      const token = startRound(repo);
+      run(["pr", "42"]);
+      endRound(repo, token);
+      ageRoundOf(repo);
 
       const second = run(["pr", "42"], { cwd: addWorkspace("later") });
 
@@ -579,10 +637,16 @@ describe("bin/loop-claim", () => {
 
     it("走っているかどうかを読めないなら、取らない", () => {
       // **判定不能は、取れなかった側でも取れた側でもない。**
-      // **作業場の入っていない lease** があると、`bin/loop-lease busy` は「読めない」を返す
+      // **作業場の入っていない lease** があると、`bin/loop-lease` は「読めない」を返す。
+      //
+      // **持ち主の lease は先に返しておく** (#306)。**`alive` は握っている lease を
+      // 先に見る**ので、**持ち主が握ったままだと「生きている」と断定できてしまい、
+      // 読めない記録まで進まない**——**それはそれで「取らない」だが、
+      // ここで見たいのは判定不能のほうである。**
       withGh({ labels: [] });
-      startRound(repo);
+      const token = startRound(repo);
       run(["pr", "42"]);
+      endRound(repo, token);
       writeFileSync(
         join(repo, ".git", "valence-loop-lease-worker-broken"),
         `tok\t${Math.floor(Date.now() / 1000)}\n\n\n`,
@@ -620,6 +684,70 @@ describe("bin/loop-claim", () => {
    * **`--author @me` は 2 人分を返す**ので、**そのまま数えると 1 人目が止まる**——
    * **数えるのは自分の作業場のものだけ**である。
    */
+  describe("release — 自分が取った PR の claim を返す", () => {
+    /** 作業場で周回を始める。 */
+    function startRound(cwd: string): string {
+      const result = spawnSync(LEASE, ["acquire", "worker", workerStamp()], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    }
+
+    /**
+     * **間違って取った claim を、持ち主が返せること**（#307 のレビュー）。
+     *
+     * **`pr` を `alive` へ寄せると、持ち主が周回を回している限り窓が開かない**
+     * ——**取り違えた claim は、その作業場が 30 分以上まったく回さなくなるまで
+     * 誰にも取り返せない。** **返す口が無いと、その PR は永久に直せなくなる。**
+     *
+     * **落ちた周回のぶんは、これまでどおり `alive` の窓が拾う**ので、
+     * **#237 が拒んだ「自動で返す仕組み」とは別のもの**である。
+     */
+    it("持ち主が返せば、別の作業場が取れる", () => {
+      withGh({ labels: [] });
+      startRound(repo);
+      expect(run(["pr", "42"]).status, "取れていない").toBe(0);
+
+      expect(run(["release", "42"]).status, "返せていない").toBe(0);
+
+      // **周回を回したままでも、返したぶんは空く**（`alive` の窓を待たない）
+      expect(run(["pr", "42"], { cwd: addWorkspace("next") }).status, "空いていない").toBe(0);
+    });
+
+    it("返したら、自分のものではなくなる", () => {
+      // **数える側（ステップ 2.1）が見るのは `mine`** である
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+
+      run(["release", "42"]);
+
+      expect(run(["mine", "42"]).status, "返したのに自分のものになっている").toBe(1);
+    });
+
+    it("別の作業場の claim は返せない", () => {
+      // **返せるのは自分のものだけ。** **他人のものを消せると、排他が意味を失う**
+      withGh({ labels: [] });
+      startRound(repo);
+      run(["pr", "42"]);
+
+      const other = run(["release", "42"], { cwd: addWorkspace("stranger") });
+
+      expect(other.status, "他人の claim を消している").toBe(1);
+      expect(run(["mine", "42"]).status, "持ち主が変わっている").toBe(0);
+    });
+
+    it("記録が無ければ、何もせず終わる", () => {
+      // **返す先が無いのは失敗ではない**（**取る前に返しても、周回は止まらない**）
+      withGh({ labels: [] });
+
+      expect(run(["release", "42"]).status).toBe(0);
+    });
+  });
+
   describe("mine — その PR を自分の作業場が持っているか", () => {
     it("自分が取った PR は、自分のもの", () => {
       withGh({ labels: [] });

@@ -6,6 +6,7 @@
 #   bin/loop-claim resume <Issue番号>   着手中の Issue を、自分が続けてよいか尋ねる
 #   bin/loop-claim pr     <PR番号>      レビュー対応の前に、その PR を取る
 #   bin/loop-claim mine   <PR番号>      その PR を自分の作業場が持っているか（読むだけ）
+#   bin/loop-claim release <PR番号>     自分が取った PR の claim を返す
 #   bin/loop-claim idle                 着手したまま実装が出ていない Issue を並べる
 #
 #   exit 0 = 取れた / 続けてよい
@@ -82,6 +83,7 @@ usage() {
   echo "        bin/loop-claim resume <Issue番号>   着手中の Issue を続けてよいか尋ねる" >&2
   echo "        bin/loop-claim pr <PR番号>          レビュー対応の前に PR を取る" >&2
   echo "        bin/loop-claim mine <PR番号>        その PR を自分の作業場が持っているか" >&2
+  echo "        bin/loop-claim release <PR番号>     自分が取った PR の claim を返す" >&2
   echo "        bin/loop-claim audit                label と実態の食い違いを見つける" >&2
   echo "        bin/loop-claim idle                 着手したまま実装が出ていない Issue を並べる" >&2
   echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
@@ -95,7 +97,8 @@ if [[ $ACTION == "audit" || $ACTION == "idle" ]]; then
 else
   [[ $# -eq 2 ]] || usage
   ISSUE="$2"
-  [[ $ACTION == "take" || $ACTION == "resume" || $ACTION == "pr" || $ACTION == "mine" ]] || usage
+  [[ $ACTION == "take" || $ACTION == "resume" || $ACTION == "pr" || $ACTION == "mine" ||
+    $ACTION == "release" ]] || usage
   [[ $ISSUE =~ ^[0-9]+$ ]] || usage
 fi
 readonly ISSUE
@@ -129,7 +132,7 @@ readonly OWNER="$toplevel"
 # **PR と Issue で置き場を分ける。** **同じ番号の Issue と PR は別のもの**で、
 # **混ぜると、Issue を取った作業場が同じ番号の PR を直せなくなる**（逆も同じ）。
 # **`audit` の走査は `valence-loop-claim-[0-9]*` を見る**ので、こちらは当たらない。
-if [[ $ACTION == "pr" || $ACTION == "mine" ]]; then
+if [[ $ACTION == "pr" || $ACTION == "mine" || $ACTION == "release" ]]; then
   readonly RECORD="$common_dir/valence-loop-claim-pr-$ISSUE"
 else
   readonly RECORD="$common_dir/valence-loop-claim-$ISSUE"
@@ -333,9 +336,11 @@ fi
 # --- audit ---------------------------------------------------------------------
 # **label と実態の食い違いを、状態から見つける。**
 #
-# **呼ぶ場所を散文で並べない。** `bin/loop-claim release` を足して「マージしたとき」
+# **呼ぶ場所を散文で並べない。** **Issue の記録を返す口**を足して「マージしたとき」
 # 「blocked へ落としたとき」…と列挙すると、**経路が増えたときに漏れる**
 # （#92 で「通知を送る場面」の列挙が漏れたのと同じ形）。
+# **`release` は PR の記録を持ち主が返す口**で、**これとは別物である** (#306 のレビュー)
+# ——**呼ぶ場所は 1 つ（取り違えたと分かったとき）**で、**列挙にならない。**
 # **どちらの食い違いも状態から機械的に決まる**ので、そちらを見る。
 #
 #   open PR が閉じる Issue が着手中でない … **人の判断が要る**（誰が持つべきか決められない）
@@ -498,12 +503,41 @@ if [[ $ACTION == "mine" ]]; then
   exit 0
 fi
 
+# --- release --------------------------------------------------------------------
+# **自分が取った PR の claim を返す** (#306 のレビュー)。
+#
+# **`pr` を `alive` へ寄せると、持ち主が周回を回している限り窓が開かない**
+# ——**取り違えた claim は、その作業場が回さなくなるまで誰にも取り返せない**
+# （**実測で踏んだ**。worker-b が #305 を取り違え、返す口が無かった）。
+#
+# **落ちた周回のぶんは、これまでどおり `alive` の窓が拾う**ので、**#237 が拒んだ
+# 「自動で返す仕組み」とは別物**である——**返すのは持ち主だけ**で、**呼ぶのは
+# 「取り違えたと分かったとき」の 1 箇所**である。
+#
+#   exit 0 = 返した（記録が無いときも 0）/ exit 1 = 別の作業場のもの / exit 2 = 判定できない
+if [[ $ACTION == "release" ]]; then
+  read_record || {
+    echo "[FAIL] PR #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
+    exit 2
+  }
+  # **返す先が無いのは失敗ではない。** **取る前に返しても、周回を止めない**
+  [[ -n $held_owner ]] || exit 0
+  if [[ $held_owner != "$OWNER" ]]; then
+    # **返せるのは自分のものだけ。** **他人のものを消せると、排他が意味を失う**
+    echo "[INFO] PR #$ISSUE は別の作業場のものです（$held_owner）。返しません" >&2
+    exit 1
+  fi
+  rm -f "$RECORD" || {
+    echo "[FAIL] PR #$ISSUE の記録を消せません: $RECORD" >&2
+    exit 2
+  }
+  echo "[INFO] PR #$ISSUE の claim を返しました" >&2
+  exit 0
+fi
+
 # --- pr ------------------------------------------------------------------------
 # **GitHub を読まずに決める。** **持ち主は作業場**で、**それは手元にしか無い**——
 # **label を 1 つ足しても、同じアカウントの 2 つの作業場は区別できない。**
-#
-# **解放は要らない。** **記録は期限で切れる**（`TTL_SEC`）——**返す手順を足すと、
-# 落ちた周回のぶんが返らず、その PR が誰にも直せなくなる。**
 if [[ $ACTION == "pr" ]]; then
   read_record || {
     echo "[FAIL] PR #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
@@ -516,42 +550,51 @@ if [[ $ACTION == "pr" ]]; then
     # 回すので、動いているまま期限を超えうる**。**超えた瞬間に引き継がれると、
     # この経路が消しに来たもの（2 人が同じ PR を直す）が、期限の側から戻ってくる。**
     #
-    # **心拍を 2 つ持たない。** **`bin/loop-lease` が既に「活動と活動の間隔」で
-    # 測っている**（`./task` が heartbeat を書く）ので、**そこへ訊く**。
+    # **心拍を 2 つ持たない。** **`bin/loop-lease` が既に測っている**ので、**そこへ訊く**。
     # 満たしたい性質は **生きている限り切れない / 落ちたら必ず切れる** で、
-    # **どちらも lease 側の期限がそのまま担う**（`release` を作らない判断は変えない）。
+    # **どちらも lease 側の窓がそのまま担う。**
     #
-    # **識別子の組み立ても書き写さない**（作業場 → digest は lease が持っている。#159）
-    # ——**`busy` は走っている作業場をそのまま出す**ので、こちらで組み立てずに済む。
+    # **PR の記録そのものは期限で消えない** (#306 のレビュー)。**`read_record` も
+    # `mine` も古さを見ていない**——**効いているのは `take` / `resume` の側だけ**である。
+    # **だから返す口を別に置いた**（この上の `release`）——**取り違えた claim が、
+    # 持ち主にも返せないまま残らないようにする。**
+    #
+    # **`resume` と同じ口へ訊く** (#306)。**前は `busy`（いま握っているか）で見ていた**
+    # ——**`resume` は `alive`（周回を回しているか）**なので、**同じ作業場の生死に
+    # 2 つの答えがあった**。**周回と周回の間にいるだけの worker から PR だけが取られ、
+    # 取られた側は次の周回で自分の PR を直せない**（2.1 も 2.2 も exit 1 になる）。
+    # **実測で踏んだ**（2026-08-15。`pr` は exit 0、`resume` は exit 1）。
+    #
+    # **寄せる先は `alive` である**（#296 / #298 / #303 でそちらへ寄せてきた）。
+    # **落ちた作業場からは、これまでどおり引き継げる**——**周回の印が窓を過ぎれば
+    # `alive` も 1 を返す**ので、**「誰も直せない」は作らない**（#296 が消しに来た形）。
+    #
+    # **識別子の組み立ては書き写さない**（作業場 → digest は lease が持っている。#159）
+    # ——**`alive` は作業場のパスをそのまま受け取る。**
     #
     # **持ち主の作業場へは移らない** (#237 のレビュー)。**手順書は `bin/loop-claim` と
     # 相対で呼ぶ**ので、**移ってから `${BASH_SOURCE[0]%/*}` を解決すると
     # 「相手の作業場の `bin/loop-lease`」が走る**——**相手は `gh pr checkout` で PR の
     # head に入っている**ので、**その PR が書き換えた版を実行しうる**（#219 と同じ形）。
-    # **壊れ方は静かで、`busy` の答えを変える PR が乗っていると、生きている持ち主を
+    # **壊れ方は静かで、`alive` の答えを変える PR が乗っていると、生きている持ち主を
     # 「走っていない」と読む**——**この経路が消しに来たものが、そこから戻ってくる。**
     #
-    # **移る必要も無い。** **`busy` は共通ディレクトリの記録を並べるだけ**で、
+    # **移る必要も無い。** **`alive` は共通ディレクトリの記録を読むだけ**で、
     # **同じ worktree 群なら、どこから呼んでも同じものが読める。**
-    if running="$("${BASH_SOURCE[0]%/*}/loop-lease" busy worker 2>/dev/null)"; then
-      : # 走っている作業場がある。下で持ち主かどうかを見る
-    else
-      case "$?" in
-        1) running="" ;; # どこも走っていない
-        *)
-          # **読めないなら取らない。** **判定不能は、取れた側でも取れなかった側でもない。**
-          echo "[FAIL] PR #$ISSUE の持ち主（$held_owner）が動いているか判定できません" >&2
-          exit 2
-          ;;
-      esac
-    fi
-
-    while IFS= read -r workspace; do
-      [[ $workspace == "$held_owner" ]] || continue
-      # **黙って飛ばさない。** **無言で譲ると、2 人居るのに 1 人で回っているように見える。**
-      echo "[INFO] PR #$ISSUE は別の作業場が直しています（$held_owner）。触りません" >&2
-      exit 1
-    done <<<"$running"
+    "${BASH_SOURCE[0]%/*}/loop-lease" alive "$held_owner"
+    case "$?" in
+      0)
+        # **黙って飛ばさない。** **無言で譲ると、2 人居るのに 1 人で回っているように見える。**
+        echo "[INFO] PR #$ISSUE は別の作業場が直しています（$held_owner）。触りません" >&2
+        exit 1
+        ;;
+      1) ;; # 回っていない。下で引き継ぐ
+      *)
+        # **読めないなら取らない。** **判定不能は、取れた側でも取れなかった側でもない。**
+        echo "[FAIL] PR #$ISSUE の持ち主（$held_owner）が動いているか判定できません" >&2
+        exit 2
+        ;;
+    esac
 
     # **黙って奪わない。** 走っていない持ち主の記録は、終わった周回か落ちた周回の跡である。
     echo "[WARN] PR #$ISSUE の持ち主（$held_owner）の周回は走っていません。引き継ぎます" >&2
