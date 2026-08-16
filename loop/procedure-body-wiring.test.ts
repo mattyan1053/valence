@@ -145,12 +145,17 @@ describe("入口だけが cron に運ばれる", () => {
     //
     // **上限が無いと、少しずつ戻る。** **1 節ずつ書き足すぶんには誰も止めないので、
     // 元の 547 行へ静かに帰る**——**戻ったことに気づけるのは、この行だけ**である。
-    const lines = entry().split("\n").length;
+    // **両方の役に掛ける**（#319 の完了条件）——**master も移し終えた。**
+    for (const role of ["worker", "master"] as const) {
+      const lines = readFileSync(join(REPO_ROOT, `.claude/commands/loop-${role}.md`), "utf8").split(
+        "\n",
+      ).length;
 
-    expect(
-      lines,
-      `入口が ${lines} 行ある。本体（loop/procedure/worker.md）へ移すこと`,
-    ).toBeLessThanOrEqual(200);
+      expect(
+        lines,
+        `${role} の入口が ${lines} 行ある。本体（loop/procedure/${role}.md）へ移すこと`,
+      ).toBeLessThanOrEqual(200);
+    }
   });
 });
 

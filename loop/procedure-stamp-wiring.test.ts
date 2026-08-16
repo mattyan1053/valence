@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = join(REPO_ROOT, "bin/loop-procedure-stamp");
@@ -299,7 +300,7 @@ describe("ずれたときの行き先が、手順書に書いてある", () => {
     // **参照をやめれば、次に 1.1 が変わっても壊れない**（AGENTS.md §5）。
     // **範囲を絞る**（#272 のレビュー）。**1.1 にも「全部消すと」がある**ので、
     // **手順書全体で見ると、マージ後の経路から指示を消しても通ってしまう。**
-    const body = readFileSync(join(REPO_ROOT, ".claude/commands/loop-master.md"), "utf8");
+    const body = procedureText("master");
     // **1.1 と同じ錨は使えない**——**`bin/loop-procedure-changed --role` は
     // 1.1 にも 3.1 にもあり、`indexOf` は 1.1 を先に見つける。**
     // **切り方も `\n### `**（`\n## ` だと次の `## 4.` まで飲み込む）。

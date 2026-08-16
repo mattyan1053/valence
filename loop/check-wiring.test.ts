@@ -85,8 +85,6 @@ describe("./task check の読み方", () => {
     // master は `./task check` を実行しないが、**`bin/loop-*` の終了コードで
     // 分岐する箇所は同じ性質**を持つ。**既にあるなら足さない**——
     // ここは「足りていること」を固定するだけである
-    expect(read(".claude/commands/loop-master.md")).toMatch(
-      /終了コードで分岐する。出力の文言で判断しない/,
-    );
+    expect(procedureText("master")).toMatch(/終了コードで分岐する。出力の文言で判断しない/);
   });
 });
