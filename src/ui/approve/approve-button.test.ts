@@ -56,13 +56,9 @@ describe("押せなかった理由を伝える", () => {
     expect(approveNotice("unavailable")).not.toContain("ログイン");
   });
 
-  it("承認できたことも出す", () => {
-    expect(approveNotice("approved")).toContain("承認");
-  });
-
   it("理由に、GitHub の文面をそのまま載せない", () => {
     // **§6。応答の中身には、そのユーザーの持ち物が並びうる**
-    for (const kind of ["approved", "forbidden", "self-approval", "unavailable"] as const) {
+    for (const kind of ["forbidden", "self-approval", "unavailable"] as const) {
       expect(approveNotice(kind)).not.toMatch(/status|Unprocessable|GitHub が/);
     }
   });

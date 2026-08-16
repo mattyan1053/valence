@@ -35,11 +35,23 @@ describe("送られてきた PR 番号を読む", () => {
   it("前後に空白があっても、番号として読む", () => {
     expect(pullRequestNumberFrom(" 42 ")).toBe(42);
   });
+
+  it("安全に扱えない大きさは通さない", () => {
+    // **`Number` にすると丸まる大きさ**——**別の PR 番号に化ける**
+    expect(pullRequestNumberFrom("9007199254740993")).toBeUndefined();
+  });
 });
 
 describe("結果を、押した人へ返す形にする", () => {
-  it("押せた・押せなかったが、そのまま行き先に載る", () => {
-    expect(approveOutcomeParam({ kind: "approved" })).toBe("approved");
+  it("成功は、行き先に載せない", () => {
+    // **`?approve=` は利用者が任意に作れる**（#342 のレビュー）——**載せると、
+    // 承認していない人が URL を開くだけで「承認しました」と出る。**
+    // **`approved` は取り消せない事実の主張**で、**見た人は次の行動へ移る。**
+    expect(approveOutcomeParam({ kind: "approved" })).toBeUndefined();
+  });
+
+  it("押せなかった理由は、そのまま行き先に載る", () => {
+    // **偽装されても、断言している内容は「起きなかった」**である
     expect(approveOutcomeParam({ kind: "forbidden" })).toBe("forbidden");
     expect(approveOutcomeParam({ kind: "self-approval" })).toBe("self-approval");
   });

@@ -12,42 +12,60 @@
  */
 
 import { redirect } from "next/navigation";
+import { z } from "zod";
 import type { ApprovePullRequestResult } from "../../../../../application/review-order/approve-pull-request";
 import { approvePullRequestForCurrentUser } from "../../../../../composition/auth";
 import type { ApproveNoticeKind } from "../../../../../ui/approve/approve-button";
 
 /**
- * 送られてきた PR 番号を、数として読む。
+ * 送られてきた PR 番号。**境界なので Zod で検証する**（`AGENTS.md` §3。#342 のレビュー）。
+ *
+ * **自前の正規表現と `Number()` で書き直さない。** **いま同じ制約を満たせていても、
+ * 境界ごとに別のものが育つ**——**#342 は「同じ規則を 2 箇所に置かない」を
+ * 自己承認の側では守っておきながら、ここで踏んでいた。**
  *
  * **フォームから来る値は文字列である。** **`Number()` に通しただけで使わない**
  * ——**`""` は `0` に、空白は無視され**、**どの PR とも違う相手へ要求が出る。**
  *
- * **1 以上の整数だけを通す**（**PR 番号がそれ以外になることは無い**）。
+ * **1 以上・安全に扱える整数だけを通す**（**PR 番号がそれ以外になることは無い**）。
  */
-export function pullRequestNumberFrom(value: unknown): number | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  // **形で確かめてから数にする**——**`Number()` は `1e3` も ` 42 ` も受ける**ので、
+const pullRequestNumberSchema = z
+  .string()
+  .trim()
+  // **形で確かめてから数にする**——**`Number()` は `1e3` も `0x2a` も受ける**ので、
   // **通してよいものを並べる側で決める**（#90 と同じ形）
-  const trimmed = value.trim();
-  if (!/^[0-9]+$/.test(trimmed)) {
-    return undefined;
-  }
-  const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+  .regex(/^[0-9]+$/)
+  .transform(Number)
+  .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER));
+
+export function pullRequestNumberFrom(value: unknown): number | undefined {
+  const parsed = pullRequestNumberSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**
  * 結果を、画面が出せる語彙へ寄せる。
  *
+ * **成功は載せない**（#342 のレビュー）——**`?approve=` は利用者が任意に作れる。**
+ * **`approved` を載せると、承認していない人が URL を開く・再読み込みする・
+ * 共有されたリンクを踏むだけで「承認しました」と出る**——**承認は 1 度も
+ * 起きていないのに、画面がそう主張する。**
+ *
+ * **失敗側は載せてよい。** **同じ穴だが、断言している内容が「起きなかった」**である
+ * ——**偽装しても、押していない人が「押せなかった」と読むだけ**で、
+ * **次の行動が変わらない。** **`approved` は取り消せない事実の主張**で、
+ * **見た人はマージへ進む。**
+ *
  * **`not-found` をそのまま返さない**（§6）——**見えないリポジトリの存在を教える。**
  * **ログインの状態も分けない**——**押した人にとっては「いま押せなかった」**である。
  */
-export function approveOutcomeParam(result: ApprovePullRequestResult): ApproveNoticeKind {
+export function approveOutcomeParam(
+  result: ApprovePullRequestResult,
+): ApproveNoticeKind | undefined {
   switch (result.kind) {
     case "approved":
-      return "approved";
+      // **何も載せずに盤面へ戻す**
+      return undefined;
     case "forbidden":
       return "forbidden";
     case "self-approval":
@@ -73,5 +91,7 @@ export async function POST(
   }
 
   const result = await approvePullRequestForCurrentUser({ owner, name }, number);
-  redirect(`${board}?approve=${approveOutcomeParam(result)}`);
+  const outcome = approveOutcomeParam(result);
+  // **成功のときは何も載せない**（上記）——**押した結果は盤面そのもので確かめる**
+  redirect(outcome === undefined ? board : `${board}?approve=${outcome}`);
 }

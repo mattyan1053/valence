@@ -39,15 +39,21 @@ describe("読めなかった PR を画面から消さない", () => {
 describe("直前の承認の結果を出す", () => {
   // **`?approve=` は URL に載っている**ので、**誰でも好きな文字列を入れられる**
   // ——**並べたものだけを通す**（#330）
-  it("知っている結果だけを通す", () => {
-    for (const kind of ["approved", "forbidden", "self-approval", "unavailable"] as const) {
+  it("知っている理由だけを通す", () => {
+    for (const kind of ["forbidden", "self-approval", "unavailable"] as const) {
       expect(approveNoticeKind(kind)).toBe(kind);
     }
   });
 
+  it("成功は、クエリ文字列から出さない", () => {
+    // **`?approve=approved` を開くだけで「承認しました」と出てはならない**
+    // （#342 のレビュー）——**利用者が任意に作れる値から、成功を断言しない。**
+    expect(approveNoticeKind("approved")).toBeUndefined();
+  });
+
   it("知らない値は通さない", () => {
     // **通すと、こちらが言っていないことを画面に言わせられる**
-    for (const value of ["", "ok", "承認しました", 1, null, undefined, ["approved"]]) {
+    for (const value of ["", "ok", "承認しました", 1, null, undefined, ["forbidden"]]) {
       expect(approveNoticeKind(value), String(value)).toBeUndefined();
     }
   });

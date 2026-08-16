@@ -46,17 +46,18 @@ function notice(kind: "signed-out" | "needs-login" | "unavailable"): string {
 }
 
 /**
- * 直前の承認の結果。**知らない値は出さない**（#330）。
+ * 直前に**押せなかった**理由。**知らない値は出さない**（#330）。
  *
  * **`?approve=` は URL に載っている**ので、**誰でも好きな文字列を入れられる**
  * ——**そのまま画面へ出すと、こちらが言っていないことを言わせられる。**
  * **並べたものだけを通す**（#90 と同じ形）。
+ *
+ * **成功はここから出さない**（#342 のレビュー）——**`?approve=approved` を
+ * 開くだけで「承認しました」と出てはならない。** **承認できたかどうかは、
+ * 利用者が任意に作れない場所（GitHub 側の状態）で確かめる。**
  */
 export function approveNoticeKind(value: unknown): ApproveNoticeKind | undefined {
-  return value === "approved" ||
-    value === "forbidden" ||
-    value === "self-approval" ||
-    value === "unavailable"
+  return value === "forbidden" || value === "self-approval" || value === "unavailable"
     ? value
     : undefined;
 }

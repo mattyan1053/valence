@@ -8,8 +8,16 @@
  * 押した先で対象が決まらない**——**別の PR へ承認が出る。**
  */
 
-/** 押した結果。**画面へ出す語彙で持つ**（`application` の型は import しない）。 */
-export type ApproveNoticeKind = "approved" | "forbidden" | "self-approval" | "unavailable";
+/**
+ * **押せなかった理由。** **画面へ出す語彙で持つ**（`application` の型は import しない）。
+ *
+ * **成功を並べない**（#342 のレビュー）——**これは URL から渡ってくる値**であり、
+ * **利用者が任意に作れる。** **`approved` を並べた瞬間、承認していない人が
+ * 「承認しました」を出せる**（**取り消せない事実の主張**で、**見た人はマージへ進む**）。
+ *
+ * **失敗側を残しているのは、断言している内容が「起きなかった」**だからである。
+ */
+export type ApproveNoticeKind = "forbidden" | "self-approval" | "unavailable";
 
 export type ApproveButtonProps = {
   readonly number: number;
@@ -35,8 +43,6 @@ export type ApproveButtonProps = {
  */
 export function approveNotice(kind: ApproveNoticeKind): string {
   switch (kind) {
-    case "approved":
-      return "承認しました。";
     case "forbidden":
       return "このリポジトリへ書き込む権限がないため、承認できません。";
     case "self-approval":
