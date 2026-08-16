@@ -395,6 +395,64 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
     expect(reader.seen, "読むものが無いのに叩きに行っている").toEqual([]);
   });
 
+  it("承認の状態が返らないときは、期限で切り上げる", async () => {
+    // **無期限に待つと、盤面ごと出ない**（#346 のレビュー）——**「読めなくても
+    // 盤面は出す」と書いておきながら、遅いときだけその経路へ入らない。**
+    // **`fetch` に短い既定の期限は無い**ので、**待つ側が決める。**
+    const never: PullRequestApprovals = {
+      listApprovals() {
+        return new Promise(() => {
+          // **返らない口**——**期限が無ければ、ここで止まったままになる**
+        });
+      },
+    };
+
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      approvals: never,
+      approvalsDeadline: () => AbortSignal.abort(),
+    });
+
+    expect(result.kind).toBe("board");
+    // **打ち切ったぶんは「読めなかった」**——**承認されていない、ではない**
+    expect(
+      result.kind === "board"
+        ? result.approvals.unavailable.map((row) => row.pullRequestNumber)
+        : [],
+      "打ち切ったのに、どこにも残っていない",
+    ).toEqual([7]);
+  });
+
+  it("打ち切りの合図を、口まで通す", async () => {
+    // **先に返すだけでは、走っている要求は走り続ける**（`ChangeSummaryRequest` と同じ）
+    const seen: (AbortSignal | undefined)[] = [];
+    const reader: PullRequestApprovals = {
+      async listApprovals(_token, _repository, _numbers, request) {
+        seen.push(request?.signal);
+        return NO_APPROVALS;
+      },
+    };
+    const deadline = new AbortController().signal;
+
+    await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      approvals: reader,
+      approvalsDeadline: () => deadline,
+    });
+
+    expect(seen, "合図が口まで届いていない").toEqual([deadline]);
+  });
+
   it("置き場を開けなかったら、期限切れと分ける", async () => {
     const board = plan();
 

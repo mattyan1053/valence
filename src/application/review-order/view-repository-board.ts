@@ -85,6 +85,18 @@ export type ViewRepositoryBoardInput = {
    * ——**#343 が消しに来た状態**である。
    */
   readonly approvals: PullRequestApprovals;
+  /**
+   * 承認の状態の取得を打ち切る合図を**作る手続き**（#346 のレビュー）。
+   *
+   * **無期限に待つと、盤面ごと出ない**——**「読めなくても盤面は出す」と決めておきながら、
+   * 遅いときだけその経路へ入らない**（**`fetch` に短い既定の期限は無い**）。
+   *
+   * **期限の決め方は持たない**（`ReviewOrderOptions.changesDeadline` と同じ理由）
+   * ——**どれだけ待つかは表示の段取り**であって、ユースケースの判断ではない。
+   * **作る手続きで受けるのは、数え始める位置のため**である（#316）——
+   * **合成ルートで作って渡すと、盤面を組み立てるぶんが承認の期限から引かれる。**
+   */
+  readonly approvalsDeadline?: () => AbortSignal;
 };
 
 export async function viewRepositoryBoard({
@@ -95,6 +107,7 @@ export async function viewRepositoryBoard({
   permissions,
   plan,
   approvals,
+  approvalsDeadline,
 }: ViewRepositoryBoardInput): Promise<RepositoryBoardResult> {
   // **認可は共有の判断が持つ** (#315)。**ここへ写すと、Approve / Merge 側と
   // 片方だけ直したときに食い違う**——**症状は「他人のものが見える / 触れる」**である。
@@ -134,6 +147,9 @@ export async function viewRepositoryBoard({
       authorization.userAccessToken,
       repository,
       board.pullRequests.map((pullRequest) => pullRequest.number),
+      // **合図はここで作る**（#316 と同じ理由）——**盤面を組み立てるぶんを、
+      // 承認の期限から引かない**
+      approvalsDeadline?.(),
     ),
   };
 }
@@ -153,18 +169,49 @@ async function readApprovals(
   userAccessToken: string,
   repository: VisibleRepository,
   numbers: readonly number[],
+  deadline: AbortSignal | undefined,
 ): Promise<PullRequestApprovalListing> {
   // **読むものが無ければ、往復も作らない**
   if (numbers.length === 0) {
     return { approved: new Set(), unavailable: [] };
   }
-  try {
-    return await approvals.listApprovals(userAccessToken, repository, numbers);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : "承認の状態を取得できませんでした";
-    return {
-      approved: new Set(),
-      unavailable: numbers.map((pullRequestNumber) => ({ pullRequestNumber, reason })),
-    };
+  // **切れているなら呼ばない**（`collectChanges` と同じ）——**呼べば往復が始まる**
+  if (deadline?.aborted === true) {
+    return unreadable(numbers, "期限までに承認の状態が返りませんでした");
   }
+  try {
+    // **口の行儀に頼らない**（`collectChanges` と同じ理由）——**合図を渡しても、
+    // 受け取らない実装・無視する実装はありうる。** **待つのをやめる側と、
+    // 取り消しを伝える側の両方**が要る。
+    const listing = await Promise.race([
+      approvals.listApprovals(userAccessToken, repository, numbers, { signal: deadline }),
+      abortion(deadline),
+    ]);
+    return listing === TIMED_OUT
+      ? unreadable(numbers, "期限までに承認の状態が返りませんでした")
+      : listing;
+  } catch (error) {
+    return unreadable(
+      numbers,
+      error instanceof Error ? error.message : "承認の状態を取得できませんでした",
+    );
+  }
+}
+
+/** 打ち切りの印。**「1 件も承認されていなかった」と区別できる値**にする。 */
+const TIMED_OUT = Symbol("timed-out");
+
+/** 合図が鳴るまで返らない約束。**合図が無ければ永久に返らない**（競争しても影響しない）。 */
+function abortion(deadline: AbortSignal | undefined): Promise<typeof TIMED_OUT> {
+  return new Promise((resolve) => {
+    deadline?.addEventListener("abort", () => resolve(TIMED_OUT), { once: true });
+  });
+}
+
+/** 読めなかったぶん。**「承認されていない」とは言わない。** */
+function unreadable(numbers: readonly number[], reason: string): PullRequestApprovalListing {
+  return {
+    approved: new Set(),
+    unavailable: numbers.map((pullRequestNumber) => ({ pullRequestNumber, reason })),
+  };
 }

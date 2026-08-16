@@ -37,6 +37,20 @@ export type PullRequestApprovalListing = {
   readonly unavailable: readonly UnavailableApproval[];
 };
 
+/** 取得のしかたに関する指示。**`ChangeSummaryRequest` と同じ形**である。 */
+export type PullRequestApprovalRequest = {
+  /**
+   * 打ち切りの合図（#346 のレビュー）。
+   *
+   * **先に返すだけでは、走っている要求は走り続ける。** **取り消しを口まで
+   * 通さない**と、**縮退したのは呼んだ側だけ**で、往復は最後まで続く。
+   *
+   * **期限の決め方はここに無い。** どれだけ待つかは**呼ぶ側の段取り**であって、
+   * ユースケースの判断ではない（`application` は時計を持たない）。
+   */
+  readonly signal?: AbortSignal;
+};
+
 export type PullRequestApprovals = {
   /**
    * **その人の身元で**、承認の状態を読む。
@@ -53,5 +67,6 @@ export type PullRequestApprovals = {
     userAccessToken: string,
     repository: VisibleRepository,
     pullRequestNumbers: readonly number[],
+    request?: PullRequestApprovalRequest,
   ): Promise<PullRequestApprovalListing>;
 };

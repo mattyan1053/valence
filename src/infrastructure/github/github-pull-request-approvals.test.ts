@@ -20,7 +20,7 @@ import { createGitHubPullRequestApprovals } from "./github-pull-request-approval
 const REPOSITORY = { owner: "acme", name: "web" } as const;
 const USER_TOKEN = "user-token";
 
-type Node = { number: number; states: string[] };
+type Node = { number: number; states: string[]; moreReviews?: string };
 
 /** 1 ページぶんの応答。**続きがあるかは `endCursor` で表す。** */
 function page(nodes: readonly Node[], endCursor?: string): unknown {
@@ -29,10 +29,33 @@ function page(nodes: readonly Node[], endCursor?: string): unknown {
       repository: {
         pullRequests: {
           pageInfo: { hasNextPage: endCursor !== undefined, endCursor: endCursor ?? null },
-          nodes: nodes.map(({ number, states }) => ({
+          nodes: nodes.map(({ number, states, moreReviews }) => ({
             number,
-            latestOpinionatedReviews: { nodes: states.map((state) => ({ state })) },
+            latestOpinionatedReviews: {
+              // **内側にも続きがある**（#346 のレビュー）——**意見の数は 100 で切れる**
+              pageInfo: {
+                hasNextPage: moreReviews !== undefined,
+                endCursor: moreReviews ?? null,
+              },
+              nodes: states.map((state) => ({ state })),
+            },
           })),
+        },
+      },
+    },
+  };
+}
+
+/** 1 つの PR の、意見だけの応答（**内側の続きを読む要求への答え**）。 */
+function reviewPage(states: readonly string[], endCursor?: string): unknown {
+  return {
+    data: {
+      repository: {
+        pullRequest: {
+          latestOpinionatedReviews: {
+            pageInfo: { hasNextPage: endCursor !== undefined, endCursor: endCursor ?? null },
+            nodes: states.map((state) => ({ state })),
+          },
         },
       },
     },
@@ -176,6 +199,76 @@ describe("GitHub から承認の状態を読む", () => {
 
     expect([...listing.approved]).toEqual([7]);
     expect(listing.unavailable.map((row) => row.pullRequestNumber)).toEqual([8]);
+  });
+
+  it("意見が 100 件を超えても、承認を取りこぼさない", async () => {
+    // **内側の接続にも `pageInfo` がある**（#346 のレビュー。**#322 で 1 度直した罠**）
+    // ——**辿らないと、唯一の承認が次のページにある PR で「承認されていない」に化ける。**
+    const approvals = createGitHubPullRequestApprovals({
+      fetchImpl: fetcher([
+        {
+          status: 200,
+          body: page([{ number: 7, states: ["CHANGES_REQUESTED"], moreReviews: "REVIEWS" }]),
+        },
+        { status: 200, body: reviewPage(["APPROVED"]) },
+      ]),
+    });
+
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7]);
+
+    expect([...listing.approved], "内側の続きを読んでいない").toEqual([7]);
+    expect(listing.unavailable).toEqual([]);
+  });
+
+  it("続きを読んでも承認が無ければ、承認済みにしない", async () => {
+    // **「読んだ」と「あった」を混ぜない**——**辿った先に無ければ、無いのである**
+    const approvals = createGitHubPullRequestApprovals({
+      fetchImpl: fetcher([
+        {
+          status: 200,
+          body: page([{ number: 7, states: ["CHANGES_REQUESTED"], moreReviews: "REVIEWS" }]),
+        },
+        { status: 200, body: reviewPage(["CHANGES_REQUESTED"]) },
+      ]),
+    });
+
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7]);
+
+    expect([...listing.approved]).toEqual([]);
+    expect(listing.unavailable).toEqual([]);
+  });
+
+  it("承認が 1 ページ目にあれば、続きは読まない", async () => {
+    // **要らない往復を作らない**——**1 人でも承認していれば、そこで決まる**
+    const fetchImpl = fetcher([
+      {
+        status: 200,
+        body: page([{ number: 7, states: ["APPROVED"], moreReviews: "REVIEWS" }]),
+      },
+    ]);
+
+    await createGitHubPullRequestApprovals({ fetchImpl }).listApprovals(
+      USER_TOKEN,
+      REPOSITORY,
+      [7],
+    );
+
+    expect(fetchImpl.calls).toHaveLength(1);
+  });
+
+  it("打ち切りの合図を、要求へ渡す", async () => {
+    // **先に返すだけでは、走っている要求は走り続ける**（`ChangeSummaryRequest` と同じ）
+    const fetchImpl = fetcher([{ status: 200, body: page([{ number: 7, states: [] }]) }]);
+    const controller = new AbortController();
+
+    await createGitHubPullRequestApprovals({ fetchImpl }).listApprovals(
+      USER_TOKEN,
+      REPOSITORY,
+      [7],
+      { signal: controller.signal },
+    );
+
+    expect(fetchImpl.calls[0]?.init?.signal, "合図が口まで届いていない").toBe(controller.signal);
   });
 
   it("読めなければ投げる", async () => {

@@ -237,6 +237,14 @@ export async function visibleRepositoriesForCurrentUser(): Promise<VisibleReposi
 const CHANGES_DEADLINE_MS = 5_000;
 
 /**
+ * 承認の状態の取得を打ち切るまで（#346 のレビュー）。
+ *
+ * **依存グラフだけでも交通整理の役に立つ**ので、**承認の状態が遅い日は、
+ * 盤面を先に出す**——**渡さないと、画面ごと待つ。**
+ */
+const APPROVALS_DEADLINE_MS = 5_000;
+
+/**
  * **いまログインしている人の目で、1 つのリポジトリの盤面を返す**（#314）。
  *
  * **見てよいかはユーザートークンで決め、PR のデータは installation トークンで取る**
@@ -272,6 +280,9 @@ export async function repositoryBoardForCurrentUser(repository: {
     // **承認の状態も、その人のトークンで読む**（#343。§6）——**installation
     // トークンだと、誰がログインしていても同じ答えになる。**
     approvals: createGitHubPullRequestApprovals(),
+    // **合図は作る手続きで渡す**（#316 と同じ理由）——**盤面を組み立てるぶんを、
+    // 承認の期限から引かない**
+    approvalsDeadline: () => AbortSignal.timeout(APPROVALS_DEADLINE_MS),
     // **App の資格を読むのはここだけ。** **見てよいと分かるまで、1 度も呼ばれない**
     plan: () => {
       const { app } = appSettings();
