@@ -58,8 +58,12 @@ function writingSections(): [string, string][] {
   let heading = "";
   let writesHere = false;
   let checkedFirst = false;
+  // **入口の「ステップ N 以降」は、本体の節を名前で並べているだけ**である（#319）——
+  // **書かない。** **並べた名前に `resolve` が入る**ので、除かないと書き込みに見える
+  // （**節が増えたわけではないのに一覧が動く**）。
+  const isPointer = (text: string) => /^## ステップ .+ 以降$/.test(text);
   const flush = () => {
-    if (heading !== "" && writesHere) {
+    if (heading !== "" && writesHere && !isPointer(heading)) {
       pairs.push([heading, checkedFirst ? "確かめてから書く" : "確かめない"]);
     }
   };
