@@ -1,0 +1,84 @@
+/**
+ * **マージを受け付ける口**（#331）。
+ *
+ * **infrastructure を直に触らない**（§3）。**合成ルートだけを呼ぶ。**
+ *
+ * **#342 が決めた形をそのまま使う**（#331 の指示）——**同じ穴を開け直さない。**
+ *
+ * - **成功をクエリ文字列から出さない**（**語彙に無ければ渡せない**）
+ * - **POST の本文は Zod で検証する**
+ * - **応答は 303**（**`boardRedirect` を使う。新しく書かない**）
+ */
+
+import { z } from "zod";
+import type { MergePullRequestResult } from "../../../../../application/review-order/merge-pull-request";
+import { mergePullRequestForCurrentUser } from "../../../../../composition/auth";
+import type { MergeNoticeKind } from "../../../../../ui/merge/merge-button";
+import { boardRedirect } from "../board-redirect";
+
+/**
+ * 送られてきた PR 番号。**境界なので Zod で検証する**（§3。#342 のレビュー）。
+ *
+ * **`Number()` は `1e3` / `0x2a` / `Infinity` を受ける**ので、
+ * **形（`regex`）で絞ってから数にする**（#90 と同じ形）。
+ */
+const pullRequestNumberSchema = z
+  .string()
+  .trim()
+  .regex(/^[0-9]+$/)
+  .transform(Number)
+  .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER));
+
+export function pullRequestNumberFrom(value: unknown): number | undefined {
+  const parsed = pullRequestNumberSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * 結果を、画面が出せる語彙へ寄せる。
+ *
+ * **成功は載せない**（#342 のレビュー）——**`?merge=` は利用者が任意に作れる。**
+ * **`merged` を載せると、マージしていない人が URL を開くだけで
+ * 「マージしました」と出る**——**取り消せない事実の主張**である。
+ *
+ * **失敗側は載せてよい**（**断言している内容が「起きなかった」**）。
+ *
+ * **`not-found` をそのまま返さない**（§6）——**見えないリポジトリの存在を教える。**
+ */
+export function mergeOutcomeParam(result: MergePullRequestResult): MergeNoticeKind | undefined {
+  switch (result.kind) {
+    case "merged":
+      // **何も載せずに盤面へ戻す**
+      return undefined;
+    case "forbidden":
+      return "forbidden";
+    case "not-mergeable":
+      return "not-mergeable";
+    default:
+      // **`signed-out` / `needs-login` / `unavailable` / `not-found`**
+      return "unavailable";
+  }
+}
+
+export async function POST(
+  request: Request,
+  { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
+): Promise<Response> {
+  const { owner, name } = await params;
+  const form = await request.formData().catch(() => undefined);
+  const number = pullRequestNumberFrom(form?.get("number"));
+
+  if (number === undefined) {
+    // **読めない要求で GitHub を叩かない**
+    return boardRedirect(request, { owner, name }, { param: "merge", value: "unavailable" });
+  }
+
+  const result = await mergePullRequestForCurrentUser({ owner, name }, number);
+  const outcome = mergeOutcomeParam(result);
+  // **成功のときは何も載せない**（上記）
+  return boardRedirect(
+    request,
+    { owner, name },
+    outcome === undefined ? undefined : { param: "merge", value: outcome },
+  );
+}

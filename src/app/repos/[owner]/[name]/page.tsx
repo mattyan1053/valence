@@ -12,6 +12,8 @@ import { notFound } from "next/navigation";
 import { repositoryBoardForCurrentUser } from "../../../../composition/auth";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
 import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
+import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
+import { MergeButton, mergeNotice } from "../../../../ui/merge/merge-button";
 import { ReviewBoard } from "../../../../ui/review-board/review-board";
 
 /**
@@ -62,6 +64,18 @@ export function approveNoticeKind(value: unknown): ApproveNoticeKind | undefined
     : undefined;
 }
 
+/**
+ * 直前に**マージできなかった**理由。**知らない値は出さない**（#331）。
+ *
+ * **成功はここから出さない**（#342 のレビューと同じ）——**`?merge=merged` を
+ * 開くだけで「マージしました」と出てはならない。**
+ */
+export function mergeNoticeKind(value: unknown): MergeNoticeKind | undefined {
+  return value === "forbidden" || value === "not-mergeable" || value === "unavailable"
+    ? value
+    : undefined;
+}
+
 export default async function RepositoryBoardPage({
   params,
   searchParams,
@@ -70,7 +84,9 @@ export default async function RepositoryBoardPage({
   readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { owner, name } = await params;
-  const outcome = approveNoticeKind((await searchParams).approve);
+  const query = await searchParams;
+  const outcome = approveNoticeKind(query.approve);
+  const mergeOutcome = mergeNoticeKind(query.merge);
   const result = await repositoryBoardForCurrentUser({ owner, name });
 
   if (result.kind === "not-found") {
@@ -83,8 +99,11 @@ export default async function RepositoryBoardPage({
       <h1 className="font-mono text-2xl font-bold tracking-tight">
         {owner}/{name}
       </h1>
-      {/* **直前の承認の結果。** **押せなかった理由は、押した画面に出す** */}
+      {/* **押せなかった理由は、押した画面に出す** */}
       {outcome === undefined ? undefined : <p className="text-sm">{approveNotice(outcome)}</p>}
+      {mergeOutcome === undefined ? undefined : (
+        <p className="text-sm">{mergeNotice(mergeOutcome)}</p>
+      )}
       {result.kind === "board" ? (
         <>
           <ReviewBoard
@@ -94,10 +113,16 @@ export default async function RepositoryBoardPage({
             invalid={result.plan.invalid}
             changes={result.plan.changes}
             renderActions={(number) => (
-              <ApproveButton
-                number={number}
-                action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/approve`}
-              />
+              <>
+                <ApproveButton
+                  number={number}
+                  action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/approve`}
+                />
+                <MergeButton
+                  number={number}
+                  action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/merge`}
+                />
+              </>
             )}
           />
           {/* **黙って捨てない。** **消すと「読めなかった」が「無かった」に化ける** */}

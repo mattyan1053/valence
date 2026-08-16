@@ -20,12 +20,15 @@ import type { VisibleRepositoriesResult } from "../application/repositories/list
 import { listVisibleRepositories } from "../application/repositories/list-visible-repositories";
 import type { ApprovePullRequestResult } from "../application/review-order/approve-pull-request";
 import { approvePullRequest } from "../application/review-order/approve-pull-request";
+import type { MergePullRequestResult } from "../application/review-order/merge-pull-request";
+import { mergePullRequest } from "../application/review-order/merge-pull-request";
 import { planReviewOrder } from "../application/review-order/plan-review-order";
 import type { RepositoryBoardResult } from "../application/review-order/view-repository-board";
 import { viewRepositoryBoard } from "../application/review-order/view-repository-board";
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
 import { readAppCredentials, readOAuthCredentials } from "../infrastructure/github/app-credentials";
 import { createGitHubChangeSummarySource } from "../infrastructure/github/github-change-summary-source";
+import { createGitHubPullRequestMerges } from "../infrastructure/github/github-pull-request-merge";
 import { createGitHubPullRequestReviews } from "../infrastructure/github/github-pull-request-review";
 import { createGitHubPullRequestSource } from "../infrastructure/github/github-pull-request-source";
 import { createUserRepositoryPermissions } from "../infrastructure/github/user-repository-permissions";
@@ -317,5 +320,42 @@ export async function approvePullRequestForCurrentUser(
     permissions: createUserRepositoryPermissions(),
     // **承認も、その人の身元で出す**（#330 の条件）
     reviews: createGitHubPullRequestReviews(),
+  });
+}
+
+/**
+ * **いまログインしている人の身元で、PR をマージする**（#331）。
+ *
+ * **`approvePullRequestForCurrentUser` と同じ経路**である——**App の資格を
+ * ここでは読まない。** **installation トークンで実行すると、保護ルールの
+ * 「マージできる人」を迂回できる**（**#330 で人が決めた条件と同じ形**）。
+ *
+ * **`require: "write"` を渡すのは `mergePullRequest` の側**である
+ * （**認可を 2 通り持たない**）。
+ */
+export async function mergePullRequestForCurrentUser(
+  repository: { readonly owner: string; readonly name: string },
+  number: number,
+): Promise<MergePullRequestResult> {
+  const { credentials, connection, key } = settings();
+  const client = await sessionClient(connection);
+  const budget = createWinnersSaveBudget();
+  return mergePullRequest({
+    repository,
+    number,
+    openStore: () => storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
+    ensure: (store) =>
+      ensureUsableToken({
+        store,
+        refresh: (refreshToken) =>
+          refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+        now: new Date(),
+        waitForWinnersSave: createWaitForWinnersSave({ budget }),
+      }),
+    // **ユーザートークンで解決する**（§6）
+    repositories: createUserVisibleRepositories(),
+    permissions: createUserRepositoryPermissions(),
+    // **マージも、その人の身元で行う**（#331 の条件）
+    merges: createGitHubPullRequestMerges(),
   });
 }

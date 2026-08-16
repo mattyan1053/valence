@@ -11,11 +11,11 @@
  * 伝わること**が、この Issue の完了条件のひとつである。
  */
 
-import { NextResponse } from "next/server";
 import { z } from "zod";
 import type { ApprovePullRequestResult } from "../../../../../application/review-order/approve-pull-request";
 import { approvePullRequestForCurrentUser } from "../../../../../composition/auth";
 import type { ApproveNoticeKind } from "../../../../../ui/approve/approve-button";
+import { boardRedirect } from "../board-redirect";
 
 /**
  * 送られてきた PR 番号。**境界なので Zod で検証する**（`AGENTS.md` §3。#342 のレビュー）。
@@ -76,36 +76,6 @@ export function approveOutcomeParam(
   }
 }
 
-/**
- * 盤面へ戻す応答。
- *
- * **303 で戻す**（#342 のレビュー）。**`next/navigation` の `redirect()` は
- * Route Handler では 307** で、**ブラウザはメソッドと本文を保持したまま再送する**
- * ——**盤面に POST handler は無い**ので、**承認が成功しても 405 で終わり**、
- * **盤面にも、押せなかった理由にも到達できない。**
- * **POST-Redirect-GET にする**（`src/app/auth/logout/route.ts` と同じ形）。
- *
- * **戻り先は要求が来たオリジンの上に組み立てる**（`src/app/auth/urls.ts` と同じ理由）
- * ——**設定へ書き固めると、`localhost` と `127.0.0.1` で食い違う。**
- *
- * **owner / name は経路の 1 区切りとして入れる**——**そのまま繋ぐと、
- * `..` や `?` を含む名前で別の場所へ戻せる。**
- */
-export function boardRedirect(
-  request: Request,
-  repository: { readonly owner: string; readonly name: string },
-  outcome: ApproveNoticeKind | undefined,
-): NextResponse {
-  const board = new URL(
-    `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`,
-    request.url,
-  );
-  if (outcome !== undefined) {
-    board.searchParams.set("approve", outcome);
-  }
-  return NextResponse.redirect(board, { status: 303 });
-}
-
 export async function POST(
   request: Request,
   { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
@@ -116,10 +86,15 @@ export async function POST(
 
   if (number === undefined) {
     // **読めない要求で GitHub を叩かない**
-    return boardRedirect(request, { owner, name }, "unavailable");
+    return boardRedirect(request, { owner, name }, { param: "approve", value: "unavailable" });
   }
 
   const result = await approvePullRequestForCurrentUser({ owner, name }, number);
+  const outcome = approveOutcomeParam(result);
   // **成功のときは何も載せない**（上記）——**押した結果は盤面そのもので確かめる**
-  return boardRedirect(request, { owner, name }, approveOutcomeParam(result));
+  return boardRedirect(
+    request,
+    { owner, name },
+    outcome === undefined ? undefined : { param: "approve", value: outcome },
+  );
 }

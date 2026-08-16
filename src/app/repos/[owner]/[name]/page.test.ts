@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { approveNoticeKind, dynamic, unreadableNote } from "./page";
+import { approveNoticeKind, dynamic, mergeNoticeKind, unreadableNote } from "./page";
 
 describe("リポジトリの盤面", () => {
   it("要求ごとに描く（静的に生成させない）", () => {
@@ -55,6 +55,25 @@ describe("直前の承認の結果を出す", () => {
     // **通すと、こちらが言っていないことを画面に言わせられる**
     for (const value of ["", "ok", "承認しました", 1, null, undefined, ["forbidden"]]) {
       expect(approveNoticeKind(value), String(value)).toBeUndefined();
+    }
+  });
+});
+
+describe("直前にマージできなかった理由を出す", () => {
+  it("知っている理由だけを通す", () => {
+    for (const kind of ["forbidden", "not-mergeable", "unavailable"] as const) {
+      expect(mergeNoticeKind(kind)).toBe(kind);
+    }
+  });
+
+  it("成功は、クエリ文字列から出さない", () => {
+    // **`?merge=merged` を開くだけで「マージしました」と出てはならない**（#342 と同じ）
+    expect(mergeNoticeKind("merged")).toBeUndefined();
+  });
+
+  it("知らない値は通さない", () => {
+    for (const value of ["", "ok", "マージしました", 1, null, undefined, ["forbidden"]]) {
+      expect(mergeNoticeKind(value), String(value)).toBeUndefined();
     }
   });
 });
