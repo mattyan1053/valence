@@ -1,4 +1,4 @@
-<!-- 版: 73a77a364241 -->
+<!-- 版: 9d2c36200c94 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -1432,6 +1432,31 @@ bin/loop-stray-branches
 **PR がまだ無いだけのブランチは出ない**（`bin/loop-stray-branches` が
 `bin/loop-lease busy worker` で見分ける）——**push から PR 作成までの間に必ず窓が開く**ので、
 **そこを鳴らすと健全な worker の周回のたびに 1 回鳴る**。
+
+**続けて、どの一覧にも出てこない open Issue を見る**（#325。**同じ理由でここに置く**）。
+
+```bash
+bin/loop-unlisted-issues
+```
+
+**状態 label が 1 つも無い open Issue は、どのループの視界にも入らない。**
+**このステップ 6 が読むのは `ready` / `in-progress` / `backlog`** なので**昇格の候補にも
+上がらず**、**`bin/loop-claim audit` も `bin/loop-handoff` も黙る**——**どちらも
+「label と PR の食い違い」を見るもの**で、**label が無いことは食い違いではない。**
+**#319 で実際に起きた**（`in-progress` を外した先が無かった）。
+
+- **exit 0** → 無い。**平常時は何も出ない**（毎周回出る警告にしない）
+- **exit 1** → **Issue 番号が 1 行ずつ並ぶ。行ごとに 1 回積む**——
+  `bin/loop-stall "unlisted-issue:<Issue番号>"` を通して**人へ渡す**
+- **exit 2** → 読めない。**「0 件」と読まない**——
+  `bin/loop-stall issue-lookup-failed` を通して終わる
+
+**label を付け直さない。** **どこへ戻すか（閉じる / `backlog` / `ready` / `blocked`）は
+その Issue の中身と完了条件を読まないと決まらない**——**自動で付けて回ると、
+`backlog` へ戻すべきものが `ready` に立つ。** **人が来たときに追えるよう、番号だけ渡す。**
+
+**どの label を「一覧に出る」と見なすかは `bin/loop-unlisted-issues` が持っている。**
+**ここへ写さない**——**label が増えたときに、写した側だけが古くなる。**
 
 ```bash
 bin/loop-handoff master

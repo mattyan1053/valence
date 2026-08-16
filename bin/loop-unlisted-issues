@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# **どの一覧にも出てこない open Issue** を挙げる (#325)。
+#
+#   bin/loop-unlisted-issues
+#
+#   exit 0 = 無い (何も出さない)
+#   exit 1 = ある (標準出力に `<Issue番号>` を 1 行ずつ)
+#   exit 2 = 読めない
+#
+# **#319 で実際に起きた。** **`in-progress` を外した先が無く**、**open のまま label が
+# 0 件**になった。**master のステップ 6 が読むのは `ready` / `in-progress` / `backlog`**
+# なので**昇格の候補に上がらず**、**`bin/loop-claim audit` も `bin/loop-handoff` も黙る**
+# ——**どちらも「label と PR の食い違い」を見るもの**で、**label が無いことは
+# 食い違いではない。** **`./task loop:status` にも出ない。**
+#
+# **全部の検査が「健全」と答える。** **空転として数えられない**ので **3 周の経路にも
+# 乗らず**、**`no-work` にも当たらない**（**他に `in-progress` があれば、ループは
+# 普通に回り続ける**）。**気づいたのは master が前の周回を覚えていたから**で、
+# **セッションが落ちれば消える記憶である。**
+#
+# **判定はここが 1 つだけ持つ** (`AGENTS.md` §5)。**手順書へ写さない**——
+# **label が増えたときに、写した側だけが古くなる。**
+#
+# **`waiting-condition` は数えない。** **あれは `backlog` に付ける修飾**であって、
+# **それ自体はどの一覧にも載らない**（`loop/README.md` の表。**`bin/loop-handoff` も
+# `labels:["backlog","waiting-condition"]` と両方を指定して数える**）——
+# **単独で付いている Issue は、まさにこの検出器が拾いたいもの**である。
+# **倒す向きで決めた**: **鳴らしすぎても人が見て何も無いだけ**だが、
+# **鳴らし損ねると誰も来ない。**
+#
+# **見つけても label は付け直さない。** **どこへ戻すかは中身を読まないと決まらない**
+# ——**人か master の判断**である（Issue の「やらないこと」）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **入口を飛ばしていないか、ここでも確かめる**（#161。`bin/loop-claim` と同じ）。
+"${BASH_SOURCE[0]%/*}/loop-lease" check || true
+
+usage() {
+  echo "使い方: bin/loop-unlisted-issues" >&2
+  echo "        exit 0 = 無い / exit 1 = ある (標準出力) / exit 2 = 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || usage
+
+# **どれか 1 つでも付いていれば、どこかの一覧に出る。**
+#
+#   backlog / ready / in-progress … master のステップ 6 が読む
+#   blocked                       … worker が毎周回読む
+readonly LISTED_LABELS=(backlog ready in-progress blocked)
+
+# **どのリポジトリを見るかは実行時に決まる**（`AGENTS.md` §1。`bin/loop-claim` と同じ口）。
+if ! repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')"; then
+  echo "[FAIL] リポジトリを特定できません" >&2
+  exit 2
+fi
+mapfile -t repo_parts <<<"$repo_ref"
+
+# **件数で打ち切らない** (#328 のレビュー)。**`gh issue list --limit N` は「最大 N 件」**
+# なので、**open Issue がそれを超えたリポジトリでは、古いものから検査の外へ出る**
+# ——**そこで label が外れても exit 0 のまま**で、**この検出器だけが静かに消える。**
+#
+# **内側の connection を明示的に辿る。** **`pageInfo` と `after` が無いと
+# `--paginate` は外側しか進めない**（`bin/loop-handoff` / `bin/loop-claim` と同じ形）。
+#
+# **label は 1 つでも見つかれば足りる**ので、**取り切れないほど付いた Issue で
+# 取りこぼしても、倒れる先は「挙げる」側**である（**黙る側ではない**）。
+if ! issues="$(gh api graphql --paginate \
+  -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+  -f query='query($owner:String!,$repo:String!,$endCursor:String){
+    repository(owner:$owner,name:$repo){
+      issues(states:OPEN, first:100, after:$endCursor){
+        pageInfo{hasNextPage endCursor}
+        nodes{number labels(first:100){nodes{name}}}}}}' \
+  --jq '.data.repository.issues.nodes[]
+    | "issue\u001f\(.number)", (.labels.nodes[] | "label\u001f\(.name)")')"; then
+  echo "[FAIL] open Issue の一覧を読めません" >&2
+  echo "       どの一覧にも出てこない Issue があるかは、この周回では分かりません" >&2
+  exit 2
+fi
+
+# **label を 1 行ずつ受ける** (#328 のレビュー 2 周目)。**繋いでから探さない**——
+# **label 名にはカンマを入れられる**ので、**`foo,ready,bar` という 1 つの label が
+# `,ready,` に部分一致する**。**付いていない `ready` が「付いている」になり**、
+# **その Issue だけが対象なら exit 0**——**また誰にも見つからないまま残る。**
+#
+# **区切りは US。** **タブや空白を使わない**（`bin/loop-handoff` と同じ理由。
+# **label 名には空白が入る**）。
+readonly FIELD=$'\037'
+
+found=0
+number=""
+listed=0
+
+report_if_unlisted() {
+  [[ $number =~ ^[0-9]+$ ]] || return 0
+  ((listed == 0)) || return 0
+  printf '%s\n' "$number"
+  found=1
+}
+
+# **最後の行に改行が無くても読む**（`bin/loop-parked-issues` と同じ理由——
+# **`read` は改行で終わっていない行を読むと変数へは入れたまま非 0 を返す**）。
+while IFS="$FIELD" read -r kind value || [[ -n $kind ]]; do
+  case "$kind" in
+    issue)
+      # **前の Issue を、次が始まる時点で判定する**（label は Issue の後ろに並ぶ）
+      report_if_unlisted
+      number="$value"
+      listed=0
+      ;;
+    label)
+      # **完全一致で見る。** **部分一致にすると、名前の一部が状態 label の Issue が黙る**
+      for label in "${LISTED_LABELS[@]}"; do
+        [[ $value == "$label" ]] && listed=1
+      done
+      ;;
+  esac
+done <<<"$issues"
+report_if_unlisted
+
+((found == 0)) || exit 1
+exit 0
