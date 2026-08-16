@@ -12,12 +12,23 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type {
+  PullRequestApprovalListing,
+  PullRequestApprovals,
+} from "../ports/pull-request-approvals";
 import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { VisibleRepositories, VisibleRepositoryListing } from "../ports/visible-repositories";
 import type { ReviewOrderPlan } from "./plan-review-order";
 import { viewRepositoryBoard } from "./view-repository-board";
 
 const TARGET = { owner: "acme", name: "web" } as const;
+
+/** 盤面に 1 件だけ載る PR。**承認の状態は「どの番号か」で引く。** */
+const PULL_REQUEST = {
+  number: 7,
+  base: { repository: "acme/web", branch: "main" },
+  head: { repository: "acme/web", branch: "feat/a" },
+} as const;
 
 /** 空の盤面。**中身はこの流れの関心ではない**（作るのは `planReviewOrder`）。 */
 const PLAN: ReviewOrderPlan = {
@@ -28,6 +39,38 @@ const PLAN: ReviewOrderPlan = {
   heads: new Map(),
   changes: new Map(),
   changesUnavailable: [],
+};
+
+/** 承認の状態を 1 件も持たない盤面。**この流れの関心は「誰の目で読むか」**である。 */
+const NO_APPROVALS: PullRequestApprovalListing = { approved: new Set(), unavailable: [] };
+
+/**
+ * 承認の状態を読む口（#343）。**誰のトークンで読んだか**を後から確かめる。
+ *
+ * **installation トークンで読むと、誰がログインしていても同じ答えになる**（§6）
+ * ——**見たトークンを残しておかないと、差し替えても試験は黙る。**
+ */
+function approvals(
+  listing: PullRequestApprovalListing = NO_APPROVALS,
+): PullRequestApprovals & { seen: string[]; asked: number[][] } {
+  const seen: string[] = [];
+  const asked: number[][] = [];
+  return {
+    seen,
+    asked,
+    async listApprovals(userAccessToken, _repository, numbers) {
+      seen.push(userAccessToken);
+      asked.push([...numbers]);
+      return listing;
+    },
+  };
+}
+
+/** 読めない口。**投げたものが「承認されていない」に化けないこと**を見る。 */
+const APPROVALS_DOWN: PullRequestApprovals = {
+  async listApprovals() {
+    throw new Error("承認の状態を取得できませんでした (HTTP 502)");
+  },
 };
 
 /** 見えるものを決められる一覧。**誰の目で見たか**を後から確かめる。 */
@@ -78,6 +121,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       repositories: listing,
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
     expect(result).toEqual({ kind: "signed-out" });
@@ -97,6 +141,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       repositories: listing,
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
     expect(result).toEqual({ kind: "not-found" });
@@ -114,9 +159,10 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       repositories: listing,
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
-    expect(result).toEqual({ kind: "board", plan: PLAN });
+    expect(result).toEqual({ kind: "board", plan: PLAN, approvals: NO_APPROVALS });
     // **installation ではなく、その人のトークンで見えるかを判定している**
     expect(listing.seen).toEqual(["user-token"]);
     expect(board.calls).toBe(1);
@@ -135,9 +181,10 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       repositories: listing,
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
-    expect(result).toEqual({ kind: "board", plan: PLAN });
+    expect(result).toEqual({ kind: "board", plan: PLAN, approvals: NO_APPROVALS });
   });
 
   it("一覧を取れなかったら、「見えない」に化けさせない", async () => {
@@ -156,6 +203,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       },
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
     expect(result).toEqual({ kind: "unavailable" });
@@ -177,6 +225,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       }),
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
     expect(result).toEqual({ kind: "unavailable" });
@@ -197,9 +246,10 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       }),
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
-    expect(result).toEqual({ kind: "board", plan: PLAN });
+    expect(result).toEqual({ kind: "board", plan: PLAN, approvals: NO_APPROVALS });
   });
 
   it.each([
@@ -216,6 +266,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       repositories: listing,
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
     expect(result).toEqual({ kind: expected });
@@ -237,9 +288,169 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       plan: async () => {
         throw new Error("PR 一覧を取得できませんでした (HTTP 502)");
       },
+      approvals: approvals(),
     });
 
     expect(result).toEqual({ kind: "unavailable" });
+  });
+
+  it("承認の状態も、その人のトークンで読む", async () => {
+    // **installation トークンで読むと、誰がログインしていても同じ答えになる**（§6）
+    // ——**「その人の目」で読んでいることを、見たトークンで確かめる**
+    const reader = approvals({ approved: new Set([7]), unavailable: [] });
+
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      approvals: reader,
+    });
+
+    expect(result.kind).toBe("board");
+    expect(reader.seen, "承認の状態を、その人以外のトークンで読んでいる").toEqual(["user-token"]);
+    // **盤面に載っている PR の状態を読む**——**番号を渡していなければ、
+    // 口は「どれの話か」を知らないまま答えることになる**
+    expect(reader.asked).toEqual([[7]]);
+    expect(result).toEqual({
+      kind: "board",
+      plan: { ...PLAN, pullRequests: [PULL_REQUEST] },
+      approvals: { approved: new Set([7]), unavailable: [] },
+    });
+  });
+
+  it("見てよいと分かるまで、承認の状態も読まない", async () => {
+    // **読むだけでも往復は起きる**——**見えない人の要求で GitHub を叩かない**（§6）
+    const reader = approvals();
+
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(NOTHING_VISIBLE),
+      permissions: PERMISSIONS,
+      plan: plan().run,
+      approvals: reader,
+    });
+
+    expect(result).toEqual({ kind: "not-found" });
+    expect(reader.seen, "見えないのに承認の状態を読んでいる").toEqual([]);
+  });
+
+  it("承認の状態を読めなくても、盤面は出す", async () => {
+    // **依存グラフだけでも交通整理の役に立つ**（`collectChanges` と同じ判断）
+    // ——**状態が読めないことを理由に、画面ごと落とさない**
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      approvals: APPROVALS_DOWN,
+    });
+
+    expect(result.kind).toBe("board");
+  });
+
+  it("読めなかった状態を、「承認されていない」に化けさせない", async () => {
+    // **これが本題である。** **`approved` から外すだけだと、画面では
+    // 「承認されていない」と見分けが付かない**——**押した人はもう一度押す**
+    // （**この Issue が消しに来た形そのもの**）。
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      approvals: APPROVALS_DOWN,
+    });
+
+    expect(result.kind === "board" ? [...result.approvals.approved] : "板ではない").toEqual([]);
+    expect(
+      result.kind === "board"
+        ? result.approvals.unavailable.map((row) => row.pullRequestNumber)
+        : [],
+      "読めなかった PR が、どこにも残っていない",
+    ).toEqual([7]);
+  });
+
+  it("PR が 1 件も無ければ、承認の状態を読みに行かない", async () => {
+    // **空の一覧で往復を作らない**——**盤面に何も無いなら、読む状態も無い**
+    const reader = approvals();
+
+    await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: plan().run,
+      approvals: reader,
+    });
+
+    expect(reader.seen, "読むものが無いのに叩きに行っている").toEqual([]);
+  });
+
+  it("承認の状態が返らないときは、期限で切り上げる", async () => {
+    // **無期限に待つと、盤面ごと出ない**（#346 のレビュー）——**「読めなくても
+    // 盤面は出す」と書いておきながら、遅いときだけその経路へ入らない。**
+    // **`fetch` に短い既定の期限は無い**ので、**待つ側が決める。**
+    const never: PullRequestApprovals = {
+      listApprovals() {
+        return new Promise(() => {
+          // **返らない口**——**期限が無ければ、ここで止まったままになる**
+        });
+      },
+    };
+
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      approvals: never,
+      approvalsDeadline: () => AbortSignal.abort(),
+    });
+
+    expect(result.kind).toBe("board");
+    // **打ち切ったぶんは「読めなかった」**——**承認されていない、ではない**
+    expect(
+      result.kind === "board"
+        ? result.approvals.unavailable.map((row) => row.pullRequestNumber)
+        : [],
+      "打ち切ったのに、どこにも残っていない",
+    ).toEqual([7]);
+  });
+
+  it("打ち切りの合図を、口まで通す", async () => {
+    // **先に返すだけでは、走っている要求は走り続ける**（`ChangeSummaryRequest` と同じ）
+    const seen: (AbortSignal | undefined)[] = [];
+    const reader: PullRequestApprovals = {
+      async listApprovals(_token, _repository, _numbers, request) {
+        seen.push(request?.signal);
+        return NO_APPROVALS;
+      },
+    };
+    const deadline = new AbortController().signal;
+
+    await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      approvals: reader,
+      approvalsDeadline: () => deadline,
+    });
+
+    expect(seen, "合図が口まで届いていない").toEqual([deadline]);
   });
 
   it("置き場を開けなかったら、期限切れと分ける", async () => {
@@ -254,6 +465,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       repositories: repositories(VISIBLE),
       permissions: PERMISSIONS,
       plan: board.run,
+      approvals: approvals(),
     });
 
     expect(result).toEqual({ kind: "unavailable" });

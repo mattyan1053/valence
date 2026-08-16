@@ -46,6 +46,16 @@ export type ReviewBoardProps = {
    * **「抜けが無い」と言い切る類の値ではない**（`invalid` とは違う）。
    */
   readonly renderActions?: (pullRequestNumber: number) => ReactNode;
+  /**
+   * 各行へ足す**状態の表示**（#343）。
+   *
+   * **操作（`renderActions`）と分ける。** **押すものと、押した結果として出るものは
+   * 別**である——**混ぜると、状態を足すたびに操作の口を触ることになる。**
+   *
+   * **任意にしてよい。** **渡さなければ出ないだけ**で、
+   * **「抜けが無い」と言い切る類の値ではない**（`invalid` とは違う）。
+   */
+  readonly renderStatus?: (pullRequestNumber: number) => ReactNode;
 };
 
 export function ReviewBoard({
@@ -55,6 +65,7 @@ export function ReviewBoard({
   invalid,
   changes,
   renderActions,
+  renderStatus,
 }: ReviewBoardProps) {
   return (
     <DependencyGraphView
@@ -73,6 +84,7 @@ export function ReviewBoard({
           return (
             <>
               <span>リスク判定の材料がありません（まだ取得できていません）</span>
+              {renderStatus?.(number)}
               {renderActions?.(number)}
             </>
           );
@@ -80,6 +92,7 @@ export function ReviewBoard({
         return (
           <>
             <RiskTierView tier={classifyRiskTier(change)} change={change} />
+            {renderStatus?.(number)}
             {renderActions?.(number)}
           </>
         );
