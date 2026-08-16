@@ -13,7 +13,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,7 +44,7 @@ afterEach(() => {
 function run(
   args: string[],
   { body, entries, fail }: { body: string; entries: Record<number, Entry>; fail?: string },
-): { status: number; stdout: string; stderr: string } {
+): { status: number; stdout: string; stderr: string; cwd: string } {
   const dir = mkdtempSync(join(tmpdir(), "close-candidates-"));
   sandboxes.push(dir);
   const stub = join(dir, "gh");
@@ -72,7 +80,15 @@ function run(
   );
   chmodSync(stub, 0o755);
 
+  // **lease の記録先も隔離する** (#337 のレビュー)。**`bin/loop-lease check` は
+  // cwd の `.git`（共通ディレクトリ）へ「入口を飛ばした周回」を書く**ので、
+  // **偽の `gh` だけを隔離しても、試験を走らせた回数ぶん運用状態が汚れる。**
+  const cwd = join(dir, "repo");
+  mkdirSync(cwd, { recursive: true });
+  expect(spawnSync("git", ["init", "--quiet", cwd], { encoding: "utf8" }).status).toBe(0);
+
   const result = spawnSync(SCRIPT, args, {
+    cwd,
     encoding: "utf8",
     env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
     timeout: 20_000,
@@ -81,6 +97,7 @@ function run(
     status: result.status ?? -1,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
+    cwd,
   };
 }
 
@@ -152,6 +169,57 @@ describe("bin/loop-close-candidates", () => {
   it("このスクリプトは 1 件も閉じない", () => {
     // **完了条件を読むのは master の仕事**である（Issue の「やらないこと」）——
     // **機械が閉じる形にすると、割った途中の PR で作業が消える**
-    expect(readFileSync(SCRIPT, "utf8"), "閉じる口を持っている").not.toContain("issue close");
+    // **コメントは落として見る** (#337 のレビュー対応で踏んだ)。**理由の説明として
+    // `gh issue close` を書くことはある**——**言及に当たると、実際に閉じる口が
+    // 無くても赤くなり、逆に文面を削れば通ってしまう。** **実行される行だけを見る。**
+    const code = readFileSync(SCRIPT, "utf8")
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+
+    expect(code, "閉じる口を持っている").not.toContain("issue close");
+  });
+  it("別のリポジトリを指した参照は挙げない", () => {
+    // **`owner/other#264` から `264` だけを取ると、ここの #264 が候補に並ぶ**
+    // （#337 のレビュー）——**手順書の `gh issue close <N>` は `-R` を付けない**ので、
+    // **無関係な Issue を閉じる相手として出す。** **その番号がここに無ければ
+    // API が落ちて exit 2 になり、本物の候補まで巻き添えで消える。**
+    const verdict = run(["330"], {
+      body: "Fixes owner/other#264\n\nRefs #319\n",
+      entries: { 319: { state: "OPEN", title: "ここの Issue" } },
+    });
+
+    expect(verdict.status, verdict.stderr).toBe(1);
+    expect(verdict.stdout).toContain("319");
+    expect(verdict.stdout, "別のリポジトリの番号が並んでいる").not.toContain("264");
+  });
+
+  it("ここのリポジトリを明示した参照は挙げる", () => {
+    // **修飾されていても、指しているのがここなら候補である**
+    const verdict = run(["330"], {
+      body: "Refs mattyan1053/valence#319\n",
+      entries: { 319: { state: "OPEN", title: "ここの Issue" } },
+    });
+
+    expect(verdict.status, verdict.stderr).toBe(1);
+    expect(verdict.stdout).toContain("319");
+  });
+
+  it("lease の記録は、砂場の中に落ちる", () => {
+    // **`bin/loop-lease check` は cwd の共通ディレクトリへ「入口を飛ばした周回」を
+    // 書く**（#337 のレビュー）——**偽の `gh` だけ隔離しても `spawnSync` は cwd を継ぐ**
+    // ので、**走らせた回数ぶん運用の記録へ混ざる**（`AGENTS.md` §5。#186）。
+    //
+    // **「実物が増えていないこと」だけを見ない**——**記録が重複を落とす形なら、
+    // 隔離をやめても同じ中身のままで緑になる。** **砂場に落ちていることを見る。**
+    const verdict = run(["330"], {
+      body: "Refs #319\n",
+      entries: { 319: { state: "OPEN", title: "x" } },
+    });
+
+    expect(
+      existsSync(join(verdict.cwd, ".git", "valence-loop-lease-missing")),
+      "lease の記録が砂場に無い（実物へ書いている）",
+    ).toBe(true);
   });
 });

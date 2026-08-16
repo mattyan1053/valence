@@ -9,13 +9,9 @@
  * **倒す向きは「閉じ損ねる」側**である（**残れば誰かが見るが、誤って閉じると作業が消える**）。
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { procedureText } from "./procedure-doc";
-
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /** マージの節。**閉じるのはここ**である（ステップ 6 ではない）。 */
 function mergeSection(): string {
@@ -60,14 +56,6 @@ describe("完了した Issue を閉じる", () => {
 
     expect(branch, "exit 2 の行き先が無い").toMatch(/exit 2/);
     expect(branch, "読めないときに閉じないと書いていない").toMatch(/読めない。*閉じない/);
-  });
-
-  it("候補を挙げる側は、1 件も閉じない", () => {
-    // **機械が閉じる形にすると、割った途中の PR で作業が消える**——
-    // **スクリプトに閉じる口を持たせない**
-    const script = readFileSync(join(REPO_ROOT, "bin/loop-close-candidates"), "utf8");
-
-    expect(script, "閉じる口を持っている").not.toContain("issue close");
   });
 
   it("`bin/loop-unlisted-issues` を消していない", () => {
