@@ -10,6 +10,8 @@
 
 import { notFound } from "next/navigation";
 import { repositoryBoardForCurrentUser } from "../../../../composition/auth";
+import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
+import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
 import { ReviewBoard } from "../../../../ui/review-board/review-board";
 
 /**
@@ -43,12 +45,32 @@ function notice(kind: "signed-out" | "needs-login" | "unavailable"): string {
   }
 }
 
+/**
+ * 直前に**押せなかった**理由。**知らない値は出さない**（#330）。
+ *
+ * **`?approve=` は URL に載っている**ので、**誰でも好きな文字列を入れられる**
+ * ——**そのまま画面へ出すと、こちらが言っていないことを言わせられる。**
+ * **並べたものだけを通す**（#90 と同じ形）。
+ *
+ * **成功はここから出さない**（#342 のレビュー）——**`?approve=approved` を
+ * 開くだけで「承認しました」と出てはならない。** **承認できたかどうかは、
+ * 利用者が任意に作れない場所（GitHub 側の状態）で確かめる。**
+ */
+export function approveNoticeKind(value: unknown): ApproveNoticeKind | undefined {
+  return value === "forbidden" || value === "self-approval" || value === "unavailable"
+    ? value
+    : undefined;
+}
+
 export default async function RepositoryBoardPage({
   params,
+  searchParams,
 }: {
   readonly params: Promise<{ readonly owner: string; readonly name: string }>;
+  readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { owner, name } = await params;
+  const outcome = approveNoticeKind((await searchParams).approve);
   const result = await repositoryBoardForCurrentUser({ owner, name });
 
   if (result.kind === "not-found") {
@@ -61,6 +83,8 @@ export default async function RepositoryBoardPage({
       <h1 className="font-mono text-2xl font-bold tracking-tight">
         {owner}/{name}
       </h1>
+      {/* **直前の承認の結果。** **押せなかった理由は、押した画面に出す** */}
+      {outcome === undefined ? undefined : <p className="text-sm">{approveNotice(outcome)}</p>}
       {result.kind === "board" ? (
         <>
           <ReviewBoard
@@ -69,6 +93,12 @@ export default async function RepositoryBoardPage({
             order={result.plan.order}
             invalid={result.plan.invalid}
             changes={result.plan.changes}
+            renderActions={(number) => (
+              <ApproveButton
+                number={number}
+                action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/approve`}
+              />
+            )}
           />
           {/* **黙って捨てない。** **消すと「読めなかった」が「無かった」に化ける** */}
           {result.plan.invalid.length > 0 ? (

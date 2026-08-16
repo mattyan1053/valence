@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { dynamic, unreadableNote } from "./page";
+import { approveNoticeKind, dynamic, unreadableNote } from "./page";
 
 describe("リポジトリの盤面", () => {
   it("要求ごとに描く（静的に生成させない）", () => {
@@ -33,5 +33,28 @@ describe("読めなかった PR を画面から消さない", () => {
   it("理由は画面へ出さない", () => {
     // **Zod のメッセージには値が入りうる**（`app-credentials.ts` と同じ理由）
     expect(unreadableNote(1)).not.toMatch(/expected|received|invalid_type/i);
+  });
+});
+
+describe("直前の承認の結果を出す", () => {
+  // **`?approve=` は URL に載っている**ので、**誰でも好きな文字列を入れられる**
+  // ——**並べたものだけを通す**（#330）
+  it("知っている理由だけを通す", () => {
+    for (const kind of ["forbidden", "self-approval", "unavailable"] as const) {
+      expect(approveNoticeKind(kind)).toBe(kind);
+    }
+  });
+
+  it("成功は、クエリ文字列から出さない", () => {
+    // **`?approve=approved` を開くだけで「承認しました」と出てはならない**
+    // （#342 のレビュー）——**利用者が任意に作れる値から、成功を断言しない。**
+    expect(approveNoticeKind("approved")).toBeUndefined();
+  });
+
+  it("知らない値は通さない", () => {
+    // **通すと、こちらが言っていないことを画面に言わせられる**
+    for (const value of ["", "ok", "承認しました", 1, null, undefined, ["forbidden"]]) {
+      expect(approveNoticeKind(value), String(value)).toBeUndefined();
+    }
   });
 });

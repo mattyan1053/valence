@@ -11,6 +11,7 @@
  * 画面が作り出すことになる。
  */
 
+import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
@@ -35,9 +36,26 @@ export type ReviewBoardProps = {
    * 揃うまでの間も画面は出る。
    */
   readonly changes: ReadonlyMap<number, ChangeSummary>;
+  /**
+   * 各行へ足す操作（#330）。
+   *
+   * **並びを作り直さないための口**である（`renderAside` と同じ理由）——
+   * **操作を足すために行を組み立て直すと、画面から PR が消える穴が復活する。**
+   *
+   * **任意にしてよい。** **渡さなければ操作が出ないだけ**で、
+   * **「抜けが無い」と言い切る類の値ではない**（`invalid` とは違う）。
+   */
+  readonly renderActions?: (pullRequestNumber: number) => ReactNode;
 };
 
-export function ReviewBoard({ pullRequests, edges, order, invalid, changes }: ReviewBoardProps) {
+export function ReviewBoard({
+  pullRequests,
+  edges,
+  order,
+  invalid,
+  changes,
+  renderActions,
+}: ReviewBoardProps) {
   return (
     <DependencyGraphView
       pullRequests={pullRequests}
@@ -49,9 +67,22 @@ export function ReviewBoard({ pullRequests, edges, order, invalid, changes }: Re
         // **材料が無い PR を黙って落とさない。** 行は残し、
         // 「出せなかった」ことが分かる形にする（#107 の `invalid` と同じ形）。
         if (change === undefined) {
-          return <span>リスク判定の材料がありません（まだ取得できていません）</span>;
+          // **材料が無くても操作は出す。** **Tier は目安**であって、
+          // **承認してよいかの判断ではない**——**揃うまで押せないのは、
+          // 交通整理をしに来た人を待たせるだけである**
+          return (
+            <>
+              <span>リスク判定の材料がありません（まだ取得できていません）</span>
+              {renderActions?.(number)}
+            </>
+          );
         }
-        return <RiskTierView tier={classifyRiskTier(change)} change={change} />;
+        return (
+          <>
+            <RiskTierView tier={classifyRiskTier(change)} change={change} />
+            {renderActions?.(number)}
+          </>
+        );
       }}
     />
   );
