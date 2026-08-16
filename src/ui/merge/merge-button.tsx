@@ -18,6 +18,7 @@ export type MergeNoticeKind =
   | "forbidden"
   | "not-mergeable"
   | "dependency-pending"
+  | "base-changed"
   | "not-orderable"
   | "unavailable";
 
@@ -75,6 +76,10 @@ export function mergeNotice(kind: MergeNoticeKind): string {
       // **土台を先に入れる**（#345）——**上段を先に入れると、土台のブランチに
       // 未確認の変更が混ざる**
       return "土台の PR が残っています。先にそちらをマージしてください。";
+    case "base-changed":
+      // **押した人が次にすることは「盤面を見直してもう一度押す」**（#350）
+      // ——**`not-mergeable`（コンフリクト等）とも `not-orderable`（順序）とも違う。**
+      return "この PR の土台が変わりました。盤面を読み込み直してから、もう一度押してください。";
     case "not-orderable":
       // **原因を言い分けない**（#348 のレビュー）——**循環・一覧に無い番号・
       // 読めなかった PR のどれでもここへ来る。** **「循環しています」と断定すると、

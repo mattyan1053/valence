@@ -143,6 +143,8 @@ describe("PR をマージする前に、押してよいかを確かめる", () =
       number: NUMBER,
       // **見せた head をそのまま運ぶ**（#331 のレビュー）——**途中で作り直さない**
       headSha: HEAD_SHA,
+      // **判定に使った base も運ぶ**（#350）——**adapter が直前に突き合わせる**
+      expectedBaseBranch: "main",
     });
   });
 
@@ -312,5 +314,42 @@ describe("読めなかった PR がある一覧では、マージしない", () 
 
     expect(result.kind).toBe("merged");
     expect(merge.calls.length).toBe(1);
+  });
+});
+
+describe("判定に使った base を、マージの口へ渡す", () => {
+  // **一覧を取ってからマージするまでの間に base が張り替えられると、
+  // `ready` と判定した要求が新しい土台へマージされる**（#350）。
+  // **突き合わせるのは adapter（マージ直前）**だが、**判定に使った値を運ぶのはここ。**
+  it("一覧に居ない番号は、突き合わせる base が無いのでマージしない", async () => {
+    // **`mergeBlockFor` も `not-orderable` へ倒すが、ここで先に断つ**
+    // ——**base が undefined のまま adapter へ渡さない**
+    const merge = merges();
+
+    const result = await mergePullRequest(
+      input({
+        permissions: permissions("write"),
+        merges: merge,
+        pullRequests: listing([ref(8, "main", "feat/a")]),
+      }),
+    );
+
+    expect(result).toEqual({ kind: "not-orderable" });
+    expect(merge.calls.length, "マージを要求している").toBe(0);
+  });
+
+  it("base が張り替えられていれば、そのまま伝える", async () => {
+    // **adapter が返した `base-changed` を、別の理由へ丸めない**
+    const changed: PullRequestMerges = {
+      async merge() {
+        return { kind: "base-changed" };
+      },
+    };
+
+    const result = await mergePullRequest(
+      input({ permissions: permissions("write"), merges: changed }),
+    );
+
+    expect(result).toEqual({ kind: "base-changed" });
   });
 });
