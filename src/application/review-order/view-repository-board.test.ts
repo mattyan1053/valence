@@ -12,6 +12,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { VisibleRepositories, VisibleRepositoryListing } from "../ports/visible-repositories";
 import type { ReviewOrderPlan } from "./plan-review-order";
 import { viewRepositoryBoard } from "./view-repository-board";
@@ -50,6 +51,17 @@ function plan(): { run: () => Promise<ReviewOrderPlan>; calls: number } {
   return state;
 }
 
+/**
+ * **盤面では引かれない口** (#317 のレビュー)。**呼ばれたら落とす**——
+ * **読むだけの経路が権限を引き始めたら、ここで気づく**（**read-only の人が
+ * 見られなくなる変更**である）。
+ */
+const PERMISSIONS: RepositoryPermissions = {
+  async levelFor() {
+    throw new Error("盤面は権限の高さを引かない");
+  },
+};
+
 const VISIBLE: VisibleRepositoryListing = { repositories: [TARGET], invalid: [] };
 const NOTHING_VISIBLE: VisibleRepositoryListing = { repositories: [], invalid: [] };
 
@@ -63,6 +75,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       openStore: async () => undefined,
       ensure: async () => ({ kind: "usable", accessToken: "should-not-be-used" }),
       repositories: listing,
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
@@ -81,6 +94,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       openStore: async () => ({}) as never,
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: listing,
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
@@ -97,6 +111,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       openStore: async () => ({}) as never,
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: listing,
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
@@ -117,6 +132,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       openStore: async () => ({}) as never,
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: listing,
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
@@ -137,6 +153,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
           throw new Error("見られるリポジトリを取得できませんでした (HTTP 502)");
         },
       },
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
@@ -157,6 +174,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
         repositories: [{ owner: "other", name: "repo" }],
         invalid: [{ index: 3, reason: "読めません" }],
       }),
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
@@ -176,6 +194,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
         repositories: [TARGET],
         invalid: [{ index: 3, reason: "読めません" }],
       }),
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
@@ -194,6 +213,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       openStore: async () => ({}) as never,
       ensure: async () => ({ kind }),
       repositories: listing,
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
@@ -212,6 +232,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       openStore: async () => ({}) as never,
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
       plan: async () => {
         throw new Error("PR 一覧を取得できませんでした (HTTP 502)");
       },
@@ -230,6 +251,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       },
       ensure: async () => ({ kind: "usable", accessToken: "should-not-be-used" }),
       repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
       plan: board.run,
     });
 
