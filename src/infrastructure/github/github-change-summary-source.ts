@@ -24,8 +24,7 @@ import type { InstallationToken } from "./installation-token";
 import { needsRefresh, requestInstallationToken } from "./installation-token";
 import type { GitHubRepository } from "./repository-installation";
 import { resolveRepositoryInstallation } from "./repository-installation";
-
-const API_ORIGIN = "https://api.github.com";
+import { repositoryUrl } from "./repository-url";
 
 /**
  * 1 つの一覧で読むページ数の上限（1 ページ 100 件）。
@@ -116,7 +115,7 @@ export function createGitHubChangeSummarySource({
   ): Promise<{ items: unknown[]; truncated: boolean }> {
     const items: unknown[] = [];
     for (let page = 1; page <= MAX_PAGES; page++) {
-      const url = `${API_ORIGIN}/repos/${repository.owner}/${repository.name}${path}?per_page=100&page=${page}`;
+      const url = `${repositoryUrl(repository)}${path}?per_page=100&page=${page}`;
       const result = (await readJson(url, header, signal)) as {
         body: unknown;
         link: string | null;
@@ -153,7 +152,7 @@ export function createGitHubChangeSummarySource({
     header: string,
     signal?: AbortSignal,
   ): Promise<ChangeSummary> {
-    const base = `${API_ORIGIN}/repos/${repository.owner}/${repository.name}`;
+    const base = `${repositoryUrl(repository)}`;
     const detail = (await readJson(`${base}/pulls/${number}`, header, signal)) as { body: unknown };
     // **検証してから URL へ入れる**（`AGENTS.md` §6）。素通しにすると、
     // **installation トークンを付けたまま別の endpoint を叩ける**。

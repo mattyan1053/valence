@@ -10,8 +10,7 @@
 import { z } from "zod";
 import type { AppCredentials } from "./app-credentials";
 import { createAppJwt } from "./app-jwt";
-
-const API_ORIGIN = "https://api.github.com";
+import { repositoryUrl } from "./repository-url";
 
 /** どのリポジトリを見るか。 */
 export type GitHubRepository = {
@@ -77,17 +76,14 @@ export async function resolveRepositoryInstallation({
   requireName(repository.owner, "owner");
   requireName(repository.name, "name");
 
-  const response = await fetchImpl(
-    `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/installation`,
-    {
-      signal,
-      headers: {
-        authorization: `Bearer ${createAppJwt(credentials, now)}`,
-        accept: "application/vnd.github+json",
-        "x-github-api-version": "2022-11-28",
-      },
+  const response = await fetchImpl(`${repositoryUrl(repository)}/installation`, {
+    signal,
+    headers: {
+      authorization: `Bearer ${createAppJwt(credentials, now)}`,
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2022-11-28",
     },
-  );
+  });
 
   const body = await response.text();
   if (!response.ok) {

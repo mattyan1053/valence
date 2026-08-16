@@ -17,8 +17,7 @@ import { nextPageUrl } from "./link-pagination";
 import { toPullRequestRefs } from "./pull-request-mapping";
 import type { GitHubRepository } from "./repository-installation";
 import { resolveRepositoryInstallation } from "./repository-installation";
-
-const API_ORIGIN = "https://api.github.com";
+import { repositoryUrl } from "./repository-url";
 
 export type GitHubPullRequestSourceOptions = {
   readonly credentials: AppCredentials;
@@ -105,7 +104,7 @@ export function createGitHubPullRequestSource({
  * 1 ページ 100 件は GitHub の上限。**ページ数を減らすだけで、読み切る責務は変わらない。**
  */
 function firstPage(repository: GitHubRepository): string {
-  return `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/pulls?state=open&per_page=100`;
+  return `${repositoryUrl(repository)}/pulls?state=open&per_page=100`;
 }
 
 /**

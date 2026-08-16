@@ -22,8 +22,7 @@ import type {
   PullRequestReviews,
   PullRequestReviewTarget,
 } from "../../application/ports/pull-request-review";
-
-const API_ORIGIN = "https://api.github.com";
+import { repositoryUrl } from "./repository-url";
 
 /**
  * 使う項目だけを検証する。
@@ -95,20 +94,17 @@ export function createGitHubPullRequestReviews({
       userAccessToken: string,
       { repository, number }: PullRequestReviewTarget,
     ): Promise<PullRequestReviewOutcome> {
-      const response = await fetchImpl(
-        `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/pulls/${number}/reviews`,
-        {
-          method: "POST",
-          headers: {
-            accept: "application/vnd.github+json",
-            authorization: `Bearer ${userAccessToken}`,
-            "content-type": "application/json",
-          },
-          // **承認だけを送る。** **本文を付けられる口にしない**——
-          // **この操作は「1 クリック Approve」**である（§1 のスコープ）。
-          body: JSON.stringify({ event: "APPROVE" }),
+      const response = await fetchImpl(`${repositoryUrl(repository)}/pulls/${number}/reviews`, {
+        method: "POST",
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${userAccessToken}`,
+          "content-type": "application/json",
         },
-      );
+        // **承認だけを送る。** **本文を付けられる口にしない**——
+        // **この操作は「1 クリック Approve」**である（§1 のスコープ）。
+        body: JSON.stringify({ event: "APPROVE" }),
+      });
 
       if (!response.ok) {
         // **文面まで一致したときだけ自己承認と読む**（`isSelfApprovalRejection`）
