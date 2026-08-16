@@ -11,7 +11,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { approveOutcomeParam, boardRedirect, pullRequestNumberFrom } from "./route";
+import { boardRedirect } from "../board-redirect";
+import { approveOutcomeParam, pullRequestNumberFrom } from "./route";
 
 describe("送られてきた PR 番号を読む", () => {
   it("数として読めるものだけを通す", () => {
@@ -89,7 +90,11 @@ describe("押したあと、盤面へ戻す", () => {
   });
 
   it("押せなかった理由は、盤面の URL に載せて戻す", () => {
-    const response = boardRedirect(request, { owner: "acme", name: "web" }, "self-approval");
+    const response = boardRedirect(
+      request,
+      { owner: "acme", name: "web" },
+      { param: "approve", value: "self-approval" },
+    );
 
     expect(response.headers.get("location")).toBe(
       "http://localhost:3000/repos/acme/web?approve=self-approval",

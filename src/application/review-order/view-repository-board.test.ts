@@ -25,6 +25,7 @@ const PLAN: ReviewOrderPlan = {
   edges: [],
   order: { ordered: [], cyclic: [] },
   invalid: [],
+  heads: new Map(),
   changes: new Map(),
   changesUnavailable: [],
 };

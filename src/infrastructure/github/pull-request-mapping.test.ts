@@ -21,6 +21,7 @@ const stackedPullRequests = [
     head: {
       label: "mattyan1053:chore/docker-improvements",
       ref: "chore/docker-improvements",
+      sha: "1b6d3f5a2c7e9d0418ab63cf27e5d9a4b8c10f2e",
       repo: { id: 1327515899, full_name: "mattyan1053/valence" },
     },
   },
@@ -37,6 +38,7 @@ const stackedPullRequests = [
     head: {
       label: "mattyan1053:chore/agent-config",
       ref: "chore/agent-config",
+      sha: "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb",
       repo: { id: 1327515899, full_name: "mattyan1053/valence" },
     },
   },
@@ -79,6 +81,10 @@ describe("GitHub の PR 一覧をドメイン型へ変換する", () => {
         },
       ],
       invalid: [],
+      heads: new Map([
+        [8, "1b6d3f5a2c7e9d0418ab63cf27e5d9a4b8c10f2e"],
+        [9, "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb"],
+      ]),
     });
   });
 
@@ -150,12 +156,36 @@ describe("GitHub の PR 一覧をドメイン型へ変換する", () => {
   });
 
   it("PR が 0 件でも落ちない", () => {
-    expect(toPullRequestRefs([])).toEqual({ pullRequests: [], invalid: [] });
+    expect(toPullRequestRefs([])).toEqual({ pullRequests: [], invalid: [], heads: new Map() });
   });
 
   it("一覧そのものが読めなければ落とす", () => {
     // ここで空の配列を返すと、**「取得に失敗した」が「PR が 0 件」に化ける**
     expect(() => toPullRequestRefs({ message: "Not Found" })).toThrow();
     expect(() => toPullRequestRefs(null)).toThrow();
+  });
+});
+
+describe("head の commit を、番号から引ける形で持つ", () => {
+  // **マージを「見せたもの」に固定するため**（#331 のレビュー）——
+  // **盤面を出してから押すまでに push されると、確かめていない head がマージされる**
+  it("実際の応答から head の commit を取り出す", () => {
+    const { heads } = toPullRequestRefs(stackedPullRequests);
+
+    expect(heads.get(8)).toBe("1b6d3f5a2c7e9d0418ab63cf27e5d9a4b8c10f2e");
+    expect(heads.get(9)).toBe("5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb");
+  });
+
+  it("commit が読めない PR も、依存グラフからは消さない", () => {
+    // **盤面の本体は依存の図**であって、**マージのボタンはその上に載っているだけ**
+    // ——**必須にすると、commit を読めなかった PR がまるごと消える**（#107 と同じ判断）
+    const [first] = stackedPullRequests;
+    const withoutSha = { ...first, head: { ...first?.head, sha: undefined } };
+
+    const { pullRequests, invalid, heads } = toPullRequestRefs([withoutSha]);
+
+    expect(pullRequests.length, "図から消えている").toBe(1);
+    expect(invalid.length).toBe(0);
+    expect(heads.has(8), "確かめられない commit を持っている").toBe(false);
   });
 });
