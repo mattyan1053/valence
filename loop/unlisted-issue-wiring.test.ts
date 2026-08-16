@@ -16,11 +16,21 @@ import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
+/**
+ * **出口で呼んでいる位置**。**名前が出てくる最初の場所ではない** (#335)——
+ * **別の節が説明として名前を挙げる**ことがあり、**そこを段だと読むと、
+ * 呼んでいないのに緑になる。** **呼び出しの形（行頭のコマンド）で探す。**
+ */
+function callAt(): number {
+  const at = procedureText("master").search(/^bin\/loop-unlisted-issues\b/m);
+  expect(at, "master の手順書がこの検出器を呼んでいない").toBeGreaterThanOrEqual(0);
+  return at;
+}
+
 /** 出口のうち、この検出器を扱っている段。**次の口（`bin/loop-handoff`）までを見る。** */
 function section(): string {
   const text = procedureText("master");
-  const from = text.indexOf("bin/loop-unlisted-issues");
-  expect(from, "master の手順書がこの検出器を呼んでいない").toBeGreaterThanOrEqual(0);
+  const from = callAt();
   const to = text.indexOf("bin/loop-handoff master", from);
   expect(to, "出口（bin/loop-handoff master）より後ろに置かれている").toBeGreaterThan(from);
   return text.slice(from, to);
@@ -37,11 +47,13 @@ describe("どの一覧にも出てこない Issue を、出口で見る", () => 
   it("宙に浮いたブランチを見たあとに置いてある", () => {
     // **状態だけを見る検査は 1 か所に固めてある。** 離すと、片方だけ足された
     // 経路から漏れる
+    // **呼び出しの位置どうしで比べる** (#335)。**名前が出てくる最初の場所で比べると、
+    // 説明として挙げただけの行に当たる**
     const text = procedureText("master");
+    const strayAt = text.search(/^bin\/loop-stray-branches\b/m);
 
-    expect(text.indexOf("bin/loop-unlisted-issues")).toBeGreaterThan(
-      text.indexOf("bin/loop-stray-branches"),
-    );
+    expect(strayAt, "宙に浮いたブランチを見ていない").toBeGreaterThanOrEqual(0);
+    expect(callAt(), "宙に浮いたブランチより前に置かれている").toBeGreaterThan(strayAt);
   });
 
   it("見つかったら、停止として数えると書いてある", () => {

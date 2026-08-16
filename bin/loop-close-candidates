@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# **マージした PR が参照していて、まだ open の Issue** を挙げる (#335)。
+#
+#   bin/loop-close-candidates <PR番号>
+#
+#   exit 0 = 無い (何も出さない)
+#   exit 1 = ある (標準出力に `<Issue番号><TAB><題名>` を 1 行ずつ)
+#   exit 2 = 読めない / 使い方の誤り
+#
+# **`Closes` を書かない PR がある。** **割った途中の 1 本**や、**親として残す Issue**が
+# それである——**GitHub は自動で閉じない**ので、**完了条件を満たしてマージされても
+# Issue は open のまま残る。**
+#
+# **#334 のあとは、それが見つからない。** **これまでは label が 0 件になって
+# `bin/loop-unlisted-issues` が鳴った**が、**`backlog` へ戻すようになったので鳴らない**
+# ——**完了しているのに昇格の候補へ並び、誰かが取って同じ作業をやり直す。**
+#
+# **ここが出すのは候補だけである。** **閉じるかどうかは完了条件を読んで決める**
+# （#335 の「やらないこと」）——**このスクリプトは 1 件も閉じない。**
+# **機械が閉じる形にすると、割った途中の PR で作業が消える**——**倒す向きは
+# 「閉じ損ねる」側**である（**残れば誰かが見るが、誤って閉じると消える**）。
+#
+# **もう閉じている Issue は挙げない。** **`Closes` で自動的に閉じたぶんはここで落ちる**
+# ので、**閉じた参照の一覧が取り切れなくても倒れる先は変わらない**（**state で見る**）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **入口を飛ばしていないか、ここでも確かめる**（#161。`bin/loop-claim` と同じ）。
+"${BASH_SOURCE[0]%/*}/loop-lease" check || true
+
+usage() {
+  echo "使い方: bin/loop-close-candidates <PR番号>" >&2
+  echo "        exit 0 = 無い / exit 1 = ある (標準出力) / exit 2 = 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+PR="$1"
+[[ $PR =~ ^[0-9]+$ ]] || usage
+readonly PR
+
+# **どのリポジトリを見るかは実行時に決まる**（`AGENTS.md` §1）。
+if ! repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')"; then
+  echo "[FAIL] リポジトリを特定できません" >&2
+  exit 2
+fi
+mapfile -t repo_parts <<<"$repo_ref"
+readonly OWNER="${repo_parts[0]-}" REPO="${repo_parts[1]-}"
+
+if ! body="$(gh pr view "$PR" --json body --jq '.body')"; then
+  echo "[FAIL] PR #$PR の本文を読めません" >&2
+  echo "       閉じ忘れている Issue があるかは、この周回では分かりません" >&2
+  exit 2
+fi
+
+# **本文の `#N` を全部拾う。** **`Closes` だけを見ない**——**`Refs #N` も
+# 「この PR が関わっている Issue」**であり、**閉じ忘れが起きるのはそちら**である。
+# **重複は落とす**（同じ番号を 2 回引かない）。
+numbers="$(printf '%s' "$body" | grep -oE '#[0-9]+' | tr -d '#' | sort -un)"
+
+found=0
+failed=0
+while read -r number; do
+  [[ -n $number ]] || continue
+  # **US 区切りで受ける。** **題名には空白もタブも入る**（`bin/loop-handoff` と同じ理由）。
+  if ! info="$(gh api "repos/$OWNER/$REPO/issues/$number" \
+    --jq '"\(.state)\(.title)\(has("pull_request"))"' 2>/dev/null)"; then
+    # **読めなかったものを「閉じるものが無い」に倒さない。** **1 件でも読めなければ、
+    # この周回の答えは「分からない」**である
+    echo "[FAIL] #$number を読めません" >&2
+    failed=1
+    continue
+  fi
+  IFS=$'\037' read -r state title is_pull <<<"$info"
+  # **PR は挙げない。** **本文には PR 番号も出てくる**ので、混ぜると閉じる相手に PR が並ぶ
+  [[ $is_pull == "true" ]] && continue
+  # **open だけが候補である**（`CLOSED` / `closed` のどちらでも落とす）
+  [[ ${state^^} == "OPEN" ]] || continue
+  printf '%s\t%s\n' "$number" "$title"
+  found=1
+done <<<"$numbers"
+
+((failed == 0)) || exit 2
+((found == 0)) || exit 1
+exit 0
