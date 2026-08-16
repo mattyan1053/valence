@@ -113,8 +113,10 @@ describe("ループが使う label", () => {
       .filter(({ file }) => /--remove-label changes-requested/.test(read(file)))
       .map(({ file }) => file);
 
-    expect(removers).toContain(".claude/commands/loop-master.md");
-    expect(removers).not.toContain(".claude/commands/loop-worker.md");
+    // **手順書は入口と本体に分かれている**（#319）——**外す手は master の本体にある**
+    expect(removers, "master が外していない").toContain("loop/procedure/master.md");
+    expect(removers, "worker の入口が外している").not.toContain(".claude/commands/loop-worker.md");
+    expect(removers, "worker の本体が外している").not.toContain("loop/procedure/worker.md");
   });
 
   it("手順書が渡す label はすべて用意されている", () => {
