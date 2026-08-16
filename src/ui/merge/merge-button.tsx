@@ -14,7 +14,12 @@
  * **`merged` を並べた瞬間、マージしていない人が「マージしました」を出せる**
  * （**取り消せない事実の主張**）。
  */
-export type MergeNoticeKind = "forbidden" | "not-mergeable" | "unavailable";
+export type MergeNoticeKind =
+  | "forbidden"
+  | "not-mergeable"
+  | "dependency-pending"
+  | "not-orderable"
+  | "unavailable";
 
 export type MergeButtonProps = {
   readonly number: number;
@@ -30,6 +35,23 @@ export type MergeButtonProps = {
    * **確かめられない対象をマージさせない。**
    */
   readonly headSha: string | undefined;
+  /**
+   * **先に入れる PR の番号**（#345）。
+   *
+   * **依存が残っているなら押させない。** **空でなければ、その番号を出す**
+   * ——**「押せない」だけでは、何をすればよいか分からない。**
+   *
+   * **これは表示側の閉じ方である。** **POST の口でも同じことを見る**
+   * （**画面を経由しない要求が作れる**）。
+   */
+  readonly blockedBy?: readonly number[];
+  /**
+   * **順序を判定できない**（#345 / #348）。**先に入れるものを名指しできない。**
+   *
+   * **循環・一覧に無い番号・読めなかった PR がある**のどれでも立つ——
+   * **原因は言い分けない**（**言い分けるには理由を運ぶ必要がある**）。
+   */
+  readonly notOrderable?: boolean;
   readonly disabled?: boolean;
 };
 
@@ -49,12 +71,30 @@ export function mergeNotice(kind: MergeNoticeKind): string {
     case "not-mergeable":
       // **理由を数え直さない**（#331）——**GitHub で見てもらう**
       return "いまはマージできません。コンフリクト・必須チェック・保護ルールを GitHub で確認してください。";
+    case "dependency-pending":
+      // **土台を先に入れる**（#345）——**上段を先に入れると、土台のブランチに
+      // 未確認の変更が混ざる**
+      return "土台の PR が残っています。先にそちらをマージしてください。";
+    case "not-orderable":
+      // **原因を言い分けない**（#348 のレビュー）——**循環・一覧に無い番号・
+      // 読めなかった PR のどれでもここへ来る。** **「循環しています」と断定すると、
+      // 循環していない場合に嘘の理由が伝わる**（**名前を `not-orderable` にした
+      // 理由がこれで、文面だけ古いままだった**）。
+      return "依存の順序を判定できませんでした。GitHub で確認してください。";
     case "unavailable":
       return "いまマージできませんでした。しばらくしてから試してください。";
   }
 }
 
-export function MergeButton({ number, action, headSha, disabled }: MergeButtonProps) {
+export function MergeButton({
+  number,
+  action,
+  headSha,
+  blockedBy,
+  notOrderable,
+  disabled,
+}: MergeButtonProps) {
+  const waiting = blockedBy !== undefined && blockedBy.length > 0;
   return (
     <form action={action} method="post">
       {/* **どの PR かを、送る本文が持つ** */}
@@ -64,11 +104,21 @@ export function MergeButton({ number, action, headSha, disabled }: MergeButtonPr
       <button
         className="rounded border px-2 py-1 text-sm disabled:opacity-50"
         // **commit が分からなければ押せない**——**確かめられない対象をマージさせない**
-        disabled={disabled === true || headSha === undefined}
+        // **依存が残っていても押せない**（#345）
+        disabled={disabled === true || headSha === undefined || waiting || notOrderable === true}
         type="submit"
       >
         Merge
       </button>
+      {/* **何を先に入れればよいかを出す**——**「押せない」だけにしない** */}
+      {waiting ? (
+        <span className="text-sm opacity-70">
+          先に {blockedBy.map((blocker) => `#${blocker}`).join(", ")} をマージ
+        </span>
+      ) : undefined}
+      {notOrderable === true ? (
+        <span className="text-sm opacity-70">依存の順序を判定できません</span>
+      ) : undefined}
     </form>
   );
 }

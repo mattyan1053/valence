@@ -11,6 +11,7 @@
 import { notFound } from "next/navigation";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
 import { repositoryBoardForCurrentUser } from "../../../../composition/auth";
+import { mergeBlockFor } from "../../../../domain/graph/merge-block";
 import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge";
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
@@ -74,7 +75,11 @@ export function approveNoticeKind(value: unknown): ApproveNoticeKind | undefined
  * 開くだけで「マージしました」と出てはならない。**
  */
 export function mergeNoticeKind(value: unknown): MergeNoticeKind | undefined {
-  return value === "forbidden" || value === "not-mergeable" || value === "unavailable"
+  return value === "forbidden" ||
+    value === "not-mergeable" ||
+    value === "dependency-pending" ||
+    value === "not-orderable" ||
+    value === "unavailable"
     ? value
     : undefined;
 }
@@ -100,6 +105,26 @@ export function approvalDisplay(
   return approvals.unavailable.some((row) => row.pullRequestNumber === pullRequestNumber)
     ? "unknown"
     : undefined;
+}
+
+/**
+ * 依存の判定を、ボタンが受け取る形へ直す（#345）。
+ *
+ * **判定そのものは `mergeBlockFor` が持つ**——**ここは詰め替えるだけ**である
+ * （**POST の口も同じ関数を通る**ので、**画面と食い違わない**）。
+ */
+export function mergeButtonBlock(block: ReturnType<typeof mergeBlockFor>): {
+  readonly blockedBy?: readonly number[];
+  readonly notOrderable?: boolean;
+} {
+  switch (block.kind) {
+    case "depends-on":
+      return { blockedBy: block.numbers };
+    case "not-orderable":
+      return { notOrderable: true };
+    case "ready":
+      return {};
+  }
 }
 
 export default async function RepositoryBoardPage({
@@ -155,6 +180,20 @@ export default async function RepositoryBoardPage({
                   // **盤面が見せている commit をそのまま渡す**（#331 のレビュー）
                   // ——**押した対象を、見せた対象に固定する**
                   headSha={result.plan.heads.get(number)}
+                  // **依存が残っていれば押させない**（#345）。**判定は domain が持つ**
+                  // ——**ここへ書き写すと、POST の口と食い違う**
+                  // **読めなかった PR があれば、どの行も押させない**（#348 のレビュー）
+                  // ——**辺が作られないので「依存なし」を信じられない。**
+                  // **画面でも止める**（POST でも止まるが、**押しても断られると
+                  // 分かっているものを押させるのは、理由が伝わる形ではない**）
+                  {...mergeButtonBlock(
+                    mergeBlockFor(
+                      number,
+                      result.plan.edges,
+                      result.plan.order,
+                      result.plan.invalid.length,
+                    ),
+                  )}
                 />
               </>
             )}

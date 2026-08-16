@@ -11,10 +11,12 @@
 
 import { describe, expect, it } from "vitest";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
+import { mergeBlockFor } from "../../../../domain/graph/merge-block";
 import {
   approvalDisplay,
   approveNoticeKind,
   dynamic,
+  mergeButtonBlock,
   mergeNoticeKind,
   unreadableNote,
 } from "./page";
@@ -78,6 +80,12 @@ describe("直前にマージできなかった理由を出す", () => {
     expect(mergeNoticeKind("merged")).toBeUndefined();
   });
 
+  it("依存の理由も通す", () => {
+    for (const kind of ["dependency-pending", "not-orderable"] as const) {
+      expect(mergeNoticeKind(kind)).toBe(kind);
+    }
+  });
+
   it("知らない値は通さない", () => {
     for (const value of ["", "ok", "マージしました", 1, null, undefined, ["forbidden"]]) {
       expect(mergeNoticeKind(value), String(value)).toBeUndefined();
@@ -130,5 +138,31 @@ describe("承認の状態を盤面へ出す", () => {
     );
 
     expect(String(display)).not.toContain("secret-repository-name");
+  });
+});
+
+describe("依存の判定を、ボタンへ詰め替える", () => {
+  // **判定そのものは domain が持つ**（#345）——**ここは詰め替えるだけ**
+  it("土台が残っていれば、番号を渡す", () => {
+    expect(mergeButtonBlock({ kind: "depends-on", numbers: [8] })).toEqual({ blockedBy: [8] });
+  });
+
+  it("順序が決められなければ、そう渡す", () => {
+    expect(mergeButtonBlock({ kind: "not-orderable" })).toEqual({ notOrderable: true });
+  });
+
+  it("依存が無ければ、何も渡さない", () => {
+    // **渡すと、押せる PR まで閉じる**
+    expect(mergeButtonBlock({ kind: "ready" })).toEqual({});
+  });
+
+  it("読めなかった PR があれば、押させない側へ倒す", () => {
+    // **図に抜けがあるなら「依存なし」を信じられない**（#348 のレビュー）——
+    // **判定は domain が持つ**ので、ここは詰め替えるだけ
+    const edges = [{ dependent: 9, dependsOn: 8 }];
+    const order = { ordered: [8, 9], cyclic: [] };
+
+    expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 0))).toEqual({});
+    expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 1))).toEqual({ notOrderable: true });
   });
 });

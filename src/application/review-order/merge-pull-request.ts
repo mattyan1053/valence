@@ -15,9 +15,13 @@
  * 1 度も呼ばれない**（#314 / #317 / #330 と同じ形）。
  */
 
+import { buildDependencyEdges } from "../../domain/graph/dependency-graph";
+import { orderByDependency } from "../../domain/graph/dependency-order";
+import { mergeBlockFor } from "../../domain/graph/merge-block";
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
 import type { PullRequestMerges } from "../ports/pull-request-merge";
+import type { PullRequestSource } from "../ports/pull-request-source";
 import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type { VisibleRepositories, VisibleRepository } from "../ports/visible-repositories";
@@ -44,6 +48,20 @@ export type MergePullRequestResult =
    * **押した人が次に取る行動も違う**（**権限を貰う**のではなく**PR を整える**）。
    */
   | { readonly kind: "not-mergeable" }
+  /**
+   * **土台の PR が残っている**（#345）。
+   *
+   * **先に入れる番号を返す**——**「押せない」だけでは、何をすればよいか分からない。**
+   * **GitHub は依存を知らない**ので、**これを止めるのはこちらの仕事**である。
+   */
+  | { readonly kind: "dependency-pending"; readonly blockedBy: readonly number[] }
+  /**
+   * **順序が決められないので、マージさせない**（#345）。
+   *
+   * **循環しているか、一覧に出てこない番号**である。
+   * **`dependency-pending` と分ける**——**先に入れるものを名指しできない。**
+   */
+  | { readonly kind: "not-orderable" }
   /** マージした。 */
   | { readonly kind: "merged" };
 
@@ -68,6 +86,15 @@ export type MergePullRequestInput = {
   readonly permissions: RepositoryPermissions;
   /** マージの口。**押した人の身元で行う側**である。 */
   readonly merges: PullRequestMerges;
+  /**
+   * **いまの PR 一覧**（#345）。
+   *
+   * **依存は押した時点で見る。** **盤面が描いた時点のものを信じない**——
+   * **画面を経由しない要求が作れる**うえ、**盤面を出してから土台が動くこともある。**
+   *
+   * **手続きごと受ける**（他の口と同じ）——**「押してよい」と分かるまで呼ばない。**
+   */
+  readonly pullRequests: PullRequestSource;
 };
 
 export async function mergePullRequest({
@@ -79,6 +106,7 @@ export async function mergePullRequest({
   repositories,
   permissions,
   merges,
+  pullRequests,
 }: MergePullRequestInput): Promise<MergePullRequestResult> {
   // **認可は共有の判断が持つ** (#315)。**ここへ写すと、盤面・Approve と
   // 片方だけ直したときに食い違う。**
@@ -93,6 +121,35 @@ export async function mergePullRequest({
   });
   if (authorization.kind !== "authorized") {
     return authorization;
+  }
+
+  // **依存が残っていないかを、押した時点の一覧で見る**（#345）。
+  // **表示の無効化だけでは足りない**——**画面を経由しない要求が作れる**（#342 と同じ形）。
+  let block: ReturnType<typeof mergeBlockFor>;
+  try {
+    const listing = await pullRequests.listPullRequests();
+    const edges = buildDependencyEdges(listing.pullRequests);
+    // **読めなかった PR の数も渡す**（#348 のレビュー）——**`invalid` に残ったものは
+    // 辺を持たない**ので、**土台だけが読めなかった場合、上段が「依存なし」に見える。**
+    // **その経路は投げないので、下の `catch` には入らない。**
+    block = mergeBlockFor(
+      number,
+      edges,
+      orderByDependency(listing.pullRequests, edges),
+      listing.invalid.length,
+    );
+  } catch {
+    // **確かめられなければマージしない。** **依存を見られないまま通すと、
+    // この Issue が塞ごうとしたものがそのまま通る**（#345）
+    return { kind: "unavailable" };
+  }
+  switch (block.kind) {
+    case "depends-on":
+      return { kind: "dependency-pending", blockedBy: block.numbers };
+    case "not-orderable":
+      return { kind: "not-orderable" };
+    case "ready":
+      break;
   }
 
   try {

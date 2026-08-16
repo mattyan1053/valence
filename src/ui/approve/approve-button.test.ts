@@ -18,6 +18,17 @@ function render(props: ApproveButtonProps): string {
   return renderToStaticMarkup(createElement(ApproveButton, props));
 }
 
+/**
+ * **押せない状態か。**
+ *
+ * **`toContain("disabled")` では測れない**——**class に `disabled:opacity-50` が
+ * 入っている**ので、**押せるときも通ってしまう**（#345 で気づいた。**#330 の時点から
+ * 貫通していた**）。**属性そのものを見る。**
+ */
+function isDisabled(html: string): boolean {
+  return html.includes('disabled=""');
+}
+
 const ACTION = "/repos/acme/web/approve";
 
 describe("Approve のボタン", () => {
@@ -36,7 +47,12 @@ describe("Approve のボタン", () => {
     // **理由は別に出す**（下）
     const html = render({ number: 42, action: ACTION, disabled: true });
 
-    expect(html).toContain("disabled");
+    expect(isDisabled(html)).toBe(true);
+  });
+
+  it("押せる状態を、押せないと読み違えない", () => {
+    // **上の判定が空でないことを、ここが支えている**
+    expect(isDisabled(render({ number: 42, action: ACTION }))).toBe(false);
   });
 });
 
