@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -21,11 +22,7 @@ function read(path: string): string {
 describe("人の判断待ち", () => {
   /** master の手順書のうち、人を呼ぶ段。 */
   function humanBranch(): string {
-    return (
-      read(".claude/commands/loop-master.md")
-        .split("#### human — 人を呼ぶ")[1]
-        ?.split("\n#### ")[0] ?? ""
-    );
+    return procedureText("master").split("#### human — 人を呼ぶ")[1]?.split("\n#### ")[0] ?? "";
   }
 
   it("人を呼ぶときは、PR を保留にする", () => {

@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const PROCEDURE = ".claude/commands/loop-master.md";
 
 function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
@@ -25,7 +25,7 @@ function read(path: string): string {
 describe("宙に浮いたブランチ", () => {
   /** master の「周回の出口」の節。 */
   function exitSection(): string {
-    const after = read(PROCEDURE).split("### 周回の出口")[1] ?? "";
+    const after = procedureText("master").split("### 周回の出口")[1] ?? "";
     return after.split(/\n#{2,3} /)[0] ?? "";
   }
 
@@ -180,9 +180,11 @@ describe("宙に浮いたブランチ", () => {
 
   it("判定は 1 箇所に置く", () => {
     // **同じ判定を 2 箇所に持つと、片方だけ直して食い違う**（#159 で踏んだ）
-    for (const path of ["task", PROCEDURE]) {
-      expect(read(path), `${path} が呼んでいない`).toContain("loop-stray-branches");
-    }
+    expect(read("task"), "task が呼んでいない").toContain("loop-stray-branches");
+    // **入口と本体のどちらに載っていてもよい**（#319）——**手順書として 1 つ**である
+    expect(procedureText("master"), "master の手順書が呼んでいない").toContain(
+      "loop-stray-branches",
+    );
     expect(read("task"), "task が自前で判定している").not.toContain("ls-remote");
   });
 

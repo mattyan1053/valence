@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -10,11 +11,9 @@ function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
 }
 
-const PROCEDURE = ".claude/commands/loop-master.md";
-
 /** 見出しで区切った 1 節。**節の外の散文で条件が満たされない**ようにする。 */
 function section(heading: string): string {
-  const after = read(PROCEDURE).split(heading)[1] ?? "";
+  const after = procedureText("master").split(heading)[1] ?? "";
   return after.split(/\n#{2,4} /)[0] ?? "";
 }
 
@@ -64,7 +63,7 @@ function writingSections(): [string, string][] {
       pairs.push([heading, checkedFirst ? "確かめてから書く" : "確かめない"]);
     }
   };
-  for (const line of read(PROCEDURE).split("\n")) {
+  for (const line of procedureText("master").split("\n")) {
     if (/^#{2,4} /.test(line)) {
       flush();
       heading = line.trim();
@@ -207,7 +206,7 @@ describe("周回の途中で動く head", () => {
     // worker の周回で待つと、**元気に push している間ずっと数えられない**。
     //
     // **#128 は「同じ状態には同じ名前」だった。** これは**逆に「違う状態には違う名前」**である
-    const procedure = read(PROCEDURE);
+    const procedure = procedureText("master");
 
     expect(procedure, "動いたときの行き先が無い").toContain('bin/loop-stall "head-moved:<PR番号>"');
     expect(procedure, "読めないときの行き先が無い").toContain(
@@ -231,7 +230,7 @@ describe("周回の途中で動く head", () => {
   it("識別子に head SHA を入れない", () => {
     // **入れると、ずれるたびに別の SHA になり、数え直しで 3 周に届かない**——
     // **ここで数えたいのは「同じ PR で、ずれが続いていること」**である
-    expect(read(PROCEDURE), "ずれの識別子に SHA が入っている").not.toContain(
+    expect(procedureText("master"), "ずれの識別子に SHA が入っている").not.toContain(
       "head-moved:<PR番号>@",
     );
   });

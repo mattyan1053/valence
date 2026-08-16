@@ -43,8 +43,7 @@ describe("lease の説明が実態と合っている", () => {
 
   it("master の手順書は「同じ役」のままである", () => {
     // **master は役のまま 1 人。** 判定が並列になるとゲートの意味が薄れる
-    const section =
-      read(".claude/commands/loop-master.md").split("### 通知を受け取ったら")[1] ?? "";
+    const section = procedureText("master").split("### 通知を受け取ったら")[1] ?? "";
 
     expect(section).toMatch(/同じ役の周回とは重ならない/);
   });

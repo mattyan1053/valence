@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const PROCEDURE = ".claude/commands/loop-master.md";
 
 function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
@@ -17,7 +17,7 @@ function blocks(): { section: string; body: string }[] {
   const found: { section: string; body: string }[] = [];
   let section = "";
   let body: string[] | undefined;
-  for (const line of read(PROCEDURE).split("\n")) {
+  for (const line of procedureText("master").split("\n")) {
     if (/^#{2,4} /.test(line)) {
       section = line.trim();
     }
@@ -364,7 +364,7 @@ describe("ループの外の著者", () => {
 
   it("判定は 1 箇所に置く", () => {
     // **手順書が自前で判定しない**（#159 で踏んだ形）
-    expect(read(PROCEDURE), "手順書が自前で著者を見ている").not.toContain("--json author");
+    expect(procedureText("master"), "手順書が自前で著者を見ている").not.toContain("--json author");
   });
 
   it("ループの外から割り込む方法が、README にある", () => {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -189,9 +190,7 @@ describe("理由の無い保留", () => {
     //
     // **`parked` を選ばないのはステップ 2 の決め事**なので、**例外もそこに置く**——
     // `bin/loop-handoff` を触らずに済み、**#92 の線も覆さない**。
-    const step2 =
-      read(".claude/commands/loop-master.md").split("## 2. open PR を見て、見る順番を決める")[1] ??
-      "";
+    const step2 = procedureText("master").split("## 2. open PR を見て、見る順番を決める")[1] ?? "";
     const section = step2.split(/\n## /)[0] ?? "";
 
     expect(section, "ステップ 2 が理由の無い保留を見ていない").toContain("bin/loop-silent-park");

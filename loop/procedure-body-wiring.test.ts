@@ -203,3 +203,62 @@ describe("本体の入れ替わりは、これまでどおり見つかる", () =
     }
   });
 });
+
+/**
+ * **両方の役で、同じ 3 つを見る**（#329 のレビュー）。
+ *
+ * **試験が `procedureText()` で入口と本体を連結して読む**ので、**入口から本体へ
+ * 実際に到達できるかは、そこでは分からない**——**呼び出しを消しても、同期の前へ
+ * 動かしても、失敗したときに lease を返さなくても緑のまま**である。
+ * **入口そのものを見る試験が要る。**
+ */
+describe.each([{ role: "worker" }, { role: "master" }] as const)(
+  "$role の入口が、本体へ到達できる",
+  ({ role }) => {
+    function roleEntry(): string {
+      return readFileSync(join(REPO_ROOT, `.claude/commands/loop-${role}.md`), "utf8");
+    }
+
+    /** 本体を読む節。**行き先が書かれるべきところ**である。 */
+    function roleReadSection(): string {
+      const text = roleEntry();
+      const from = text.indexOf(`bin/loop-procedure-body ${role}`);
+      expect(from, "本体を読む口が無い").toBeGreaterThanOrEqual(0);
+      return text.slice(from).split("\n## ")[0] ?? "";
+    }
+
+    it("入口が、本体をディスクから読む口を持っている", () => {
+      // **消しても、連結して読む試験は気づかない**
+      expect(roleEntry(), "本体を読む口が入口に無い").toContain(`bin/loop-procedure-body ${role}`);
+    });
+
+    it("読むのは、同期のあとである", () => {
+      // **前に置くと、その周回が始まった時点の作業ツリーから読む**（#323 の P1）
+      const text = roleEntry();
+      const sync = text.indexOf(`bin/loop-procedure-changed --role ${role}`);
+      const read = text.indexOf(`bin/loop-procedure-body ${role}`);
+
+      expect(sync, "同期の判定が入口に無い").toBeGreaterThanOrEqual(0);
+      expect(read, "同期より先に本体を読んでいる").toBeGreaterThan(sync);
+    });
+
+    it("読めなかったら、押さえたぶんを返して終わると書いてある", () => {
+      // **読むのは lease を取ったあと**なので、**返さずに終えると、
+      // この作業場（役）は期限が切れるまで動けない**
+      expect(roleReadSection(), "読めなかったときの行き先が書いていない").toContain(
+        `bin/loop-lease release ${role}`,
+      );
+    });
+
+    it("本体が、実際に読める", () => {
+      // **文面だけを見ていると、置き場所を間違えても気づかない**——
+      // **本物のスクリプトに出させる**
+      const shown = spawnSync(join(REPO_ROOT, "bin/loop-procedure-body"), [role], {
+        encoding: "utf8",
+      });
+
+      expect(shown.status, shown.stderr).toBe(0);
+      expect(shown.stdout.length, "本体が空である").toBeGreaterThan(0);
+    });
+  },
+);
