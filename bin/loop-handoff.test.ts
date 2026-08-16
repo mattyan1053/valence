@@ -711,6 +711,54 @@ describe("bin/loop-handoff", () => {
     expect(handoff.stdout, "計算中を「していない」へ倒している").toMatch(/^worker\t/);
   });
 
+  it("先頭がコンフリクトしていなくても、後続を見つけて worker の番として出す", () => {
+    // **探しているのは「worker が動ける候補」であって「先頭の候補の状態」ではない**
+    // （#349 のレビュー）。**先頭だけを見ると、後続の取り込み直しは誰にも依頼されない**
+    // ——**この出口が消しに来た沈黙を、この出口自身が作る。**
+    withState({
+      prs: [
+        { number: 12, mergeable: "MERGEABLE" },
+        { number: 13, mergeable: "CONFLICTING" },
+      ],
+    });
+
+    const handoff = run("master");
+
+    expect(handoff.status).toBe(0);
+    expect(handoff.stdout, "先頭しか見ていない").toMatch(/^worker\t/);
+    // **番号まで見る**——**worker へ渡しても、指す先が違えば取り込み直しは起きない**
+    expect(handoff.stdout, "取り込み直す PR が読めない").toMatch(/#13\b/);
+  });
+
+  it("先頭がコンフリクトしていれば、後続が健全でも先頭を指す", () => {
+    // **逆の並びも残す**（#349 のレビュー）——**「最後の候補を選ぶ」実装でも、
+    // 上の 1 件だけなら緑になる。**
+    withState({
+      prs: [
+        { number: 12, mergeable: "CONFLICTING" },
+        { number: 13, mergeable: "MERGEABLE" },
+      ],
+    });
+
+    const handoff = run("master");
+
+    expect(handoff.status).toBe(0);
+    expect(handoff.stdout).toMatch(/^worker\t/);
+    expect(handoff.stdout, "取り込み直す PR が読めない").toMatch(/#12\b/);
+  });
+
+  it("候補が複数あっても、どれもコンフリクトしていなければ master へ渡す", () => {
+    // **全部 worker にする実装でも、上の 2 件だけなら緑になる**
+    withState({
+      prs: [
+        { number: 12, mergeable: "MERGEABLE" },
+        { number: 13, mergeable: "MERGEABLE" },
+      ],
+    });
+
+    expect(run("worker").stdout, "ゲートを回せる PR が worker へ行っている").toMatch(/^master\t/);
+  });
+
   it("コンフリクトしていなければ、これまでどおり master へ渡す", () => {
     // **緩めすぎない側の担保**——**全部 worker にする実装でも、上の 2 件だけなら緑になる**
     withState({ prs: [{ number: 12, mergeable: "MERGEABLE" }] });
