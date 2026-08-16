@@ -356,8 +356,26 @@ describe("bin/loop-handoff", () => {
     return runWith(role === "" ? [] : [role], env);
   }
 
-  /** 送信が成功したことを伝える口。**呼んだ側にしか分からない。** */
+  /**
+   * 送信が成功したことを伝える口。**呼んだ側にしか分からない。**
+   *
+   * **lease を握ったまま打つ** (#352)。**出口の順序はそれ**である（#340。
+   * **返すのはいちばん最後**）——**試験のほうが崩れた順序で打っていると、
+   * 崩れを検出する実装を入れた瞬間に、正しい周回まで全部赤くなる。**
+   */
   function sent(role: string, env: Record<string, string> = {}): Run {
+    const stamp = spawnSync(STAMP, [role], { encoding: "utf8" }).stdout.trim();
+    const acquired = spawnSync(LEASE, ["acquire", role, stamp], { cwd: repo, encoding: "utf8" });
+    expect(acquired.status, `lease を取れない: ${acquired.stderr}`).toBe(0);
+    try {
+      return runWith([role, "--sent"], env);
+    } finally {
+      spawnSync(LEASE, ["release", role, acquired.stdout.trim()], { cwd: repo, encoding: "utf8" });
+    }
+  }
+
+  /** **lease を返してから `--sent` を打つ。** 崩れた順序そのもの (#352)。 */
+  function sentAfterRelease(role: string, env: Record<string, string> = {}): Run {
     return runWith([role, "--sent"], env);
   }
 
@@ -798,6 +816,50 @@ describe("bin/loop-handoff", () => {
     expect(handoff.stdout, "健全な PR に取り込み直しを指示している").not.toMatch(
       /コンフリクト|取り込み直/,
     );
+  });
+
+  /**
+   * **「lease はいちばん最後に返す」を、機械が見る**（#352）。
+   *
+   * **#340 で手順書は直っている**——**それでも破られ続けた**（worker が自己申告、
+   * master も 1 度）。**#341 が入れた試験は手順書の本文を見るだけ**で、
+   * **打つ側が守ったかは見ていない。** **守る場所には何も無かった** (#176 の形)。
+   *
+   * **倒れ方**——**先に返すと、返した先で cron の周回が同じ判定をもう一度立てる**
+   * （**指紋が動くのは `--sent` のとき**）。**症状は「同じ判定が 2 回立つ」**で、
+   * **原因が順序だとは分からない。**
+   */
+  describe("lease を返してから --sent を打った周回", () => {
+    beforeEach(() => {
+      withState({ prs: [{ number: 12 }] });
+      expect(run("worker").status, "送ると決められていない").toBe(0);
+    });
+
+    it("記録しない", () => {
+      // **倒す向きは「記録しない」**——**記録すると、届いていない状態が「送信済み」に
+      // なり、その状態では二度と送られない** (#258)。**記録しなければ、次の周回が
+      // 同じ状態をもう一度立ち上げる**（**保険が効く**）
+      expect(sentAfterRelease("worker").status, "崩れた順序で記録できている").not.toBe(0);
+
+      expect(run("worker").status, "記録が上がっていて、2 通目が出ない").toBe(0);
+    });
+
+    it("何が起きたかと、次にどうすればよいかを言う", () => {
+      const broken = sentAfterRelease("worker");
+
+      expect(broken.stderr, "lease の話だと分からない").toContain("lease");
+      // **打ち直せる形で言う**——**「順序が違う」とだけ言われても、
+      // 次に何をすればよいかが分からない**
+      expect(broken.stderr, "打ち直す手が出ていない").toContain("bin/loop-handoff worker --sent");
+    });
+
+    it("握っている周回では、これまでどおり記録できる", () => {
+      // **退行の検出。** **厳しくしすぎると、正常な周回が記録できなくなる**
+      // ——**そのときは毎周回 2 通目が出る**
+      expect(sent("worker").status, "正しい順序の周回が落ちている").toBe(0);
+
+      expect(run("worker").status, "記録が上がっていない").toBe(1);
+    });
   });
 
   it("ready が 1 件で着手されていなければ worker へ渡す", () => {

@@ -550,6 +550,93 @@ describe("bin/loop-lease", () => {
     });
   });
 
+  /**
+   * **この周回が持っているか**を、呼ぶ側へ答える口（#352）。
+   *
+   * **`held` は「誰かが持っているか」**である——**返してから `--sent` を打った周回でも、
+   * 別の周回が取っていれば 0 になる**ので、**順序が崩れたことは見えない。**
+   *
+   * **判定そのものは `check` が既に持っていた**（#161）——**あれは全部の役を回って
+   * 「言うだけ」で、合否を返さない。** **同じ読み方を、役 1 つについて返す。**
+   */
+  describe("mine — この周回が持っているか", () => {
+    /**
+     * **別の周回として lease を取る。**
+     *
+     * **`round_owner` は「自分のセッションの外に出たところ」を印にする**ので、
+     * **同じセッションの中で bash を挟しても同じ周回のまま**である
+     * ——**`setsid` で切り離して初めて別の周回になる**（`round_owner` の
+     * コメントがそう書いている）。
+     */
+    function acquireAsAnotherRound(role = "worker"): void {
+      // **セッションを切り離したうえで、その中に親を 1 つ置く**——**切り離すだけだと
+      // 「セッションそのものを印にする」側へ落ち**、**測っているものが違うので
+      // 「分からない」になる**（`round_owner` の `p:` と `s:`）。**ここで見たいのは
+      // 「同じ測り方で、別の周回」**である。
+      const result = spawnSync(
+        "setsid",
+        ["--wait", "bash", "-c", `"${SCRIPT}" acquire ${role} ${stampFor(role)}`],
+        { cwd: sandbox, encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
+    }
+
+    it("この周回が持っていれば 0 を返す", () => {
+      acquire();
+
+      expect(run(["mine", "worker"]).status).toBe(0);
+    });
+
+    it("誰も持っていなければ 1 を返す", () => {
+      expect(run(["mine", "worker"]).status).toBe(1);
+    });
+
+    it("返したあとは 1 を返す", () => {
+      // **これが本題**——**出口で先に返した周回**が、この形になる
+      const token = acquire().stdout.trim();
+      expect(run(["release", "worker", token]).status).toBe(0);
+
+      expect(run(["mine", "worker"]).status).toBe(1);
+    });
+
+    it("別の周回が持っていても、自分のものとは読まない", () => {
+      // **`held` との違いはここ**である——**あちらは 0 を返す**（誰かが持っている）。
+      //
+      // **終了コードは 1 に固定できない。** **`round_owner` は環境で測り方が変わる**
+      // （**セッションの外へ出られれば `p:`、出られなければ `s:`**）——
+      // **測り方が違う相手は「別の周回」ではなく「分からない」** (exit 2) である。
+      // **どちらであっても、この周回のものではない**——**そこだけを見る。**
+      acquireAsAnotherRound();
+
+      expect(run(["held", "worker"]).status, "誰かが持っている状態になっていない").toBe(0);
+      expect(run(["mine", "worker"]).status, "他人の lease を自分のものと読んでいる").not.toBe(0);
+    });
+
+    it("役ごとに見る", () => {
+      acquire("master");
+
+      expect(run(["mine", "master"]).status).toBe(0);
+      expect(run(["mine", "worker"]).status).toBe(1);
+    });
+
+    it("読むだけで、状態を変えない", () => {
+      const token = acquire().stdout.trim();
+
+      expect(run(["mine", "worker"]).status).toBe(0);
+      expect(run(["release", "worker", token]).status, "見ただけで返せなくなっている").toBe(0);
+    });
+
+    it("役を渡さなければ、使い方の誤りとして落ちる", () => {
+      expect(run(["mine"]).status).toBe(2);
+    });
+
+    it("知らない役は 2 で落ちる", () => {
+      // **判定不能を「持っていない」へ倒さない**——**綴り違いで、正常な周回の
+      // 記録が上がらなくなる**
+      expect(run(["mine", "workers"]).status).toBe(2);
+    });
+  });
+
   it("知らない役は受け付けない", () => {
     // **語彙を固定する。** 綴り違いで別の lease を取ると、直列化しているつもりで
     // 2 つ走る
