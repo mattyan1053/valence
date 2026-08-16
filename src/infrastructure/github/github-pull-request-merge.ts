@@ -62,6 +62,41 @@ const mergeSchema = z.object({
   merged: z.boolean(),
 });
 
+/**
+ * マージ直前に読み直す PR。**base だけを見る**（#350）。
+ *
+ * **依存判定は一覧を取った時点の base に対して行われる**ので、
+ * **そのあと base が別の open PR の head へ張り替えられると、
+ * `ready` と判定した要求が新しい土台へマージされる。**
+ * **GitHub のマージ API に base を固定する引数は無い**（`sha` は head だけで、
+ * GraphQL の `expectedHeadOid` も同じ）ので、**こちらで突き合わせるしかない。**
+ */
+const basedOnSchema = z.object({
+  base: z.object({ ref: z.string().min(1) }),
+});
+
+/**
+ * マージ要求の応答を、答えへ直す。
+ *
+ * **断られたのか、届かなかったのかを分ける**——**通信や権限の失敗を
+ * 「まだマージできません」と伝えると、押した人は待てば直ると思う。**
+ */
+async function interpretMergeResponse(response: Response): Promise<PullRequestMergeOutcome> {
+  if (!response.ok) {
+    if (NOT_MERGEABLE_STATUSES.has(response.status)) {
+      return { kind: "not-mergeable" };
+    }
+    throw new MergeFailed(response.status);
+  }
+
+  const parsed = mergeSchema.safeParse(await response.json().catch(() => undefined));
+  if (!parsed.success) {
+    throw new MergeFailed(response.status);
+  }
+  // **`merged: false` を「マージしました」と言わない**
+  return parsed.data.merged ? { kind: "merged" } : { kind: "not-mergeable" };
+}
+
 /** 応答から、試す順で最初に許可されている方式を選ぶ。 */
 function allowedMethod(
   allowed: z.infer<typeof repositorySchema>,
@@ -131,16 +166,59 @@ export function createGitHubPullRequestMerges({
     return allowedMethod(parsed.data);
   }
 
+  /**
+   * **いまの base**（#350）。**読めなければ投げる**——**確かめられないまま
+   * 通すと、この突き合わせが塞ごうとしたものがそのまま通る。**
+   */
+  async function baseBranchOf(
+    userAccessToken: string,
+    repository: PullRequestMergeTarget["repository"],
+    number: number,
+  ): Promise<string> {
+    const response = await fetchImpl(
+      `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/pulls/${number}`,
+      {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${userAccessToken}`,
+        },
+      },
+    );
+    if (!response.ok) {
+      throw new MergeFailed(response.status);
+    }
+    const parsed = basedOnSchema.safeParse(await response.json().catch(() => undefined));
+    if (!parsed.success) {
+      throw new MergeFailed(response.status);
+    }
+    return parsed.data.base.ref;
+  }
+
   return {
     async merge(
       userAccessToken: string,
-      { repository, number, headSha }: PullRequestMergeTarget,
+      { repository, number, headSha, expectedBaseBranch }: PullRequestMergeTarget,
     ): Promise<PullRequestMergeOutcome> {
       const method = await methodFor(userAccessToken, repository);
       if (method === undefined) {
         // **どの方式も許可されていない。** **押した人が次にすることは
         // 「GitHub で見る」**なので、`not-mergeable` へ倒す——**故障ではない。**
         return { kind: "not-mergeable" };
+      }
+
+      // **base を読み直すのは、マージ要求の直前である**（#350）。
+      // **間に別の往復を挟むと、そのぶん窓が広がる**ので、
+      // **方式の解決（`methodFor`）より後に置く。**
+      //
+      // **窓は狭くなるだけで、消えない。** **残るのは
+      // 「この読み直しの応答が GitHub を出てから、下のマージが GitHub で処理されるまで」**
+      // ——**そこへ base の張り替えが入れば、やはり新しい土台へマージされる。**
+      // **塞ぎ切る手は無い**（**マージ API に base を固定する引数が無い**）。
+      // **一覧の staleness はリポジトリの大きさで伸びる**（ページングと集計）が、
+      // **この読み直しは 1 件なので、窓の大きさが大きさに依らなくなる**
+      // ——**それがこの往復 1 回ぶんのコストで買っているものである。**
+      if ((await baseBranchOf(userAccessToken, repository, number)) !== expectedBaseBranch) {
+        return { kind: "base-changed" };
       }
 
       const response = await fetchImpl(
@@ -160,20 +238,7 @@ export function createGitHubPullRequestMerges({
         },
       );
 
-      if (!response.ok) {
-        // **断られたのか、届かなかったのかを分ける**（上記）
-        if (NOT_MERGEABLE_STATUSES.has(response.status)) {
-          return { kind: "not-mergeable" };
-        }
-        throw new MergeFailed(response.status);
-      }
-
-      const parsed = mergeSchema.safeParse(await response.json().catch(() => undefined));
-      if (!parsed.success) {
-        throw new MergeFailed(response.status);
-      }
-      // **`merged: false` を「マージしました」と言わない**
-      return parsed.data.merged ? { kind: "merged" } : { kind: "not-mergeable" };
+      return await interpretMergeResponse(response);
     },
   };
 }

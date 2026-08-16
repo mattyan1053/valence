@@ -79,6 +79,7 @@ export function mergeNoticeKind(value: unknown): MergeNoticeKind | undefined {
     value === "not-mergeable" ||
     value === "dependency-pending" ||
     value === "not-orderable" ||
+    value === "base-changed" ||
     value === "unavailable"
     ? value
     : undefined;

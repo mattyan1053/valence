@@ -94,3 +94,10 @@ describe("送られてきた head の commit を読む", () => {
     }
   });
 });
+
+describe("土台が張り替えられた要求を、別の理由として返す", () => {
+  it("base-changed をそのまま載せる", () => {
+    // **`not-mergeable` へ丸めると「コンフリクト」と案内される**（#348 の反省）
+    expect(mergeOutcomeParam({ kind: "base-changed" })).toBe("base-changed");
+  });
+});

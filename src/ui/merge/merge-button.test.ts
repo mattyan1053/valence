@@ -135,3 +135,15 @@ describe("押せなかった理由（依存）", () => {
     expect(mergeNotice("dependency-pending")).toContain("先に");
   });
 });
+
+describe("土台が張り替えられたことを伝える", () => {
+  it("コンフリクトや順序と、別の文面にする", () => {
+    // **押した人が次にすることが違う**（#350）——**盤面を読み込み直す**
+    expect(mergeNotice("base-changed")).not.toBe(mergeNotice("not-mergeable"));
+    expect(mergeNotice("base-changed")).not.toBe(mergeNotice("not-orderable"));
+  });
+
+  it("もう一度押せばよいと分かる文面になっている", () => {
+    expect(mergeNotice("base-changed")).toContain("もう一度");
+  });
+});

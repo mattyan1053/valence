@@ -80,6 +80,8 @@ export function mergeOutcomeParam(result: MergePullRequestResult): MergeNoticeKi
       return "dependency-pending";
     case "not-orderable":
       return "not-orderable";
+    case "base-changed":
+      return "base-changed";
     default:
       // **`signed-out` / `needs-login` / `unavailable` / `not-found`**
       return "unavailable";

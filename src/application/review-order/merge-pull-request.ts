@@ -62,6 +62,13 @@ export type MergePullRequestResult =
    * **`dependency-pending` と分ける**——**先に入れるものを名指しできない。**
    */
   | { readonly kind: "not-orderable" }
+  /**
+   * **判定したときと base が違う**（#350）。
+   *
+   * **`not-mergeable` とも `not-orderable` とも混ぜない**——**押した人が次に
+   * することが違う**（**盤面を見直して、もう一度押す**）。
+   */
+  | { readonly kind: "base-changed" }
   /** マージした。 */
   | { readonly kind: "merged" };
 
@@ -126,8 +133,12 @@ export async function mergePullRequest({
   // **依存が残っていないかを、押した時点の一覧で見る**（#345）。
   // **表示の無効化だけでは足りない**——**画面を経由しない要求が作れる**（#342 と同じ形）。
   let block: ReturnType<typeof mergeBlockFor>;
+  // **判定に使った base を控える**（#350）——**マージ直前に読み直して突き合わせる。**
+  let judgedBaseBranch: string | undefined;
   try {
     const listing = await pullRequests.listPullRequests();
+    judgedBaseBranch = listing.pullRequests.find((pullRequest) => pullRequest.number === number)
+      ?.base.branch;
     const edges = buildDependencyEdges(listing.pullRequests);
     // **読めなかった PR の数も渡す**（#348 のレビュー）——**`invalid` に残ったものは
     // 辺を持たない**ので、**土台だけが読めなかった場合、上段が「依存なし」に見える。**
@@ -143,6 +154,12 @@ export async function mergePullRequest({
     // この Issue が塞ごうとしたものがそのまま通る**（#345）
     return { kind: "unavailable" };
   }
+  if (judgedBaseBranch === undefined) {
+    // **一覧に居ない番号**である。**`mergeBlockFor` も `not-orderable` へ倒す**が、
+    // **突き合わせる base が無いまま進めない**——**先に断つ。**
+    return { kind: "not-orderable" };
+  }
+
   switch (block.kind) {
     case "depends-on":
       return { kind: "dependency-pending", blockedBy: block.numbers };
@@ -154,7 +171,13 @@ export async function mergePullRequest({
 
   try {
     // **確かめた本人のトークンで行う**（#317 が `userAccessToken` を返す理由）
-    return await merges.merge(authorization.userAccessToken, { repository, number, headSha });
+    return await merges.merge(authorization.userAccessToken, {
+      repository,
+      number,
+      headSha,
+      // **判定に使った base**（#350）——**adapter がマージ直前に突き合わせる。**
+      expectedBaseBranch: judgedBaseBranch,
+    });
   } catch {
     // **投げたものを「マージできた」に化けさせない。** **マージは取り消せない**ので、
     // **「したかどうか分からない」を「した」と言うと、誰も確かめに行かない。**

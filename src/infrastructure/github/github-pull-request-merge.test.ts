@@ -14,10 +14,12 @@ import { describe, expect, it } from "vitest";
 import { createGitHubPullRequestMerges } from "./github-pull-request-merge";
 
 const HEAD_SHA = "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb";
+const BASE_BRANCH = "main";
 const TARGET = {
   repository: { owner: "acme", name: "web" },
   number: 42,
   headSha: HEAD_SHA,
+  expectedBaseBranch: BASE_BRANCH,
 } as const;
 const USER_TOKEN = "user-token";
 
@@ -37,11 +39,21 @@ const ALLOWED = {
 function fetcher(
   merge: { status: number; body: unknown },
   settings: { status: number; body: unknown } = { status: 200, body: ALLOWED },
+  /** **マージ直前に読み直す PR**（#350）。**既定は判定したときと同じ base。** */
+  pullRequest: { status: number; body: unknown } = {
+    status: 200,
+    body: { base: { ref: BASE_BRANCH } },
+  },
 ): typeof fetch & { calls: { url: string; init: RequestInit | undefined }[] } {
   const calls: { url: string; init: RequestInit | undefined }[] = [];
   const impl = (async (url: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(url), init });
-    const answer = String(url).endsWith("/merge") ? merge : settings;
+    const path = String(url);
+    const answer = path.endsWith("/merge")
+      ? merge
+      : /\/pulls\/[0-9]+$/.test(path)
+        ? pullRequest
+        : settings;
     return new Response(JSON.stringify(answer.body), {
       status: answer.status,
       headers: { "content-type": "application/json" },
@@ -197,5 +209,65 @@ describe("GitHub で PR をマージする", () => {
     expect(error, "投げていない").toBeInstanceOf(Error);
     expect(String(error), "応答の中身が載っている").not.toContain(secret);
     expect(String(error)).toContain("403");
+  });
+});
+
+describe("判定したときと base が違えばマージしない", () => {
+  // **一覧を取ってからマージするまでの間に base が張り替えられると、
+  // `ready` と判定した要求が新しい土台へマージされる**（#350）——
+  // **GitHub のマージ API に base を固定する引数が無い**ので、**こちらで見る。**
+  it("base が変わっていたら、マージ要求を出さない", () => {
+    const fetchImpl = fetcher(
+      { status: 200, body: MERGED_BODY },
+      { status: 200, body: ALLOWED },
+      { status: 200, body: { base: { ref: "feat/a" } } },
+    );
+
+    return createGitHubPullRequestMerges({ fetchImpl })
+      .merge(USER_TOKEN, TARGET)
+      .then((outcome) => {
+        expect(outcome).toEqual({ kind: "base-changed" });
+        expect(mergeCall(fetchImpl), "マージを要求している").toBeUndefined();
+      });
+  });
+
+  it("base が同じなら、これまでどおりマージできる", async () => {
+    // **上の 1 件が base の違いだけで赤くなっていることを、ここが支えている**
+    const fetchImpl = fetcher({ status: 200, body: MERGED_BODY });
+
+    expect(await createGitHubPullRequestMerges({ fetchImpl }).merge(USER_TOKEN, TARGET)).toEqual({
+      kind: "merged",
+    });
+  });
+
+  it("base を読めなければマージしない", async () => {
+    // **確かめられないまま通すと、この直しが塞ごうとしたものがそのまま通る**
+    const fetchImpl = fetcher(
+      { status: 200, body: MERGED_BODY },
+      { status: 200, body: ALLOWED },
+      { status: 500, body: {} },
+    );
+
+    await expect(
+      createGitHubPullRequestMerges({ fetchImpl }).merge(USER_TOKEN, TARGET),
+    ).rejects.toThrow();
+    expect(mergeCall(fetchImpl), "マージを要求している").toBeUndefined();
+  });
+
+  it("base の読み直しは、マージ要求の直前に行う", () => {
+    // **窓は「読み直し → マージ」の間だけにする**（#350）——
+    // **間に別の往復を挟むと、そのぶん窓が広がる**
+    const fetchImpl = fetcher({ status: 200, body: MERGED_BODY });
+
+    return createGitHubPullRequestMerges({ fetchImpl })
+      .merge(USER_TOKEN, TARGET)
+      .then(() => {
+        const paths = fetchImpl.calls.map((call) => call.url);
+        const readAt = paths.findIndex((path) => /\/pulls\/[0-9]+$/.test(path));
+        const mergeAt = paths.findIndex((path) => path.endsWith("/merge"));
+
+        expect(readAt, "base を読み直していない").toBeGreaterThanOrEqual(0);
+        expect(mergeAt, "読み直しの直後にマージしていない").toBe(readAt + 1);
+      });
   });
 });

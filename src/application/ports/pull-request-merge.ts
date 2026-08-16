@@ -29,6 +29,19 @@ export type PullRequestMergeTarget = {
    * 「固定したつもり」で通る**——**そのとき赤くなる試験は、呼ぶ側には無い。**
    */
   readonly headSha: string;
+  /**
+   * **依存を判定したときの base**（#350）。
+   *
+   * **マージ直前に読み直して突き合わせる。** **食い違ったら断る**
+   * ——**一覧を取ってからマージするまでの間に base が別の open PR の head へ
+   * 張り替えられると、`ready` と判定した要求が新しい土台へマージされる。**
+   * **GitHub のマージ API に base を固定する引数は無い**ので（`sha` は head だけ）、
+   * **こちらで突き合わせるしかない。**
+   *
+   * **窓は狭くなるだけで、消えない**——**読み直しとマージの間に同じ窓が残る。**
+   * **残る窓の大きさは `github-pull-request-merge.ts` に書いてある。**
+   */
+  readonly expectedBaseBranch: string;
 };
 
 /**
@@ -40,6 +53,14 @@ export type PullRequestMergeTarget = {
 export type PullRequestMergeOutcome =
   /** マージした。 */
   | { readonly kind: "merged" }
+  /**
+   * **判定したときと base が違う**（#350）。
+   *
+   * **`not-mergeable` と混ぜない。** **あちらは「コンフリクト・必須チェック・
+   * 保護ルール」を指す**ので、**張り替えを混ぜると嘘の理由が伝わる。**
+   * **押した人が次にすることも違う**——**盤面を見直して、もう一度押す**である。
+   */
+  | { readonly kind: "base-changed" }
   /**
    * **いまはマージできない**（GitHub が断った）。
    *
