@@ -43,18 +43,24 @@ afterEach(() => {
 /** 偽の `gh` を置いて走らせる。**落とす口も用意する**（読めないを 0 件にしない）。 */
 function run(
   args: string[],
-  { body, entries, fail }: { body: string; entries: Record<number, Entry>; fail?: string },
+  {
+    body,
+    entries,
+    fail,
+    repo = "mattyan1053/valence",
+  }: { body: string; entries: Record<number, Entry>; fail?: string; repo?: string },
 ): { status: number; stdout: string; stderr: string; cwd: string } {
   const dir = mkdtempSync(join(tmpdir(), "close-candidates-"));
   sandboxes.push(dir);
   const stub = join(dir, "gh");
+  const [owner = "", name = ""] = repo.split("/");
   writeFileSync(
     stub,
     [
       "#!/usr/bin/env bash",
       `fail=${JSON.stringify(fail ?? "")}`,
       // **`gh repo view`** — どのリポジトリを見るかは実行時に決まる
-      'if [[ "$1" == "repo" ]]; then printf "mattyan1053\\nvalence\\n"; exit 0; fi',
+      `if [[ "$1" == "repo" ]]; then printf '%s\\n%s\\n' ${JSON.stringify(owner)} ${JSON.stringify(name)}; exit 0; fi`,
       'if [[ "$1" == "pr" ]]; then',
       '  [[ $fail == "pr" ]] && { echo "boom" >&2; exit 1; }',
       `  cat <<'BODY'`,
@@ -203,6 +209,27 @@ describe("bin/loop-close-candidates", () => {
 
     expect(verdict.status, verdict.stderr).toBe(1);
     expect(verdict.stdout).toContain("319");
+  });
+
+  it("リポジトリ名の記号を、任意の文字として扱わない", () => {
+    // **リポジトリ名は正規表現ではない** (#337 のレビュー)。**`.` を含む名前
+    // （`foo.bar`）を ERE へそのまま挿すと、`fooXbar` を指した別のリポジトリの
+    // 参照まで「ここのもの」として拾う**——**倒れ方は修飾を見ていなかったときと同じ**で、
+    // **無関係な Issue が `gh issue close <N>` の相手として並ぶ。**
+    //
+    // **名前は文字列として突き合わせる。**
+    const verdict = run(["330"], {
+      repo: "acme/foo.bar",
+      body: "Fixes acme/fooXbar#264\n\nRefs #319\n",
+      entries: {
+        319: { state: "OPEN", title: "ここの Issue" },
+        264: { state: "OPEN", title: "ここの無関係な Issue" },
+      },
+    });
+
+    expect(verdict.status, verdict.stderr).toBe(1);
+    expect(verdict.stdout).toContain("319");
+    expect(verdict.stdout, "別のリポジトリの参照を正規表現で拾っている").not.toContain("264");
   });
 
   it("lease の記録は、砂場の中に落ちる", () => {
