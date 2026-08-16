@@ -34,10 +34,17 @@ afterEach(() => {
 /**
  * 偽の `gh` を置いて走らせる。
  *
- * **`--jq` の後ろの形で返す**（`bin/loop-claim idle` の偽物と同じ約束。
- * **本物の `gh` が絞ったあとの行**を、そのまま出す）。
+ * **ページの切れ目を、そのまま置く** (#328 のレビュー)。**本物の `gh api graphql
+ * --paginate` は内側の `pageInfo` を辿って続きを読む**ので、**辿る形になっていない
+ * 要求には 1 ページ目しか返さない**——**「件数で打ち切ると取りこぼす」を再現する。**
  */
-function run(options: { issues?: Issue[]; fails?: boolean; args?: string[] }): {
+function run(options: {
+  issues?: Issue[];
+  /** **1 ページ目より先にしか出てこない Issue。** 打ち切る実装では見えない */
+  beyondFirstPage?: Issue[];
+  fails?: boolean;
+  args?: string[];
+}): {
   status: number;
   stdout: string[];
   stderr: string;
@@ -46,16 +53,27 @@ function run(options: { issues?: Issue[]; fails?: boolean; args?: string[] }): {
   sandboxes.push(dir);
   const path = join(dir, "path");
   mkdirSync(path, { recursive: true });
-  const lines = (options.issues ?? [])
-    .map((issue) => `${issue.number}\t${issue.labels.join(",")}`)
-    .join("\n");
+  const asLines = (issues: Issue[]): string =>
+    issues.map((issue) => `${issue.number}\t${issue.labels.join(",")}`).join("\n");
+  const head = asLines(options.issues ?? []);
+  const tail = asLines(options.beyondFirstPage ?? []);
   writeFileSync(
     join(path, "gh"),
     [
       "#!/usr/bin/env bash",
       ...(options.fails === true ? ["exit 1"] : []),
-      `printf '%b' ${JSON.stringify(lines)}`,
-      `[[ -n ${JSON.stringify(lines)} ]] && echo`,
+      'if [[ $* == *"repo view"* ]]; then',
+      '  echo "owner"',
+      '  echo "repo"',
+      "  exit 0",
+      "fi",
+      `printf '%b' ${JSON.stringify(head)}`,
+      `[[ -n ${JSON.stringify(head)} ]] && echo`,
+      // **続きは、内側を辿る要求にだけ返す**（`--paginate` と `pageInfo` と `after:`）
+      'if [[ $* == *"--paginate"* && $* == *"pageInfo"* && $* == *"after:"* ]]; then',
+      `  printf '%b' ${JSON.stringify(tail)}`,
+      `  [[ -n ${JSON.stringify(tail)} ]] && echo`,
+      "fi",
       "exit 0",
       "",
     ].join("\n"),
@@ -158,6 +176,22 @@ describe("bin/loop-unlisted-issues", () => {
 
     expect(listed.status, "読めなかったのに答えを返している").toBe(2);
     expect(listed.stderr).not.toBe("");
+  });
+
+  it("1 ページ目より先にある Issue も見る", () => {
+    // **件数で打ち切ると、古い Issue から状態 label が外れても気づけない**
+    // （#328 のレビュー）——**症状は「何も出ない」**なので、
+    // **この検出器だけが静かに消える**（**この PR が消しに来た形そのもの**）。
+    //
+    // **1 ページ目には label の付いた Issue しか置かない**——**続きを読まなければ
+    // 「無い」と答える。**
+    const listed = run({
+      issues: [{ number: 1, labels: ["backlog"] }],
+      beyondFirstPage: [{ number: 400, labels: [] }],
+    });
+
+    expect(listed.status, "打ち切って「無い」と答えている").toBe(1);
+    expect(listed.stdout).toEqual(["400"]);
   });
 
   it("使い方の誤りは、無いと混ぜない", () => {

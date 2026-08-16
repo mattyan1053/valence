@@ -51,8 +51,31 @@ usage() {
 #   blocked                       … worker が毎周回読む
 readonly LISTED_LABELS=(backlog ready in-progress blocked)
 
-if ! issues="$(gh issue list --state open --limit 200 --json number,labels \
-  --jq '.[] | "\(.number)\t\([.labels[].name] | join(","))"')"; then
+# **どのリポジトリを見るかは実行時に決まる**（`AGENTS.md` §1。`bin/loop-claim` と同じ口）。
+if ! repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')"; then
+  echo "[FAIL] リポジトリを特定できません" >&2
+  exit 2
+fi
+mapfile -t repo_parts <<<"$repo_ref"
+
+# **件数で打ち切らない** (#328 のレビュー)。**`gh issue list --limit N` は「最大 N 件」**
+# なので、**open Issue がそれを超えたリポジトリでは、古いものから検査の外へ出る**
+# ——**そこで label が外れても exit 0 のまま**で、**この検出器だけが静かに消える。**
+#
+# **内側の connection を明示的に辿る。** **`pageInfo` と `after` が無いと
+# `--paginate` は外側しか進めない**（`bin/loop-handoff` / `bin/loop-claim` と同じ形）。
+#
+# **label は 1 つでも見つかれば足りる**ので、**取り切れないほど付いた Issue で
+# 取りこぼしても、倒れる先は「挙げる」側**である（**黙る側ではない**）。
+if ! issues="$(gh api graphql --paginate \
+  -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+  -f query='query($owner:String!,$repo:String!,$endCursor:String){
+    repository(owner:$owner,name:$repo){
+      issues(states:OPEN, first:100, after:$endCursor){
+        pageInfo{hasNextPage endCursor}
+        nodes{number labels(first:100){nodes{name}}}}}}' \
+  --jq '.data.repository.issues.nodes[]
+    | "\(.number)\t\([.labels.nodes[].name] | join(","))"')"; then
   echo "[FAIL] open Issue の一覧を読めません" >&2
   echo "       どの一覧にも出てこない Issue があるかは、この周回では分かりません" >&2
   exit 2
