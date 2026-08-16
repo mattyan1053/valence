@@ -129,7 +129,15 @@ export async function mergePullRequest({
   try {
     const listing = await pullRequests.listPullRequests();
     const edges = buildDependencyEdges(listing.pullRequests);
-    block = mergeBlockFor(number, edges, orderByDependency(listing.pullRequests, edges));
+    // **読めなかった PR の数も渡す**（#348 のレビュー）——**`invalid` に残ったものは
+    // 辺を持たない**ので、**土台だけが読めなかった場合、上段が「依存なし」に見える。**
+    // **その経路は投げないので、下の `catch` には入らない。**
+    block = mergeBlockFor(
+      number,
+      edges,
+      orderByDependency(listing.pullRequests, edges),
+      listing.invalid.length,
+    );
   } catch {
     // **確かめられなければマージしない。** **依存を見られないまま通すと、
     // この Issue が塞ごうとしたものがそのまま通る**（#345）

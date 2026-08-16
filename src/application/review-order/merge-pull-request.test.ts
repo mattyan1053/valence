@@ -66,10 +66,13 @@ function ref(number: number, base: string, head: string): PullRequestRef {
 }
 
 /** いまの一覧を返す口。**押した時点の依存を見るため**である（#345）。 */
-function listing(pullRequests: readonly PullRequestRef[]): PullRequestSource {
+function listing(
+  pullRequests: readonly PullRequestRef[],
+  invalid: readonly { index: number; reason: string }[] = [],
+): PullRequestSource {
   return {
     async listPullRequests() {
-      return { pullRequests, invalid: [], heads: new Map() };
+      return { pullRequests, invalid, heads: new Map() };
     },
   };
 }
@@ -275,5 +278,39 @@ describe("依存が残っている PR はマージしない", () => {
     );
 
     expect(result.kind).toBe("forbidden");
+  });
+});
+
+describe("読めなかった PR がある一覧では、マージしない", () => {
+  // **`PullRequestSource` は検証に落ちた PR を `invalid` に残して正常終了する**
+  // （#348 のレビュー）——**投げないので `catch` に入らず**、
+  // **土台だけが読めなかった場合、上段が「依存なし」に見えてマージされる。**
+  it("依存なしに見えても、読めなかった PR があればマージ要求が出ない", async () => {
+    // **`pullRequests` の側は正常なまま**にしてある——**`invalid` が効いて
+    // 赤くなったことを、依存の判定と分けて見るため**（master の指示）
+    const merge = merges();
+
+    const result = await mergePullRequest(
+      input({
+        permissions: permissions("write"),
+        merges: merge,
+        pullRequests: listing(ALONE, [{ index: 3, reason: "読めない" }]),
+      }),
+    );
+
+    expect(merge.calls.length, "マージを要求している").toBe(0);
+    expect(result).toEqual({ kind: "not-orderable" });
+  });
+
+  it("同じ一覧でも、読めなかった PR が無ければマージできる", async () => {
+    // **上の 1 件が `invalid` だけで赤くなっていることを、ここが支えている**
+    const merge = merges();
+
+    const result = await mergePullRequest(
+      input({ permissions: permissions("write"), merges: merge, pullRequests: listing(ALONE) }),
+    );
+
+    expect(result.kind).toBe("merged");
+    expect(merge.calls.length).toBe(1);
   });
 });

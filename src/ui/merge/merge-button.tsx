@@ -45,7 +45,12 @@ export type MergeButtonProps = {
    * （**画面を経由しない要求が作れる**）。
    */
   readonly blockedBy?: readonly number[];
-  /** **順序が決められない**（循環など。#345）。**先に入れるものを名指しできない。** */
+  /**
+   * **順序を判定できない**（#345 / #348）。**先に入れるものを名指しできない。**
+   *
+   * **循環・一覧に無い番号・読めなかった PR がある**のどれでも立つ——
+   * **原因は言い分けない**（**言い分けるには理由を運ぶ必要がある**）。
+   */
   readonly notOrderable?: boolean;
   readonly disabled?: boolean;
 };
@@ -71,7 +76,11 @@ export function mergeNotice(kind: MergeNoticeKind): string {
       // 未確認の変更が混ざる**
       return "土台の PR が残っています。先にそちらをマージしてください。";
     case "not-orderable":
-      return "依存が循環しているため、マージする順序を決められません。GitHub で確認してください。";
+      // **原因を言い分けない**（#348 のレビュー）——**循環・一覧に無い番号・
+      // 読めなかった PR のどれでもここへ来る。** **「循環しています」と断定すると、
+      // 循環していない場合に嘘の理由が伝わる**（**名前を `not-orderable` にした
+      // 理由がこれで、文面だけ古いままだった**）。
+      return "依存の順序を判定できませんでした。GitHub で確認してください。";
     case "unavailable":
       return "いまマージできませんでした。しばらくしてから試してください。";
   }
@@ -108,7 +117,7 @@ export function MergeButton({
         </span>
       ) : undefined}
       {notOrderable === true ? (
-        <span className="text-sm opacity-70">依存が循環しています</span>
+        <span className="text-sm opacity-70">依存の順序を判定できません</span>
       ) : undefined}
     </form>
   );

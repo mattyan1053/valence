@@ -182,7 +182,18 @@ export default async function RepositoryBoardPage({
                   headSha={result.plan.heads.get(number)}
                   // **依存が残っていれば押させない**（#345）。**判定は domain が持つ**
                   // ——**ここへ書き写すと、POST の口と食い違う**
-                  {...mergeButtonBlock(mergeBlockFor(number, result.plan.edges, result.plan.order))}
+                  // **読めなかった PR があれば、どの行も押させない**（#348 のレビュー）
+                  // ——**辺が作られないので「依存なし」を信じられない。**
+                  // **画面でも止める**（POST でも止まるが、**押しても断られると
+                  // 分かっているものを押させるのは、理由が伝わる形ではない**）
+                  {...mergeButtonBlock(
+                    mergeBlockFor(
+                      number,
+                      result.plan.edges,
+                      result.plan.order,
+                      result.plan.invalid.length,
+                    ),
+                  )}
                 />
               </>
             )}

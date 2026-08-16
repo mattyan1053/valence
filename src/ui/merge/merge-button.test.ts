@@ -105,17 +105,30 @@ describe("依存が残っているときは押させない", () => {
     expect(isDisabled(html)).toBe(false);
   });
 
-  it("循環しているときは押せず、そう伝える", () => {
+  it("順序を判定できないときは押せず、そう伝える", () => {
     const html = render({ number: 9, action: ACTION, headSha: HEAD_SHA, notOrderable: true });
 
     expect(isDisabled(html)).toBe(true);
-    expect(html).toContain("循環");
+    expect(html).toContain("順序");
+  });
+
+  it("循環だと断定しない", () => {
+    // **`not-orderable` は循環以外でも立つ**（一覧に無い番号・読めなかった PR）
+    // ——**断定すると、循環していない場合に嘘の理由が伝わる**（#348 のレビュー）
+    const html = render({ number: 9, action: ACTION, headSha: HEAD_SHA, notOrderable: true });
+
+    expect(html, "循環と断定している").not.toContain("循環");
   });
 });
 
 describe("押せなかった理由（依存）", () => {
-  it("土台待ちと、順序が決められないことを分ける", () => {
+  it("土台待ちと、順序が判定できないことを分ける", () => {
     expect(mergeNotice("dependency-pending")).not.toBe(mergeNotice("not-orderable"));
+  });
+
+  it("順序を判定できない理由に、循環と書かない", () => {
+    // **循環以外でもここへ来る**（#348 のレビュー）
+    expect(mergeNotice("not-orderable"), "循環と断定している").not.toContain("循環");
   });
 
   it("土台待ちは、先に入れることが分かる文面になっている", () => {

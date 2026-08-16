@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
+import { mergeBlockFor } from "../../../../domain/graph/merge-block";
 import {
   approvalDisplay,
   approveNoticeKind,
@@ -92,7 +93,6 @@ describe("直前にマージできなかった理由を出す", () => {
   });
 });
 
-<<<<<<< HEAD
 /**
  * **承認済みかどうかを盤面に出す**（#343）。
  *
@@ -154,5 +154,15 @@ describe("依存の判定を、ボタンへ詰め替える", () => {
   it("依存が無ければ、何も渡さない", () => {
     // **渡すと、押せる PR まで閉じる**
     expect(mergeButtonBlock({ kind: "ready" })).toEqual({});
+  });
+
+  it("読めなかった PR があれば、押させない側へ倒す", () => {
+    // **図に抜けがあるなら「依存なし」を信じられない**（#348 のレビュー）——
+    // **判定は domain が持つ**ので、ここは詰め替えるだけ
+    const edges = [{ dependent: 9, dependsOn: 8 }];
+    const order = { ordered: [8, 9], cyclic: [] };
+
+    expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 0))).toEqual({});
+    expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 1))).toEqual({ notOrderable: true });
   });
 });

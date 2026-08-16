@@ -16,9 +16,9 @@ function pr(number: number, base: string, head: string): PullRequestRef {
 /** #9 が #8 の上に積まれている、いちばん小さなスタック。 */
 const STACK = [pr(8, "main", "feat/a"), pr(9, "feat/a", "feat/b")];
 
-function blockFor(pullRequests: readonly PullRequestRef[], number: number) {
+function blockFor(pullRequests: readonly PullRequestRef[], number: number, unreadable = 0) {
   const edges = buildDependencyEdges(pullRequests);
-  return mergeBlockFor(number, edges, orderByDependency(pullRequests, edges));
+  return mergeBlockFor(number, edges, orderByDependency(pullRequests, edges), unreadable);
 }
 
 describe("依存が残っているかを決める", () => {
@@ -72,6 +72,27 @@ describe("順序と辺が食い違っていても、緩い側へ倒さない", (
     const edges: readonly DependencyEdge[] = [];
     const order: DependencyOrder = { ordered: [], cyclic: [7] };
 
-    expect(mergeBlockFor(7, edges, order)).toEqual({ kind: "not-orderable" });
+    expect(mergeBlockFor(7, edges, order, 0)).toEqual({ kind: "not-orderable" });
+  });
+});
+
+describe("読めなかった PR があれば、順序を判定できたと言わない", () => {
+  // **`PullRequestSource` は、検証に落ちた PR を `invalid` に残して正常終了する**
+  // （#348 のレビュー）——**土台だけが読めなかった場合、辺が作られず、
+  // 上段が `ready` に見える。** **投げないので `catch` にも入らない。**
+  //
+  // **図に抜けがあるなら、どの行の「依存なし」も信じられない。**
+  it("依存が無く見えても、読めなかった PR があればマージさせない", () => {
+    // **`pullRequests` の側は正常なまま**にしてある——**どちらが効いて赤くなったかを
+    // 分けるため**（master の指示）
+    expect(blockFor([pr(8, "main", "feat/a")], 8, 0)).toEqual({ kind: "ready" });
+
+    expect(blockFor([pr(8, "main", "feat/a")], 8, 1)).toEqual({ kind: "not-orderable" });
+  });
+
+  it("土台が残っているときも、読めなかった側を優先して伝えない", () => {
+    // **どちらも「押させない」**である——**先に入れる番号を名指しできるなら、
+    // そちらのほうが役に立つ**
+    expect(blockFor(STACK, 9, 1).kind).toBe("not-orderable");
   });
 });
