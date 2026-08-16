@@ -29,6 +29,13 @@ export type InvalidPullRequest = {
 export type PullRequestListing = {
   readonly pullRequests: readonly PullRequestRef[];
   readonly invalid: readonly InvalidPullRequest[];
+  /**
+   * PR 番号から引ける head の commit（#331 のレビュー）。
+   *
+   * **マージは「見せたもの」に固定する**ため、**押す側まで運ぶ。**
+   * **`PullRequestRef` へ足さない**——**あれは依存を決めるのに要る最小限**である。
+   */
+  readonly heads: ReadonlyMap<number, string>;
 };
 
 export type PullRequestSource = {

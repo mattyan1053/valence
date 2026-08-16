@@ -13,23 +13,47 @@
 import { describe, expect, it } from "vitest";
 import { createGitHubPullRequestMerges } from "./github-pull-request-merge";
 
-const TARGET = { repository: { owner: "acme", name: "web" }, number: 42 } as const;
+const HEAD_SHA = "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb";
+const TARGET = {
+  repository: { owner: "acme", name: "web" },
+  number: 42,
+  headSha: HEAD_SHA,
+} as const;
 const USER_TOKEN = "user-token";
 
-function fetcher(response: {
-  status: number;
-  body: unknown;
-}): typeof fetch & { calls: { url: string; init: RequestInit | undefined }[] } {
+/** 許可されている方式。**既定は squash だけ**（このリポジトリの慣行）。 */
+const ALLOWED = {
+  allow_squash_merge: true,
+  allow_merge_commit: false,
+  allow_rebase_merge: false,
+};
+
+/**
+ * 応答を決められる `fetch`。
+ *
+ * **2 つの要求に答える**——**リポジトリの設定**（許可されている方式）と、
+ * **マージそのもの**。**分けているのは、方式を要求ごとに引くから**である（#331 のレビュー）。
+ */
+function fetcher(
+  merge: { status: number; body: unknown },
+  settings: { status: number; body: unknown } = { status: 200, body: ALLOWED },
+): typeof fetch & { calls: { url: string; init: RequestInit | undefined }[] } {
   const calls: { url: string; init: RequestInit | undefined }[] = [];
   const impl = (async (url: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(url), init });
-    return new Response(JSON.stringify(response.body), {
-      status: response.status,
+    const answer = String(url).endsWith("/merge") ? merge : settings;
+    return new Response(JSON.stringify(answer.body), {
+      status: answer.status,
       headers: { "content-type": "application/json" },
     });
   }) as typeof fetch & { calls: typeof calls };
   impl.calls = calls;
   return impl;
+}
+
+/** マージの要求だけを取り出す。**設定を引く要求と混ぜない。** */
+function mergeCall(fetchImpl: ReturnType<typeof fetcher>) {
+  return fetchImpl.calls.find((call) => call.url.endsWith("/merge"));
 }
 
 const MERGED_BODY = { merged: true, sha: "abc123" };
@@ -40,19 +64,70 @@ describe("GitHub で PR をマージする", () => {
 
     await createGitHubPullRequestMerges({ fetchImpl }).merge(USER_TOKEN, TARGET);
 
-    const [call] = fetchImpl.calls;
+    const call = mergeCall(fetchImpl);
     expect(call?.url).toBe("https://api.github.com/repos/acme/web/pulls/42/merge");
     expect(call?.init?.method).toBe("PUT");
     expect(new Headers(call?.init?.headers).get("authorization")).toBe(`Bearer ${USER_TOKEN}`);
   });
 
-  it("squash でマージする", async () => {
-    // **方法を UI に出さない**（#331 の「やらないこと」）——**1 つに決める**
+  it("盤面で見せた commit に固定して送る", async () => {
+    // **これが無いと、盤面を出してから押すまでに push された変更まで
+    // マージされる**（#331 のレビュー）——**利用者が確かめていないものが入る。**
+    // **載せて初めて、GitHub が head の食い違いを 409 で返す。**
     const fetchImpl = fetcher({ status: 200, body: MERGED_BODY });
 
     await createGitHubPullRequestMerges({ fetchImpl }).merge(USER_TOKEN, TARGET);
 
-    expect(JSON.parse(String(fetchImpl.calls[0]?.init?.body))).toEqual({ merge_method: "squash" });
+    expect(JSON.parse(String(mergeCall(fetchImpl)?.init?.body)).sha).toBe(HEAD_SHA);
+  });
+
+  it("許可されている方式を、要求ごとに引いて選ぶ", async () => {
+    // **squash 固定にしない**（#331 のレビュー）——**無効にしている
+    // リポジトリでは全要求が 405 になり、しかも「コンフリクト」と案内される**
+    for (const [settings, expected] of [
+      [ALLOWED, "squash"],
+      [{ allow_squash_merge: false, allow_merge_commit: true, allow_rebase_merge: true }, "merge"],
+      [
+        { allow_squash_merge: false, allow_merge_commit: false, allow_rebase_merge: true },
+        "rebase",
+      ],
+    ] as const) {
+      const fetchImpl = fetcher(
+        { status: 200, body: MERGED_BODY },
+        { status: 200, body: settings },
+      );
+
+      await createGitHubPullRequestMerges({ fetchImpl }).merge(USER_TOKEN, TARGET);
+
+      expect(JSON.parse(String(mergeCall(fetchImpl)?.init?.body)).merge_method, expected).toBe(
+        expected,
+      );
+    }
+  });
+
+  it("どの方式も許可されていなければ、マージしに行かない", async () => {
+    // **押しても 405 になるだけ**——**要求を出さずに「いまはできない」と伝える**
+    const fetchImpl = fetcher(
+      { status: 200, body: MERGED_BODY },
+      {
+        status: 200,
+        body: { allow_squash_merge: false, allow_merge_commit: false, allow_rebase_merge: false },
+      },
+    );
+
+    const outcome = await createGitHubPullRequestMerges({ fetchImpl }).merge(USER_TOKEN, TARGET);
+
+    expect(outcome).toEqual({ kind: "not-mergeable" });
+    expect(mergeCall(fetchImpl), "マージを要求している").toBeUndefined();
+  });
+
+  it("許可されている方式を読めなければ投げる", async () => {
+    // **「許可されていない」と「読めなかった」を混ぜない**
+    const fetchImpl = fetcher({ status: 200, body: MERGED_BODY }, { status: 500, body: {} });
+
+    await expect(
+      createGitHubPullRequestMerges({ fetchImpl }).merge(USER_TOKEN, TARGET),
+    ).rejects.toThrow();
   });
 
   it("マージできたら merged を返す", async () => {

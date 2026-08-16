@@ -19,6 +19,16 @@ import type { VisibleRepository } from "./visible-repositories";
 export type PullRequestMergeTarget = {
   readonly repository: VisibleRepository;
   readonly number: number;
+  /**
+   * **盤面で見せた head の commit**（#331 のレビュー）。
+   *
+   * **これを要求へ載せる。** **載せないと、盤面を出してから押すまでに push された
+   * 変更まで一緒にマージされる**——**利用者が確かめていないものが入る。**
+   *
+   * **必須にしてある。** **省略できる形にすると、呼ぶ側が省いたときに
+   * 「固定したつもり」で通る**——**そのとき赤くなる試験は、呼ぶ側には無い。**
+   */
+  readonly headSha: string;
 };
 
 /**

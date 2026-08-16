@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import { boardRedirect } from "../board-redirect";
-import { mergeOutcomeParam, pullRequestNumberFrom } from "./route";
+import { headShaFrom, mergeOutcomeParam, pullRequestNumberFrom } from "./route";
 
 describe("送られてきた PR 番号を読む", () => {
   it("数として読めるものだけを通す", () => {
@@ -69,5 +69,28 @@ describe("押したあと、盤面へ戻す", () => {
     expect(response.headers.get("location")).toBe(
       "http://localhost:3000/repos/acme/web?merge=not-mergeable",
     );
+  });
+});
+
+describe("送られてきた head の commit を読む", () => {
+  it("commit として有り得る形だけを通す", () => {
+    expect(headShaFrom("5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb")).toBe(
+      "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb",
+    );
+  });
+
+  it("形が違うものは通さない", () => {
+    // **そのまま GitHub の要求へ載せる値**である
+    for (const value of [
+      "",
+      "abc",
+      "5E2A91C4D7F60B83AE15CD429F70B6D8E3A142CB",
+      "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142c",
+      "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cbb",
+      null,
+      undefined,
+    ]) {
+      expect(headShaFrom(value), String(value)).toBeUndefined();
+    }
   });
 });

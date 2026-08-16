@@ -35,6 +35,26 @@ export function pullRequestNumberFrom(value: unknown): number | undefined {
 }
 
 /**
+ * 送られてきた head の commit（#331 のレビュー）。**境界なので Zod で検証する**。
+ *
+ * **形まで見る。** **そのまま GitHub の要求へ載せる値**なので、
+ * **commit として有り得ないものを通さない**（**40 桁の 16 進**）。
+ *
+ * **無ければ通さない。** **省略された要求を「固定しないマージ」として通すと、
+ * ボタンを経由しない要求で、見せていない head がマージできる**
+ * ——**フォームを直せば済む側に穴を残さない。**
+ */
+const headShaSchema = z
+  .string()
+  .trim()
+  .regex(/^[0-9a-f]{40}$/);
+
+export function headShaFrom(value: unknown): string | undefined {
+  const parsed = headShaSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
  * 結果を、画面が出せる語彙へ寄せる。
  *
  * **成功は載せない**（#342 のレビュー）——**`?merge=` は利用者が任意に作れる。**
@@ -67,13 +87,15 @@ export async function POST(
   const { owner, name } = await params;
   const form = await request.formData().catch(() => undefined);
   const number = pullRequestNumberFrom(form?.get("number"));
+  const headSha = headShaFrom(form?.get("sha"));
 
-  if (number === undefined) {
-    // **読めない要求で GitHub を叩かない**
+  if (number === undefined || headSha === undefined) {
+    // **読めない要求で GitHub を叩かない。** **commit が無い要求も通さない**
+    // ——**通すと、見せていない head がマージできる。**
     return boardRedirect(request, { owner, name }, { param: "merge", value: "unavailable" });
   }
 
-  const result = await mergePullRequestForCurrentUser({ owner, name }, number);
+  const result = await mergePullRequestForCurrentUser({ owner, name }, number, headSha);
   const outcome = mergeOutcomeParam(result);
   // **成功のときは何も載せない**（上記）
   return boardRedirect(

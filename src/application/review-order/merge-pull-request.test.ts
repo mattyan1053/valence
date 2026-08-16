@@ -18,6 +18,7 @@ import { mergePullRequest } from "./merge-pull-request";
 
 const TARGET = { owner: "acme", name: "web" } as const;
 const NUMBER = 42;
+const HEAD_SHA = "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb";
 
 const VISIBLE: VisibleRepositoryListing = { repositories: [TARGET], invalid: [] };
 const NOTHING_VISIBLE: VisibleRepositoryListing = { repositories: [], invalid: [] };
@@ -70,6 +71,7 @@ function input(overrides: {
   return {
     repository: TARGET,
     number: NUMBER,
+    headSha: HEAD_SHA,
     openStore: overrides.openStore ?? (async () => ({}) as never),
     ensure: async () => ({ kind: "usable", accessToken: USER_TOKEN }) as const,
     repositories: repositories(overrides.listing ?? VISIBLE),
@@ -109,7 +111,12 @@ describe("PR をマージする前に、押してよいかを確かめる", () =
     await mergePullRequest(input({ permissions: permissions("write"), merges: merge }));
 
     expect(merge.calls[0]?.token).toBe(USER_TOKEN);
-    expect(merge.calls[0]?.target).toEqual({ repository: TARGET, number: NUMBER });
+    expect(merge.calls[0]?.target).toEqual({
+      repository: TARGET,
+      number: NUMBER,
+      // **見せた head をそのまま運ぶ**（#331 のレビュー）——**途中で作り直さない**
+      headSha: HEAD_SHA,
+    });
   });
 
   it("いまマージできないことを、そのまま伝える", async () => {

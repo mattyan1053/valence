@@ -121,6 +121,9 @@ export default async function RepositoryBoardPage({
                 <MergeButton
                   number={number}
                   action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/merge`}
+                  // **盤面が見せている commit をそのまま渡す**（#331 のレビュー）
+                  // ——**押した対象を、見せた対象に固定する**
+                  headSha={result.plan.heads.get(number)}
                 />
               </>
             )}

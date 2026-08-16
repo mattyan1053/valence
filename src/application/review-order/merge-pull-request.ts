@@ -52,6 +52,13 @@ export type MergePullRequestInput = {
   readonly repository: VisibleRepository;
   /** どの PR か。 */
   readonly number: number;
+  /**
+   * **盤面で見せた head の commit**（#331 のレビュー）。
+   *
+   * **押した対象が、見せた対象であること**を GitHub 側で確かめさせる
+   * ——**「押したあとに理由が伝わる」は、その前提の上にある。**
+   */
+  readonly headSha: string;
   /** **開く手続きごと受ける**（`approvePullRequest` と同じ形）。 */
   readonly openStore: () => Promise<UserTokenStore | undefined>;
   readonly ensure: (store: UserTokenStore) => Promise<UsableToken>;
@@ -66,6 +73,7 @@ export type MergePullRequestInput = {
 export async function mergePullRequest({
   repository,
   number,
+  headSha,
   openStore,
   ensure,
   repositories,
@@ -89,7 +97,7 @@ export async function mergePullRequest({
 
   try {
     // **確かめた本人のトークンで行う**（#317 が `userAccessToken` を返す理由）
-    return await merges.merge(authorization.userAccessToken, { repository, number });
+    return await merges.merge(authorization.userAccessToken, { repository, number, headSha });
   } catch {
     // **投げたものを「マージできた」に化けさせない。** **マージは取り消せない**ので、
     // **「したかどうか分からない」を「した」と言うと、誰も確かめに行かない。**

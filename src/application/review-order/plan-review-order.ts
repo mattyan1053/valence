@@ -29,6 +29,13 @@ export type ReviewOrderPlan = {
   readonly changes: ReadonlyMap<number, ChangeSummary>;
   /** 材料を取れなかった PR。**0 件でないなら、その行は Tier を出せない。** */
   readonly changesUnavailable: readonly UnavailableChangeSummary[];
+  /**
+   * PR 番号から引ける head の commit（#331 のレビュー）。
+   *
+   * **マージを「見せたもの」に固定する**ために運ぶ——**盤面を出してから押すまでに
+   * push されると、利用者が確かめていない head がマージされる。**
+   */
+  readonly heads: ReadonlyMap<number, string>;
 };
 
 export type ReviewOrderSources = {
@@ -68,7 +75,7 @@ export async function planReviewOrder(
   sources: ReviewOrderSources,
   options: ReviewOrderOptions = {},
 ): Promise<ReviewOrderPlan> {
-  const { pullRequests, invalid } = await sources.pullRequests.listPullRequests();
+  const { pullRequests, invalid, heads } = await sources.pullRequests.listPullRequests();
   const edges = buildDependencyEdges(pullRequests);
   const numbers = pullRequests.map((pullRequest) => pullRequest.number);
   // **合図はここで作る。** **一覧を取り終えてから数え始める**（#316 のレビュー）
@@ -79,6 +86,7 @@ export async function planReviewOrder(
     edges,
     order: orderByDependency(pullRequests, edges),
     invalid,
+    heads,
     ...changes,
   };
 }

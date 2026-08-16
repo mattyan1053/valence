@@ -336,6 +336,7 @@ export async function approvePullRequestForCurrentUser(
 export async function mergePullRequestForCurrentUser(
   repository: { readonly owner: string; readonly name: string },
   number: number,
+  headSha: string,
 ): Promise<MergePullRequestResult> {
   const { credentials, connection, key } = settings();
   const client = await sessionClient(connection);
@@ -343,6 +344,7 @@ export async function mergePullRequestForCurrentUser(
   return mergePullRequest({
     repository,
     number,
+    headSha,
     openStore: () => storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
     ensure: (store) =>
       ensureUsableToken({

@@ -27,6 +27,22 @@ const branchRefSchema = z.object({
 });
 
 /**
+ * head だけは commit も読む（#331 のレビュー）。
+ *
+ * **マージは「見せたもの」に固定する**——**盤面を出してから押すまでに push されると、
+ * 利用者が確かめていない head がマージされる。** **その commit を要求に載せるため、
+ * ここで拾う。**
+ *
+ * **必須にしない。** **必須にすると、commit を読めなかった PR が
+ * 依存グラフからまるごと消える**——**盤面の本体は依存の図**であって、
+ * **マージのボタンはその上に載っているだけ**である（#107 と同じ判断）。
+ * **読めなければ、その行のマージだけができない。**
+ */
+const headRefSchema = branchRefSchema.extend({
+  sha: z.string().min(1).optional(),
+});
+
+/**
  * 使う項目だけを検証する。
  *
  * 応答には他にも多くの項目が来るが、**使わないものまで型を固定すると、
@@ -35,7 +51,7 @@ const branchRefSchema = z.object({
 const pullRequestSchema = z.object({
   number: z.number().int().positive(),
   base: branchRefSchema,
-  head: branchRefSchema,
+  head: headRefSchema,
 });
 
 /**
@@ -52,6 +68,9 @@ export function toPullRequestRefs(response: unknown): PullRequestListing {
 
   const pullRequests: PullRequestRef[] = [];
   const invalid: InvalidPullRequest[] = [];
+  // **番号から引ける形で持つ**（`changes` と同じ形）——**依存を決める型
+  // （`PullRequestRef`）へ足さない。** **あれは「依存を決めるのに要る最小限」**である
+  const heads = new Map<number, string>();
   for (const [index, item] of listed.data.entries()) {
     const parsed = pullRequestSchema.safeParse(item);
     if (!parsed.success) {
@@ -59,8 +78,11 @@ export function toPullRequestRefs(response: unknown): PullRequestListing {
       continue;
     }
     pullRequests.push(toRef(parsed.data));
+    if (parsed.data.head.sha !== undefined) {
+      heads.set(parsed.data.number, parsed.data.head.sha);
+    }
   }
-  return { pullRequests, invalid };
+  return { pullRequests, invalid, heads };
 }
 
 function toRef(pullRequest: z.infer<typeof pullRequestSchema>): PullRequestRef {

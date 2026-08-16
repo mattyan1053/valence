@@ -20,6 +20,16 @@ export type MergeButtonProps = {
   readonly number: number;
   /** 送る先。**どこへ送るかを決めるのは、この部品の外**である。 */
   readonly action: string;
+  /**
+   * **いま盤面が見せている head の commit**（#331 のレビュー）。
+   *
+   * **これを送るので、押した対象と見せた対象が一致する**——**盤面を出してから
+   * push された変更は、GitHub 側で食い違いとして弾かれる。**
+   *
+   * **分からないときは `undefined`。** **そのときは押せない**——
+   * **確かめられない対象をマージさせない。**
+   */
+  readonly headSha: string | undefined;
   readonly disabled?: boolean;
 };
 
@@ -44,14 +54,17 @@ export function mergeNotice(kind: MergeNoticeKind): string {
   }
 }
 
-export function MergeButton({ number, action, disabled }: MergeButtonProps) {
+export function MergeButton({ number, action, headSha, disabled }: MergeButtonProps) {
   return (
     <form action={action} method="post">
       {/* **どの PR かを、送る本文が持つ** */}
       <input type="hidden" name="number" value={number} />
+      {/* **どの commit を見せたか**も持つ——**押した対象を、見せた対象に固定する** */}
+      {headSha === undefined ? undefined : <input type="hidden" name="sha" value={headSha} />}
       <button
         className="rounded border px-2 py-1 text-sm disabled:opacity-50"
-        disabled={disabled}
+        // **commit が分からなければ押せない**——**確かめられない対象をマージさせない**
+        disabled={disabled === true || headSha === undefined}
         type="submit"
       >
         Merge

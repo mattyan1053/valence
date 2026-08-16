@@ -16,18 +16,37 @@ function render(props: MergeButtonProps): string {
 }
 
 const ACTION = "/repos/acme/web/merge";
+const HEAD_SHA = "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb";
 
 describe("Merge のボタン", () => {
   it("どの PR をマージするのかを、送る先が持っている", () => {
-    const html = render({ number: 42, action: ACTION });
+    const html = render({ number: 42, action: ACTION, headSha: HEAD_SHA });
 
     expect(html).toContain('method="post"');
     expect(html).toContain(ACTION);
     expect(html).toContain('value="42"');
   });
 
+  it("見せた commit を、送る本文が持つ", () => {
+    // **押した対象を、見せた対象に固定する**（#331 のレビュー）
+    const html = render({ number: 42, action: ACTION, headSha: HEAD_SHA });
+
+    expect(html).toContain(`value="${HEAD_SHA}"`);
+  });
+
+  it("commit が分からなければ押せない", () => {
+    // **確かめられない対象をマージさせない**——**押せると、盤面が見せていない
+    // ものがマージされる**
+    const html = render({ number: 42, action: ACTION, headSha: undefined });
+
+    expect(html).toContain("disabled");
+    expect(html, "空の commit を送っている").not.toContain('name="sha"');
+  });
+
   it("できないと分かっているときは、押せない", () => {
-    expect(render({ number: 42, action: ACTION, disabled: true })).toContain("disabled");
+    expect(render({ number: 42, action: ACTION, headSha: HEAD_SHA, disabled: true })).toContain(
+      "disabled",
+    );
   });
 });
 
