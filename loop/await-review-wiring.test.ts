@@ -2,11 +2,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 function master(): string {
-  return readFileSync(join(REPO_ROOT, ".claude/commands/loop-master.md"), "utf8");
+  return procedureText("master");
 }
 
 /** 3.2（レビューを要求してよいか確かめる）の節だけを取り出す。 */

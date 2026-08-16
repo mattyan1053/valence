@@ -22,12 +22,11 @@ export type LoopRole = "master" | "worker";
 /**
  * 役ごとの、手順書を構成するファイル（**読む順**）。
  *
- * **master はまだ移していない**ので入口だけである。**移したら、ここへ本体を足す**
- * ——**分岐ではなく一覧にしてあるのは、「まだ移していない」を条件文で表すと、
- * 移し終えたあとも残るから**である。
+ * **移すたびに、ここへ本体を足す**——**分岐ではなく一覧にしてあるのは、
+ * 「まだ移していない」を条件文で表すと、移し終えたあとも残るから**である。
  */
 const PARTS: Record<LoopRole, readonly string[]> = {
-  master: [".claude/commands/loop-master.md"],
+  master: [".claude/commands/loop-master.md", "loop/procedure/master.md"],
   worker: [".claude/commands/loop-worker.md", "loop/procedure/worker.md"],
 };
 

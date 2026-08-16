@@ -4,10 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-
-const PROCEDURE = ".claude/commands/loop-master.md";
 
 function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
@@ -30,9 +29,9 @@ function blocks(text: string): string[] {
  * （#313 のレビュー。**出口の判定は正しいのに、人が読んで実行するほうだけが壊れていた**）。
  */
 function runFetch(): { status: number; stdout: string; stderr: string } {
-  const [block = ""] = blocks(read(PROCEDURE).split("## 6. 着手順を決める")[1] ?? "").filter(
-    (chunk) => chunk.includes("--label backlog"),
-  );
+  const [block = ""] = blocks(
+    procedureText("master").split("## 6. 着手順を決める")[1] ?? "",
+  ).filter((chunk) => chunk.includes("--label backlog"));
   const workspace = mkdtempSync(join(tmpdir(), "promotable-"));
   try {
     const stub = join(workspace, "stub");
@@ -75,7 +74,7 @@ function runFetch(): { status: number; stdout: string; stderr: string } {
 
 /** 見出しで区切った 1 節（**節の外の散文で条件が満たされない**ようにする）。 */
 function section(heading: string): string {
-  const after = read(PROCEDURE).split(heading)[1] ?? "";
+  const after = procedureText("master").split(heading)[1] ?? "";
   return after.split(/\n#{2,4} /)[0] ?? "";
 }
 
@@ -95,7 +94,7 @@ describe("いま昇格できない backlog", () => {
   it("判定に使う印を、master が付ける", () => {
     // **master の記憶に置かない。** **セッションが落ちれば消える**ので、
     // **次の周回は同じ判断をやり直すだけ**になり、どこにも出てこない
-    const doc = read(PROCEDURE);
+    const doc = procedureText("master");
 
     expect(doc, "条件待ちの印を付ける手が無い").toMatch(/--add-label waiting-condition/);
     expect(doc, "条件が来たときに外す手が無い").toMatch(/--remove-label waiting-condition/);

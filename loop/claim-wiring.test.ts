@@ -88,13 +88,13 @@ describe("着手の取り合い", () => {
 describe("label と実態の食い違い", () => {
   it("master は毎周回、食い違いを見にいく", () => {
     // **呼ぶ場所を散文で並べない。** 経路が増えたときに漏れる（#92 と同じ形）
-    const exitSection = read(".claude/commands/loop-master.md").split("### 周回の出口")[1] ?? "";
+    const exitSection = procedureText("master").split("### 周回の出口")[1] ?? "";
 
     expect(exitSection).toContain("bin/loop-claim audit");
   });
 
   it("止める側の行き先が書いてある", () => {
-    const exitSection = read(".claude/commands/loop-master.md").split("### 周回の出口")[1] ?? "";
+    const exitSection = procedureText("master").split("### 周回の出口")[1] ?? "";
 
     expect(exitSection).toContain("claim-mismatch");
     expect(

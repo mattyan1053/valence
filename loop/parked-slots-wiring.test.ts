@@ -17,9 +17,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const PROCEDURE = ".claude/commands/loop-master.md";
 
 function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
@@ -49,7 +49,7 @@ const PARKED_WITHOUT_CLOSES = {
 function runCount(): { status: number; stdout: string; stderr: string } {
   // **取る側と数える側を、続けて打つ**（**手順書はブロックを分けている**——
   // **片方だけ走らせると、いちばん見たい繋ぎ目が抜ける**）
-  const block = blocks(read(PROCEDURE).split("## 6. 着手順を決める")[1] ?? "")
+  const block = blocks(procedureText("master").split("## 6. 着手順を決める")[1] ?? "")
     .filter((chunk) => /parked(_slots)?="/.test(chunk))
     .join("\n");
   const workspace = mkdtempSync(join(tmpdir(), "parked-slots-"));
@@ -112,7 +112,7 @@ describe("保留した PR の枠を、master も引く", () => {
 
   it("数え方は、出口と同じものを呼ぶ", () => {
     // **写しを持たない**（`AGENTS.md` §5）。**両方が同じスクリプトを呼ぶ**
-    const step6 = read(PROCEDURE).split("## 6. 着手順を決める")[1] ?? "";
+    const step6 = procedureText("master").split("## 6. 着手順を決める")[1] ?? "";
 
     expect(step6, "master が自分で数えている").toContain("bin/loop-parked-issues");
     expect(read("bin/loop-handoff"), "出口が自分で数えている").toContain("loop-parked-issues");

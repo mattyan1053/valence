@@ -781,8 +781,11 @@ describe("ドキュメントに書かれた停止識別子", () => {
       .filter(({ arg }) => arg === "no-work")
       .map(({ file }) => file);
 
-    expect(users).toContain(".claude/commands/loop-master.md");
-    expect(users).not.toContain(".claude/commands/loop-worker.md");
+    // **手順書は入口と本体に分かれている**（#319）ので、**役で見る**——
+    // **`no-work` は master の本体（ステップ 7）にある**
+    expect(users, "master の手順書が数えていない").toContain("loop/procedure/master.md");
+    expect(users, "worker の入口が数えている").not.toContain(".claude/commands/loop-worker.md");
+    expect(users, "worker の本体が数えている").not.toContain("loop/procedure/worker.md");
   });
 });
 

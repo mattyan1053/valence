@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -31,7 +32,7 @@ function watched(): string[] {
  * 入れ替わっても master の実行内容は変わらない（毎周回そこを見るだけである）。
  */
 function executedByMaster(): string[] {
-  const doc = read(".claude/commands/loop-master.md");
+  const doc = procedureText("master");
   const found = [...doc.matchAll(/(?:^|[\s`(])((?:bin|src|scripts)\/[\w./-]+|\.\/task)/gm)]
     .map((match) => match[1] ?? "")
     .map((path) => (path === "./task" ? "task" : path));
@@ -53,12 +54,12 @@ describe("周回を捨てるかの判定", () => {
   }
 
   it("手順書は判定をスクリプトに任せる", () => {
-    expect(read(".claude/commands/loop-master.md")).toContain("bin/loop-procedure-changed");
+    expect(procedureText("master")).toContain("bin/loop-procedure-changed");
   });
 
   it("手順書に対象の一覧を書き写さない", () => {
     // **2 箇所に持つと、ファイルが増えたときに片方だけ直して食い違う**
-    const doc = read(".claude/commands/loop-master.md");
+    const doc = procedureText("master");
     const listed = watched().filter((path) => path.endsWith("/") && doc.includes(`\`${path}\``));
 
     expect(listed).toEqual([]);
@@ -81,7 +82,7 @@ describe("周回を捨てるかの判定", () => {
     //
     // **節を切って見る。** 文書全体を見ると、別の節の同じ言い回しが拾われて
     // **分岐を書き換えても通る**（実際に 0 件だった）
-    const section = read(".claude/commands/loop-master.md")
+    const section = procedureText("master")
       .split("### 1.1 手順とスクリプトを最新にする")[1]
       ?.split("\n## ")[0];
 
@@ -92,7 +93,7 @@ describe("周回を捨てるかの判定", () => {
   it("マージした周回も、変わっていなければ続ける", () => {
     // **ここで終えると、次の周回まで誰も動かない。** マージでは通知を送らないので、
     // worker は自分の cron が来るまで何も知らない
-    const doc = read(".claude/commands/loop-master.md");
+    const doc = procedureText("master");
     const afterMerge = doc.split("### exit 0 — マージする")[1]?.split("\n### ")[0] ?? "";
 
     expect(afterMerge).toContain("bin/loop-procedure-changed");
@@ -128,7 +129,7 @@ describe("周回を捨てるかの判定", () => {
   ] as const;
 
   function sectionOf(heading: string): string {
-    const section = read(".claude/commands/loop-master.md").split(heading)[1];
+    const section = procedureText("master").split(heading)[1];
     if (section === undefined) {
       throw new Error(`loop-master.md に「${heading}」がありません`);
     }
