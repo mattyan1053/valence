@@ -10,7 +10,14 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { approveNoticeKind, dynamic, mergeNoticeKind, unreadableNote } from "./page";
+import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
+import {
+  approvalDisplay,
+  approveNoticeKind,
+  dynamic,
+  mergeNoticeKind,
+  unreadableNote,
+} from "./page";
 
 describe("リポジトリの盤面", () => {
   it("要求ごとに描く（静的に生成させない）", () => {
@@ -75,5 +82,53 @@ describe("直前にマージできなかった理由を出す", () => {
     for (const value of ["", "ok", "マージしました", 1, null, undefined, ["forbidden"]]) {
       expect(mergeNoticeKind(value), String(value)).toBeUndefined();
     }
+  });
+});
+
+/**
+ * **承認済みかどうかを盤面に出す**（#343）。
+ *
+ * **押した結果は、盤面そのもので確かめる**——**成功はクエリ文字列に載らない**
+ * （#342 のレビュー）。**この関数が読むのは、GitHub から引いた状態だけ**である
+ * ——**引数に検索文字列が無いので、URL からは作れない。**
+ */
+describe("承認の状態を盤面へ出す", () => {
+  const listing = (
+    overrides: Partial<PullRequestApprovalListing> = {},
+  ): PullRequestApprovalListing => ({
+    approved: new Set(),
+    unavailable: [],
+    ...overrides,
+  });
+
+  it("承認済みの PR は、承認済みとして出す", () => {
+    // **これが無いと、押した人は「何も起きなかった」と読んでもう一度押す**
+    expect(approvalDisplay(7, listing({ approved: new Set([7]) }))).toBe("approved");
+  });
+
+  it("承認されていない PR は、承認済みに見せない", () => {
+    // **全部を承認済みにする実装でも、上の 1 件だけなら緑になる**
+    expect(approvalDisplay(8, listing({ approved: new Set([7]) }))).toBeUndefined();
+  });
+
+  it("読めなかった PR は、承認されていないと混ぜない", () => {
+    // **同じ見た目にすると、押した人は「承認されていない」と読む**
+    // ——**実際には、こちらが見ていないだけ**である
+    expect(
+      approvalDisplay(
+        8,
+        listing({ unavailable: [{ pullRequestNumber: 8, reason: "読めません" }] }),
+      ),
+    ).toBe("unknown");
+  });
+
+  it("読めなかった理由は、盤面へ出さない", () => {
+    // **理由には値が入りうる**（`unreadableNote` と同じ理由）——**種別だけを返す**
+    const display = approvalDisplay(
+      8,
+      listing({ unavailable: [{ pullRequestNumber: 8, reason: "secret-repository-name" }] }),
+    );
+
+    expect(String(display)).not.toContain("secret-repository-name");
   });
 });

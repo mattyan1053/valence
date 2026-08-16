@@ -17,6 +17,10 @@
 
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
+import type {
+  PullRequestApprovalListing,
+  PullRequestApprovals,
+} from "../ports/pull-request-approvals";
 import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type { VisibleRepositories, VisibleRepository } from "../ports/visible-repositories";
@@ -36,7 +40,17 @@ export type RepositoryBoardResult =
    * 見えないほうの存在を教えることになる。**
    */
   | { readonly kind: "not-found" }
-  | { readonly kind: "board"; readonly plan: ReviewOrderPlan };
+  | {
+      readonly kind: "board";
+      readonly plan: ReviewOrderPlan;
+      /**
+       * **各 PR が承認済みかどうか**（#343）。
+       *
+       * **押した結果は、盤面そのもので確かめる**——**成功はクエリ文字列に
+       * 載らない**（#342 のレビュー）ので、**ここが唯一の手掛かり**である。
+       */
+      readonly approvals: PullRequestApprovalListing;
+    };
 
 export type ViewRepositoryBoardInput = {
   /** どのリポジトリを見るか。**要求ごとに決まる**（設定に固定しない。§1）。 */
@@ -63,6 +77,14 @@ export type ViewRepositoryBoardInput = {
    * **結果を受け取る形にすると、確かめる前に取りに行くことになる。**
    */
   readonly plan: () => Promise<ReviewOrderPlan>;
+  /**
+   * **承認の状態を読む口**（#343）。**ユーザートークンで読む側**である（§6）。
+   *
+   * **任意にしない。** **渡さなければ出ないだけ、にすると、
+   * 合成ルートで渡し忘れた日から「押した結果が出ない」へ静かに戻る**
+   * ——**#343 が消しに来た状態**である。
+   */
+  readonly approvals: PullRequestApprovals;
 };
 
 export async function viewRepositoryBoard({
@@ -72,6 +94,7 @@ export async function viewRepositoryBoard({
   repositories,
   permissions,
   plan,
+  approvals,
 }: ViewRepositoryBoardInput): Promise<RepositoryBoardResult> {
   // **認可は共有の判断が持つ** (#315)。**ここへ写すと、Approve / Merge 側と
   // 片方だけ直したときに食い違う**——**症状は「他人のものが見える / 触れる」**である。
@@ -89,8 +112,9 @@ export async function viewRepositoryBoard({
     return authorization.kind === "forbidden" ? { kind: "unavailable" } : authorization;
   }
 
+  let board: ReviewOrderPlan;
   try {
-    return { kind: "board", plan: await plan() };
+    board = await plan();
   } catch {
     // **`planReviewOrder` は一覧を取れないと投げる**（**空の計画にすると
     // 「取得できなかった」が「PR が 0 件」に化ける**ため）——**そのまま通すと、
@@ -100,5 +124,47 @@ export async function viewRepositoryBoard({
     // **`not-found` へは倒さない。** **ここへ来た時点で「見える」と分かっている**
     // ので、**故障を「ありません」に化けさせる理由が無い。**
     return { kind: "unavailable" };
+  }
+
+  return {
+    kind: "board",
+    plan: board,
+    approvals: await readApprovals(
+      approvals,
+      authorization.userAccessToken,
+      repository,
+      board.pullRequests.map((pullRequest) => pullRequest.number),
+    ),
+  };
+}
+
+/**
+ * 承認の状態を読む。**落ちても盤面は返す。**
+ *
+ * **依存グラフだけでも交通整理の役に立つ**（`planReviewOrder` の `collectChanges` と
+ * 同じ判断）——**状態が読めないことを理由に、画面ごと落とさない。**
+ *
+ * **黙って捨てない。** **`approved` から外すだけだと、画面では
+ * 「承認されていない」と見分けが付かない**——**押した人はもう一度押す**
+ * （**#343 が消しに来た形そのもの**）。**理由つきで残す。**
+ */
+async function readApprovals(
+  approvals: PullRequestApprovals,
+  userAccessToken: string,
+  repository: VisibleRepository,
+  numbers: readonly number[],
+): Promise<PullRequestApprovalListing> {
+  // **読むものが無ければ、往復も作らない**
+  if (numbers.length === 0) {
+    return { approved: new Set(), unavailable: [] };
+  }
+  try {
+    return await approvals.listApprovals(userAccessToken, repository, numbers);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "承認の状態を取得できませんでした";
+    return {
+      approved: new Set(),
+      unavailable: numbers.map((pullRequestNumber) => ({ pullRequestNumber, reason })),
+    };
   }
 }

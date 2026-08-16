@@ -51,6 +51,47 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
   };
 }
 
+/**
+ * **状態の表示は、材料が無い行にも出す**（#343）。
+ *
+ * **材料（リスク Tier）が揃っていないことと、承認済みかどうかは別**である
+ * ——**片方の行にだけ出すと、「押した結果が出ない」行が残る。**
+ */
+describe("各行へ状態を足す", () => {
+  it("材料がある行にも、無い行にも出る", () => {
+    const html = render(
+      props({
+        changes: new Map([[1, change()]]),
+        renderStatus: (number) => createElement("i", { key: number }, `状態${number}`),
+      }),
+    );
+
+    expect(html).toContain("状態1");
+    // **材料が無い行**（#2 は `changes` に無い）
+    expect(html).toContain("状態2");
+  });
+
+  it("渡さなければ、何も出ない", () => {
+    // **任意の口である**——**渡さないことは「抜け」ではない**
+    expect(render(props())).not.toContain("状態");
+  });
+
+  it("操作の口とは別に受ける", () => {
+    // **押すものと、押した結果として出るものを混ぜない**
+    // ——**混ぜると、状態を足すたびに操作の口を触ることになる**
+    const html = render(
+      props({
+        renderStatus: (number) => createElement("i", { key: number }, "承認済み"),
+        renderActions: (number) =>
+          createElement("button", { key: number, type: "button" }, "Approve"),
+      }),
+    );
+
+    expect(html).toContain("承認済み");
+    expect(html).toContain("Approve");
+  });
+});
+
 describe("ReviewBoard", () => {
   it("依存の順に並んだ各行に Tier が出る", () => {
     const markup = render(props());

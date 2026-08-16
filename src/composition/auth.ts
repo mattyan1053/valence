@@ -28,6 +28,7 @@ import { viewRepositoryBoard } from "../application/review-order/view-repository
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
 import { readAppCredentials, readOAuthCredentials } from "../infrastructure/github/app-credentials";
 import { createGitHubChangeSummarySource } from "../infrastructure/github/github-change-summary-source";
+import { createGitHubPullRequestApprovals } from "../infrastructure/github/github-pull-request-approvals";
 import { createGitHubPullRequestMerges } from "../infrastructure/github/github-pull-request-merge";
 import { createGitHubPullRequestReviews } from "../infrastructure/github/github-pull-request-review";
 import { createGitHubPullRequestSource } from "../infrastructure/github/github-pull-request-source";
@@ -268,6 +269,9 @@ export async function repositoryBoardForCurrentUser(repository: {
     // **その人の権限の高さ**（#317 のレビュー）。**盤面では引かれない**（read）が、
     // **Approve では引く**（write）——**判断は `authorizeRepository` が持つ。**
     permissions: createUserRepositoryPermissions(),
+    // **承認の状態も、その人のトークンで読む**（#343。§6）——**installation
+    // トークンだと、誰がログインしていても同じ答えになる。**
+    approvals: createGitHubPullRequestApprovals(),
     // **App の資格を読むのはここだけ。** **見てよいと分かるまで、1 度も呼ばれない**
     plan: () => {
       const { app } = appSettings();

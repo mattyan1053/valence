@@ -9,7 +9,10 @@
  */
 
 import { notFound } from "next/navigation";
+import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
 import { repositoryBoardForCurrentUser } from "../../../../composition/auth";
+import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge";
+import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
 import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
@@ -76,6 +79,29 @@ export function mergeNoticeKind(value: unknown): MergeNoticeKind | undefined {
     : undefined;
 }
 
+/**
+ * その PR について、盤面に出す状態（#343）。
+ *
+ * **読むのは GitHub から引いた状態だけ**である——**引数に検索文字列が無い**ので、
+ * **`?approve=approved` のような値からは作れない**（#342 が塞いだ穴）。
+ *
+ * **「承認されていない」は出さない**（`ApprovalBadge` の理由）。
+ * **読めなかったことは出す**——**黙らせると、承認されていないのと見分けが付かない。**
+ *
+ * **理由は画面へ出さない**（`unreadableNote` と同じ理由。**値が入りうる**）。
+ */
+export function approvalDisplay(
+  pullRequestNumber: number,
+  approvals: PullRequestApprovalListing,
+): ApprovalDisplayKind | undefined {
+  if (approvals.approved.has(pullRequestNumber)) {
+    return "approved";
+  }
+  return approvals.unavailable.some((row) => row.pullRequestNumber === pullRequestNumber)
+    ? "unknown"
+    : undefined;
+}
+
 export default async function RepositoryBoardPage({
   params,
   searchParams,
@@ -112,6 +138,11 @@ export default async function RepositoryBoardPage({
             order={result.plan.order}
             invalid={result.plan.invalid}
             changes={result.plan.changes}
+            renderStatus={(number) => {
+              // **押した結果は、盤面そのもので確かめる**（#343）
+              const display = approvalDisplay(number, result.approvals);
+              return display === undefined ? undefined : <ApprovalBadge kind={display} />;
+            }}
             renderActions={(number) => (
               <>
                 <ApproveButton
