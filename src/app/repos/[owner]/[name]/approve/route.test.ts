@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { approveOutcomeParam, pullRequestNumberFrom } from "./route";
+import { approveOutcomeParam, boardRedirect, pullRequestNumberFrom } from "./route";
 
 describe("送られてきた PR 番号を読む", () => {
   it("数として読めるものだけを通す", () => {
@@ -66,5 +66,49 @@ describe("結果を、押した人へ返す形にする", () => {
     // **§6。**「権限がありません」と「ありません」を区別できる応答にしない**
     // ——**ここで `not-found` を返すと、見えないリポジトリの存在を教える**
     expect(approveOutcomeParam({ kind: "not-found" })).toBe("unavailable");
+  });
+});
+
+describe("押したあと、盤面へ戻す", () => {
+  const request = new Request("http://localhost:3000/repos/acme/web/approve", { method: "POST" });
+
+  it("303 で戻す（POST を持ち越さない）", () => {
+    // **`redirect()` は Route Handler では 307**（#342 のレビュー）——
+    // **ブラウザはメソッドと本文を保持したまま盤面 URL へ再送する**ので、
+    // **盤面に POST handler が無い以上 405 になる。**
+    // **承認が成功しても、盤面にも失敗の理由にも到達できない。**
+    const response = boardRedirect(request, { owner: "acme", name: "web" }, undefined);
+
+    expect(response.status).toBe(303);
+  });
+
+  it("成功のときは、理由を付けずに盤面へ戻す", () => {
+    const response = boardRedirect(request, { owner: "acme", name: "web" }, undefined);
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/repos/acme/web");
+  });
+
+  it("押せなかった理由は、盤面の URL に載せて戻す", () => {
+    const response = boardRedirect(request, { owner: "acme", name: "web" }, "self-approval");
+
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/repos/acme/web?approve=self-approval",
+    );
+  });
+
+  it("要求が来たオリジンの上に組み立てる", () => {
+    // **設定へ書き固めない**（`src/app/auth/urls.ts` と同じ理由）
+    const other = new Request("http://127.0.0.1:3000/repos/acme/web/approve", { method: "POST" });
+
+    expect(
+      boardRedirect(other, { owner: "acme", name: "web" }, undefined).headers.get("location"),
+    ).toBe("http://127.0.0.1:3000/repos/acme/web");
+  });
+
+  it("owner / name に記号が入っても、経路として組み立てる", () => {
+    // **そのまま繋ぐと、`..` や `?` で別の場所へ戻せる**
+    const response = boardRedirect(request, { owner: "a/../b", name: "c?d" }, undefined);
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/repos/a%2F..%2Fb/c%3Fd");
   });
 });
