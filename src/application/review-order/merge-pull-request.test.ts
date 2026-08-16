@@ -11,7 +11,9 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { PullRequestMerges, PullRequestMergeTarget } from "../ports/pull-request-merge";
+import type { PullRequestSource } from "../ports/pull-request-source";
 import type { RepositoryAccessLevel, RepositoryPermissions } from "../ports/repository-permissions";
 import type { VisibleRepositories, VisibleRepositoryListing } from "../ports/visible-repositories";
 import { mergePullRequest } from "./merge-pull-request";
@@ -55,6 +57,26 @@ function merges(
   };
 }
 
+function ref(number: number, base: string, head: string): PullRequestRef {
+  return {
+    number,
+    base: { repository: "r", branch: base },
+    head: { repository: "r", branch: head },
+  };
+}
+
+/** いまの一覧を返す口。**押した時点の依存を見るため**である（#345）。 */
+function listing(pullRequests: readonly PullRequestRef[]): PullRequestSource {
+  return {
+    async listPullRequests() {
+      return { pullRequests, invalid: [], heads: new Map() };
+    },
+  };
+}
+
+/** 依存の無い 1 本（#42 は main の上）。 */
+const ALONE = [ref(NUMBER, "main", "feat/x")];
+
 /** **呼ばれたら落とす口。** **確かめる前に GitHub を変えていないか**を見る。 */
 const NEVER_MERGES: PullRequestMerges = {
   async merge() {
@@ -67,6 +89,7 @@ function input(overrides: {
   readonly listing?: VisibleRepositoryListing;
   readonly permissions: RepositoryPermissions;
   readonly merges: PullRequestMerges;
+  readonly pullRequests?: PullRequestSource;
 }) {
   return {
     repository: TARGET,
@@ -77,6 +100,7 @@ function input(overrides: {
     repositories: repositories(overrides.listing ?? VISIBLE),
     permissions: overrides.permissions,
     merges: overrides.merges,
+    pullRequests: overrides.pullRequests ?? listing(ALONE),
   };
 }
 
@@ -177,5 +201,79 @@ describe("PR をマージする前に、押してよいかを確かめる", () =
     );
 
     expect(result.kind).toBe("unavailable");
+  });
+});
+
+describe("依存が残っている PR はマージしない", () => {
+  // **依存グラフを描く道具が、依存を壊せるボタンを持っていた**（#345）——
+  // **上段を先に入れると、土台のブランチに未確認の変更が混ざる**
+  const STACK = [ref(8, "main", "feat/a"), ref(NUMBER, "feat/a", "feat/b")];
+
+  it("土台が残っていれば、マージしに行かない", async () => {
+    const result = await mergePullRequest(
+      input({
+        permissions: permissions("write"),
+        merges: NEVER_MERGES,
+        pullRequests: listing(STACK),
+      }),
+    );
+
+    expect(result).toEqual({ kind: "dependency-pending", blockedBy: [8] });
+  });
+
+  it("依存が無ければ、これまでどおりマージできる", async () => {
+    const merge = merges();
+
+    const result = await mergePullRequest(
+      input({ permissions: permissions("write"), merges: merge, pullRequests: listing(ALONE) }),
+    );
+
+    expect(result.kind).toBe("merged");
+    expect(merge.calls.length).toBe(1);
+  });
+
+  it("循環していればマージしに行かない", async () => {
+    const cycle = [ref(NUMBER, "feat/b", "feat/a"), ref(8, "feat/a", "feat/b")];
+
+    const result = await mergePullRequest(
+      input({
+        permissions: permissions("write"),
+        merges: NEVER_MERGES,
+        pullRequests: listing(cycle),
+      }),
+    );
+
+    expect(result).toEqual({ kind: "not-orderable" });
+  });
+
+  it("一覧を読めなければマージしない", async () => {
+    // **確かめられないまま通すと、この Issue が塞ごうとしたものがそのまま通る**
+    const failing: PullRequestSource = {
+      async listPullRequests() {
+        throw new Error("読めない");
+      },
+    };
+
+    const result = await mergePullRequest(
+      input({ permissions: permissions("write"), merges: NEVER_MERGES, pullRequests: failing }),
+    );
+
+    expect(result.kind).toBe("unavailable");
+  });
+
+  it("押してよいと分かる前に、一覧を読みに行かない", async () => {
+    // **認可が先**（#314 / #317 と同じ順序）——**権限の無い人の要求で
+    // GitHub を叩かない**
+    const throwing: PullRequestSource = {
+      async listPullRequests() {
+        throw new Error("認可より先に読んだ");
+      },
+    };
+
+    const result = await mergePullRequest(
+      input({ permissions: permissions("read"), merges: NEVER_MERGES, pullRequests: throwing }),
+    );
+
+    expect(result.kind).toBe("forbidden");
   });
 });

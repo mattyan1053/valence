@@ -374,5 +374,14 @@ export async function mergePullRequestForCurrentUser(
     permissions: createUserRepositoryPermissions(),
     // **マージも、その人の身元で行う**（#331 の条件）
     merges: createGitHubPullRequestMerges(),
+    // **依存は押した時点で見る**（#345）。**盤面が描いた時点のものを信じない**
+    // ——**PR の一覧は盤面と同じ口から取る**（installation トークン。§6）。
+    // **App の資格を読むのはここだけ**で、**「押してよい」と分かるまで呼ばれない。**
+    pullRequests: {
+      listPullRequests: () => {
+        const { app } = appSettings();
+        return createGitHubPullRequestSource({ credentials: app, repository }).listPullRequests();
+      },
+    },
   });
 }

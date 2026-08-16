@@ -15,6 +15,7 @@ import {
   approvalDisplay,
   approveNoticeKind,
   dynamic,
+  mergeButtonBlock,
   mergeNoticeKind,
   unreadableNote,
 } from "./page";
@@ -78,6 +79,12 @@ describe("直前にマージできなかった理由を出す", () => {
     expect(mergeNoticeKind("merged")).toBeUndefined();
   });
 
+  it("依存の理由も通す", () => {
+    for (const kind of ["dependency-pending", "not-orderable"] as const) {
+      expect(mergeNoticeKind(kind)).toBe(kind);
+    }
+  });
+
   it("知らない値は通さない", () => {
     for (const value of ["", "ok", "マージしました", 1, null, undefined, ["forbidden"]]) {
       expect(mergeNoticeKind(value), String(value)).toBeUndefined();
@@ -85,6 +92,7 @@ describe("直前にマージできなかった理由を出す", () => {
   });
 });
 
+<<<<<<< HEAD
 /**
  * **承認済みかどうかを盤面に出す**（#343）。
  *
@@ -130,5 +138,21 @@ describe("承認の状態を盤面へ出す", () => {
     );
 
     expect(String(display)).not.toContain("secret-repository-name");
+  });
+});
+
+describe("依存の判定を、ボタンへ詰め替える", () => {
+  // **判定そのものは domain が持つ**（#345）——**ここは詰め替えるだけ**
+  it("土台が残っていれば、番号を渡す", () => {
+    expect(mergeButtonBlock({ kind: "depends-on", numbers: [8] })).toEqual({ blockedBy: [8] });
+  });
+
+  it("順序が決められなければ、そう渡す", () => {
+    expect(mergeButtonBlock({ kind: "not-orderable" })).toEqual({ notOrderable: true });
+  });
+
+  it("依存が無ければ、何も渡さない", () => {
+    // **渡すと、押せる PR まで閉じる**
+    expect(mergeButtonBlock({ kind: "ready" })).toEqual({});
   });
 });

@@ -74,6 +74,12 @@ export function mergeOutcomeParam(result: MergePullRequestResult): MergeNoticeKi
       return "forbidden";
     case "not-mergeable":
       return "not-mergeable";
+    case "dependency-pending":
+      // **土台が残っている**（#345）——**番号は載せない**（**URL は利用者が
+      // 作れる**ので、**盤面が描いている依存のほうが確かである**）
+      return "dependency-pending";
+    case "not-orderable":
+      return "not-orderable";
     default:
       // **`signed-out` / `needs-login` / `unavailable` / `not-found`**
       return "unavailable";
