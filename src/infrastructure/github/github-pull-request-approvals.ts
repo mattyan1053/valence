@@ -147,7 +147,7 @@ export function createGitHubPullRequestApprovals({
     userAccessToken: string,
     body: unknown,
     signal: AbortSignal | undefined,
-  ): Promise<unknown> {
+  ): Promise<{ readonly status: number; readonly payload: unknown }> {
     const response = await fetchImpl(`${API_ORIGIN}/graphql`, {
       method: "POST",
       headers: {
@@ -172,7 +172,7 @@ export function createGitHubPullRequestApprovals({
     cursor: string | undefined,
     signal: AbortSignal | undefined,
   ) {
-    const { status, payload } = (await ask(
+    const { status, payload } = await ask(
       userAccessToken,
       {
         query: BOARD_QUERY,
@@ -180,7 +180,7 @@ export function createGitHubPullRequestApprovals({
         variables: { owner: repository.owner, name: repository.name, cursor: cursor ?? null },
       },
       signal,
-    )) as { status: number; payload: unknown };
+    );
     const parsed = boardSchema.safeParse(payload);
     if (!parsed.success) {
       // **`errors` だけが返った応答もここへ来る**——**「承認されていない」にしない**
@@ -197,14 +197,14 @@ export function createGitHubPullRequestApprovals({
     cursor: string,
     signal: AbortSignal | undefined,
   ): Promise<ReviewsPage> {
-    const { status, payload } = (await ask(
+    const { status, payload } = await ask(
       userAccessToken,
       {
         query: REVIEWS_QUERY,
         variables: { owner: repository.owner, name: repository.name, number, cursor },
       },
       signal,
-    )) as { status: number; payload: unknown };
+    );
     const parsed = reviewsPageSchema.safeParse(payload);
     if (!parsed.success) {
       throw new ApprovalLookupFailed(status);
