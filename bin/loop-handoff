@@ -700,12 +700,72 @@ elif [[ -n $changes_requested ]]; then
   branch="changes-requested"
   witness="$(branch_witness "$changes_requested")"
 elif [[ -n $gateable ]]; then
-  to="master"
-  reason="PR #${gateable%% *} のゲートを回せる"
-  branch="gateable"
-  # **ここでは CI も読む。** **ゲートが落とす条件そのもの**なので、
-  # **外すと、マージできるようになった、まさにその瞬間に黙る** (#125 / #173 のレビュー)
-  witness="$(branch_witness "$gateable" checks)"
+  # **ゲートを回せる PR でも、コンフリクトしていれば行き先が違う** (#347)。
+  # **master が指摘を resolve して label も外した直後**、**上の 2 つの手掛かりが
+  # 両方消え**、**残っている `mergeable` を見ていなかった**——**どちらの役も呼ばれず、
+  # 症状は「何も起きていない」**なので気づけない（#346 で実測）。
+  #
+  # **判定は `bin/loop-ci-status` が持っている** (`AGENTS.md` §5)——**`bin/loop-gate` が
+  # 「コンフリクトしているため実行が作られない」と出せるのはあの判定があるから**で、
+  # **ここへ書き写すと、片方だけ直したときに食い違う。**
+  #
+  # **候補は全部見る** (#349 のレビュー)。**探しているのは「取り込み直しが要る候補」で
+  # あって「先頭の候補の状態」ではない**——**先頭が `MERGEABLE` で後続が
+  # `CONFLICTING` のとき、先頭だけを見ると「ゲートを回せる」になり**、**後続の
+  # 取り込み直しは誰にも依頼されない**（**この枝が消しに来た沈黙を、この枝自身が作る**）。
+  conflicting=""     # 取り込み直しが要る（確定）
+  computing=""       # まだ計算中（`UNKNOWN`）
+  # **`mergeable` も指紋に載せる。** **候補ごとに載せる**ので、
+  # **どれか 1 本の状態が動いた瞬間に指紋も動く**——**解けたら次の枝へそのまま移る。**
+  mergeable_witness=""
+  for candidate in $(printf '%s\n' $gateable | sort -n); do
+    "${BASH_SOURCE[0]%/*}/loop-ci-status" --conflicting "$candidate" >/dev/null
+    case "$?" in
+      0) conflicting="${conflicting:+$conflicting }$candidate"; mergeable_code=1 ;;
+      1) mergeable_code=0 ;;
+      3) computing="${computing:+$computing }$candidate"; mergeable_code=2 ;;
+      # **判定不能を「していない」へ倒さない**——**倒すと、コンフリクトしている PR が
+      # master 宛てになり、ゲートで落ちるだけで誰も直さない。**
+      *) fail_unknown "PR #${candidate} がコンフリクトしているか" ;;
+    esac
+    mergeable_witness+="${mergeable_witness:+;}${candidate}=${mergeable_code}"
+  done
+  if [[ -n $conflicting || -n $computing ]]; then
+    # **起こす先は worker ではない** (#349 のレビュー)。**取り込み直せるのは著者だけ**だが、
+    # **worker は通知の本文で分岐せず、GitHub 側の裏付けを見る**——**label も未解決
+    # スレッドも無い PR で起こしても、実行できる指示がどこにも無い**ので、
+    # **訊きに戻るだけ**である（**実測: worker-1 が #348 について「自分の判断では
+    # rebase しません」と訊いてきた**。**手順書が「指示が来てから行う」と決めている**）。
+    #
+    # **worker を指すと、この枝が消しに来た沈黙を worker 側に作る**——
+    # **worker の周回では自己通知が抑止される**ので、**誰も起きない。**
+    #
+    # **`to=master` は沈黙ではない**（**worker が通れば master が起き、master が
+    # 通れば自分の周回でそのまま見る**）。**#347 が解いたのは
+    # 「どちらの役も呼ばれない」**であって、**「master を指すこと」ではない。**
+    #
+    # **鎖はここで終わらない。** **master が `changes-requested` を付けた時点で
+    # `gateable` から外れ**、**既存の枝が worker を指す**——**新しい経路は要らない。**
+    to="master"
+    branch="conflicting"
+    if [[ -n $conflicting ]]; then
+      reason="PR #${conflicting%% *} がコンフリクトしている（取り込み直しを指示する）"
+    else
+      # **計算中（`UNKNOWN`）も同じ側へ渡す。** **「していない」ではない**ので
+      # **「ゲートを回せる」に混ぜない**——**混ぜると、ゲートが落ちるのを見るだけで、
+      # 取り込み直しの指示は残らない。** **確かめられるのは master だけ**である。
+      reason="PR #${computing%% *} のコンフリクトの有無が計算中（確定したら取り込み直しを指示する）"
+    fi
+    # **CI は読まない。** **コンフリクトしている間、必須チェックは作られない**
+    witness="$(branch_witness "$gateable")|mergeable=${mergeable_witness}"
+  else
+    to="master"
+    reason="PR #${gateable%% *} のゲートを回せる"
+    branch="gateable"
+    # **ここでは CI も読む。** **ゲートが落とす条件そのもの**なので、
+    # **外すと、マージできるようになった、まさにその瞬間に黙る** (#125 / #173 のレビュー)
+    witness="$(branch_witness "$gateable" checks)|mergeable=${mergeable_witness}"
+  fi
 elif ((ready >= 1 && in_progress < hands)); then
   # **件数で絞らない** (#267)。**等号だと 2 件でどの枝にも入らず、
   # 「相手に持ち物が無い」と読まれて終わる**——**いちばん渡したい瞬間に落ちる。**
