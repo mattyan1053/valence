@@ -221,8 +221,26 @@ printf '%s\n' "$head_prs"
   必ずここへ入り、`ready` の Issue へ進めないまま Issue にコメントだけが積もる。
   停止も記録されないので 3 周で止まる仕組みも働かない。**state ごとに、label を
   動かして収束させるか、停止を記録するかのどちらかへ必ず倒す。**
-  - **MERGED** → 作業は終わっている。`in-progress` を外し、マージ済みである旨を
-    Issue にコメントする（閉じるのは master）。次の周回はこの経路に入らない
+  - **MERGED** → その PR の作業は終わっている。**`in-progress` を `backlog` へ付け替え**、
+    マージ済みである旨を Issue にコメントする（**閉じるのは master**）。
+    次の周回はこの経路に入らない
+
+    ```bash
+    # **外した先を決める** (#332)。**`in-progress` を外すだけだと label が 0 件になり**、
+    # **`backlog` / `ready` / `in-progress` / `blocked` のどれでもない open Issue** は
+    # **ループのどの一覧にも出てこない**（#325。**3 度起きた。3 度とも #319 である**）。
+    #
+    # **`backlog` が素直である**——**まだ着手していない、昇格を待つ**、がいまの状態。
+    # **完了しているなら master が閉じる**（**完了条件を読むのは master の仕事**）。
+    #
+    # **1 回の編集で付け替える。** **外してから足すと、その間に落ちた周回が
+    # label 0 件の Issue を残す**——**この節が消しに来た状態を、自分で作りうる。**
+    gh issue edit <Issue番号> --remove-label in-progress --add-label backlog
+    gh issue comment <Issue番号> --body-file <file>
+    ```
+
+    **外す判断そのものは正しい**——**実装している周回が無いのに `in-progress` のままだと
+    嘘になる。** **足りなかったのは行き先である。**
   - **CLOSED**（マージされていない）→ なぜ閉じられたかは worker には判断できない。
     `in-progress` を外して `blocked` を付け、状況を Issue にコメントしたうえで
     `bin/loop-stall "implementation-blocked:<Issue番号>"` を通して停止する
