@@ -18,12 +18,15 @@ import { signOut } from "../application/auth/sign-out";
 import type { UserTokenStore } from "../application/ports/user-token-store";
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
 import { listVisibleRepositories } from "../application/repositories/list-visible-repositories";
+import type { ApprovePullRequestResult } from "../application/review-order/approve-pull-request";
+import { approvePullRequest } from "../application/review-order/approve-pull-request";
 import { planReviewOrder } from "../application/review-order/plan-review-order";
 import type { RepositoryBoardResult } from "../application/review-order/view-repository-board";
 import { viewRepositoryBoard } from "../application/review-order/view-repository-board";
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
 import { readAppCredentials, readOAuthCredentials } from "../infrastructure/github/app-credentials";
 import { createGitHubChangeSummarySource } from "../infrastructure/github/github-change-summary-source";
+import { createGitHubPullRequestReviews } from "../infrastructure/github/github-pull-request-review";
 import { createGitHubPullRequestSource } from "../infrastructure/github/github-pull-request-source";
 import { createUserRepositoryPermissions } from "../infrastructure/github/user-repository-permissions";
 import { refreshUserTokens } from "../infrastructure/github/user-token";
@@ -276,5 +279,43 @@ export async function repositoryBoardForCurrentUser(repository: {
         { changesDeadline: () => AbortSignal.timeout(CHANGES_DEADLINE_MS) },
       );
     },
+  });
+}
+
+/**
+ * **いまログインしている人の身元で、PR に承認を出す**（#330）。
+ *
+ * **App の資格をここでは読まない。** **承認はユーザートークンで出す**ので、
+ * **installation トークンを作る側は、この経路に 1 度も現れない**——
+ * **人の判断で #317 から持ち越された条件**である（**App の身元で出すと、
+ * 本人には出せない承認が出せてしまう**）。
+ *
+ * **`require: "write"` を渡すのは `approvePullRequest` の側**である
+ * （**認可を 2 通り持たない**）——**ここが渡すのは口だけ。**
+ */
+export async function approvePullRequestForCurrentUser(
+  repository: { readonly owner: string; readonly name: string },
+  number: number,
+): Promise<ApprovePullRequestResult> {
+  const { credentials, connection, key } = settings();
+  const client = await sessionClient(connection);
+  const budget = createWinnersSaveBudget();
+  return approvePullRequest({
+    repository,
+    number,
+    openStore: () => storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
+    ensure: (store) =>
+      ensureUsableToken({
+        store,
+        refresh: (refreshToken) =>
+          refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+        now: new Date(),
+        waitForWinnersSave: createWaitForWinnersSave({ budget }),
+      }),
+    // **ユーザートークンで解決する**（§6）
+    repositories: createUserVisibleRepositories(),
+    permissions: createUserRepositoryPermissions(),
+    // **承認も、その人の身元で出す**（#330 の条件）
+    reviews: createGitHubPullRequestReviews(),
   });
 }
