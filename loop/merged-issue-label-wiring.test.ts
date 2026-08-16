@@ -11,7 +11,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,11 +62,17 @@ function mergedBlock(): string {
  * **`issue edit` は本物と同じように付け外しする**ので、**手順書の 1 行を走らせた結果が
  * そのまま検出器の入力になる**——**間に人の解釈が入らない。**
  */
-function workspace(labels: string[]): { path: string; labelsFile: string } {
+function workspace(labels: string[]): { path: string; labelsFile: string; repo: string } {
   const dir = mkdtempSync(join(tmpdir(), "merged-issue-"));
   sandboxes.push(dir);
   const path = join(dir, "path");
   mkdirSync(path, { recursive: true });
+  // **走らせる場所も砂場にする** (#338)。**`bin/loop-unlisted-issues` は冒頭で
+  // `bin/loop-lease check` を通す**ので、**cwd を継ぐと実物の共通 `.git` へ書く**
+  // ——**人が診断に使う記録（上限 20 行）が、試験の雑音で押し出される**（#186 / #192）。
+  const repo = join(dir, "repo");
+  mkdirSync(repo, { recursive: true });
+  expect(spawnSync("git", ["init", "--quiet", repo]).status, "砂場を作れない").toBe(0);
   const labelsFile = join(dir, "labels");
   writeFileSync(labelsFile, `${labels.join("\n")}\n`);
 
@@ -104,25 +118,27 @@ function workspace(labels: string[]): { path: string; labelsFile: string } {
     ].join("\n"),
   );
   chmodSync(join(path, "gh"), 0o755);
-  return { path, labelsFile };
+  return { path, labelsFile, repo };
 }
 
 /** その label のまま `bin/loop-unlisted-issues` に訊く。**exit 1 = 鳴った。** */
-function detectorStatus(path: string): number {
+function detectorStatus(place: { path: string; repo: string }): number {
   const result = spawnSync(DETECTOR, [], {
+    cwd: place.repo,
     encoding: "utf8",
-    env: { ...process.env, PATH: `${path}:${process.env.PATH ?? ""}` },
+    env: { ...process.env, PATH: `${place.path}:${process.env.PATH ?? ""}` },
   });
   return result.status ?? -1;
 }
 
-function runBlock(block: string, path: string): void {
+function runBlock(block: string, place: { path: string; repo: string }): void {
   // **穴埋めをそのまま置き換える**（`loop/worker-open-pr-owner-wiring.test.ts` と同じ）
   const body = join(REPO_ROOT, "package.json");
   const filled = block.replaceAll("<Issue番号>", ISSUE).replaceAll("<file>", body);
   const result = spawnSync("bash", ["-c", filled], {
+    cwd: place.repo,
     encoding: "utf8",
-    env: { ...process.env, PATH: `${path}:${process.env.PATH ?? ""}` },
+    env: { ...process.env, PATH: `${place.path}:${process.env.PATH ?? ""}` },
   });
   expect(result.status, result.stderr).toBe(0);
 }
@@ -131,9 +147,10 @@ describe("マージしたのに閉じない Issue の行き先", () => {
   it("手順書のとおりに打つと、どの一覧にも出てこない状態にならない", () => {
     // **完了条件そのもの。** **`Closes` の無い PR がマージされたあと、
     // その Issue が label 0 件で残らないこと**
-    const { path, labelsFile } = workspace(["in-progress"]);
+    const place = workspace(["in-progress"]);
+    const { labelsFile } = place;
 
-    runBlock(mergedBlock(), path);
+    runBlock(mergedBlock(), place);
 
     const labels = readFileSync(labelsFile, "utf8").split("\n").filter(Boolean);
     expect(labels, "着手中のまま残っている").not.toContain("in-progress");
@@ -141,19 +158,37 @@ describe("マージしたのに閉じない Issue の行き先", () => {
     // `blocked` へ付け替わっても緑になる**——**前者は master の着手順を飛ばし**、
     // **後者は止まっていない Issue を止める**
     expect(labels, "backlog へ戻していない").toContain("backlog");
-    expect(detectorStatus(path), "検出器が鳴っている（label が 0 件になった）").toBe(0);
+    expect(detectorStatus(place), "検出器が鳴っている（label が 0 件になった）").toBe(0);
   });
 
   it("外すだけに戻すと、検出器が鳴る", () => {
     // **試験が測っているのは語ではなく振る舞いである。** **前の手順書は
     // 「`in-progress` を外す」しか言っていなかった**——**その形に戻すと、
     // ここが赤くなる**（3 度とも、それで label が 0 件になった）
-    const { path, labelsFile } = workspace(["in-progress"]);
+    const place = workspace(["in-progress"]);
+    const { labelsFile } = place;
 
-    runBlock(`gh issue edit ${ISSUE} --remove-label in-progress`, path);
+    runBlock(`gh issue edit ${ISSUE} --remove-label in-progress`, place);
 
     expect(readFileSync(labelsFile, "utf8").split("\n").filter(Boolean)).toEqual([]);
-    expect(detectorStatus(path), "label が 0 件なのに鳴っていない").toBe(1);
+    expect(detectorStatus(place), "label が 0 件なのに鳴っていない").toBe(1);
+  });
+
+  it("入口確認の記録は、走らせた砂場に残る", () => {
+    // **実物の共通 `.git` に書かない** (#338)。**`bin/loop-unlisted-issues` は
+    // 冒頭で `bin/loop-lease check` を通す**ので、**cwd を継ぐと実物へ書く**——
+    // **上限 20 行の記録が試験の雑音で埋まり、本物の行が押し出される**（#186 / #192）。
+    //
+    // **見るのは砂場の側である。** **「実物が増えないこと」で測ると、
+    // 他の周回が同時に書きうる**——**合否が他人の持ち物で決まる。**
+    const place = workspace(["in-progress"]);
+
+    detectorStatus(place);
+
+    expect(
+      existsSync(join(place.repo, ".git", "valence-loop-lease-missing")),
+      "入口確認の記録が砂場に無い（実物の共通 .git へ書いている）",
+    ).toBe(true);
   });
 
   it("付け替えは 1 回の編集で行う", () => {

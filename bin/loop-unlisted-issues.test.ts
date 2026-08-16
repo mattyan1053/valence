@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,11 +48,19 @@ function run(options: {
   status: number;
   stdout: string[];
   stderr: string;
+  /** **走らせた場所**。`bin/loop-lease check` の記録はここへ落ちる */
+  workspace: string;
 } {
   const dir = mkdtempSync(join(tmpdir(), "unlisted-issues-"));
   sandboxes.push(dir);
   const path = join(dir, "path");
   mkdirSync(path, { recursive: true });
+  // **走らせる場所を砂場にする** (#338)。**`bin/loop-unlisted-issues` は冒頭で
+  // `bin/loop-lease check` を通す**ので、**cwd を継ぐと実物の共通 `.git` へ書く**
+  // ——**人が診断に使う記録（上限 20 行）が、試験の雑音で押し出される**（#186 / #192）。
+  const workspace = join(dir, "repo");
+  mkdirSync(workspace, { recursive: true });
+  expect(spawnSync("git", ["init", "--quiet", workspace]).status, "砂場を作れない").toBe(0);
   // **本物の `--jq` が出す形**（#328 のレビュー 2 周目）。**label は 1 行ずつ**で、
   // **区切りは US**——**繋いで渡すと、カンマを含む label 名が測れない。**
   const asLines = (issues: Issue[]): string =>
@@ -88,6 +96,7 @@ function run(options: {
   chmodSync(join(path, "gh"), 0o755);
 
   const result = spawnSync(SCRIPT, options.args ?? [], {
+    cwd: workspace,
     encoding: "utf8",
     env: { ...process.env, PATH: `${path}:${process.env.PATH ?? ""}` },
   });
@@ -95,6 +104,7 @@ function run(options: {
     status: result.status ?? -1,
     stdout: result.stdout.split("\n").filter((line) => line !== ""),
     stderr: result.stderr,
+    workspace,
   };
 }
 
@@ -213,6 +223,23 @@ describe("bin/loop-unlisted-issues", () => {
 
     expect(listed.status, "部分一致で「付いている」と読んでいる").toBe(1);
     expect(listed.stdout).toEqual(["400"]);
+  });
+
+  it("入口確認の記録は、走らせた砂場に残る", () => {
+    // **実物の共通 `.git` に書かない** (#338)。**記録には上限（20 行）がある**ので、
+    // **試験のたびに雑音が入ると、本物の「入口を飛ばした周回」が押し出される**
+    // ——**あれは人が診断に使う記録**である（#192）。
+    //
+    // **「実物が増えないこと」では測らない。** **他の周回が同時に書きうる**ので、
+    // **合否が他人の持ち物で決まる**（#186）——**書き先が砂場であることを、
+    // 砂場の側で見る。**
+    const listed = run({ issues: [{ number: 319, labels: [] }] });
+
+    expect(listed.status).toBe(1);
+    expect(
+      existsSync(join(listed.workspace, ".git", "valence-loop-lease-missing")),
+      "入口確認の記録が砂場に無い（実物の共通 .git へ書いている）",
+    ).toBe(true);
   });
 
   it("使い方の誤りは、無いと混ぜない", () => {
