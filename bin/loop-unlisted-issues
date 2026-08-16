@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# **どの一覧にも出てこない open Issue** を挙げる (#325)。
+#
+#   bin/loop-unlisted-issues
+#
+#   exit 0 = 無い (何も出さない)
+#   exit 1 = ある (標準出力に `<Issue番号>` を 1 行ずつ)
+#   exit 2 = 読めない
+#
+# **#319 で実際に起きた。** **`in-progress` を外した先が無く**、**open のまま label が
+# 0 件**になった。**master のステップ 6 が読むのは `ready` / `in-progress` / `backlog`**
+# なので**昇格の候補に上がらず**、**`bin/loop-claim audit` も `bin/loop-handoff` も黙る**
+# ——**どちらも「label と PR の食い違い」を見るもの**で、**label が無いことは
+# 食い違いではない。** **`./task loop:status` にも出ない。**
+#
+# **全部の検査が「健全」と答える。** **空転として数えられない**ので **3 周の経路にも
+# 乗らず**、**`no-work` にも当たらない**（**他に `in-progress` があれば、ループは
+# 普通に回り続ける**）。**気づいたのは master が前の周回を覚えていたから**で、
+# **セッションが落ちれば消える記憶である。**
+#
+# **判定はここが 1 つだけ持つ** (`AGENTS.md` §5)。**手順書へ写さない**——
+# **label が増えたときに、写した側だけが古くなる。**
+#
+# **`waiting-condition` は数えない。** **あれは `backlog` に付ける修飾**であって、
+# **それ自体はどの一覧にも載らない**（`loop/README.md` の表。**`bin/loop-handoff` も
+# `labels:["backlog","waiting-condition"]` と両方を指定して数える**）——
+# **単独で付いている Issue は、まさにこの検出器が拾いたいもの**である。
+# **倒す向きで決めた**: **鳴らしすぎても人が見て何も無いだけ**だが、
+# **鳴らし損ねると誰も来ない。**
+#
+# **見つけても label は付け直さない。** **どこへ戻すかは中身を読まないと決まらない**
+# ——**人か master の判断**である（Issue の「やらないこと」）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **入口を飛ばしていないか、ここでも確かめる**（#161。`bin/loop-claim` と同じ）。
+"${BASH_SOURCE[0]%/*}/loop-lease" check || true
+
+usage() {
+  echo "使い方: bin/loop-unlisted-issues" >&2
+  echo "        exit 0 = 無い / exit 1 = ある (標準出力) / exit 2 = 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || usage
+
+# **どれか 1 つでも付いていれば、どこかの一覧に出る。**
+#
+#   backlog / ready / in-progress … master のステップ 6 が読む
+#   blocked                       … worker が毎周回読む
+readonly LISTED_LABELS=(backlog ready in-progress blocked)
+
+if ! issues="$(gh issue list --state open --limit 200 --json number,labels \
+  --jq '.[] | "\(.number)\t\([.labels[].name] | join(","))"')"; then
+  echo "[FAIL] open Issue の一覧を読めません" >&2
+  echo "       どの一覧にも出てこない Issue があるかは、この周回では分かりません" >&2
+  exit 2
+fi
+
+found=0
+# **最後の行に改行が無くても読む**（`bin/loop-parked-issues` と同じ理由——
+# **`read` は改行で終わっていない行を読むと変数へは入れたまま非 0 を返す**）。
+while IFS=$'\t' read -r number labels || [[ -n $number ]]; do
+  [[ $number =~ ^[0-9]+$ ]] || continue
+  listed=0
+  for label in "${LISTED_LABELS[@]}"; do
+    [[ ",$labels," == *",$label,"* ]] && listed=1
+  done
+  ((listed == 0)) || continue
+  printf '%s\n' "$number"
+  found=1
+done <<<"$issues"
+
+((found == 0)) || exit 1
+exit 0

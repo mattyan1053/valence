@@ -211,6 +211,12 @@ describe("停止識別子", () => {
       // **どちらも「救うか捨てるかは中身を見ないと決まらない」**ので、同じ名前で数える
       ["### 周回の出口", "stray-branch:<ブランチ>"],
       ["### 周回の出口", "stray-branch:<ブランチ>"],
+      // **どの一覧にも出てこない open Issue**（#325）。**状態 label が 1 つも無いと、
+      // ステップ 6 にも worker にも見えない**——**`audit` も `handoff` も
+      // 「label と PR の食い違い」を見るもの**で、**label が無いことは食い違いではない**。
+      // **読めなかったぶんは `issue-lookup-failed`**（**0 件と読まない**）
+      ["### 周回の出口", "unlisted-issue:<Issue番号>"],
+      ["### 周回の出口", "issue-lookup-failed"],
       ["### 周回の出口", "handoff-mismatch:<PR番号>"],
     ]);
   });
