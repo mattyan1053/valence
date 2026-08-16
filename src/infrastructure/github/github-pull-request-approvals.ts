@@ -91,6 +91,11 @@ type ReviewsPage = z.infer<typeof reviewsSchema>;
  * **状態コードだけを見ると「1 件も承認されていない」として通ってしまう。**
  */
 const boardSchema = z.object({
+  // **部分的な成功も弾く** (#346 のレビュー 2 周目)。**GraphQL は `data` と `errors` を
+  // 同時に返す**ことがあり、**`z.object` は知らない鍵を捨てる**ので、
+  // **「`errors` が載っていたら読まない」と書いてあっても素通りしていた。**
+  // **`z.never().optional()` は「無いときだけ通る」**——**載っていたら落ちる。**
+  errors: z.never().optional(),
   data: z.object({
     repository: z.object({
       pullRequests: z.object({
@@ -107,6 +112,8 @@ const boardSchema = z.object({
 });
 
 const reviewsPageSchema = z.object({
+  // **こちらも同じ**（**カーソルの解決に失敗した応答がここへ来る**）
+  errors: z.never().optional(),
   data: z.object({
     repository: z.object({
       pullRequest: z.object({ latestOpinionatedReviews: reviewsSchema }),
@@ -215,11 +222,24 @@ export function createGitHubPullRequestApprovals({
     for (;;) {
       const listing = await readBoardPage(userAccessToken, repository, cursor, signal);
       yield* listing.nodes;
-      if (!listing.pageInfo.hasNextPage || listing.pageInfo.endCursor === null) {
+      if (!listing.pageInfo.hasNextPage) {
         return;
       }
-      cursor = listing.pageInfo.endCursor;
+      cursor = nextCursor(listing.pageInfo);
     }
+  }
+
+  /**
+   * 次のページの位置。**続きがあると言いながら行き先が無いなら、読めていない。**
+   *
+   * **黙って止めない** (#346 のレビュー 2 周目)——**外側なら「一覧に無い」へ、
+   * 内側なら「承認されていない」へ落ちる**。**どちらも、読めていないだけである。**
+   */
+  function nextCursor(pageInfo: { hasNextPage: boolean; endCursor: string | null }): string {
+    if (pageInfo.endCursor === null) {
+      throw new ApprovalLookupFailed(200);
+    }
+    return pageInfo.endCursor;
   }
 
   /**
@@ -241,14 +261,14 @@ export function createGitHubPullRequestApprovals({
       if (page.nodes.some((review) => review.state === "APPROVED")) {
         return true;
       }
-      if (!page.pageInfo.hasNextPage || page.pageInfo.endCursor === null) {
+      if (!page.pageInfo.hasNextPage) {
         return false;
       }
       page = await readReviewsPage(
         userAccessToken,
         repository,
         number,
-        page.pageInfo.endCursor,
+        nextCursor(page.pageInfo),
         signal,
       );
     }

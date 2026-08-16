@@ -271,6 +271,82 @@ describe("GitHub から承認の状態を読む", () => {
     expect(fetchImpl.calls[0]?.init?.signal, "合図が口まで届いていない").toBe(controller.signal);
   });
 
+  it("`data` と `errors` が同時に返ったら、読まない", async () => {
+    // **GraphQL は部分的な成功を返す**（#346 のレビュー 2 周目）——**`z.object` は
+    // 知らない鍵を捨てる**ので、**「`errors` が載っていたら読まない」と書いてあっても
+    // 素通りしていた。** **読める形をしているぶん、いちばん静かに壊れる。**
+    const approvals = createGitHubPullRequestApprovals({
+      fetchImpl: fetcher([
+        {
+          status: 200,
+          body: {
+            ...(page([{ number: 7, states: [] }]) as Record<string, unknown>),
+            errors: [{ message: "Something went wrong while executing your query" }],
+          },
+        },
+      ]),
+    });
+
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow();
+  });
+
+  it("続きがあるのに辿れないなら、承認されていないことにしない", async () => {
+    // **`hasNextPage: true` なのに `endCursor` が無い**——**辿れないだけ**であって、
+    // **「意見はここで終わり」ではない**（#346 のレビュー 2 周目）。
+    // **黙って止まると、次のページの承認が未承認として出る。**
+    const approvals = createGitHubPullRequestApprovals({
+      fetchImpl: fetcher([
+        {
+          status: 200,
+          body: {
+            data: {
+              repository: {
+                pullRequests: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [
+                    {
+                      number: 7,
+                      latestOpinionatedReviews: {
+                        // **続きがあると言いながら、行き先が無い**
+                        pageInfo: { hasNextPage: true, endCursor: null },
+                        nodes: [{ state: "CHANGES_REQUESTED" }],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ]),
+    });
+
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow();
+  });
+
+  it("PR の一覧も、続きを辿れないなら投げる", async () => {
+    // **外側でも同じ**——**打ち切ると、読めていない PR が「一覧に無い」へ落ちる**
+    const approvals = createGitHubPullRequestApprovals({
+      fetchImpl: fetcher([
+        {
+          status: 200,
+          body: {
+            data: {
+              repository: {
+                pullRequests: {
+                  pageInfo: { hasNextPage: true, endCursor: null },
+                  nodes: [],
+                },
+              },
+            },
+          },
+        },
+      ]),
+    });
+
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow();
+  });
+
   it("読めなければ投げる", async () => {
     // **空の一覧を返すと、「読めなかった」が「1 件も承認されていない」に化ける**
     // ——**理由つきで残すのは呼ぶ側**である（port の約束）
