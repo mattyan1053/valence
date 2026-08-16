@@ -262,6 +262,8 @@ describe("bin/loop-ci-status", () => {
     mergeableFails?: boolean;
     /** 指紋だけを尋ねる（`bin/loop-handoff` が使う）。 */
     fingerprint?: boolean;
+    /** コンフリクトしているかだけを尋ねる（`bin/loop-handoff` が使う。#347）。 */
+    conflicting?: boolean;
   }): { status: number; stdout: string; stderr: string } {
     const stub = join(sandbox, "stub");
     mkdirSync(stub, { recursive: true });
@@ -300,19 +302,21 @@ describe("bin/loop-ci-status", () => {
     rmSync(target);
     spawnSync("cp", [SCRIPT, target]);
     chmodSync(target, 0o755);
-    const result = spawnSync(
-      target,
-      options.fingerprint === true ? ["--fingerprint", "42"] : ["42"],
-      {
-        cwd: sandbox,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          PATH: `${stub}:${process.env.PATH}`,
-          LOOP_REQUIRED_CHECKS: REQUIRED,
-        },
+    const args =
+      options.conflicting === true
+        ? ["--conflicting", "42"]
+        : options.fingerprint === true
+          ? ["--fingerprint", "42"]
+          : ["42"];
+    const result = spawnSync(target, args, {
+      cwd: sandbox,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${stub}:${process.env.PATH}`,
+        LOOP_REQUIRED_CHECKS: REQUIRED,
       },
-    );
+    });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
@@ -1043,6 +1047,50 @@ describe("bin/loop-ci-status", () => {
 
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
       expect(existsSync(marker), "head の版が実行された").toBe(false);
+    });
+  });
+
+  /**
+   * **コンフリクトしているかを、外から尋ねられる口**（#347）。
+   *
+   * **判定はここが持っている**（`bin/loop-gate` が「コンフリクトしているため実行が
+   * 作られない」と出せるのは、この判定があるからである）——**`bin/loop-handoff` が
+   * 同じ判定を書き写すと、片方だけ直したときに食い違う**（`AGENTS.md` §5）。
+   *
+   * **3 値をそのまま返す。** **`UNKNOWN` を「していない」へ畳まない**——
+   * **畳んだ先で、呼ぶ側が倒す向きを選べなくなる。**
+   */
+  describe("コンフリクトしているかを尋ねる", () => {
+    it("コンフリクトしていれば 0", () => {
+      expect(run({ conflicting: true, mergeable: "CONFLICTING" }).status).toBe(0);
+    });
+
+    it("していなければ 1", () => {
+      // **全部 0 を返す実装でも、上の 1 件だけなら緑になる**
+      expect(run({ conflicting: true, mergeable: "MERGEABLE" }).status).toBe(1);
+    });
+
+    it("計算中なら、どちらでもない 3", () => {
+      // **`UNKNOWN` は「していない」ではない**——**倒す向きは呼ぶ側が決める**
+      expect(run({ conflicting: true, mergeable: "UNKNOWN" }).status).toBe(3);
+    });
+
+    it("読めなければ 2", () => {
+      // **判定不能を「していない」へ倒さない**——**呼ぶ側が黙る**
+      expect(run({ conflicting: true, mergeableFails: true }).status).toBe(2);
+    });
+
+    it("知らない値も 2", () => {
+      // **GitHub が値を増やしても、知らないものが「していない」にはならない**（#90）
+      expect(run({ conflicting: true, mergeable: "SOMETHING_NEW" }).status).toBe(2);
+    });
+
+    it("必須チェックの一覧は引かない", () => {
+      // **尋ねているのはコンフリクトだけ**——**要らない往復を作らない**
+      const result = run({ conflicting: true, mergeable: "CONFLICTING" });
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(join(sandbox, "gh.calls"), "utf8")).not.toContain("check-runs");
     });
   });
 });

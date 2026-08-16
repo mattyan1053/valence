@@ -700,12 +700,47 @@ elif [[ -n $changes_requested ]]; then
   branch="changes-requested"
   witness="$(branch_witness "$changes_requested")"
 elif [[ -n $gateable ]]; then
-  to="master"
-  reason="PR #${gateable%% *} のゲートを回せる"
-  branch="gateable"
-  # **ここでは CI も読む。** **ゲートが落とす条件そのもの**なので、
-  # **外すと、マージできるようになった、まさにその瞬間に黙る** (#125 / #173 のレビュー)
-  witness="$(branch_witness "$gateable" checks)"
+  gateable_first="${gateable%% *}"
+  # **コンフリクトしているなら、動けるのは worker である** (#347)。**取り込み直せるのは
+  # 著者だけ**で、**master は push しない**（絶対ルール）——**master が指摘を resolve して
+  # label も外した直後**、**上の 2 つの手掛かりが両方消え**、**残っている `mergeable` を
+  # 見ていなかった**（#346 で実測。**症状は「何も起きていない」**なので気づけない）。
+  #
+  # **判定は `bin/loop-ci-status` が持っている** (`AGENTS.md` §5)——**`bin/loop-gate` が
+  # 「コンフリクトしているため実行が作られない」と出せるのはあの判定があるから**で、
+  # **ここへ書き写すと、片方だけ直したときに食い違う。**
+  "${BASH_SOURCE[0]%/*}/loop-ci-status" --conflicting "$gateable_first" >/dev/null
+  conflicting=$?
+  case "$conflicting" in
+    0 | 3)
+      # **計算中（exit 3）も worker へ倒す。** **`UNKNOWN` は「していない」ではない**
+      # ——**余計に呼んでも、相手が周回を回して何も無いと分かるだけ**である一方、
+      # **呼び損ねると誰も来ない**（このループで一貫している向き）。
+      to="worker"
+      branch="conflicting"
+      if ((conflicting == 0)); then
+        reason="PR #${gateable_first} がコンフリクトしている（main を取り込み直す）"
+      else
+        reason="PR #${gateable_first} のコンフリクトの有無が計算中（取り込み直しが要るかもしれない）"
+      fi
+      # **CI は読まない。** **コンフリクトしている間、必須チェックは作られない**
+      # ——**`mergeable` が動いたら指紋も動く**ので、**解けた瞬間に次の枝へ移る**
+      witness="$(branch_witness "$gateable_first")|mergeable=$((conflicting == 0 ? 1 : 2))"
+      ;;
+    1)
+      to="master"
+      reason="PR #${gateable_first} のゲートを回せる"
+      branch="gateable"
+      # **ここでは CI も読む。** **ゲートが落とす条件そのもの**なので、
+      # **外すと、マージできるようになった、まさにその瞬間に黙る** (#125 / #173 のレビュー)
+      witness="$(branch_witness "$gateable" checks)|mergeable=0"
+      ;;
+    *)
+      # **判定不能を「していない」へ倒さない**——**倒すと、コンフリクトしている PR が
+      # master 宛てになり、ゲートで落ちるだけで誰も直さない。**
+      fail_unknown "PR #${gateable_first} がコンフリクトしているか"
+      ;;
+  esac
 elif ((ready >= 1 && in_progress < hands)); then
   # **件数で絞らない** (#267)。**等号だと 2 件でどの枝にも入らず、
   # 「相手に持ち物が無い」と読まれて終わる**——**いちばん渡したい瞬間に落ちる。**

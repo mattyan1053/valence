@@ -110,6 +110,12 @@ type State = {
     labeledAt?: string;
     /** 最後の発言の ID。**返信だけでも動く値**である。 */
     lastComment?: number;
+    /**
+     * コンフリクトしているか（#347）。**既定は `MERGEABLE`。**
+     *
+     * **`UNKNOWN` は GitHub が計算中に返す**——**「していない」ではない。**
+     */
+    mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
     head?: string;
     /**
      * CI の結果（check 名 → bucket）。**書かなかったものは pass** とみなす。
@@ -219,6 +225,11 @@ describe("bin/loop-handoff", () => {
       return `${encoded}\\u001f${status}\\u001f${conclusion}\\u001f2026-01-01T00:00:00Z`;
     });
     return [
+      // **コンフリクトの有無**（#347）。**head より先に見る**——**同じ `pr view` で来る**
+      `if [[ $* == *"pr view ${pr.number}"* && $* == *"mergeable"* ]]; then`,
+      `  printf '%s\\n' ${JSON.stringify(pr.mergeable ?? "MERGEABLE")}`,
+      "  exit 0",
+      "fi",
       `if [[ $* == *"pull/${pr.number}"* || $* == *"pr view ${pr.number}"* ]]; then`,
       `  printf '%s\\n' "head-of-${pr.number}"`,
       "  exit 0",
@@ -674,6 +685,37 @@ describe("bin/loop-handoff", () => {
 
     expect(handoff.status).toBe(0);
     expect(handoff.stdout).toMatch(/^master\t/);
+  });
+
+  it("コンフリクトしている PR は、worker の番として出す", () => {
+    // **実測**（#346）——**master が resolve して label も外した直後**、
+    // **出口が見ている 2 つの手掛かりが両方消え**、**残っている `mergeable` を
+    // 見ていなかった。** **取り込み直せるのは著者だけ**なので、**worker の番である。**
+    withState({ prs: [{ number: 12, mergeable: "CONFLICTING" }] });
+
+    const handoff = run("master");
+
+    expect(handoff.status).toBe(0);
+    expect(handoff.stdout, "コンフリクトしているのに master のままである").toMatch(/^worker\t/);
+    expect(handoff.stdout, "何をすればよいかが読めない").toMatch(/コンフリクト|取り込み直/);
+  });
+
+  it("コンフリクトの有無が計算中なら、呼ぶ側へ倒す", () => {
+    // **`UNKNOWN` は「していない」ではない**——**余計に呼んでも、相手が周回を
+    // 回して何も無いと分かるだけ**だが、**呼び損ねると誰も来ない。**
+    withState({ prs: [{ number: 12, mergeable: "UNKNOWN" }] });
+
+    const handoff = run("master");
+
+    expect(handoff.status).toBe(0);
+    expect(handoff.stdout, "計算中を「していない」へ倒している").toMatch(/^worker\t/);
+  });
+
+  it("コンフリクトしていなければ、これまでどおり master へ渡す", () => {
+    // **緩めすぎない側の担保**——**全部 worker にする実装でも、上の 2 件だけなら緑になる**
+    withState({ prs: [{ number: 12, mergeable: "MERGEABLE" }] });
+
+    expect(run("worker").stdout, "ゲートを回せる PR が worker へ行っている").toMatch(/^master\t/);
   });
 
   it("ready が 1 件で着手されていなければ worker へ渡す", () => {

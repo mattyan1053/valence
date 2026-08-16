@@ -3,6 +3,7 @@
 #
 #   bin/loop-ci-status <PR番号>
 #   bin/loop-ci-status --fingerprint <PR番号>   決着の別だけを、必須の並び順で返す
+#   bin/loop-ci-status --conflicting <PR番号>   コンフリクトしているか (#347)
 #   bin/loop-ci-status --required-checks        `main` 側の必須チェック名を並べる
 #
 # **PR を見るときの必須は、`main` の一覧と PR の head の一覧の**和**である** (#219)。
@@ -85,9 +86,11 @@ readonly MISSING_GRACE_MIN="${LOOP_CI_MISSING_GRACE_MIN:-10}"
 usage() {
   echo "使い方: bin/loop-ci-status <PR番号>" >&2
   echo "        bin/loop-ci-status --fingerprint <PR番号>" >&2
+  echo "        bin/loop-ci-status --conflicting <PR番号>" >&2
   echo "        bin/loop-ci-status --required-checks" >&2
   echo "        exit 0 = 決着して成功 / exit 1 = 失敗・一部欠け / exit 3 = 待つ" >&2
   echo "        exit 4 = 予算を超えた / exit 5 = 1 件も作られない / exit 2 = 読めない・使い方の誤り" >&2
+  echo "        --conflicting: exit 0 = している / exit 1 = していない / exit 3 = 計算中" >&2
   exit 2
 }
 
@@ -117,9 +120,54 @@ if [[ ${1-} == "--fingerprint" ]]; then
 fi
 readonly FINGERPRINT
 
+# **コンフリクトしているかだけを尋ねる口** (#347)。
+#
+# **判定はこのファイルが持っている**（`bin/loop-gate` が「コンフリクトしているため
+# 実行が作られない」と出せるのは、下の `case` があるからである）——**`bin/loop-handoff`
+# が同じ判定を書き写すと、片方だけ直したときに食い違う**（`AGENTS.md` §5）。
+#
+# **3 値をそのまま返す。** **`UNKNOWN` を「していない」へ畳まない**——
+# **畳んだ先で、呼ぶ側が倒す向きを選べなくなる**（**こちらは猶予の時計に乗せ、
+# 出口は worker を呼ぶ側へ倒す**。**同じ値でも、次にやることが違う**）。
+CONFLICTING_ONLY=0
+if [[ ${1-} == "--conflicting" ]]; then
+  CONFLICTING_ONLY=1
+  shift
+fi
+readonly CONFLICTING_ONLY
+
 [[ $# -eq 1 ]] || usage
 [[ $1 =~ ^[0-9]+$ ]] || usage
 readonly PR="$1"
+
+# **コンフリクトの有無を GitHub から読む。** **読めなければ空で落ちる**
+# ——**「していない」へ倒さない**（判定不能を答えの一種にしない）。
+read_mergeable() {
+  local value
+  if ! value="$(gh pr view "$PR" --json mergeable --jq '.mergeable' 2>/dev/null)" \
+    || [[ -z $value ]]; then
+    echo "[FAIL] PR #$PR がコンフリクトしているか読めません" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+if ((CONFLICTING_ONLY == 1)); then
+  # **尋ねられたのはコンフリクトだけ**なので、**必須チェックの一覧は引かない**
+  # ——**要らない往復を作らない。**
+  conflicting_value="$(read_mergeable)" || exit 2
+  case "$conflicting_value" in
+    CONFLICTING) exit 0 ;;
+    MERGEABLE) exit 1 ;;
+    # **計算中である。** **「していない」ではない**——**呼ぶ側が倒す向きを決める**
+    UNKNOWN) exit 3 ;;
+    *)
+      # **知らない値は止まる側へ** (#90 の逆向き)
+      echo "[FAIL] PR #$PR がコンフリクトしているか判定できません: $conflicting_value" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
   || [[ -z $head_sha || $head_sha == "null" ]]; then
@@ -406,11 +454,7 @@ if ((${#missing[@]} > 0 && ${#missing[@]} == ${#required[@]})); then
   # **`UNKNOWN` と「まだ作られていない」は、どちらも『まだ決まっていない』**である。
   # **同じ時計で測る**——**猶予の内なら待ち、過ぎれば人待ちへ出る**ので、
   # **新しい配線を足さずに「待つ → 届く」が閉じる。**
-  if ! mergeable="$(gh pr view "$PR" --json mergeable --jq '.mergeable' 2>/dev/null)" \
-    || [[ -z $mergeable ]]; then
-    echo "[FAIL] PR #$PR がコンフリクトしているか読めません" >&2
-    exit 2
-  fi
+  mergeable="$(read_mergeable)" || exit 2
   # **`UNKNOWN` だったことを、読む側にも残す**（文面で分岐させるためではなく、
   # **人が来たときに何を見ればよいかが分かるように**）。
   missing_note=""
