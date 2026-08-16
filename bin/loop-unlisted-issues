@@ -75,25 +75,51 @@ if ! issues="$(gh api graphql --paginate \
         pageInfo{hasNextPage endCursor}
         nodes{number labels(first:100){nodes{name}}}}}}' \
   --jq '.data.repository.issues.nodes[]
-    | "\(.number)\t\([.labels.nodes[].name] | join(","))"')"; then
+    | "issue\u001f\(.number)", (.labels.nodes[] | "label\u001f\(.name)")')"; then
   echo "[FAIL] open Issue の一覧を読めません" >&2
   echo "       どの一覧にも出てこない Issue があるかは、この周回では分かりません" >&2
   exit 2
 fi
 
+# **label を 1 行ずつ受ける** (#328 のレビュー 2 周目)。**繋いでから探さない**——
+# **label 名にはカンマを入れられる**ので、**`foo,ready,bar` という 1 つの label が
+# `,ready,` に部分一致する**。**付いていない `ready` が「付いている」になり**、
+# **その Issue だけが対象なら exit 0**——**また誰にも見つからないまま残る。**
+#
+# **区切りは US。** **タブや空白を使わない**（`bin/loop-handoff` と同じ理由。
+# **label 名には空白が入る**）。
+readonly FIELD=$'\037'
+
 found=0
-# **最後の行に改行が無くても読む**（`bin/loop-parked-issues` と同じ理由——
-# **`read` は改行で終わっていない行を読むと変数へは入れたまま非 0 を返す**）。
-while IFS=$'\t' read -r number labels || [[ -n $number ]]; do
-  [[ $number =~ ^[0-9]+$ ]] || continue
-  listed=0
-  for label in "${LISTED_LABELS[@]}"; do
-    [[ ",$labels," == *",$label,"* ]] && listed=1
-  done
-  ((listed == 0)) || continue
+number=""
+listed=0
+
+report_if_unlisted() {
+  [[ $number =~ ^[0-9]+$ ]] || return 0
+  ((listed == 0)) || return 0
   printf '%s\n' "$number"
   found=1
+}
+
+# **最後の行に改行が無くても読む**（`bin/loop-parked-issues` と同じ理由——
+# **`read` は改行で終わっていない行を読むと変数へは入れたまま非 0 を返す**）。
+while IFS="$FIELD" read -r kind value || [[ -n $kind ]]; do
+  case "$kind" in
+    issue)
+      # **前の Issue を、次が始まる時点で判定する**（label は Issue の後ろに並ぶ）
+      report_if_unlisted
+      number="$value"
+      listed=0
+      ;;
+    label)
+      # **完全一致で見る。** **部分一致にすると、名前の一部が状態 label の Issue が黙る**
+      for label in "${LISTED_LABELS[@]}"; do
+        [[ $value == "$label" ]] && listed=1
+      done
+      ;;
+  esac
 done <<<"$issues"
+report_if_unlisted
 
 ((found == 0)) || exit 1
 exit 0

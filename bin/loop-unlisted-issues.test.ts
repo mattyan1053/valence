@@ -53,8 +53,15 @@ function run(options: {
   sandboxes.push(dir);
   const path = join(dir, "path");
   mkdirSync(path, { recursive: true });
+  // **本物の `--jq` が出す形**（#328 のレビュー 2 周目）。**label は 1 行ずつ**で、
+  // **区切りは US**——**繋いで渡すと、カンマを含む label 名が測れない。**
   const asLines = (issues: Issue[]): string =>
-    issues.map((issue) => `${issue.number}\t${issue.labels.join(",")}`).join("\n");
+    issues
+      .flatMap((issue) => [
+        `issue\u001f${issue.number}`,
+        ...issue.labels.map((label) => `label\u001f${label}`),
+      ])
+      .join("\n");
   const head = asLines(options.issues ?? []);
   const tail = asLines(options.beyondFirstPage ?? []);
   writeFileSync(
@@ -191,6 +198,20 @@ describe("bin/loop-unlisted-issues", () => {
     });
 
     expect(listed.status, "打ち切って「無い」と答えている").toBe(1);
+    expect(listed.stdout).toEqual(["400"]);
+  });
+
+  it("カンマを含む label 名で黙らない", () => {
+    // **label 名にカンマを入れられる**（#328 のレビュー 2 周目）——**一覧を
+    // カンマで繋いでから探すと、`foo,ready,bar` という 1 つの label が
+    // `,ready,` に部分一致する。** **付いていない `ready` が付いていることになり、
+    // その Issue だけが対象なら exit 0**——**また誰にも見つからないまま残る。**
+    //
+    // **倒す向き**: **「分からない」を「付いている」側へ倒さない**
+    // （**付いていない側へ倒れれば挙がるだけ**だが、**逆は黙る**）。
+    const listed = run({ issues: [{ number: 400, labels: ["foo,ready,bar"] }] });
+
+    expect(listed.status, "部分一致で「付いている」と読んでいる").toBe(1);
     expect(listed.stdout).toEqual(["400"]);
   });
 
