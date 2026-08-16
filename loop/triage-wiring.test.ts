@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -12,9 +13,7 @@ function read(path: string): string {
 
 /** 上限に達した PR の行き先を決めている節。**文書全体で見ない。** */
 function triageSection(): string {
-  const section = read(".claude/commands/loop-master.md").split(
-    "### 上限に達した PR をどこへ渡すか",
-  )[1];
+  const section = procedureText("master").split("### 上限に達した PR をどこへ渡すか")[1];
   if (section === undefined) {
     throw new Error("master の手順書に打ち切りの節がありません");
   }
@@ -43,7 +42,7 @@ describe("上限に達したあとの行き先", () => {
 
   it("古い「優先度 1 / 2 が残るなら人へ渡す」が残っていない", () => {
     // **食い違いを残さない。** これが #73 の主題である
-    const doc = read(".claude/commands/loop-master.md");
+    const doc = procedureText("master");
 
     expect(doc).not.toMatch(/優先度 1（正しさ）・2（セキュリティ）が残る/);
   });
@@ -74,7 +73,7 @@ describe("上限に達したあとの行き先", () => {
   it("ゲートが落ちたときの行き先が手順書にある", () => {
     // **記録しないと、溜まったまま何周でも回る**（他の停止と同じ理由）
     // **節を切って見る。** 切らないと、後ろの節にある同じ語で満たされる（実際に通った）
-    const failTable = read(".claude/commands/loop-master.md")
+    const failTable = procedureText("master")
       .split("### exit 1 — 何が足りないかで分ける")[1]
       ?.split("\n### ")[0];
 

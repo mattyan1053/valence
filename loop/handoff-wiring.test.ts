@@ -106,9 +106,7 @@ describe("状態が矛盾したとき", () => {
   describe("まだ誰も答えていない指摘", () => {
     /** master のステップ 4。**返信を確かめる段**である。 */
     function stepFour(): string {
-      return (
-        read(".claude/commands/loop-master.md").split("\n## 4. ")[1]?.split("\n## 5. ")[0] ?? ""
-      );
+      return procedureText("master").split("\n## 4. ")[1]?.split("\n## 5. ")[0] ?? "";
     }
 
     /**

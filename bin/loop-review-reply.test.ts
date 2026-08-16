@@ -402,7 +402,7 @@ describe("返信の投稿口は、両方の役から辿れる", () => {
 
   for (const doc of [
     "loop/procedure/worker.md",
-    ".claude/commands/loop-master.md",
+    "loop/procedure/master.md",
     ".claude/skills/respond-to-review/SKILL.md",
   ]) {
     it(`${doc} が投稿口を指している`, () => {
