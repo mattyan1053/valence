@@ -137,7 +137,10 @@ describe("マージしたのに閉じない Issue の行き先", () => {
 
     const labels = readFileSync(labelsFile, "utf8").split("\n").filter(Boolean);
     expect(labels, "着手中のまま残っている").not.toContain("in-progress");
-    expect(labels, "どの一覧にも出てこない状態になっている").not.toEqual([]);
+    // **行き先まで見る** (#334 のレビュー)。**「空でない」だけだと、`ready` や
+    // `blocked` へ付け替わっても緑になる**——**前者は master の着手順を飛ばし**、
+    // **後者は止まっていない Issue を止める**
+    expect(labels, "backlog へ戻していない").toContain("backlog");
     expect(detectorStatus(path), "検出器が鳴っている（label が 0 件になった）").toBe(0);
   });
 
