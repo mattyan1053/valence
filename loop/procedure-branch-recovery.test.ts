@@ -137,13 +137,37 @@ function parkedOnBranch(): { workspace: string; mainStamp: string } {
   return { workspace, mainStamp };
 }
 
-function runRecovery(workspace: string, stamp: string) {
-  return spawnSync("bash", ["-c", recoveryBlock().replaceAll("<読んだ印>", stamp)], {
+/** **その作業場を押さえる**（印がずれている状態から押さえる口）。**token を返す。** */
+function recoverIn(workspace: string, stamp: string): string {
+  const done = spawnSync(join(workspace, "bin/loop-lease"), ["recover", "worker", stamp], {
     cwd: workspace,
     encoding: "utf8",
-    // **上限には触れさせない**——**止めたいのではなく、何を記録するかを見たい**
-    env: { ...process.env, LOOP_MAX_STALL_REPEATS: "9" },
   });
+  expect(done.status, done.stderr).toBe(0);
+  return done.stdout.trim();
+}
+
+/** いま、この作業場の lease を誰かが握っているか。 */
+function heldIn(workspace: string): boolean {
+  return (
+    spawnSync(join(workspace, "bin/loop-lease"), ["held", "worker"], {
+      cwd: workspace,
+      encoding: "utf8",
+    }).status === 0
+  );
+}
+
+function runRecovery(workspace: string, stamp: string, token = "token") {
+  return spawnSync(
+    "bash",
+    ["-c", recoveryBlock().replaceAll("<読んだ印>", stamp).replaceAll("<token>", token)],
+    {
+      cwd: workspace,
+      encoding: "utf8",
+      // **上限には触れさせない**——**止めたいのではなく、何を記録するかを見たい**
+      env: { ...process.env, LOOP_MAX_STALL_REPEATS: "9" },
+    },
+  );
 }
 
 describe("ディスクのほうが新しいとき、手順書に次の一手がある", () => {
@@ -220,5 +244,40 @@ describe("戻れない入力でも、正しいものを記録する", () => {
     const done = runRecovery(workspace, mainStamp);
 
     expect(done.stdout + done.stderr, "同期の失敗を記録していない").toContain("main-sync-failed");
+  });
+});
+
+/**
+ * **押さえたまま終わらない**（#370 のレビュー 2 周目）。
+ *
+ * **入口 1.0 は「何もせず終わる場合も含めて必ず返す」と書いている。** **握ったまま
+ * 終えると、次の周回は期限が切れるまで `acquire` に拒まれる**——**master が 1 度
+ * これで 98 分止めている。** **当たる場面も悪い**: **`main-sync-failed` は
+ * 一時的な失敗**で、**すぐ試し直せば通ることが多い**のに、**そこで 30 分待つ。**
+ *
+ * **lease を取った状態から走らせて、終わったあとに握られていないことを見る**
+ * ——**ブロックだけを走らせると、この残留は見えない。**
+ */
+describe("戻れない入力でも、作業場を握ったまま終わらない", () => {
+  it("残っているものがあるときも、返してから終わる", () => {
+    const { workspace, mainStamp } = parkedOnBranch();
+    writeFileSync(join(workspace, "作業中"), "書きかけ\n");
+    const token = recoverIn(workspace, mainStamp);
+    expect(heldIn(workspace), "押さえられていない（入力になっていない）").toBe(true);
+
+    runRecovery(workspace, mainStamp, token);
+
+    expect(heldIn(workspace), "握ったまま終わっている").toBe(false);
+  });
+
+  it("同期に失敗したときも、返してから終わる", () => {
+    const { workspace, mainStamp } = parkedOnBranch();
+    git(workspace, "remote", "set-url", "origin", join(workspace, "居ない-origin.git"));
+    const token = recoverIn(workspace, mainStamp);
+    expect(heldIn(workspace), "押さえられていない（入力になっていない）").toBe(true);
+
+    runRecovery(workspace, mainStamp, token);
+
+    expect(heldIn(workspace), "握ったまま終わっている").toBe(false);
   });
 });

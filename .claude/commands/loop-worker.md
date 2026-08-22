@@ -1,4 +1,4 @@
-<!-- 版: 1234887b5db8 -->
+<!-- 版: 5d4b4c902449 -->
 ---
 name: "Loop: Worker"
 description: Issue の実装またはレビュー指摘への対応を 1 周だけ実行する
@@ -87,13 +87,15 @@ bin/loop-procedure-stamp worker "<読んだ印>"  # 揃ったか。判定はこ�
 **入る枝が無いなら、`origin/main` へ戻す** (#369)——**ディスクのほうが新しい向き**では、**枝に居る限り呼び直しても揃わない。**
 
 ```bash
-if [[ -n "$(git status --porcelain)" ]]; then
-  bin/loop-stall dirty                        # **`bin/loop-sync-main` は dirty を見ない**
-  exit                                        # **持ったまま移ると、どの枝の作業か消える**
+if [[ -n "$(git status --porcelain)" ]]; then   # **`bin/loop-sync-main` は dirty を見ない**
+  bin/loop-stall dirty                         # **持ったまま移ると、どの枝の作業か消える**
+  bin/loop-lease release worker "<token>"      # **握ったまま終わらない** (1.0)
+  exit
 fi
-if ! bin/loop-sync-main >/dev/null; then
-  bin/loop-stall main-sync-failed             # **印ずれと混ぜない**（1.1 と同じ扱い）
-  exit                                        # **枝の上なら印は当然ずれる**
+if ! bin/loop-sync-main >/dev/null; then       # **枝の上なら、印は当然ずれる**
+  bin/loop-stall main-sync-failed              # **印ずれと混ぜない**（1.1 と同じ扱い）
+  bin/loop-lease release worker "<token>"
+  exit
 fi
 bin/loop-procedure-stamp worker "<読んだ印>"  # 揃ったか。判定はここ 1 箇所が持つ
 ```
@@ -167,21 +169,19 @@ bin/loop-procedure-body worker
 ```
 
 - **exit 0** → 出力が本体である。**この周回は、入口と本体を続けて 1 つの手順として読む**
-- **それ以外** → `bin/loop-lease release worker "<token>"` して終わる。
-  **入口だけで進まない**——**手順の大半が無いまま走ると、レビュー対応も出口も飛ばす**
-  （**止まったほうが軽い**）
+- **それ以外** → `bin/loop-lease release worker "<token>"` して終わる。**入口だけで
+  進まない**——**手順の大半が無いまま走ると、レビュー対応も出口も飛ばす**（**止まるほうが軽い**）
 
 **読むのは同期のあとである** (#323 のレビュー)。**前に置くと、その周回が始まった時点の
-作業ツリーから読む**——**未マージの PR の枝に居た周回は、その PR の本体をそのまま実行する。**
-**`bin/loop-procedure-changed` は見つけられない**（**`BEFORE` の側にしか無い変更は
-意図して除いてある**。#259）ので、**レビューを通っていない手順が黙って走る。**
+作業ツリーから読む**——**未マージの PR の枝に居た周回は、その PR の本体をそのまま実行し**、
+**`bin/loop-procedure-changed` は見つけられない**（#259）ので、**黙って走る。**
 
 **出られなくなる形もある。** **`bin/loop-procedure-body` を持たない古い checkout に
 居ると、同期の前に読もうとして落ち**、**同期へ到達しないまま毎周回そこで止まる**
 ——**直しに行く経路が、直る前の状態に閉じ込められる**（#184 / #262 と同じ形）。
 
-**印がずれて枝へ入った周回だけは、その枝で読む**（1.0）——**あそこは
-`bin/loop-procedure-stamp` が「手順書もスクリプトも枝で揃っている」ことを確かめている。**
+**印がずれて枝へ入った周回だけは、その枝で読む**（1.0。**`bin/loop-procedure-stamp` が
+「手順書もスクリプトも枝で揃っている」ことを確かめた道**である）。
 
 **なぜ分かれているかは `bin/loop-procedure-body` の冒頭にある** (#319)。
 **検出はそのまま残す** (#241 / #243)——**入口が変わったときは、これまでどおり鳴る。**
