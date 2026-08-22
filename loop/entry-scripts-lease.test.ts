@@ -193,28 +193,52 @@ describe("試験が、共有の記録を汚さない", () => {
    *
    * **`cwd` を渡していない呼び出しは、vitest の cwd（＝実物）で走る。**
    * **問い合わせ（`--list` / `--entry`）は記録より前に返る**ので、ここでは見ない
-   * （**下の 2 本が振る舞いで押さえている**）。
+   * （**振る舞いの試験 2 本が押さえている**）。
    */
   function runsOnRealRepo(call: string): boolean {
-    if (/"--list"|"--entry"/.test(call)) {
+    // **問い合わせは記録より前に返る**（`--list` / `--entry` / `--required-checks`）
+    if (/"--list"|"--entry"|"--required-checks"/.test(call)) {
       return false;
     }
-    return !/cwd:/.test(call) || /cwd:\s*REPO_ROOT/.test(call);
+    // **`cwd,` の省略記法も「渡している」**である——**見落とすと、砂場で走っている
+    // 呼び出しを咎める**（**締めすぎると、この見張りが読まれなくなる**）
+    const passesCwd = /cwd:\s*(?!REPO_ROOT)/.test(call) || /(\{|\s)cwd,/.test(call);
+    return !passesCwd;
   }
 
-  /** その試験ファイルが、実物の置き場所から起こしている記録スクリプト。 */
-  function offendersIn(file: string, scripts: string[]): string[] {
-    const text = readFileSync(join(REPO_ROOT, file), "utf8");
+  /**
+   * **実物の置き場所を指している名前**（#393）。
+   *
+   * **直に書いた呼び出ししか見ないと、定数を経由した瞬間に黙る**
+   * ——**塞いでいるのが見張りではなくなる。**
+   */
+  function realPathNames(text: string, script: string): string[] {
+    const forms = [
+      new RegExp(`const\\s+(\\w+)\\s*=\\s*join\\(REPO_ROOT,\\s*"bin/${script}"\\)`, "g"),
+      new RegExp(`const\\s+(\\w+)\\s*=\\s*fileURLToPath\\(new URL\\("\\./${script}"`, "g"),
+    ];
+    return forms.flatMap((form) => [...text.matchAll(form)].map((match) => match[1] ?? ""));
+  }
+
+  /** 起こしている呼び出し（第 1 引数と、その呼び出しの範囲）。 */
+  function spawnCalls(text: string): { target: string; call: string }[] {
+    return [...text.matchAll(/(spawnSync|execFileSync)\(\s*([^,\n]+),/g)].map((match) => {
+      const from = match.index ?? 0;
+      const scope = text.slice(from, from + 500);
+      return { target: match[2] ?? "", call: scope.split(/\n\s*\}\);/)[0] ?? scope };
+    });
+  }
+
+  /** その本文が、実物の置き場所から起こしている記録スクリプト。 */
+  function offendersIn(label: string, text: string, scripts: string[]): string[] {
+    const calls = spawnCalls(text);
     return scripts.flatMap((script) => {
-      const spawn = new RegExp(
-        `(spawnSync|execFileSync)\\(\\s*join\\(REPO_ROOT,\\s*"bin/${script}"\\)`,
-        "g",
-      );
-      return [...text.matchAll(spawn)]
-        .map((match) => text.slice(match.index ?? 0, (match.index ?? 0) + 500))
-        .map((scope) => scope.split(/\n\s*\}\);/)[0] ?? scope)
-        .filter(runsOnRealRepo)
-        .map(() => `${file}: bin/${script}`);
+      const names = realPathNames(text, script);
+      const direct = `join(REPO_ROOT, "bin/${script}")`;
+      return calls
+        .filter(({ target }) => target.includes(direct) || names.includes(target.trim()))
+        .filter(({ call }) => runsOnRealRepo(call))
+        .map(() => `${label}: bin/${script}`);
     });
   }
 
@@ -224,8 +248,68 @@ describe("試験が、共有の記録を汚さない", () => {
     const scripts = recordingScripts();
     expect(scripts.length, "記録する側が 1 つも無い").toBeGreaterThan(0);
 
-    const offenders = testFiles().flatMap((file) => offendersIn(file, scripts));
+    // **この見張り自身は外す。** **下の「見落とす形」の入力が、まさにその形を
+    // 文字列で持っている**——**入力を咎めると、見落とす形を試せなくなる。**
+    const offenders = testFiles()
+      .filter((file) => !file.endsWith("entry-scripts-lease.test.ts"))
+      .flatMap((file) => offendersIn(file, readFileSync(join(REPO_ROOT, file), "utf8"), scripts));
 
     expect(offenders, "実物のリポジトリに対して走らせている").toEqual([]);
+  });
+
+  /**
+   * **見張り自身が、自分の見落とす形を入力に持つ**（#393 の完了条件）。
+   *
+   * **いま塞いでいるのが見張りなのか、たまたま置かれた身代わりなのかは、
+   * 実物を見ているだけでは分からない**——**見落とす形を置いて、赤くなることを見る。**
+   * **#381 の「変異が当たっていない変異試験」の、見張り版**である。
+   */
+  describe("見張りが、見落とす形を捕まえる", () => {
+    const scripts = ["loop-sync-main", "loop-procedure-body"];
+
+    it("定数を経由した呼び出しにも当たる", () => {
+      const text = [
+        'const SCRIPT = fileURLToPath(new URL("./loop-sync-main", import.meta.url));',
+        'const done = spawnSync(SCRIPT, ["--fetch-only"], { encoding: "utf8" });',
+      ].join("\n");
+
+      expect(offendersIn("例", text, scripts), "定数を経由すると黙る").toEqual([
+        "例: bin/loop-sync-main",
+      ]);
+    });
+
+    it("join を定数へ入れた呼び出しにも当たる", () => {
+      const text = [
+        'const BODY = join(REPO_ROOT, "bin/loop-procedure-body");',
+        'spawnSync(BODY, ["worker"], { encoding: "utf8" });',
+      ].join("\n");
+
+      expect(offendersIn("例", text, scripts)).toEqual(["例: bin/loop-procedure-body"]);
+    });
+
+    it("砂場を渡していれば、当たらない", () => {
+      // **締めすぎない**——**砂場で起こす呼び出しは、記録もそちらへ行く**
+      const text = [
+        'const BODY = join(REPO_ROOT, "bin/loop-procedure-body");',
+        'spawnSync(BODY, ["worker"], { cwd: sandbox, encoding: "utf8" });',
+      ].join("\n");
+
+      expect(offendersIn("例", text, scripts)).toEqual([]);
+    });
+
+    it("写したものを起こす呼び出しには、当たらない", () => {
+      const text = 'spawnSync(join(dir, "bin", "loop-sync-main"), ["--fetch-only"], {});';
+
+      expect(offendersIn("例", text, scripts)).toEqual([]);
+    });
+
+    it("問い合わせには、当たらない", () => {
+      const text = [
+        'const CHANGED = join(REPO_ROOT, "bin/loop-procedure-changed");',
+        'spawnSync(CHANGED, ["--role", "worker", "--list"], { encoding: "utf8" });',
+      ].join("\n");
+
+      expect(offendersIn("例", text, ["loop-procedure-changed"])).toEqual([]);
+    });
   });
 });
