@@ -67,6 +67,8 @@ mapfile -t repo_parts <<<"$repo_ref"
 #
 # **label は 1 つでも見つかれば足りる**ので、**取り切れないほど付いた Issue で
 # 取りこぼしても、倒れる先は「挙げる」側**である（**黙る側ではない**）。
+# **`$owner` などは GraphQL / jq の変数**である——**シェルに展開させない。**
+# shellcheck disable=SC2016
 if ! issues="$(gh api graphql --paginate \
   -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
   -f query='query($owner:String!,$repo:String!,$endCursor:String){

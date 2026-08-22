@@ -86,6 +86,8 @@ fi
 # **印は必ず末尾へ付ける。** **書いた本人が忘れられる形にしない**（上記）
 body="${body}"$'\n\n'"${MARK}"
 
+# **`$owner` などは GraphQL / jq の変数**である——**シェルに展開させない。**
+# shellcheck disable=SC2016
 readonly REPLY_QUERY='mutation($t:ID!,$b:String!){
   addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t, body:$b}){
     comment{url}

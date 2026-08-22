@@ -112,7 +112,11 @@ while :; do
   # 失敗は標準エラーに出るので、握りつぶしてはいない。
   "$(dirname "$0")/loop-lease" heartbeat master || true
   # **残りが間隔より短ければ、残りだけ待つ。** 超過して待つと上限の意味が無くなる。
-  ((remaining < INTERVAL_SEC)) && sleep "$remaining" || sleep "$INTERVAL_SEC"
+  if ((remaining < INTERVAL_SEC)); then
+    sleep "$remaining"
+  else
+    sleep "$INTERVAL_SEC"
+  fi
 done
 
 echo "[WARN] PR #$PR のレビューは ${MAX_SEC} 秒では返りませんでした" >&2

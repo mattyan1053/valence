@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# **このリポジトリの bash を lint する** (#377)。
+#
+#   bin/lint-shell          lint する（shellcheck を呼ぶ）
+#   bin/lint-shell --list   対象を 1 行ずつ出す（読むだけ）
+#
+#   exit 0 = 指摘なし / exit 1 = 指摘あり / exit 2 = 走らせられない・使い方の誤り
+#
+# **`bin/` は lint の外にあった。** **見ていたのは `task` と `docker-entrypoint.sh` の
+# 2 つだけ**で、**このループの中身——lease・停止カウンタ・ゲート・出口——は
+# 1 つも入っていなかった**（**実測: PR #376 で `task` を触ったから SC1010 を拾えた**）。
+#
+# **一覧を書き写さない。** **`bin/` に置かれた bash は全部見る**——**書き写すと、
+# 次に足したスクリプトが黙って外れる**（`AGENTS.md` §5）。**除ける唯一のものは
+# 試験（`*.test.ts`）**で、**あれは bash ではない。**
+#
+# **shellcheck が無ければ落ちる。** **skip は緑に見える**（#210）——**入っていない
+# 環境で「指摘なし」と答えると、見ていないことが緑として記録される。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/lint-shell          lint する" >&2
+  echo "        bin/lint-shell --list   対象を並べる" >&2
+  exit 2
+}
+
+[[ $# -eq 0 || ($# -eq 1 && $1 == "--list") ]] || usage
+
+# **スクリプトの隣から辿る。** **cwd からではない**（`bin/loop-procedure-body` と同じ理由）。
+readonly ROOT="${BASH_SOURCE[0]%/*}/.."
+
+targets() {
+  # **入口の 2 つ**（開発の入口。壊れると何も動かせなくなる）
+  printf '%s\n' "$ROOT/task" "$ROOT/docker-entrypoint.sh"
+  # **`bin/` の中身**（**試験は bash ではないので除く**）
+  local path
+  for path in "$ROOT"/bin/*; do
+    [[ -f $path ]] || continue
+    [[ $path != *.test.ts ]] || continue
+    printf '%s\n' "$path"
+  done
+}
+
+if [[ ${1-} == "--list" ]]; then
+  targets
+  exit 0
+fi
+
+# **呼ぶものを差し替えられるようにしておく**——**試験は「無いときに落ちる」を
+# 見たい**が、**入っている環境と入っていない環境の両方で走る**（#210 の向き）。
+readonly SHELLCHECK="${LOOP_SHELLCHECK:-shellcheck}"
+
+if ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
+  echo "[FAIL] shellcheck がありません。lint できないので止めます" >&2
+  echo "       CI では runner に入っています（.github/workflows/audit.yml）" >&2
+  echo "       手元で見るなら、コンテナ経由で打てます:" >&2
+  echo "         docker run --rm -v \"\$PWD:/mnt\" -w /mnt koalaman/shellcheck:stable \\" >&2
+  echo "           --shell=bash \$(bin/lint-shell --list)" >&2
+  exit 2
+fi
+
+mapfile -t files < <(targets)
+"$SHELLCHECK" --shell=bash "${files[@]}"
