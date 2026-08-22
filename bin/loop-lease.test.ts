@@ -677,6 +677,24 @@ describe("bin/loop-lease", () => {
     });
   });
 
+  it("sha256sum が無くても、周回を始められる", () => {
+    // **ホストには何もインストールしない**（§2）ので、**あることを前提にできない**
+    // ——**入口 1.0 で必ず通る**ので、**無ければ周回が 1 つも始まらない**（#220 の形）。
+    const stub = mkdtempSync(join(tmpdir(), "no-sha256sum-"));
+    try {
+      writeFileSync(join(stub, "sha256sum"), "#!/usr/bin/env bash\nexit 127\n", { mode: 0o755 });
+      const token = acquire("worker", { PATH: `${stub}:${process.env.PATH ?? ""}` }).stdout.trim();
+
+      expect(token, "周回を始められない").not.toBe("");
+      expect(
+        run(["release", "worker", token], { PATH: `${stub}:${process.env.PATH ?? ""}` }).status,
+        "返せない",
+      ).toBe(0);
+    } finally {
+      rmSync(stub, { recursive: true, force: true });
+    }
+  });
+
   it("知らない役は受け付けない", () => {
     // **語彙を固定する。** 綴り違いで別の lease を取ると、直列化しているつもりで
     // 2 つ走る
@@ -1823,7 +1841,7 @@ describe("bin/loop-lease", () => {
       chmodSync(join(sandbox, "bin", "loop-procedure-stamp"), 0o755);
       const older = join(sandbox, "bin", "older-loop-lease");
       const source = readFileSync(SCRIPT, "utf8");
-      const changed = source.replace('lease_scope="worker-${digest%% *}"', formula);
+      const changed = source.replace('lease_scope="worker-$digest"', formula);
       expect(changed, "名前の作り方を差し替えられていない").not.toBe(source);
       writeFileSync(older, changed, { mode: 0o755 });
       return older;

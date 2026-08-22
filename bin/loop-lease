@@ -215,9 +215,12 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
 worker_scope_of() {
   local path="$1" resolved digest
   resolved="$(cd "$path" 2>/dev/null && pwd -P)" || return 2
-  digest="$(printf '%s' "$resolved" | sha256sum)" || return 2
-  [[ -n ${digest%% *} ]] || return 2
-  printf 'worker-%s' "${digest%% *}"
+  # **`git hash-object` で取る** (#383)。**`sha256sum` はホスト標準ではない**
+  # ——**このスクリプトはホストで走り、入口 1.0 で必ず通る**ので、**無い機械では
+  # 周回が 1 つも始まらない**（#220 の `flock` と同じ形）。**`git` は既に必須**である。
+  digest="$(printf '%s' "$resolved" | git hash-object --stdin)" || return 2
+  [[ -n $digest ]] || return 2
+  printf 'worker-%s' "$digest"
 }
 
 # その名前は、この作業場のものか (#298 のレビュー)。
@@ -255,8 +258,7 @@ worker_name_is_mine() {
   [[ $hex =~ ^[0-9a-f]+$ ]] || return 1
   # **短すぎる頭では照合しない**（**別の作業場と当たりうる**）
   ((${#hex} >= 8)) || return 1
-  digest="$(printf '%s' "$resolved" | sha256sum)" || return 1
-  digest="${digest%% *}"
+  digest="$(printf '%s' "$resolved" | git hash-object --stdin)" || return 1
   [[ $digest == "$hex"* ]]
 }
 
@@ -283,11 +285,11 @@ set_role_paths() {
     # 「どのセッションが握っているか」を読めるようにするため**で、そこは
     # `busy` が既に中身から読んでいる (#148)。**衝突すれば直列になる**という性質も
     # そのまま——**同じパスは同じ digest** である。
-    if ! digest="$(printf '%s' "$toplevel" | sha256sum)" || [[ -z ${digest%% *} ]]; then
+    if ! digest="$(printf '%s' "$toplevel" | git hash-object --stdin)" || [[ -z $digest ]]; then
       echo "[FAIL] 作業場の識別子を作れません: $toplevel" >&2
       return 2
     fi
-    lease_scope="worker-${digest%% *}"
+    lease_scope="worker-$digest"
     # **どの作業場かは、名前ではなく中身で照らす** (#291)。**名前の作り方は版で変わる**
     # ので、**別の名前の記録が自分のものかは、記録の 3 行目（作業場）でしか分からない。**
     WORKSPACE_PATH="$toplevel"
