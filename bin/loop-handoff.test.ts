@@ -277,6 +277,9 @@ describe("bin/loop-handoff", () => {
       join(path, "gh"),
       [
         "#!/usr/bin/env bash",
+        // **呼んだ回数を数える** (#363 のレビュー)。**出口は毎周回打たれる**ので、
+        // **候補が増えるほど問い合わせが増える形**になっていないかを見る
+        `printf '%s\\n' "$*" >>${JSON.stringify(join(repo, "gh-calls"))}`,
         ...failureLines(state),
         ...answerLines("repo view", "owner\nrepo"),
         // **理由の無い保留の問い合わせ**（`bin/loop-silent-park`）。**PR 一覧より先に置く**——
@@ -1920,6 +1923,61 @@ describe("bin/loop-handoff", () => {
       withState({ prs: [{ number: 12, unresolvedBy: ["worker"] }] });
 
       expect(run("master").status, "持ち物が無いのに起こしている").toBe(1);
+    });
+  });
+
+  describe("版をまたいで読まれる記録", () => {
+    /** **古い版が読み書きしていた記録**（役ごとに 1 つ）。 */
+    function legacyRecord(role: string): string {
+      const record = join(repo, ".git", `valence-loop-handoff-${role}`);
+      return existsSync(record) ? readFileSync(record, "utf8") : "";
+    }
+
+    it("古い版が読む記録の中身を、書き換えない", () => {
+      // **`AGENTS.md` §5 が名指ししている形** (#363 のレビュー)。**記録は
+      // `.git` の共通ディレクトリにあり、版をまたいで共有される**——**役ごとに
+      // `bin/loop-sync-main` を通る**ので、**master が新版・worker が旧版**という
+      // 期間が、**それぞれの次の周回まで**続く。
+      //
+      // **役ごとの状態は、古い版が見ない場所へ足す**（**足す側にする**）。
+      const stale = "informed\u001fon=changes-requested|pr=12";
+      writeFileSync(join(repo, ".git", "valence-loop-handoff-worker"), stale);
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      expect(cycle("master").status, "渡せていない").toBe(0);
+
+      expect(legacyRecord("worker"), "古い版の記録を書き換えている").toBe(stale);
+    });
+
+    it("足した先で、これまでどおり 2 通目を抑える", () => {
+      // **場所を変えたぶんが効いていること**（**別の場所に書いて、読んでいない**形を止める）
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      expect(cycle("master").status).toBe(0);
+
+      expect(run("master").status, "足した先を読んでいない").toBe(1);
+    });
+  });
+
+  describe("枝を歩くときの問い合わせ", () => {
+    /** `gh pr view --json mergeable` を呼んだ回数。**候補ごとに 1 回**が上限である。 */
+    function conflictChecks(): number {
+      const log = join(repo, "gh-calls");
+      if (!existsSync(log)) {
+        return 0;
+      }
+      return readFileSync(log, "utf8")
+        .split("\n")
+        .filter((line) => line.includes("mergeable")).length;
+    }
+
+    it("同じ PR の衝突判定を、何度も引き直さない", () => {
+      // **歩くたびに残り全件へ掛け直すと N(N+1)/2 回**になる (#363 のレビュー)
+      // ——**`--who` は毎周回打たれる**ので、**常時のコスト**である。
+      withState({ prs: [{ number: 12 }, { number: 13 }, { number: 14 }] });
+
+      run("master", {}, ["--who"]);
+
+      expect(conflictChecks(), "候補ごとに 1 回を超えて引いている").toBeLessThanOrEqual(3);
     });
   });
 

@@ -199,6 +199,29 @@ worktree_dir="$(cd "$worktree_dir" 2>/dev/null && pwd -P)" || {
 }
 readonly PENDING="$worktree_dir/valence-loop-handoff-$ROLE.pending"
 
+# **役ごとの指紋を置く先** (#359 / #363 のレビュー)。
+#
+# **`valence-loop-handoff-<役>` には書かない。** **あれは版をまたいで読まれる記録**で、
+# **古い版は「1 枝ぶんの状態」として読む**（`AGENTS.md` §5。**#281 で 2 周連続で踏んだ形**）。
+# **役ごとに `bin/loop-sync-main` を通る**ので、**master が新版・worker が旧版**という
+# 期間が**それぞれの次の周回まで**続く——**同じ 1 つの記録を、2 つの版が読み書きする。**
+#
+# **逃げ道は「足す」側にある**——**古い版が見ない場所へ置けば、古い版の解釈は変わらない。**
+# **数えたのは「古い読み手が何を読むか」**である: **読むのは
+# `valence-loop-handoff-<役>` だけ**（`bin/loop-handoff` の 3 箇所。ほかのスクリプトは
+# この記録を読まない）。**新しい名前は前方一致でも当たらない**ように分けてある。
+#
+# **その間どうなるか。** **版ごとに別の帳簿を持つ**ので、**古い版は自分が送ったぶんしか
+# 知らない**——**同じ状態で 1 通余計に届くことがある。** **黙るほうへは倒れない**
+# （**新しい版が送ったぶんは、新しい版の帳簿に残る**）——**倒れる向きはこちらが安い。**
+#
+# **古い記録は消さない。** **消すと、まだ旧版で走っている周回が「送っていない」へ落ちる**
+# ——**消す側を足したら、残る側の前提を見直す**（§5）。**全部の作業場が入れ替わったあとで、
+# 別の PR で片付ける。**
+role_record() {
+  printf '%s' "$common_dir/valence-loop-handoff-by-role.$1"
+}
+
 # **記録のロック。** 判断する側と `--sent` で同じものを取る。
 lock_records() {
   exec 9>"$common_dir/valence-loop-handoff.lock" || {
@@ -300,7 +323,7 @@ if ((confirm_sent == 1)); then
   # **こちらの役の記録には、こちらの役の状態が入っている**——**送った状態と
   # 突き合わせる意味が無い**（**必ず食い違い、書かずに終える**）。
   for role in "$sent_to"; do
-    record="$common_dir/valence-loop-handoff-$role"
+    record="$(role_record "$role")"
     stored="$(cat "$record" 2>/dev/null || true)"
     if [[ ${stored#*"$FIELD"} != "$sent_state" ]]; then
       echo "[INFO] 送ったあいだに、より新しい状態が記録されました（$role）。巻き戻さずに終えます" >&2
@@ -319,8 +342,9 @@ if ((confirm_sent == 1)); then
   # 「master の番の枝」で、master が送った「worker の番の枝」とは別の鍵**である。
   # **こちらの役の記録へ相手の状態を書くと、そちらの記録が壊れる。**
   for role in "$sent_to"; do
-    printf '%s' "${INFORMED}${FIELD}${sent_state}" >"$common_dir/valence-loop-handoff-$role" || {
-      echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$role" >&2
+    record="$(role_record "$role")"
+    printf '%s' "${INFORMED}${FIELD}${sent_state}" >"$record" || {
+      echo "[FAIL] 送信記録を書き込めません: $record" >&2
       exit 2
     }
   done
@@ -820,17 +844,25 @@ elif [[ -n $gateable_left ]]; then
   computing=""       # まだ計算中（`UNKNOWN`）
   # **`mergeable` も指紋に載せる。** **候補ごとに載せる**ので、
   # **どれか 1 本の状態が動いた瞬間に指紋も動く**——**解けたら次の枝へそのまま移る。**
+  # **同じ PR を 2 度引かない** (#363 のレビュー)。**枝は歩くたびに残りを見る**ので、
+  # **その都度引き直すと N(N+1)/2 回**になる——**`--who` は毎周回打たれる**ので、
+  # **常時のコスト**である。**状態は周回の中で変わらない**（**同じ盤面を読んでいる**）。
   for candidate in $(printf '%s\n' $gateable_left | sort -n); do
-    "${BASH_SOURCE[0]%/*}/loop-ci-status" --conflicting "$candidate" >/dev/null
-    case "$?" in
-      0) conflicting="${conflicting:+$conflicting }$candidate"; mergeable_code=1 ;;
-      1) mergeable_code=0 ;;
-      3) computing="${computing:+$computing }$candidate"; mergeable_code=2 ;;
-      # **判定不能を「していない」へ倒さない**——**倒すと、コンフリクトしている PR が
-      # master 宛てになり、ゲートで落ちるだけで誰も直さない。**
-      *) fail_unknown "PR #${candidate} がコンフリクトしているか" ;;
+    if [[ -z ${mergeable_of[$candidate]-} ]]; then
+      "${BASH_SOURCE[0]%/*}/loop-ci-status" --conflicting "$candidate" >/dev/null
+      case "$?" in
+        0) mergeable_of[$candidate]=1 ;;
+        1) mergeable_of[$candidate]=0 ;;
+        3) mergeable_of[$candidate]=2 ;;
+        # **判定不能を「していない」へ倒さない**——**倒すと、コンフリクトしている PR が
+        # master 宛てになり、ゲートで落ちるだけで誰も直さない。**
+        *) fail_unknown "PR #${candidate} がコンフリクトしているか" ;;
+      esac
+    fi
+    case "${mergeable_of[$candidate]}" in
+      1) conflicting="${conflicting:+$conflicting }$candidate" ;;
+      2) computing="${computing:+$computing }$candidate" ;;
     esac
-    mergeable_of[$candidate]="$mergeable_code"
   done
   if [[ -n $conflicting || -n $computing ]]; then
     # **起こす先は worker ではない** (#349 のレビュー)。**取り込み直せるのは著者だけ**だが、
@@ -1031,7 +1063,7 @@ rm -f "$PENDING" || {
 
 declare -A informed=()
 for role in "${ROLES[@]}"; do
-  record="$common_dir/valence-loop-handoff-$role"
+  record="$(role_record "$role")"
   stored="$(cat "$record" 2>/dev/null || true)"
   # **印は 1 列目**。状態そのものにも `$FIELD` が入るので、**最初の 1 つだけ**を剥がす。
   # **前の版が書いた記録には印が無い**（状態がそのまま入っている）。その場合は
