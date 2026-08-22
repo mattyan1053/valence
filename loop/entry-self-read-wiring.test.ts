@@ -52,6 +52,31 @@ describe("配られた本文が古いとき", () => {
     expect(read, "読み直す前に人を呼んでいる").toBeLessThan(stall);
   });
 
+  it.each(ROLES)("%s は、取り直せたら止まらない", (role) => {
+    // **手を挟んだら、その前後の文が新しい経路にも掛かる** (#374 のレビュー。§5)。
+    // **分岐が無いと、読み直して取り直したあとの行が「そこで終える」**になり、
+    // **この直しが直そうとしたものが、そのまま残る**——**しかも `acquire` を
+    // 通しているので、握ったまま終わる**（#370 で直したのと同じ倒れ方）。
+    const section = staleSection(role);
+    const acquire = section.indexOf(`bin/loop-lease acquire ${role}`, section.indexOf("--entry"));
+    const stall = section.indexOf("`bin/loop-stall procedure-stale` を通す");
+    const forward = section.indexOf("1.1", acquire);
+
+    expect(forward, "取り直せたときの進み先が書いていない").toBeGreaterThan(acquire);
+    expect(forward, "進む前に人を呼んでいる").toBeLessThan(stall);
+  });
+
+  it.each(ROLES)("%s は、取り直せなかったときだけ人を呼ぶ", (role) => {
+    // **分けてあること**を見る——**片方しか書いていないと、読む側はどちらへも行ける**
+    const section = staleSection(role);
+    const acquire = section.indexOf(`bin/loop-lease acquire ${role}`, section.indexOf("--entry"));
+    const stall = section.indexOf("`bin/loop-stall procedure-stale` を通す");
+    const between = section.slice(acquire, stall);
+
+    expect(between, "取り直せたときの分岐が無い").toMatch(/exit 0/);
+    expect(between, "取り直せなかったときの分岐が無い").toMatch(/それ以外|読めない/);
+  });
+
   it.each(ROLES)("%s は、読み直したあとに印を突き合わせ直す", (role) => {
     // **印の検査を捨てない** (#241 / #243 / #244)。**読み直しただけで進むと、
     // 「古い手順で走り続ける」を自分で作る**——**読んだ本文の印で取り直す。**
