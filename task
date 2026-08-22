@@ -143,9 +143,14 @@ git_common_dir() {
 }
 
 compose() {
-  local port
+  local port inputs
   port="$(workspace_port)" || return 1
+  # **build 入力の指紋を渡す** (#380)。**`compose up` が暗黙に build する経路**でも
+  # **ラベルが載る**ようにする——**`./task build` のときだけ渡すと、
+  # 「いつの build か分からない」イメージが普通に生まれる。**
+  inputs="$(./bin/image-drift digest)" || inputs=""
   VALENCE_APP_PORT="$port" VALENCE_GIT_COMMON_DIR="$(git_common_dir)" \
+    VALENCE_BUILD_INPUTS="$inputs" \
     docker compose -p "$(workspace_name)" "$@"
 }
 
@@ -866,6 +871,10 @@ ensure_commit_guard() {
 # **走っている作業を巻き込む**——**気づかせるところまで**である。
 warn_stale_containers() {
   ./bin/db-config-drift check || true
+  # **イメージが古いことも、使う前に言う** (#380)——**`Dockerfile` に何かを足した
+  # PR がマージされても、走っている作業場は古いイメージのまま動き続ける**
+  # （**気づくのは、そのぶんが要る検査が落ちたとき**である）。
+  ./bin/image-drift check "$(workspace_name)-app" || true
 }
 
 main() {

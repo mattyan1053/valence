@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# **走っているイメージが、いまの `Dockerfile` と食い違っていないかを見る** (#380)。
+#
+#   bin/image-drift digest          いまの build 入力の指紋を出す（`./task` が渡す）
+#   bin/image-drift check <イメージ> 食い違っていれば、作り直し方を出す
+#
+#   exit 0 = 食い違いなし（**何も出さない**）／**そのイメージがまだ無い**
+#   exit 1 = 古い（**作り直し方**を出す）
+#   exit 2 = 判定できない / 使い方の誤り
+#
+# **イメージに何かを足すと、走っている作業場は次の周回で赤くなる** (#379)——
+# **「作り直せ」を伝える口が無かった。** **`warn_stale_containers` は
+# `bin/db-config-drift` しか見ていない**ので、**`supabase/config.toml` のずれは鳴るのに、
+# **イメージそのものが古いときは鳴らない。**
+#
+# **何と比べるか。** **イメージに焼き込まれるファイル**（`Dockerfile` と
+# `docker-entrypoint.sh`）**の内容**である。**指紋はイメージのラベルに残す**
+# ——**残る側はイメージ**である（`AGENTS.md` §5）。**記録をファイルに置くと、
+# `./task` を通さずに作り直したときに嘘になる。**
+#
+# **commit では見ない。** **作業ツリーで直している最中は commit されていない**ので、
+# **「直したのに鳴らない」**になる——**内容で見れば、直した瞬間から鳴る。**
+#
+# **止めない。** **`bin/db-config-drift` と揃えて警告である**——**古いイメージでも
+# ほとんどの作業は進む**ので、**止めると直しに行く経路まで閉じる**（#184 の形）。
+#
+# **鳴りっぱなしにしない。** **鳴るのは本当に古いあいだだけ**で、
+# **作り直せば止まる**（**ラベルが新しくなる**）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+readonly LABEL="valence.build-inputs"
+# **呼ぶものを差し替えられるようにしておく**（`bin/lint-shell` と同じ理由）——
+# **試験は「無いときに分からないと言う」を見たい**が、**入っている環境でも走る。**
+readonly DOCKER="${LOOP_DOCKER:-docker}"
+readonly FIX="./task build"
+
+usage() {
+  echo "使い方: bin/image-drift digest           build 入力の指紋を出す" >&2
+  echo "        bin/image-drift check <イメージ>  古ければ作り直し方を出す" >&2
+  echo "        exit 0 食い違いなし / exit 1 古い / exit 2 判定できない" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+
+# **スクリプトの隣から辿る。** **cwd からではない**（`bin/lint-shell` と同じ理由）。
+readonly ROOT="${BASH_SOURCE[0]%/*}/.."
+
+# **イメージに焼き込まれるものだけを見る。** **`package.json` は入っていない**
+# （**依存は起動時に volume へ入れる**ので、**イメージを作り直す理由にならない**）。
+readonly INPUTS=("$ROOT/Dockerfile" "$ROOT/docker-entrypoint.sh")
+
+digest() {
+  local path
+  for path in "${INPUTS[@]}"; do
+    if [[ ! -f $path ]]; then
+      echo "[FAIL] build の入力が見つかりません: $path" >&2
+      return 2
+    fi
+  done
+  # **中身だけを混ぜる**（**パスを混ぜると、作業場ごとに違う指紋になる**）
+  local sum
+  if ! sum="$(cat "${INPUTS[@]}" | sha256sum)"; then
+    echo "[FAIL] build の入力を読めません" >&2
+    return 2
+  fi
+  printf '%s\n' "${sum%% *}"
+}
+
+case "$1" in
+  digest)
+    [[ $# -eq 1 ]] || usage
+    digest
+    ;;
+  check)
+    [[ $# -eq 2 ]] || usage
+    want="$(digest)" || exit 2
+    if ! command -v "$DOCKER" >/dev/null 2>&1; then
+      echo "[FAIL] docker がありません。イメージが古いかどうかは分かりません" >&2
+      exit 2
+    fi
+    # **まだ無いイメージは「古い」ではない**——**compose がこれから作る。**
+    if ! have="$("$DOCKER" image inspect "$2" --format "{{index .Config.Labels \"$LABEL\"}}" 2>/dev/null)"; then
+      exit 0
+    fi
+    [[ $have != "$want" ]] || exit 0
+    echo "[WARN] このイメージは、いまの Dockerfile より古いかもしれません: $2" >&2
+    if [[ -z $have ]]; then
+      # **ラベルが無いのは、この仕組みより前に作られたイメージ**である
+      echo "       いつの build か分かりません（この仕組みより前に作られています）" >&2
+    fi
+    echo "       作り直すまで、足りないものは入っていません:" >&2
+    echo "         $FIX" >&2
+    exit 1
+    ;;
+  *) usage ;;
+esac
