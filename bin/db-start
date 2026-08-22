@@ -52,6 +52,9 @@ readonly WAIT_SEC
 # **通ってしまうなら、それは隠したことになる。**
 readonly RETRYABLE='failed to bind host port|address already in use'
 
+# **落とすものが無かった、と読める文面。** **これ以外は「落とせなかった」へ倒す** (#371)。
+readonly NOT_RUNNING='not running|no such container|is not running'
+
 attempt=1
 while :; do
   out="$(mktemp)" || {
@@ -82,9 +85,33 @@ while :; do
   fi
 
   echo "[WARN] ポートの衝突で起動できませんでした（${attempt}/${ATTEMPTS}）。やり直します" >&2
+
   # **残骸を残したまま上げ直さない**——**半分起きた状態が、次の bind を塞ぐ。**
-  # **落とせなくても進む**（**そもそも起きていないこともある**）。
-  pnpm exec supabase stop >/dev/null 2>&1
+  #
+  # **「起きていなかった」と「落とせなかった」を分ける** (#371 のレビュー)。
+  # **落とすものが無いのは失敗ではない**（**1 回目が衝突しただけの回まで人を呼ぶ**）が、
+  # **落とせなかったのは別**である——**塞いだまま上げ直しても、同じところで落ちる。**
+  #
+  # **見分けは文面で行う。** **`supabase stop` は、起きていないときも非ゼロで戻る**ので、
+  # **終了コードだけでは分けられない。** **知らない文面は「落とせなかった」へ倒す**
+  # ——**塞いだまま 2 回空振りするより、1 回で理由を出すほうが早い。**
+  stopped="$(mktemp)" || {
+    echo "[FAIL] 出力を受け取れません" >&2
+    exit 1
+  }
+  if ! pnpm exec supabase stop >"$stopped" 2>&1; then
+    if ! grep -qiE "$NOT_RUNNING" "$stopped"; then
+      # **理由は捨てない** (#371 のレビュー)。**人を呼ぶことになった回に、
+      # いちばん要る情報が消えているのがいちばん困る。**
+      cat "$stopped" >&2
+      echo "[FAIL] 起動をやり直す前に、走っているものを落とせませんでした" >&2
+      echo "       塞いだまま上げ直しても同じところで落ちるので、ここで止めます" >&2
+      rm -f "$stopped"
+      exit 1
+    fi
+    # **起きていなかっただけ。** **落とすものが無いのは失敗ではない。**
+  fi
+  rm -f "$stopped"
   ((WAIT_SEC > 0)) && sleep "$WAIT_SEC"
   attempt=$((attempt + 1))
 done

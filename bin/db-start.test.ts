@@ -29,6 +29,12 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BIND_FAILURE =
   "failed to bind host port for 0.0.0.0:54322:172.18.0.2:5432/tcp: address already in use";
 
+/** **起きていなかったとき**の文面（`supabase stop`）。 */
+const NOT_RUNNING = "supabase local development setup is not running.";
+
+/** **落とせなかったとき**の文面。**docker が居ない・応答しない、が実際の形**である。 */
+const STOP_FAILURE = "failed to stop containers: Cannot connect to the Docker daemon";
+
 const sandboxes: string[] = [];
 
 afterEach(() => {
@@ -44,7 +50,14 @@ afterEach(() => {
  * **呼ばれた引数はすべて記録する**——**「やり直していない」も「止めていない」も、
  * ここでしか見えない。**
  */
-function withPnpm(plan: ("ok" | "bind" | "other")[]): { dir: string; log: () => string[] } {
+function withPnpm(
+  plan: ("ok" | "bind" | "other")[],
+  /**
+   * `stop` の落ち方（#371 のレビュー）。**「そもそも起きていない」と
+   * 「落とせなかった」は別**である——**入力に入れないと、その区別は見えない。**
+   */
+  stop: "ok" | "not-running" | "fails" = "ok",
+): { dir: string; log: () => string[] } {
   const dir = mkdtempSync(join(tmpdir(), "db-start-"));
   sandboxes.push(dir);
   const log = join(dir, "pnpm.log");
@@ -55,6 +68,13 @@ function withPnpm(plan: ("ok" | "bind" | "other")[]): { dir: string; log: () => 
     [
       "#!/usr/bin/env bash",
       `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`,
+      'if [[ "$*" == *"supabase stop"* ]]; then',
+      ...(stop === "ok"
+        ? ["  exit 0"]
+        : stop === "not-running"
+          ? [`  echo ${JSON.stringify(NOT_RUNNING)} >&2`, "  exit 1"]
+          : [`  echo ${JSON.stringify(STOP_FAILURE)} >&2`, "  exit 1"]),
+      "fi",
       'if [[ "$*" != *"supabase start"* ]]; then exit 0; fi',
       `n=$(cat ${JSON.stringify(count)} 2>/dev/null || echo 0)`,
       "n=$((n + 1))",
@@ -134,6 +154,39 @@ describe("bin/db-start", () => {
     const done = runStart(dir);
 
     expect(done.stderr, "理由が消えている").toContain("migration failed");
+  });
+});
+
+describe("落とせなかったのか、起きていなかったのか", () => {
+  it("落とせなかったら、やり直さずに中断する", () => {
+    // **塞いだまま 2 回空振りするより、1 回で理由を出すほうが早い**（#371 のレビュー）
+    const { dir, log } = withPnpm(["bind", "ok"], "fails");
+
+    const done = runStart(dir);
+
+    expect(done.status, "落ちていない").not.toBe(0);
+    expect(startsIn(log()), "落とせていないのにやり直している").toBe(1);
+  });
+
+  it("落とせなかった理由を出す", () => {
+    // **やり直す仕組みを入れた目的は「人を呼ばずに済ませる」ことだった**が、
+    // **呼ぶことになった回に、いちばん要る情報が消えていた**（`>/dev/null 2>&1`）
+    const { dir } = withPnpm(["bind", "ok"], "fails");
+
+    const done = runStart(dir);
+
+    expect(done.stderr, "理由が消えている").toContain("Cannot connect to the Docker daemon");
+  });
+
+  it("そもそも起きていなかったなら、やり直す", () => {
+    // **落とすものが無いのは、失敗ではない**——**ここで中断すると、
+    // 1 回目が衝突しただけの回まで人が呼ばれる**
+    const { dir, log } = withPnpm(["bind", "ok"], "not-running");
+
+    const done = runStart(dir);
+
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    expect(startsIn(log()), "やり直していない").toBe(2);
   });
 });
 
