@@ -53,6 +53,10 @@ readonly LOCK_WAIT_SEC="${LOOP_LEASE_LOCK_WAIT_SEC:-10}"
 # **設定で変えられるようにしない**（変える理由が出てから考える）。
 readonly RECENT_ROUNDS=5
 
+# 周回の始まりを何本残すか (#378)。**見るのは種類ごとの最後の 1 本**なので、
+# **増え続けないための上限**であって、意味のある数ではない。
+readonly RECENT_STARTS=20
+
 usage() {
   echo "使い方: bin/loop-lease acquire <役> <手順書の印>" >&2
   echo "        bin/loop-lease recover <役> <手順書の印>  印がずれた周回が、木を入れ替える前に押さえる" >&2
@@ -114,6 +118,25 @@ fi
 
 [[ $# -ge 1 ]] || usage
 readonly ACTION="$1"
+
+# **周回が「どう始まったか」** (#378)。**cron の周回と、人に突かれた周回を見分ける**
+# ——**見分けないと、突かれて動いた日が「健全」に見える**（実測。`bin/loop-cadence`）。
+#
+# **省略できる**（**渡さなければ `unknown`**）。**古い手順書を配られた周回も通る**が、
+# **`unknown` は cron と数えない**——**判定不能を「動いていた」へ倒さない。**
+TRIGGER="unknown"
+if [[ $# -ge 2 && ${*: -2:1} == "--trigger" ]]; then
+  TRIGGER="${*: -1}"
+  case "$TRIGGER" in
+    cron | poke) ;;
+    *)
+      echo "[FAIL] --trigger は cron か poke です（渡されたもの: $TRIGGER）" >&2
+      exit 2
+      ;;
+  esac
+  set -- "${@:1:$#-2}"
+fi
+readonly TRIGGER
 
 # **`check` は役を取らない。** 役を引数で固定すると、**`bin/loop-review-head` や
 # `bin/loop-claim` のように両方の役が使うもの**で必ずどちらかが偽になる——
@@ -278,6 +301,9 @@ set_role_paths() {
   # 消してしまうと**周回と周回の間が「始めていない」と同じ見え方**になる
   # （bin/loop-stall がそれで数えられなくなった）。
   ROUNDS="$common_dir/valence-loop-rounds-$lease_scope"
+  # **周回が始まった記録** (#378)。**`ROUNDS` に列を足さない**——**あれは前の版も
+  # 読んでいる**ので、**列を足すと解釈が黙って変わる**（`AGENTS.md` §5）。
+  STARTS="$common_dir/valence-loop-starts-$lease_scope"
   # **いちばん長かった周回の秒数。** 「周回が動いているか」を外から判断するのに使う
   # （bin/loop-stall）。**書き写した閾値を置かないため**に、実測を溜める形にしてある。
   ROUND_LEN="$common_dir/valence-loop-roundlen-$lease_scope"
@@ -1309,6 +1335,22 @@ acquire | recover)
   if ! { printf '%s\n' "$now" >"$ROUNDS.tmp" 2>/dev/null && mv -f "$ROUNDS.tmp" "$ROUNDS" 2>/dev/null; }; then
     rm -f "$ROUNDS.tmp" 2>/dev/null || true
     echo "[WARN] $SCOPE_LABEL の周回の印を書けません: $ROUNDS" >&2
+  fi
+  # **どう始まったかを残す** (#378)。**足すのは別のファイルである**（上の `STARTS`）。
+  # **失敗しても lease は取れているので止めない**——**読む側は記録が無ければ
+  # 「分からない」と答える**（`bin/loop-cadence`）。
+  #
+  # **増え続けさせない。** **見るのは最後の 1 本ずつ**なので、**古い行は落としてよい。**
+  # **作業場も書く** (#381 のレビュー)。**共通ディレクトリは worktree をまたいで 1 つ**
+  # なので、**消した作業場の記録も残る**——**読む側が「まだ居るか」を見られるようにする。**
+  # **scope からは戻せない**（digest である）ので、**ここで書くしかない。**
+  if ! printf '%s\t%s\t%s\n' "$now" "$TRIGGER" "$workspace" >>"$STARTS" 2>/dev/null; then
+    echo "[WARN] $SCOPE_LABEL の周回の始まりを書けません: $STARTS" >&2
+  elif kept_starts="$(tail -n "$RECENT_STARTS" "$STARTS" 2>/dev/null)"; then
+    if ! { printf '%s\n' "$kept_starts" >"$STARTS.tmp" 2>/dev/null &&
+      mv -f "$STARTS.tmp" "$STARTS" 2>/dev/null; }; then
+      rm -f "$STARTS.tmp" 2>/dev/null || true
+    fi
   fi
   echo "$token"
   ;;
