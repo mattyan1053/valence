@@ -38,6 +38,29 @@ describe("イメージが古いことの合図", () => {
     expect(dockerfile, "ラベルにしていない").toContain("LABEL valence.build-inputs=");
   });
 
+  it("`./task` が、指紋を作れなかったことを黙らない", () => {
+    // **黙って空にすると、ラベルの無いイメージが普通に生まれ**、
+    // **以後の合図が「分からない」と言い続ける**（#382 のレビュー）
+    const compose = read("task").split("compose() {")[1]?.split("\n}")[0] ?? "";
+
+    expect(compose, "失敗を黙って空にしている").toMatch(/\[WARN\]/);
+  });
+
+  it("合図は、走っているコンテナも見る", () => {
+    // **`./task build` はタグを作り直すだけ**——**入れ替えるまで、走っているのは古い**
+    const warn = read("task").split("warn_stale_containers() {")[1]?.split("\n}")[0] ?? "";
+    // **コメントは落として見る**——**理由の説明として書いた語に当たると、
+    // 実際の呼び出しを直さなくても赤くなる**（`bin/loop-close-candidates` の試験と同じ）
+    const executed = warn
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+
+    expect(executed, "コンテナを渡していない").toContain("com.docker.compose.service=app");
+    // **compose を増やさない**——**`./task` を打つたびに通るところ**である
+    expect(executed, "compose を 1 回増やしている").not.toMatch(/compose ps/);
+  });
+
   it("毎回の合図が、それを読む", () => {
     // **`bin/db-config-drift` の隣**である（**同じ問い**——**走っているものが古い**）
     const warn = read("task").split("warn_stale_containers() {")[1]?.split("\n}")[0] ?? "";

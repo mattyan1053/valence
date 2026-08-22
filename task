@@ -148,7 +148,12 @@ compose() {
   # **build 入力の指紋を渡す** (#380)。**`compose up` が暗黙に build する経路**でも
   # **ラベルが載る**ようにする——**`./task build` のときだけ渡すと、
   # 「いつの build か分からない」イメージが普通に生まれる。**
-  inputs="$(./bin/image-drift digest)" || inputs=""
+  if ! inputs="$(./bin/image-drift digest)"; then
+    # **黙って空にしない** (#382 のレビュー)——**空のまま build すると、ラベルの無い
+    # イメージが普通に生まれ、以後の合図が「分からない」と言い続ける。**
+    echo "[WARN] build 入力の指紋を作れません。作り直しの合図が効きません" >&2
+    inputs=""
+  fi
   VALENCE_APP_PORT="$port" VALENCE_GIT_COMMON_DIR="$(git_common_dir)" \
     VALENCE_BUILD_INPUTS="$inputs" \
     docker compose -p "$(workspace_name)" "$@"
@@ -874,7 +879,18 @@ warn_stale_containers() {
   # **イメージが古いことも、使う前に言う** (#380)——**`Dockerfile` に何かを足した
   # PR がマージされても、走っている作業場は古いイメージのまま動き続ける**
   # （**気づくのは、そのぶんが要る検査が落ちたとき**である）。
-  ./bin/image-drift check "$(workspace_name)-app" || true
+  # **走っているコンテナも渡す** (#382 のレビュー)——**`./task build` はタグを
+  # 作り直すだけ**で、**入れ替えるまでは古いイメージ ID のまま動く。**
+  #
+  # **`compose ps` ではなく `docker ps` で引く。** **`warn_stale_containers` は
+  # `./task` を打つたびに通る**ので、**compose を 1 回増やすと、全部のコマンドが
+  # そのぶん遅くなる**（**試験もその増加を見ている**）。**探し方は compose が
+  # コンテナに付ける label** である。
+  local container
+  container="$(docker ps -q \
+    --filter "label=com.docker.compose.project=$(workspace_name)" \
+    --filter "label=com.docker.compose.service=app" 2>/dev/null | head -1)" || container=""
+  ./bin/image-drift check "$(workspace_name)-app" "$container" || true
 }
 
 main() {

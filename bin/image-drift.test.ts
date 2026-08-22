@@ -32,7 +32,15 @@ afterEach(() => {
  *
  * `label` は偽の `docker` が返す値。`null` なら「そのイメージは無い」。
  */
-function checkout(options: { dockerfile?: string; label?: string | null } = {}): string {
+function checkout(
+  options: {
+    dockerfile?: string;
+    /** タグのラベル。`null` なら「そのイメージは無い」。 */
+    label?: string | null;
+    /** 走っているコンテナのイメージのラベル。**渡すと、コンテナがある状態**になる。 */
+    runningLabel?: string;
+  } = {},
+): string {
   const dir = mkdtempSync(join(tmpdir(), "image-drift-"));
   sandboxes.push(dir);
   mkdirSync(join(dir, "bin"), { recursive: true });
@@ -42,11 +50,33 @@ function checkout(options: { dockerfile?: string; label?: string | null } = {}):
   writeFileSync(join(dir, "docker-entrypoint.sh"), '#!/usr/bin/env bash\nexec "$@"\n');
   const stub = join(dir, "stub");
   mkdirSync(stub, { recursive: true });
+  // **偽の `docker`。** **コンテナの image id を引く口**（`docker inspect <cid>`）と、
+  // **イメージのラベルを引く口**（`docker image inspect <ref>`）を分けて答える。
+  const running = options.runningLabel;
   writeFileSync(
     join(stub, "docker"),
-    options.label === null
-      ? '#!/usr/bin/env bash\necho "No such image" >&2\nexit 1\n'
-      : `#!/usr/bin/env bash\nprintf '%s\\n' ${JSON.stringify(options.label ?? "")}\nexit 0\n`,
+    [
+      "#!/usr/bin/env bash",
+      // コンテナ → そのコンテナが使っているイメージ（id は "走っているイメージ"）
+      'if [[ $1 == "inspect" ]]; then',
+      running === undefined
+        ? '  echo "No such object" >&2; exit 1'
+        : "  printf '%s\\n' \"走っているイメージ\"; exit 0",
+      "fi",
+      // イメージ → ラベル
+      'if [[ $1 == "image" ]]; then',
+      '  if [[ $3 == "走っているイメージ" ]]; then',
+      running === undefined
+        ? '    echo "No such image" >&2; exit 1'
+        : `    printf '%s\\n' ${JSON.stringify(running)}; exit 0`,
+      "  fi",
+      options.label === null
+        ? '  echo "No such image" >&2; exit 1'
+        : `  printf '%s\\n' ${JSON.stringify(options.label ?? "")}; exit 0`,
+      "fi",
+      'echo "スタブ: 想定外の docker 呼び出し: $*" >&2',
+      "exit 2",
+    ].join("\n"),
     { mode: 0o755 },
   );
   return dir;
@@ -140,10 +170,49 @@ describe("bin/image-drift", () => {
     expect(run(dir, ["digest", "余計"]).status).toBe(2);
   });
 
+  it("走っているコンテナが古ければ、タグが新しくても鳴る", () => {
+    // **これが本題** (#382 のレビュー)。**`./task build` はタグを作り直すだけ**で、
+    // **走っているコンテナは古いイメージ ID のまま**——**タグだけを見ると、
+    // 案内どおりに打った直後に「直った」と嘘をつく。**
+    const dir = checkout({ runningLabel: "前の指紋" });
+    const digest = run(dir, ["digest"]).stdout.trim();
+    const same = checkout({ label: digest, runningLabel: "前の指紋" });
+
+    const result = run(same, ["check", "valence-app", "コンテナ"]);
+
+    expect(result.status, "タグが新しいだけで黙っている").toBe(1);
+    expect(result.stderr, "入れ替えまで案内していない").toContain("./task up");
+    expect(dir).toBeTruthy();
+  });
+
+  it("走っているコンテナが新しければ、何も言わない", () => {
+    const dir = checkout();
+    const digest = run(dir, ["digest"]).stdout.trim();
+    const same = checkout({ label: "前の指紋", runningLabel: digest });
+
+    const result = run(same, ["check", "valence-app", "コンテナ"]);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr, "使っているものは新しいのに鳴っている").toBe("");
+  });
+
+  it("sha256sum が無くても、指紋を出せる", () => {
+    // **`sha256sum` はホスト標準ではない** (#195 のレビュー)——**`git hash-object` で取る**
+    const dir = checkout();
+    writeFileSync(join(dir, "stub", "sha256sum"), "#!/usr/bin/env bash\nexit 127\n", {
+      mode: 0o755,
+    });
+
+    const result = run(dir, ["digest"]);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim(), "git の hash になっていない").toMatch(/^[0-9a-f]{40}$/);
+  });
+
   it("実物の checkout でも、指紋を出せる", () => {
     const result = spawnSync(SCRIPT, ["digest"], { cwd: REPO_ROOT, encoding: "utf8" });
 
     expect(result.status).toBe(0);
-    expect(result.stdout.trim(), "指紋の形が違う").toMatch(/^[0-9a-f]{64}$/);
+    expect(result.stdout.trim(), "指紋の形が違う").toMatch(/^[0-9a-f]{40}$/);
   });
 });
