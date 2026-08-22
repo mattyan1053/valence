@@ -815,6 +815,27 @@ if [[ $ACTION == "busy" ]]; then
   exit 0
 fi
 
+# **前の版の名前で、この周回が持っていないか** (#383)。
+#
+# **`release` は token で引き直す** (#240) が、**`check` は token を持たない**
+# ——**周回の印（owner）で照らす。** **別の作業場の記録は、印が違うので当たらない。**
+#
+# **前提: `set_role_paths` を通していること**（`STATE` を除いて走査する）。
+held_under_other_name() {
+  local role="$1" want_owner="$2" candidate first second
+  for candidate in "$common_dir/valence-loop-lease-$role"*; do
+    [[ -f $candidate ]] || continue
+    [[ $candidate != *.lock && $candidate != *.tmp ]] || continue
+    [[ $candidate != "$STATE" ]] || continue
+    { read -r first && read -r second; } <"$candidate" 2>/dev/null || continue
+    # **1 行目は token と時刻、2 行目が周回の印**である
+    [[ -n ${first%%$'\t'*} ]] || continue
+    [[ $second == "$want_owner" ]] || continue
+    return 0
+  done
+  return 1
+}
+
 # **この周回が、その役の lease を持っているか。** **読み方はここ 1 つ** (#352)。
 #
 #   0 = 持っている / 1 = 持っていない / 2 = 読めない / 3 = 分からない
@@ -859,6 +880,15 @@ round_holds() {
     if [[ -n $owner ]] && superseded_has "" "$owner"; then
       echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
       echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
+      return 0
+    fi
+    # **前の版の名前で持っていないかを見る** (#383。#240 / #290 / #291 と同じ形)。
+    # **名前の作り方は版で変わる**——**新しい名前だけを見ると、健全な周回が
+    # 「入口を飛ばした」として記録され**、**その記録が読めなくなる**
+    # （**偽の記録より取りこぼしのほうが安い**、が崩れる）。**実地で踏んだ。**
+    if [[ -n $owner ]] && held_under_other_name "$role" "$owner"; then
+      echo "[WARN] この周回の lease は、いまと違う名前で置かれています（版が入れ替わりました）" >&2
+      echo "       返すときは、そのまま同じ token で返せます" >&2
       return 0
     fi
     return 1

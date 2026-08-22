@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -1887,6 +1888,26 @@ describe("bin/loop-lease", () => {
       const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
 
       expect(released.status, released.stderr).toBe(0);
+    });
+
+    it("前の版の名前で持っている周回を、飛ばしたと記録しない", () => {
+      // **`check` は「この周回が持っているか」を見る** (#161)——**名前が変わると、
+      // 新しい名前を見て「持っていない」と読む。** **健全な周回が「入口を飛ばした」
+      // として記録され**、**その記録が読めなくなる**（**偽の記録より取りこぼしのほうが安い**）。
+      //
+      // **実地で踏んだ** (#383)——**古い名前で取った周回が、新しい版の `bin/loop-*` を
+      // 打つたびに 1 件ずつ積んだ。**
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      const checked = runWith(SCRIPT, ["check"]);
+
+      expect(checked.status, checked.stderr).toBe(0);
+      expect(checked.stderr, "持っているのに飛ばしたと言っている").not.toContain("飛ばした");
+      expect(
+        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        "健全な周回を、飛ばしとして記録している",
+      ).toBe(false);
     });
 
     it("前の版が持っている lease は、いまの版の acquire にも見える", () => {
