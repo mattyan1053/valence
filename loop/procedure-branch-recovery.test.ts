@@ -9,6 +9,10 @@
  * **見るのは「書いてあること」だけではない。** **手順書に書いてあるとおりに走らせて、
  * 実際に揃うこと**を見る——**書き写した手順は、実物が変わっても緑のまま**である
  * （#181 / #183 と同じ理由）。
+ *
+ * **走らせるだけでも足りない**（#370 のレビュー）。**踏む形を入力に入れる**——
+ * **clean な git と、成功する `fetch` しか置かなければ、「動く条件では動いていた」しか
+ * 言えない。** **dirty と、戻れない `origin` を置く。**
  */
 
 import { spawnSync } from "node:child_process";
@@ -46,6 +50,102 @@ function recoveryBlock(): string {
   return found[0] ?? "";
 }
 
+const sandboxes: string[] = [];
+
+afterEach(() => {
+  for (const dir of sandboxes.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function git(cwd: string, ...args: string[]): string {
+  const done = spawnSync(
+    "git",
+    ["-c", "user.email=loop@example.invalid", "-c", "user.name=loop", ...args],
+    { cwd, encoding: "utf8" },
+  );
+  expect(done.status, done.stderr).toBe(0);
+  return done.stdout.trim();
+}
+
+/**
+ * **実物のスクリプトを置く。** **偽物にすると「呼んでいるのに何も見ていない」形が
+ * 緑になる**（#227）。
+ */
+function placeScripts(workspace: string): void {
+  const bin = join(workspace, "bin");
+  mkdirSync(bin, { recursive: true });
+  for (const name of [
+    "loop-sync-main",
+    "loop-procedure-stamp",
+    "loop-procedure-changed",
+    "loop-stall",
+    // **`bin/loop-stall` は作業場の名前を `bin/loop-lease` に訊く**（#239）
+    "loop-lease",
+  ]) {
+    const target = join(bin, name);
+    copyFileSync(join(REPO_ROOT, "bin", name), target);
+    chmodSync(target, 0o755);
+  }
+}
+
+function writeEntry(workspace: string, body: string): void {
+  mkdirSync(join(workspace, ".claude", "commands"), { recursive: true });
+  writeFileSync(
+    join(workspace, ".claude", "commands", "loop-worker.md"),
+    `<!-- 版: 000000000000 -->\n${body}\n`,
+  );
+}
+
+/** いまディスクにある手順書の印。 */
+function stampOf(workspace: string): string {
+  const done = spawnSync(join(workspace, "bin/loop-procedure-stamp"), ["worker"], {
+    cwd: workspace,
+    encoding: "utf8",
+  });
+  expect(done.status, done.stderr).toBe(0);
+  return done.stdout.trim();
+}
+
+function headOf(workspace: string): string {
+  return git(workspace, "rev-parse", "HEAD");
+}
+
+/**
+ * **`main` と、そこから分かれた枝**を持つ作業場。**HEAD は枝の上**に置く
+ * ——**前の周回が自分の PR の枝で終わった状態**である。
+ */
+function parkedOnBranch(): { workspace: string; mainStamp: string } {
+  const parent = mkdtempSync(join(tmpdir(), "branch-recovery-"));
+  sandboxes.push(parent);
+  const origin = join(parent, "origin.git");
+  const workspace = join(parent, "valence");
+  expect(spawnSync("git", ["init", "--bare", "--quiet", "-b", "main", origin]).status).toBe(0);
+  expect(spawnSync("git", ["clone", "--quiet", origin, workspace]).status).toBe(0);
+  placeScripts(workspace);
+  writeEntry(workspace, "main の手順書");
+  git(workspace, "add", "-A");
+  git(workspace, "commit", "--quiet", "-m", "main");
+  git(workspace, "push", "--quiet", "origin", "main");
+  const mainStamp = stampOf(workspace);
+
+  // **自分の PR の枝**（入口を直している PR。ディスクのほうが新しい）
+  writeEntry(workspace, "枝の手順書（入口を直している）");
+  git(workspace, "commit", "--quiet", "-a", "-m", "枝");
+  git(workspace, "switch", "--detach", "--quiet", "HEAD");
+  expect(stampOf(workspace), "枝と main の印が同じでは、入力になっていない").not.toBe(mainStamp);
+  return { workspace, mainStamp };
+}
+
+function runRecovery(workspace: string, stamp: string) {
+  return spawnSync("bash", ["-c", recoveryBlock().replaceAll("<読んだ印>", stamp)], {
+    cwd: workspace,
+    encoding: "utf8",
+    // **上限には触れさせない**——**止めたいのではなく、何を記録するかを見たい**
+    env: { ...process.env, LOOP_MAX_STALL_REPEATS: "9" },
+  });
+}
+
 describe("ディスクのほうが新しいとき、手順書に次の一手がある", () => {
   it("枝から戻る手順が、入口 1.0 に書いてある", () => {
     // **これが無いと、書いてある回復（呼び直す）を素直にやって人待ちへ落ちる**
@@ -69,97 +169,6 @@ describe("ディスクのほうが新しいとき、手順書に次の一手が�
 });
 
 describe("書いてある手順で、実際に揃う", () => {
-  let parent = "";
-
-  afterEach(() => {
-    if (parent !== "") {
-      rmSync(parent, { recursive: true, force: true });
-      parent = "";
-    }
-  });
-
-  function git(cwd: string, ...args: string[]): string {
-    const done = spawnSync(
-      "git",
-      ["-c", "user.email=loop@example.invalid", "-c", "user.name=loop", ...args],
-      {
-        cwd,
-        encoding: "utf8",
-      },
-    );
-    expect(done.status, done.stderr).toBe(0);
-    return done.stdout.trim();
-  }
-
-  /**
-   * **実物のスクリプトを置く。** **偽物にすると「呼んでいるのに何も見ていない」形が
-   * 緑になる**（#227）。
-   */
-  function placeScripts(workspace: string): void {
-    const bin = join(workspace, "bin");
-    mkdirSync(bin, { recursive: true });
-    for (const name of [
-      "loop-sync-main",
-      "loop-procedure-stamp",
-      "loop-procedure-changed",
-      "loop-stall",
-    ]) {
-      const target = join(bin, name);
-      copyFileSync(join(REPO_ROOT, "bin", name), target);
-      chmodSync(target, 0o755);
-    }
-  }
-
-  function writeEntry(workspace: string, body: string): void {
-    mkdirSync(join(workspace, ".claude", "commands"), { recursive: true });
-    writeFileSync(
-      join(workspace, ".claude", "commands", "loop-worker.md"),
-      `<!-- 版: 000000000000 -->\n${body}\n`,
-    );
-  }
-
-  /** いまディスクにある手順書の印。 */
-  function stampOf(workspace: string): string {
-    const done = spawnSync(join(workspace, "bin/loop-procedure-stamp"), ["worker"], {
-      cwd: workspace,
-      encoding: "utf8",
-    });
-    expect(done.status, done.stderr).toBe(0);
-    return done.stdout.trim();
-  }
-
-  /**
-   * **`main` と、そこから分かれた枝**を持つ作業場。**HEAD は枝の上**に置く
-   * ——**前の周回が自分の PR の枝で終わった状態**である。
-   */
-  function parkedOnBranch(): { workspace: string; mainStamp: string } {
-    parent = mkdtempSync(join(tmpdir(), "branch-recovery-"));
-    const origin = join(parent, "origin.git");
-    const workspace = join(parent, "valence");
-    expect(spawnSync("git", ["init", "--bare", "--quiet", "-b", "main", origin]).status).toBe(0);
-    expect(spawnSync("git", ["clone", "--quiet", origin, workspace]).status).toBe(0);
-    placeScripts(workspace);
-    writeEntry(workspace, "main の手順書");
-    git(workspace, "add", "-A");
-    git(workspace, "commit", "--quiet", "-m", "main");
-    git(workspace, "push", "--quiet", "origin", "main");
-    const mainStamp = stampOf(workspace);
-
-    // **自分の PR の枝**（入口を直している PR。ディスクのほうが新しい）
-    writeEntry(workspace, "枝の手順書（入口を直している）");
-    git(workspace, "commit", "--quiet", "-a", "-m", "枝");
-    git(workspace, "switch", "--detach", "--quiet", "HEAD");
-    expect(stampOf(workspace), "枝と main の印が同じでは、入力になっていない").not.toBe(mainStamp);
-    return { workspace, mainStamp };
-  }
-
-  function runRecovery(workspace: string, stamp: string) {
-    return spawnSync("bash", ["-c", recoveryBlock().replaceAll("<読んだ印>", stamp)], {
-      cwd: workspace,
-      encoding: "utf8",
-    });
-  }
-
   it("枝に居ても、書いてある手順で印が揃う", () => {
     const { workspace, mainStamp } = parkedOnBranch();
 
@@ -177,5 +186,39 @@ describe("書いてある手順で、実際に揃う", () => {
     const done = runRecovery(workspace, "ffffffffffff");
 
     expect(done.status, "揃っていないのに続けてよいと答えている").not.toBe(0);
+  });
+});
+
+/**
+ * **踏む形を入力に入れる**（#370 のレビュー）。
+ *
+ * **前の版は「動く条件でだけ」確かめていた**——**用意した git は clean で、
+ * `fetch` も成功していた。** **入力をそこから外すと、「dirty なら落ちる」も
+ * 「同期の失敗を分ける」も成り立っていなかった。**
+ */
+describe("戻れない入力でも、正しいものを記録する", () => {
+  it("残っているものがあるなら、枝から離れない", () => {
+    // **`git switch --detach` は、衝突しない未コミットの変更を持ったまま HEAD を移す**
+    // ——**1.1 の clean 検査に着く前に枝から離れ**、
+    // **どの枝の上での作業だったかが失われる**
+    const { workspace, mainStamp } = parkedOnBranch();
+    writeFileSync(join(workspace, "作業中"), "書きかけ\n");
+    const parked = headOf(workspace);
+
+    const done = runRecovery(workspace, mainStamp);
+
+    expect(headOf(workspace), "残っているのに枝から離れた").toBe(parked);
+    expect(done.stdout + done.stderr, "dirty を記録していない").toContain("dirty");
+  });
+
+  it("同期に失敗したら、印ずれとして数えない", () => {
+    // **枝の上なら印は当然ずれる**ので、**`main-sync-failed` が「配られたものが古い」に
+    // 化ける**——**2 回目で `procedure-stale` を積み、本当の原因はどこにも残らない**
+    const { workspace, mainStamp } = parkedOnBranch();
+    git(workspace, "remote", "set-url", "origin", join(workspace, "居ない-origin.git"));
+
+    const done = runRecovery(workspace, mainStamp);
+
+    expect(done.stdout + done.stderr, "同期の失敗を記録していない").toContain("main-sync-failed");
   });
 });
