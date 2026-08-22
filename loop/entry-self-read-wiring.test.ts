@@ -84,7 +84,10 @@ describe("配られた本文が古いとき", () => {
     // 走り、編集中の枝から離れる**）。
     const section = staleSection(role);
     const acquire = section.indexOf(`bin/loop-lease acquire ${role}`, section.indexOf("--entry"));
-    const forward = section.slice(acquire, section.indexOf("`bin/loop-stall procedure-stale` を通す"));
+    const forward = section.slice(
+      acquire,
+      section.indexOf("`bin/loop-stall procedure-stale` を通す"),
+    );
 
     expect(forward, "1.0 の残りを跳び越している").not.toMatch(/1\.1 (から|へ)/);
   });
@@ -95,7 +98,10 @@ describe("配られた本文が古いとき", () => {
     // **並べないと、別の周回が走っているだけ（exit 1）で `procedure-stale` を積む。**
     const section = staleSection(role);
     const acquire = section.indexOf(`bin/loop-lease acquire ${role}`, section.indexOf("--entry"));
-    const branches = section.slice(acquire, section.indexOf("`bin/loop-stall procedure-stale` を通す"));
+    const branches = section.slice(
+      acquire,
+      section.indexOf("`bin/loop-stall procedure-stale` を通す"),
+    );
 
     for (const code of ["exit 0", "exit 1", "exit 2"]) {
       expect(branches, `${code} の行き先が書いていない`).toContain(code);
