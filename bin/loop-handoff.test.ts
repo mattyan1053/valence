@@ -63,6 +63,13 @@ const FIELD = "\\0037";
 const THREAD_AT = "2026-01-01T00:00:00Z";
 /** `changes-requested` を付けた既定の時刻。**スレッドより後**。 */
 const LABELED_AT = "2026-06-01T00:00:00Z";
+/**
+ * head が積まれた既定の時刻（#384）。
+ *
+ * **`LABELED_AT` より前**にしてある——**既定は「要求のあと、まだ押していない」**側で、
+ * **押した側は起こりえない状態ではない**ので、**試験ごとに明示する。**
+ */
+const PUSHED_AT = "2026-05-01T00:00:00Z";
 
 /** 役の印。**書く側から引く**（試験にも写さない。#174）。 */
 function markOf(role: string): string {
@@ -110,6 +117,13 @@ type State = {
      * **外したあとも記録は残る**ので、その形を作るときはここへ明示する。
      */
     labeledAt?: string;
+    /**
+     * head が積まれた時刻（#384）。
+     *
+     * **要求より後なら、worker は既に直している**——**次に動くのは master**である。
+     * **既定は label より前**（**押されていない側**）。
+     */
+    pushedAt?: string;
     /** 最後の発言の ID。**返信だけでも動く値**である。 */
     lastComment?: number;
     /**
@@ -258,7 +272,7 @@ describe("bin/loop-handoff", () => {
     const prs = (state.prs ?? [])
       .map(
         (pr) =>
-          `${pr.number}${FIELD}${(pr.labels ?? []).join(",")}${FIELD}${pr.head ?? "a".repeat(40)}${FIELD}${labeledAtOf(pr)}${FIELD}${pr.body ?? ""}`,
+          `${pr.number}${FIELD}${(pr.labels ?? []).join(",")}${FIELD}${pr.head ?? "a".repeat(40)}${FIELD}${labeledAtOf(pr)}${FIELD}${pr.pushedAt ?? PUSHED_AT}${FIELD}${pr.body ?? ""}`,
       )
       .join("\n");
     // **一覧（検索）は古い値を返しうる。** ここでは**わざと古い値**を返させ、
@@ -2524,5 +2538,80 @@ describe("bin/loop-handoff", () => {
     withState({ ready: 1, inProgress: 1 });
 
     expect(run("master").status).toBe(1);
+  });
+  /**
+   * **要求が満たされても、受け渡しが worker を指したままになる**（#384）。
+   *
+   * **`changes-requested` を外すのは master だけ**なので、**worker が直して押したあとも
+   * label は残る**——**受け渡しはそれを見て worker を指し続ける。**
+   * **label が持っているのは「master が確認したか」で、受け渡しが答えたい問いは
+   * 「要求が満たされたか」**である。
+   *
+   * **未解決スレッドの手掛かりは効く**（返信すると master へ回る）が、
+   * **要求を PR コメントで出したときは、その手掛かりが無い。**
+   */
+  describe("要求のあとに押されていれば、master を指す", () => {
+    it("押されているなら master", () => {
+      withState({
+        prs: [
+          {
+            number: 20,
+            labels: ["changes-requested"],
+            labeledAt: "2026-08-01T00:00:00Z",
+            pushedAt: "2026-08-01T09:00:00Z",
+          },
+        ],
+      });
+
+      // **出口を打つのは worker である**（直して押した側が周回を終える）
+      const done = run("worker");
+
+      expect(done.status, done.stderr).toBe(0);
+      expect(done.stdout, "worker を指したままである").toMatch(/^master\t/);
+    });
+
+    it("押されていないなら、これまでどおり worker", () => {
+      // **上の 1 件が「押されたこと」で master へ回っていることを、ここが支えている**
+      withState({
+        prs: [
+          {
+            number: 20,
+            labels: ["changes-requested"],
+            labeledAt: "2026-08-01T00:00:00Z",
+            pushedAt: "2026-07-31T09:00:00Z",
+          },
+        ],
+      });
+
+      const done = run("master");
+
+      expect(done.status, done.stderr).toBe(0);
+      expect(done.stdout, "直していないのに master へ回している").toMatch(/^worker\t/);
+    });
+
+    it("押された PR と押されていない PR が並んでいたら、押されていないほうを worker に渡す", () => {
+      // **片方だけの入力だと、常に master へ倒す実装でも緑になる**（#384 の完了条件）
+      withState({
+        prs: [
+          {
+            number: 20,
+            labels: ["changes-requested"],
+            labeledAt: "2026-08-01T00:00:00Z",
+            pushedAt: "2026-08-01T09:00:00Z",
+          },
+          {
+            number: 21,
+            labels: ["changes-requested"],
+            labeledAt: "2026-08-01T00:00:00Z",
+            pushedAt: "2026-07-31T09:00:00Z",
+          },
+        ],
+      });
+
+      const done = run("master");
+
+      expect(done.status, done.stderr).toBe(0);
+      expect(done.stdout, "押されていない PR を worker へ渡していない").toMatch(/^worker\t.*21/);
+    });
   });
 });

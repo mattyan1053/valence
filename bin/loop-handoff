@@ -381,12 +381,13 @@ prs="$(gh api graphql --paginate \
       pullRequests(states:OPEN,first:50,after:$endCursor){
         pageInfo{hasNextPage endCursor}
         nodes{number headRefOid body labels(first:50){nodes{name}}
+          commits(last:1){nodes{commit{committedDate}}}
           timelineItems(itemTypes:LABELED_EVENT, last:50){
             nodes{... on LabeledEvent{createdAt label{name}}}}}}}}' \
   --jq '.data.repository.pullRequests.nodes[]
     | "\(.number)\u001f\([.labels.nodes[].name] | join(","))\u001f\(.headRefOid)\u001f\(
         [.timelineItems.nodes[] | select(.label.name == "changes-requested") | .createdAt] | max // ""
-      )\u001f\((.body // "") | gsub("\\s+"; " "))"')" ||
+      )\u001f\(.commits.nodes[0].commit.committedDate // "")\u001f\((.body // "") | gsub("\\s+"; " "))"')" ||
   fail_unknown "open PR"
 
 # **未解決スレッドを、ゲートと同じ読み方で取る。**
@@ -436,12 +437,17 @@ declare -A requested_of=()
 declare -A checks_of=()
 # PR ごとの head。**枝ごとの指紋に要る** (#274)——**その PR が動いたかは head で見る**
 declare -A head_of=()
+declare -A pushed_of=()
+declare -A requested_at_of=()
 # PR ごとの、コンフリクトの有無 (#347)。**指紋に載せる**——**解けたら次の枝へ移る**
 declare -A mergeable_of=()
 
-while IFS="$FIELD" read -r number _labels head labeled_at _body; do
+while IFS="$FIELD" read -r number _labels head labeled_at pushed_at _body; do
   [[ -n $number ]] || continue
   head_of[$number]="$head"
+  requested_at_of[$number]="$labeled_at"
+  # **head が積まれた時刻** (#384)。**要求より後なら、worker は既に直している。**
+  pushed_of[$number]="$pushed_at"
 
   # **ゲートと同じ判定を、同じところから取る。** **指紋は決着の別だけ**で、
   # **予算は見ない**——**時間の経過だけで指紋が動くと、何も変わっていないのに通知が飛ぶ**。
@@ -501,7 +507,7 @@ for number in "${!unresolved_of[@]}"; do
 done
 # **ゲートが見る条件を、同じ形で持つ** (#125)。名前ではなく**必須の並び順の結果**を書く
 checks=""
-while IFS="$FIELD" read -r number _labels _head _labeled_at _body; do
+while IFS="$FIELD" read -r number _labels _head _labeled_at _pushed_at _body; do
   [[ -n $number ]] || continue
   checks+="${number}:${checks_of[$number]-} "
 done <<<"$prs"
@@ -608,7 +614,7 @@ promotable=$((backlog - waiting))
 # **読めなければ止める**（`fail_unknown`）。**0 件へ倒すと、着手中が引かれないまま
 # 「渡すものがある」に見える。**
 parked_slots="$(
-  while IFS="$FIELD" read -r number labels _head _labeled_at body || [[ -n $number ]]; do
+  while IFS="$FIELD" read -r number labels _head _labeled_at _pushed_at body || [[ -n $number ]]; do
     [[ -n $number ]] || continue
     printf '%s%s%s%s%s\n' "$number" "$FIELD" "$labels" "$FIELD" "$body"
   done <<<"$prs" | "${BASH_SOURCE[0]%/*}/loop-parked-issues"
@@ -687,7 +693,7 @@ mismatched=""
 answered=""
 # **当否がまだ判断されていない指摘がある** PR。**動けるのは master だけ**である。
 untriaged=""
-while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
+while IFS="$FIELD" read -r number labels _head _labeled_at _pushed_at _body; do
   [[ -n $number ]] || continue
   unresolved="${unresolved_of[$number]-0}"
   [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
@@ -811,9 +817,34 @@ elif [[ -n $answered_left ]]; then
     reason="PR #${picked} の未解決スレッドの最後の発言が bot ではない（確認して resolve できる）"
   fi
 elif [[ -n $changes_requested_left ]]; then
-  picked="${changes_requested_left%% *}"
-  to="worker"
-  reason="PR #${picked} に master の要求が残っている"
+  # **要求が満たされたかを見る** (#384)。**label が持っているのは「master が確認したか」**
+  # で、**受け渡しが答えたい問いは「要求が満たされたか」**である——**`changes-requested`
+  # を外すのは master だけ**なので、**worker が直して押したあとも label は残り、
+  # 受け渡しは worker を指し続ける**（**呼ばれて、見て、何も無くて、返す**）。
+  #
+  # **押されていない PR を先に選ぶ**——**探しているのは「まだ直していない PR」**であって、
+  # **先頭の PR の状態ではない**（#349 / #362 と同じ形。**1 件目だけを見て全体の
+  # 答えにしない**）。
+  picked=""
+  pushed_picked=""
+  for candidate in $changes_requested_left; do
+    if [[ -n ${pushed_of[$candidate]-} && -n ${requested_at_of[$candidate]-} &&
+      ${pushed_of[$candidate]} > ${requested_at_of[$candidate]} ]]; then
+      # **要求より後に押されている。** **次に動くのは master** である
+      [[ -n $pushed_picked ]] || pushed_picked="$candidate"
+      continue
+    fi
+    picked="$candidate"
+    break
+  done
+  if [[ -n $picked ]]; then
+    to="worker"
+    reason="PR #${picked} に master の要求が残っている"
+  else
+    picked="$pushed_picked"
+    to="master"
+    reason="PR #${picked} は要求のあとに押されている（確認して label を外せる）"
+  fi
   # **CI は見ない。** **要求が残っているかどうかは、CI が進んでも変わらない**
   branch="changes-requested"
   witness="$(pr_witness "$picked")"
