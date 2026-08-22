@@ -218,6 +218,36 @@ describe("bin/loop-close-candidates", () => {
       expect(verdict.status, verdict.stderr).toBe(shown ? 1 : 0);
     });
 
+    /**
+     * **書式は `<a>` だけではない** (#365 のレビュー)。**Markdown のリンクでも
+     * 同じことが起きる**——**リンク先で振り分ける、という軸は同じ**である。
+     *
+     * **置くのは 2 本**（**書式ごとに全部の組み合わせは置かない**）。**軸は
+     * 1 箇所で効いている**ので、**新しい書式について要るのは「両側」だけ**
+     * ——**片側だけだと、「全部落とす」実装でも「全部残す」実装でも通る。**
+     * **自分のものの側は `redirect.github.com` で置く**（**黙って消える側**なので、
+     * **ホストの取りこぼしがそこに出る**）。
+     */
+    it("Markdown のリンクでも、他所の番号は引きに行かない", () => {
+      const verdict = run(["357"], {
+        body: "リリースノートより [#94905](https://redirect.github.com/vercel/next.js/issues/94905)\n",
+        entries: {},
+      });
+
+      expect(verdict.asked, "他のリポジトリの番号を引きに行っている").not.toContain("94905");
+      expect(verdict.status, verdict.stderr).toBe(0);
+    });
+
+    it("Markdown のリンクでも、自分の番号は残す", () => {
+      const verdict = run(["357"], {
+        body: "直したもの [#319](https://redirect.github.com/mattyan1053/valence/issues/319)\n",
+        entries: { 319: { state: "OPEN", title: "ここの Issue" } },
+      });
+
+      expect(verdict.status, verdict.stderr).toBe(1);
+      expect(verdict.stdout, "自分のリンクを落としている").toContain("319");
+    });
+
     it("同じ本文の本物の候補は、これまでどおり出す", () => {
       // **これが無いと「静かになった」だけ**で、**見えなくなったのと区別が付かない**
       const verdict = run(["357"], {
