@@ -264,14 +264,14 @@ describe("bin/loop-handoff", () => {
     const staleCounts = "0";
     // **ゲートと同じものを見る。** 未解決スレッドは GraphQL からしか取れない。
     // 1 行 1 スレッドで、**最後の発言の ID と書いた人**を返す
-    const threads = (state.prs ?? [])
-      .flatMap((pr) =>
-        (pr.unresolvedBy ?? []).map(
+    const threadsOf = (pr: NonNullable<State["prs"]>[number]): string =>
+      (pr.unresolvedBy ?? [])
+        .map(
           (who, index) =>
             `${pr.lastComment ?? 100 + index}${FIELD}${who === "bot" ? BOT_GRAPHQL : "mattyan1053"}${FIELD}${pr.threadsAt?.[index] ?? THREAD_AT}${FIELD}${bodyOf(who)}`,
-        ),
-      )
-      .join("\n");
+        )
+        .join("\n");
+    const threads = (state.prs ?? []).map(threadsOf).filter(Boolean).join("\n");
 
     writeFileSync(
       join(path, "gh"),
@@ -327,6 +327,16 @@ describe("bin/loop-handoff", () => {
         "    exit 1",
         "  fi",
         "fi",
+        // **スレッドは PR ごとに答える** (#362 の 2 度目のレビュー)。**まとめて返すと、
+        // どの PR も同じ「最後の発言」を持つ**ので、**枝の中で宛先が割れる形
+        // （`answered`）を試験に置けない**——**実物は PR ごとに違う。**
+        ...(state.prs ?? []).flatMap((pr) => [
+          `if [[ $* == *"reviewThreads"* && $* == *"number=${pr.number}"* ]]; then`,
+          `  printf '%b' ${JSON.stringify(threadsOf(pr))}`,
+          `  [[ -n ${JSON.stringify(threadsOf(pr))} ]] && echo`,
+          "  exit 0",
+          "fi",
+        ]),
         ...answerLines("api graphql", threads),
         // **ここから下は「古い一覧」である。** 検索の索引を経由する口は、
         // 付け替えた直後に古い値を返す。**これを見ていたら通知が落ちる**
@@ -352,8 +362,19 @@ describe("bin/loop-handoff", () => {
     return runIn(repo, args, env);
   }
 
-  function run(role: string, env: Record<string, string> = {}): Run {
-    return runWith(role === "" ? [] : [role], env);
+  function run(role: string, env: Record<string, string> = {}, extra: string[] = []): Run {
+    return runWith(role === "" ? [...extra] : [role, ...extra], env);
+  }
+
+  /** 入口を飛ばした記録。**git の共通ディレクトリに置く**（作業場をまたいで 1 つ）。 */
+  function peekMissingRecord(): string {
+    const record = join(repo, ".git", "valence-loop-lease-missing");
+    return existsSync(record) ? readFileSync(record, "utf8") : "";
+  }
+
+  /** **`--who` のあとに `--sent` を打つ。** 送信待ちを書いていないことを見る (#360)。 */
+  function sentAfterPeek(token: string): Run {
+    return runWith(["master", `--sent=${token}`]);
   }
 
   /** その役の lease を取り、token を返す。**周回を始める**（`cwd` はこの作業場）。 */
@@ -2189,6 +2210,134 @@ describe("bin/loop-handoff", () => {
       });
 
       expect(run("master").status).toBe(0);
+    });
+  });
+
+  /**
+   * **次に動けるのが自分でも、それを読めるようにする**（#360）。
+   *
+   * **出口は自分自身へは送らない**（#92）ので、**`to` が自分の役なら exit 1 で黙る**
+   * ——**「いまは自分の番だ」を、周回の側から読む手立てが無かった。**
+   * **master のステップ 2 は、そのぶんを大きさと古さで並べ直していた**
+   * ——**手番を持っている PR が、より小さい / 古い PR に毎周回負ける**（**実測 105 分**）。
+   *
+   * **読むだけの口を足す。** **同じ判定を、周回の並べ替えのために書き写さないため**
+   * である（`AGENTS.md` §5）。
+   */
+  describe("誰の番かを、読むだけで訊く", () => {
+    it("自分の番でも、誰の番かと理由を出す", () => {
+      // **ここが本題**——**ふつうに打つと、自己通知の抑止で黙る**
+      withState({ prs: [{ number: 12, unresolvedBy: ["worker"] }] });
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status, "自分の番を読めない").toBe(0);
+      expect(peeked.stdout, "宛先が出ない").toMatch(/^master\t/);
+      expect(peeked.stdout, "どの PR かが読めない").toMatch(/#12\b/);
+      expect(run("master").status, "ふつうに打てば、これまでどおり黙る").toBe(1);
+    });
+
+    it("前の枝が相手の番でも、自分の番の PR を見つける", () => {
+      // **枝は排他である** (#362 のレビュー)。**上の枝が相手の番だと、そこで止まって
+      // しまい**、**下にある自分の番が出てこない**——**手順書は「相手の番なら従来の
+      // 順序」なので、その PR は小さい / 古い PR に毎周回負ける**（**上限が無い**という
+      // #360 の芯がそのまま残る）。
+      withState({
+        prs: [
+          { number: 12, labels: ["changes-requested"] }, // worker の番（上の枝）
+          { number: 13 }, // master の番（ゲートを回せる）
+        ],
+      });
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status, "自分の番が見つからない").toBe(0);
+      expect(peeked.stdout, "上の枝で止まっている").toMatch(/^master\t/);
+      expect(peeked.stdout, "どの PR かが読めない").toMatch(/#13\b/);
+    });
+
+    it("同じ枝の中でも、宛先の違う PR を見つける", () => {
+      // **`answered` は、枝の中で宛先が PR ごとに割れる** (#362 のレビュー)。
+      // **他の枝は入った時点で宛先が決まっている**のに、**あそこだけ
+      // 「最後の発言の印」で反転する** (#174)——**master が 2 本に要求を出し、
+      // 片方だけ worker が返した**、それだけでこの形になる。
+      //
+      // **枝の名前で飛ばす実装では、ここで止まる**——**枝ではなく PR を進める。**
+      withState({
+        prs: [
+          { number: 12, unresolvedBy: ["master"] }, // master が書いた → worker の番
+          { number: 13, unresolvedBy: ["worker"] }, // worker が返した → master の番
+        ],
+      });
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status, "同じ枝の 2 本目を見ていない").toBe(0);
+      expect(peeked.stdout, "枝の先頭で止まっている").toMatch(/^master\t/);
+      expect(peeked.stdout, "どの PR かが読めない").toMatch(/#13\b/);
+    });
+
+    it("相手の番しか無ければ、何も出さない", () => {
+      // **訊いているのは「自分の番はどれか」**である——**相手の番を出しても
+      // 並べ替えには使えない**（**手順書はそれを捨てるだけ**）
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status).toBe(1);
+      expect(peeked.stdout).toBe("");
+    });
+
+    it("読むだけの口は、入口を飛ばしたと記録しない", () => {
+      // **周回の外から打つ人がいる** (#362 のレビュー)——**読むだけのつもりで打つと、
+      // `./task loop:status` に偽の運用違反が残る。** **契約（読むだけ）と実装を
+      // 食い違わせない。**
+      withState({ prs: [{ number: 12 }] });
+
+      expect(run("master", {}, ["--who"]).status).toBe(0);
+
+      expect(peekMissingRecord(), "読むだけの口が、運用違反を作っている").toBe("");
+      // **ふつうに打つ側は、これまでどおり記録する**（退行の検出）
+      // ——**自分の番なので出口は黙る**（#92）が、**記録は分岐の前に通る**
+      run("master");
+      expect(peekMissingRecord(), "飛ばした周回を記録しなくなっている").not.toBe("");
+    });
+
+    it("渡す相手がいなければ 1 を返す", () => {
+      withState({});
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status).toBe(1);
+      expect(peeked.stdout).toBe("");
+    });
+
+    it("読むだけで、記録も送信待ちも書かない", () => {
+      // **並べ替えのために毎周回打つ**ので、**打っただけで指紋が動くと、
+      // その周回は「もう伝えた」ことにされる**——**出口の 1 通が消える。**
+      withState({
+        prs: [
+          { number: 12, labels: ["changes-requested"] }, // 出口が渡す先（worker）
+          { number: 13 }, // master の番（`--who` が答えるほう）
+        ],
+      });
+
+      expect(run("master", {}, ["--who"]).status).toBe(0);
+
+      // **送ると決めた記録が無い**ので、`--sent` は落ちる（**書いていない証拠**）
+      const token = acquireLease("master");
+      try {
+        expect(sentAfterPeek(token).status, "送信待ちを書いている").not.toBe(0);
+      } finally {
+        releaseLease("master", token);
+      }
+      // **指紋も動いていない**ので、**このあとふつうに打てば、これまでどおり渡せる**
+      expect(cycle("master").status, "打っただけで「伝えた」ことにされている").toBe(0);
+      expect(run("master").status, "抑止が効いていない").toBe(1);
+    });
+
+    it("知らない旗は、使い方の誤りとして落ちる", () => {
+      expect(run("master", {}, ["--whom"]).status).toBe(2);
     });
   });
 
