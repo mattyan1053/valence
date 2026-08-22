@@ -42,8 +42,10 @@ afterEach(() => {
 type Setup = {
   /** いま付いている label。**既に付いているかどうかで、付け直すかが変わる。** */
   labels?: string[];
-  /** head が動いていないか（`bin/loop-head same` の答え）。 */
-  headMoved?: boolean;
+  /** `bin/loop-head same` の答え（0 同じ / 1 動いた / **2 読めない**）。 */
+  head?: 0 | 1 | 2;
+  /** 何回目の label の読み取りで落ちるか（1 = 付ける前、2 = 付けたあとの確かめ）。 */
+  failsOnRead?: number;
   /** `gh` のどの呼び出しで落ちるか（部分一致）。 */
   failsOn?: string;
 };
@@ -76,7 +78,17 @@ function sandbox(setup: Setup = {}): { dir: string; calls: () => string[] } {
       // **label は覚える**——**付けたあとに読み直す口があるので、答えが動かないと
       // 「付いたことを確かめる」が確かめになっていない**（**偽物のほうが甘い**）
       `state=${JSON.stringify(join(dir, "labels"))}`,
+      `reads=${JSON.stringify(join(dir, "reads"))}`,
       'if [[ "$*" == *"--json labels"* ]]; then',
+      '  n=$(cat "$reads" 2>/dev/null || echo 0); n=$((n + 1)); printf \'%s\' "$n" > "$reads"',
+      ...(setup.failsOnRead === undefined
+        ? []
+        : [
+            `  if ((n == ${setup.failsOnRead})); then`,
+            '    echo "gh: label を読めません" >&2',
+            "    exit 1",
+            "  fi",
+          ]),
       '  cat "$state" 2>/dev/null',
       "  exit 0",
       "fi",
@@ -99,7 +111,7 @@ function sandbox(setup: Setup = {}): { dir: string; calls: () => string[] } {
     [
       "#!/usr/bin/env bash",
       `printf '%s\\n' "loop-head $*" >> ${JSON.stringify(log)}`,
-      `exit ${setup.headMoved === true ? "1" : "0"}`,
+      `exit ${setup.head ?? 0}`,
     ].join("\n"),
     { mode: 0o755 },
   );
@@ -169,7 +181,7 @@ describe("bin/loop-request-changes", () => {
 
   it("head が動いていたら、何も書かない", () => {
     // **読んだ指摘は、評価した head に対するもの**である
-    const { dir, calls } = sandbox({ headMoved: true });
+    const { dir, calls } = sandbox({ head: 1 });
 
     const done = request(dir);
 
@@ -207,6 +219,44 @@ describe("bin/loop-request-changes", () => {
     expect(only(calls(), "loop-stall")[0], "待ちを記録していない").toContain(
       `awaiting-worker:42@${HEAD}`,
     );
+  });
+
+  it("head が動いたなら、動いたと記録する", () => {
+    // **`bin/loop-head same` は 3 つ返す**（0 同じ / 1 動いた / 2 読めない）
+    const { dir, calls } = sandbox({ head: 1 });
+
+    const done = request(dir);
+
+    expect(done.status, "出していないのに 0 で終わっている").toBe(1);
+    expect(only(calls(), "loop-stall")[0], "動いたと記録していない").toContain("head-moved:42");
+  });
+
+  it("head を読めなかったなら、動いたと言わない", () => {
+    // **まとめると、worker が元気に push している間ずっと取得障害が数えられない**
+    // ——**人を呼ぶ道が閉じる**（`bin/loop-stall` が 2 つに分けている理由そのもの）
+    const { dir, calls } = sandbox({ head: 2 });
+
+    const done = request(dir);
+
+    expect(done.status, "動いたときと同じ終わり方をしている").not.toBe(1);
+    expect(only(calls(), "loop-stall")[0], "読めなかったと記録していない").toContain(
+      "head-lookup-failed:42",
+    );
+    expect(only(calls(), "head-moved"), "動いたと記録している").toEqual([]);
+  });
+
+  it("label を確かめられなければ、付いたまま黙らない", () => {
+    // **ここだけ、残る状態が他と違う**——**label が付いたまま、要求のコメントが無い**。
+    // **受け渡しは label を見て worker を指し**、**worker は要求を探して見つけられない。**
+    // **`handoff-mismatch` が拾えるのは「label が無い」ほう**なので、そちらへ倒す
+    const { dir, calls } = sandbox({ failsOnRead: 2 });
+
+    const done = request(dir);
+
+    expect(done.status, "読めないのに続けている").not.toBe(0);
+    expect(only(calls(), "pr comment"), "確かめられていないのに投稿している").toEqual([]);
+    expect(only(calls(), "--remove-label"), "拾えない状態のままにしている").not.toEqual([]);
+    expect(done.stderr, "読めなかったと言っていない").toMatch(/読め/);
   });
 
   it("本文のファイルが無ければ、何も書かない", () => {
