@@ -136,6 +136,108 @@ describe("bin/loop-check-state", () => {
     expect(run(["walking"]).status).toBe(2);
   });
 
+  describe("所要時間を残す（#391）", () => {
+    /** その走りの記録の行。 */
+    function recordLines(id: string): string[] {
+      return readFileSync(join(statePath(), id), "utf8").split("\n");
+    }
+
+    /** 積まれた所要時間の記録（`<始め>\t<終わり>\t<結果>`）。 */
+    function durations(): string[][] {
+      const listed = run(["--durations"]);
+      expect(listed.status, listed.stderr).toBe(0);
+      return listed.stdout
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => line.split("\t"));
+    }
+
+    function near(value: string | undefined): boolean {
+      const epoch = Number(value);
+      return Number.isInteger(epoch) && Math.abs(epoch - Math.floor(Date.now() / 1000)) <= 120;
+    }
+
+    it("走り始めた時刻が、記録に残る", () => {
+      // **始めた時刻は、いままでどこにも残っていなかった**——**終わりは mtime に
+      // 残るが、始めは `running` の上書きで消える**（**1 回の所要時間すら出せない**）
+      run(["running", "A"]);
+
+      expect(near(recordLines("A")[1]), "始めた時刻が残っていない").toBe(true);
+    });
+
+    it("走り終えた記録に、始めと終わりの両方が残る", () => {
+      run(["running", "A"]);
+
+      run(["finished", "A", "0"]);
+
+      const lines = recordLines("A");
+      expect(near(lines[1]), "始めた時刻を引き継いでいない").toBe(true);
+      expect(near(lines[2]), "終わった時刻が残っていない").toBe(true);
+    });
+
+    it("古い読み手が読む 1 行目は、変えない", () => {
+      // **`AGENTS.md` §5: 新しい書き手 → 古い読み手。** **前の版の `--verdict` は
+      // `read -r kind value <記録` で 1 行目しか読まない**（`running` の片付けも同じ）
+      // ——**行を足すのは安全だが、1 行目に列を足すと `finished 0 1700000000` が
+      // 「合否を読めません」で止まる**（#281 と同じ形）。
+      run(["running", "A"]);
+      expect(recordLines("A")[0], "走っている記録の 1 行目が変わっている").toBe("running");
+
+      run(["finished", "A", "0"]);
+
+      expect(recordLines("A")[0], "終わった記録の 1 行目が変わっている").toBe("finished 0");
+    });
+
+    it("走りごとに、所要時間が積まれる", () => {
+      // **走りの記録は次の走りが片付ける**（**そういう設計**）ので、**そこに残しても
+      // 消える**——**あとから突き合わせるには、積む先が要る。**
+      run(["running", "A"]);
+      run(["finished", "A", "0"]);
+      run(["running", "B"]);
+      run(["finished", "B", "1"]);
+
+      const rows = durations();
+      expect(rows.length, "走りごとに積まれていない").toBe(2);
+      expect(near(rows[0]?.[0]), "始めた時刻が積まれていない").toBe(true);
+      expect(near(rows[0]?.[1]), "終わった時刻が積まれていない").toBe(true);
+      expect(
+        rows.map((row) => row[2]),
+        "合否が積まれていない",
+      ).toEqual(["0", "1"]);
+    });
+
+    it("殺された走りも、殺されたと分かる形で積む", () => {
+      // **実害はこちら側で出ている**（**道具の 10 分制限で 3 回切られた**）——
+      // **切られた走りが記録に残らないと、「切られやすさ」を測れない。**
+      mkdirSync(statePath(), { recursive: true });
+      writeFileSync(
+        join(statePath(), "999999"), // **死んだ PID**（殺された走りの跡）
+        `running\n${Math.floor(Date.now() / 1000) - 600}\n`,
+      );
+
+      run(["running", "A"]); // 次の走りが片付ける
+
+      const rows = durations();
+      expect(rows.length, "殺された走りが積まれていない").toBe(1);
+      expect(rows[0]?.[2], "殺されたことが読み取れない").toBe("killed");
+    });
+
+    it("記録が伸び続けない", () => {
+      // **直近の分だけを残す**（`bin/loop-lease` の周回の長さと同じ形）
+      for (let index = 0; index < 12; index += 1) {
+        run(["running", `run${index}`]);
+        run(["finished", `run${index}`, "0"]);
+      }
+
+      expect(durations().length, "走りのたびに伸びている").toBeLessThanOrEqual(10);
+    });
+
+    it("積む先が無ければ、記録が無いと答える", () => {
+      // **「無い」と「読めない」を混ぜない**（`--verdict` と同じ語彙）
+      expect(run(["--durations"]).status).toBe(4);
+    });
+  });
+
   it("記録は作業場ごとに置く", () => {
     // **共通ディレクトリに置くと、別の作業場の check がこちらの可否を決める**
     run(["running", "A"]);

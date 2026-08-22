@@ -4,6 +4,7 @@
 #   bin/loop-check-state running <走りの id>            走り始めた
 #   bin/loop-check-state finished <走りの id> <合否>    走り終えた
 #   bin/loop-check-state --verdict                      いまの記録を読む
+#   bin/loop-check-state --durations                    積んだ所要時間を読む
 #
 #   --verdict の終了コード:
 #     0 = 緑 / 1 = 赤 / 2 = 読めない・使い方の誤り / 3 = まだ走っている / 4 = 記録が無い
@@ -29,6 +30,17 @@
 # **記録は作業場ごと**（`git rev-parse --git-dir`。**worktree ごとに分かれる**）
 # ——**別の作業場の check は、こちらの commit の可否と関係が無い。**
 #
+# **所要時間は、別の口へ積む** (#391)。**走りの記録は次の走りが片付ける**ので、
+# **そこに時刻を書くだけでは残らない**——**`valence-check-durations` へ 1 行足す。**
+#
+# **走りの記録には、1 行目を変えずに行を足す**（`AGENTS.md` §5。**新しい書き手 →
+# 古い読み手**）。**前の版の `--verdict` も `running` の片付けも `read -r ... <記録` で
+# 1 行目しか読まない**ので、**2 行目以降は見えない**——**1 行目に列を足すと
+# `finished 0 <時刻>` が「合否を読めません」で止まる**（#281 と同じ形）。
+#
+# **時刻が書けないことを、合否の記録と混ぜない** (#391 の完了条件)。**測るための
+# 記録が落ちても、`./task check` は使える**——**言うだけにして、合否は残す。**
+#
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
 set -uo pipefail
 
@@ -36,7 +48,9 @@ usage() {
   echo "使い方: bin/loop-check-state running <走りの id>          走り始めた" >&2
   echo "        bin/loop-check-state finished <走りの id> <合否>  走り終えた" >&2
   echo "        bin/loop-check-state --verdict                    いまの記録を読む" >&2
+  echo "        bin/loop-check-state --durations                  積んだ所要時間を読む" >&2
   echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
+  echo "        --durations: <始め>\\t<終わり>\\t<合否 または killed>（4 記録が無い）" >&2
   exit 2
 }
 
@@ -47,6 +61,49 @@ if ! git_dir="$(git rev-parse --git-dir 2>/dev/null)" || [[ -z $git_dir ]]; then
   exit 2
 fi
 readonly STATE_DIR="$git_dir/valence-check-state.d"
+# **積む先も作業場ごと**（**走りの記録と同じ場所**——**別の作業場の速さと混ぜない**）
+readonly DURATIONS="$git_dir/valence-check-durations"
+# **直近のぶんだけ残す**（`bin/loop-lease` の周回の長さと同じ形）。**際限なく足すと、
+# 読むたびに重くなる**——**振れ幅を見るには、直近の何十回かで足りる。**
+readonly RECENT_RUNS=10
+
+now_epoch() { date +%s; }
+
+# 所要時間を 1 行積む。**落ちても、この check は止めない**（合否の記録とは別物）。
+#
+# **読んで、足して、書き戻す**ので、**2 本が同時に終わると 1 行落ちうる**
+# ——**`flock` で直列にする**（**測るための記録なので、待たせても誰も止まらない**）。
+append_duration() {
+  local started="$1" ended="$2" result="$3" kept=()
+  [[ $started =~ ^[0-9]+$ ]] || return 1
+  exec 8>"$DURATIONS.lock" 2>/dev/null || return 1
+  flock -w 10 8 || {
+    exec 8>&-
+    return 1
+  }
+  if [[ -f $DURATIONS ]]; then
+    mapfile -t kept <"$DURATIONS" 2>/dev/null || kept=()
+  fi
+  kept+=("$(printf '%s\t%s\t%s' "$started" "$ended" "$result")")
+  # **数より短いときに切り出さない。** **要素数を超える負の開始位置は空になる**
+  # ——**積んだ行が丸ごと消える**（**測るための記録が、静かに空のままになる**）
+  ((${#kept[@]} <= RECENT_RUNS)) || kept=("${kept[@]: -RECENT_RUNS}")
+  if ! { printf '%s\n' "${kept[@]}" >"$DURATIONS.tmp" 2>/dev/null \
+    && mv -f "$DURATIONS.tmp" "$DURATIONS" 2>/dev/null; }; then
+    rm -f "$DURATIONS.tmp" 2>/dev/null
+    exec 8>&-
+    return 1
+  fi
+  exec 8>&-
+}
+
+# その走りの記録に残っている「始めた時刻」。**無ければ空**（**作り話で埋めない**）。
+started_at_of() {
+  local record="$1" first second
+  { read -r first; read -r second; } <"$record" 2>/dev/null
+  [[ $second =~ ^[0-9]+$ ]] || second=""
+  printf '%s' "$second"
+}
 
 # **id はファイル名になる。** **区切りやパスを含む値を受けない**
 valid_id() {
@@ -70,6 +127,7 @@ case "$1" in
     # **生きているかは PID で見る。** **id は `./task` の PID である**（`task` が
     # そう渡す）——**生きていない PID の記録は、走っている周回のものではありえない。**
     # **数字でない id は、そう決められない**ので**残す**（**消すほうへ倒さない**）。
+    started="$(now_epoch)"
     for old in "$STATE_DIR"/*; do
       [[ -f $old ]] || continue
       read -r kind _ <"$old" 2>/dev/null || continue
@@ -79,9 +137,18 @@ case "$1" in
       fi
       old_id="${old##*/}"
       [[ $old_id =~ ^[0-9]+$ ]] || continue
-      kill -0 "$old_id" 2>/dev/null || rm -f "$old"
+      kill -0 "$old_id" 2>/dev/null && continue
+      # **殺された走りも積む** (#391)。**切られた走りが残らないと、切られやすさを
+      # 測れない**——**実害はそこで出ている**（**道具の 10 分制限**）。
+      # **終わりの時刻は「片付けた時刻」**なので、**合否の代わりに `killed` と書く**
+      # ——**所要時間として読ませない。**
+      old_started="$(started_at_of "$old")"
+      [[ -z $old_started ]] || append_duration "$old_started" "$started" killed ||
+        echo "[WARN] 殺された走りの所要時間を積めません: $DURATIONS" >&2
+      rm -f "$old"
     done
-    printf 'running\n' >"$STATE_DIR/$2" || {
+    # **2 行目に始めた時刻**（**1 行目は前の版が読む**ので動かさない）
+    printf 'running\n%s\n' "$started" >"$STATE_DIR/$2" || {
       echo "[FAIL] check の記録を書き込めません: $STATE_DIR/$2" >&2
       exit 2
     }
@@ -93,8 +160,25 @@ case "$1" in
       echo "[FAIL] check の記録を置けません: $STATE_DIR" >&2
       exit 2
     }
-    printf 'finished %s\n' "$3" >"$STATE_DIR/$2" || {
+    ended="$(now_epoch)"
+    # **始めた時刻は、その走りの記録から引き継ぐ**（**書けていなければ空のまま**
+    # ——**分からないものを、いまの時刻で埋めない**）
+    started=""
+    [[ ! -f $STATE_DIR/$2 ]] || started="$(started_at_of "$STATE_DIR/$2")"
+    printf 'finished %s\n%s\n%s\n' "$3" "$started" "$ended" >"$STATE_DIR/$2" || {
       echo "[FAIL] check の記録を書き込めません: $STATE_DIR/$2" >&2
+      exit 2
+    }
+    # **積めなくても、合否は残っている**——**この check を落とさない** (#391)
+    [[ -z $started ]] || append_duration "$started" "$ended" "$3" ||
+      echo "[WARN] 所要時間を積めません: $DURATIONS" >&2
+    ;;
+  --durations)
+    [[ $# -eq 1 ]] || usage
+    # **「無い」と「読めない」を混ぜない**（`--verdict` と同じ語彙）
+    [[ -s $DURATIONS ]] || exit 4
+    cat "$DURATIONS" || {
+      echo "[FAIL] 所要時間の記録を読めません: $DURATIONS" >&2
       exit 2
     }
     ;;
