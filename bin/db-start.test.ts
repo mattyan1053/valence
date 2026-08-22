@@ -35,6 +35,23 @@ const NOT_RUNNING = "supabase local development setup is not running.";
 /** **落とせなかったとき**の文面。**docker が居ない・応答しない、が実際の形**である。 */
 const STOP_FAILURE = "failed to stop containers: Cannot connect to the Docker daemon";
 
+/**
+ * **半分だけ起きている**ときの出力（#371 のレビュー 2 周目）。
+ *
+ * **落とせたもの・元から居ないもの・落とせなかったものが混ざる**——
+ * **「どこかに『居ない』が 1 行あれば良性」だと、この出力が良性に化ける。**
+ */
+const MIXED_STOP = ["container supabase_db_valence is not running", STOP_FAILURE].join("\n");
+
+/** **良性の行だけが複数**（**締めすぎると、これで止まってしまう**）。 */
+const BENIGN_LINES = [
+  "supabase local development setup is not running.",
+  // **空行が混ざる**（**CLI は区切りに空行を出す**）。**空行を「残った」と読むと、
+  // ふつうに起きていなかった回まで止まる。**
+  "",
+  "container supabase_kong_valence is not running",
+].join("\n");
+
 const sandboxes: string[] = [];
 
 afterEach(() => {
@@ -56,7 +73,7 @@ function withPnpm(
    * `stop` の落ち方（#371 のレビュー）。**「そもそも起きていない」と
    * 「落とせなかった」は別**である——**入力に入れないと、その区別は見えない。**
    */
-  stop: "ok" | "not-running" | "fails" = "ok",
+  stop: "ok" | "not-running" | "fails" | "mixed" | "benign-lines" = "ok",
 ): { dir: string; log: () => string[] } {
   const dir = mkdtempSync(join(tmpdir(), "db-start-"));
   sandboxes.push(dir);
@@ -71,9 +88,18 @@ function withPnpm(
       'if [[ "$*" == *"supabase stop"* ]]; then',
       ...(stop === "ok"
         ? ["  exit 0"]
-        : stop === "not-running"
-          ? [`  echo ${JSON.stringify(NOT_RUNNING)} >&2`, "  exit 1"]
-          : [`  echo ${JSON.stringify(STOP_FAILURE)} >&2`, "  exit 1"]),
+        : [
+            `  printf '%b\\n' ${JSON.stringify(
+              stop === "not-running"
+                ? NOT_RUNNING
+                : stop === "mixed"
+                  ? MIXED_STOP
+                  : stop === "benign-lines"
+                    ? BENIGN_LINES
+                    : STOP_FAILURE,
+            )} >&2`,
+            "  exit 1",
+          ]),
       "fi",
       'if [[ "$*" != *"supabase start"* ]]; then exit 0; fi',
       `n=$(cat ${JSON.stringify(count)} 2>/dev/null || echo 0)`,
@@ -182,6 +208,31 @@ describe("落とせなかったのか、起きていなかったのか", () => {
     // **落とすものが無いのは、失敗ではない**——**ここで中断すると、
     // 1 回目が衝突しただけの回まで人が呼ばれる**
     const { dir, log } = withPnpm(["bind", "ok"], "not-running");
+
+    const done = runStart(dir);
+
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    expect(startsIn(log()), "やり直していない").toBe(2);
+  });
+});
+
+describe("良性の行が混ざっても、悪性は悪性である", () => {
+  it("落とせなかった行が混ざっていたら、中断する", () => {
+    // **「どこかに『居ない』が 1 行あれば良性」だと、この出力が良性に化ける**
+    // （#371 のレビュー 2 周目）——**構造の話なので、文面が何であっても当たる**
+    const { dir, log } = withPnpm(["bind", "ok"], "mixed");
+
+    const done = runStart(dir);
+
+    expect(done.status, "混ざった出力を良性に読んでいる").not.toBe(0);
+    expect(startsIn(log()), "落とせていないのにやり直している").toBe(1);
+    expect(done.stderr, "理由が消えている").toContain("Cannot connect to the Docker daemon");
+  });
+
+  it("良性の行だけなら、これまでどおりやり直す", () => {
+    // **締めすぎると、ふつうに起きていなかった回まで止まる**
+    // ——**上の 1 件が「混ざっていること」で赤いことを、ここが支えている**
+    const { dir, log } = withPnpm(["bind", "ok"], "benign-lines");
 
     const done = runStart(dir);
 
