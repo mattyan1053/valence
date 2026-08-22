@@ -296,7 +296,10 @@ if ((confirm_sent == 1)); then
   # **違っていたら、書かずに終える。** **抑止が答える問いは「いまの状態は既に
   # 伝えたか」**で、**後から書かれたほうが、いまの状態に近い**——
   # **送ったこと自体は失敗していない**ので、**呼んだ側へは成功を返す。**
-  for role in "$sent_to" "$ROLE"; do
+  # **見るのは宛先の記録だけ** (#359)。**指紋は役ごと**になったので、
+  # **こちらの役の記録には、こちらの役の状態が入っている**——**送った状態と
+  # 突き合わせる意味が無い**（**必ず食い違い、書かずに終える**）。
+  for role in "$sent_to"; do
     record="$common_dir/valence-loop-handoff-$role"
     stored="$(cat "$record" 2>/dev/null || true)"
     if [[ ${stored#*"$FIELD"} != "$sent_state" ]]; then
@@ -306,9 +309,16 @@ if ((confirm_sent == 1)); then
       exit 0
     fi
   done
-  # **送った側にも書く。** 宛先は呼んだ役で反転するので、
-  # **宛先だけに書くと同じ指紋のまま 2 通出る** (#173 のレビュー)。
-  for role in "$sent_to" "$ROLE"; do
+  # **書くのは宛先の記録だけ** (#359)。
+  #
+  # **#173 のレビューが「送った側にも書く」とした理由は、指紋が役をまたいで
+  # 同じだったから**である——**宛先が呼んだ役で反転すると、同じ指紋のまま
+  # master→worker→master と 2 通出た。**
+  #
+  # **指紋を役ごとに持つと、その形は作れない**——**worker の周回が見るのは
+  # 「master の番の枝」で、master が送った「worker の番の枝」とは別の鍵**である。
+  # **こちらの役の記録へ相手の状態を書くと、そちらの記録が壊れる。**
+  for role in "$sent_to"; do
     printf '%s' "${INFORMED}${FIELD}${sent_state}" >"$common_dir/valence-loop-handoff-$role" || {
       echo "[FAIL] 送信記録を書き込めません: $common_dir/valence-loop-handoff-$role" >&2
       exit 2
@@ -410,6 +420,8 @@ declare -A requested_of=()
 declare -A checks_of=()
 # PR ごとの head。**枝ごとの指紋に要る** (#274)——**その PR が動いたかは head で見る**
 declare -A head_of=()
+# PR ごとの、コンフリクトの有無 (#347)。**指紋に載せる**——**解けたら次の枝へ移る**
+declare -A mergeable_of=()
 
 while IFS="$FIELD" read -r number _labels head labeled_at _body; do
   [[ -n $number ]] || continue
@@ -651,28 +663,6 @@ pr_witness() {
     "$1" "${head_of[$1]-}" "${unresolved_of[$1]-}" "${last_comment_of[$1]-}"
 }
 
-# **その枝の候補ぜんぶ**を指紋にする (#292 のレビュー)。
-#
-# **選ぶのは 1 件だが、指紋を 1 件ぶんにすると、もう 1 件が動いても `STATE` は同じ**
-# ——**送らない。** **選ばれている側が動かないかぎり、もう 1 件はずっと指紋に現れない**
-# （**`changes-requested` は master 待ちで何日でも止まりうる**）。
-# **#80（worker 2 セッション）が入れば、「同じ枝に 2 件」は普通の状態になる。**
-#
-# **倒れる向きで決める**（#124 / #125 / #258）——**送りすぎは読み飛ばされるだけ**だが、
-# **黙るほうは誰も気づけない。** **#274 は前者を減らす Issue で、後者を作ってよい
-# 理由にはならない。**
-#
-# **並びは番号順にする。** **`gh` の返す順に依存すると、並びが変わっただけで
-# 別状態になる**——**何も動いていないのに通知が飛ぶ**（#274 が減らそうとした側）。
-branch_witness() {
-  local number extra="${2-}" out=""
-  for number in $(printf '%s\n' $1 | sort -n); do
-    out+="${out:+;}$(pr_witness "$number")"
-    [[ -z $extra ]] || out+="|${extra}=${checks_of[$number]-}"
-  done
-  printf '%s' "$out"
-}
-
 changes_requested=""
 gateable=""
 # **label と実態の食い違い。** 未解決が残っているのに `changes-requested` が無い状態で、
@@ -744,6 +734,13 @@ unskipped() {
   done
   printf '%s' "$out"
 }
+# **枝を最後まで歩いて、役ごとに集める** (#359)。**指紋を「当たった 1 枝」で作ると、
+# 前の枝が続いている間、後ろの枝の材料が指紋に入らない**——**`changes-requested` の枝に
+# 入っているあいだ `ready` が 0 から 1 になっても、同じ状態と読む**（**空いた worker は
+# 次の cron まで動かない**。**症状は「何も起きていない」**）。
+#
+# **その役が動ける枝を全部集めたものが、その役の状態**である。
+declare -a entry_to=() entry_reason=() entry_branch=() entry_witness=() entry_pr=()
 while :; do
 silent_park_left="$(unskipped "$silent_park")"
 untriaged_left="$(unskipped "$untriaged")"
@@ -759,7 +756,7 @@ if [[ -n $silent_park_left ]]; then
   reason="PR #${silent_park_left} が理由の無い保留になっている（理由を投稿し直すか、保留を戻す）"
   # **読んだのは「理由の無い保留がある」ことだけ**である
   branch="silent-park"
-  witness="silent-park=${silent_park_left}"
+  witness="silent-park=${picked}"
 elif [[ -n $untriaged_left ]]; then
   picked="${untriaged_left%% *}"
   # **当否を判断できるのは master だけ**である。**放っておくとループが止まる側**なので、
@@ -767,7 +764,7 @@ elif [[ -n $untriaged_left ]]; then
   to="master"
   reason="PR #${picked} の指摘が未処理（当否を判断して changes-requested を付けるか、外出しする）"
   branch="untriaged"
-  witness="$(branch_witness "$untriaged_left")"
+  witness="$(pr_witness "$picked")"
 elif [[ -n $answered_left ]]; then
   picked="${answered_left%% *}"
   # **誰が書いたかは、発言の印で読む** (#174)。**呼んだ役では決めない。**
@@ -786,7 +783,7 @@ elif [[ -n $answered_left ]]; then
   # 同じ指摘について master→worker と worker→master で 2 通出る**——
   # **鍵は枝の名前で持ち、文面は持たない。**
   branch="answered"
-  witness="$(branch_witness "$answered_left")"
+  witness="$(pr_witness "$picked")"
   if [[ ${last_body_of[$picked]-} == *"${ROLE_MARK[master]}"* ]]; then
     # master が書いた（要求・質問）。**直すのは worker**
     to="worker"
@@ -804,7 +801,7 @@ elif [[ -n $changes_requested_left ]]; then
   reason="PR #${picked} に master の要求が残っている"
   # **CI は見ない。** **要求が残っているかどうかは、CI が進んでも変わらない**
   branch="changes-requested"
-  witness="$(branch_witness "$changes_requested_left")"
+  witness="$(pr_witness "$picked")"
 elif [[ -n $gateable_left ]]; then
   # **ゲートを回せる PR でも、コンフリクトしていれば行き先が違う** (#347)。
   # **master が指摘を resolve して label も外した直後**、**上の 2 つの手掛かりが
@@ -823,7 +820,6 @@ elif [[ -n $gateable_left ]]; then
   computing=""       # まだ計算中（`UNKNOWN`）
   # **`mergeable` も指紋に載せる。** **候補ごとに載せる**ので、
   # **どれか 1 本の状態が動いた瞬間に指紋も動く**——**解けたら次の枝へそのまま移る。**
-  mergeable_witness=""
   for candidate in $(printf '%s\n' $gateable_left | sort -n); do
     "${BASH_SOURCE[0]%/*}/loop-ci-status" --conflicting "$candidate" >/dev/null
     case "$?" in
@@ -834,7 +830,7 @@ elif [[ -n $gateable_left ]]; then
       # master 宛てになり、ゲートで落ちるだけで誰も直さない。**
       *) fail_unknown "PR #${candidate} がコンフリクトしているか" ;;
     esac
-    mergeable_witness+="${mergeable_witness:+;}${candidate}=${mergeable_code}"
+    mergeable_of[$candidate]="$mergeable_code"
   done
   if [[ -n $conflicting || -n $computing ]]; then
     # **起こす先は worker ではない** (#349 のレビュー)。**取り込み直せるのは著者だけ**だが、
@@ -865,7 +861,7 @@ elif [[ -n $gateable_left ]]; then
       reason="PR #${picked} のコンフリクトの有無が計算中（確定したら取り込み直しを指示する）"
     fi
     # **CI は読まない。** **コンフリクトしている間、必須チェックは作られない**
-    witness="$(branch_witness "$gateable_left")|mergeable=${mergeable_witness}"
+    witness="$(pr_witness "$picked")|mergeable=${mergeable_of[$picked]-}"
   else
     to="master"
     picked="${gateable_left%% *}"
@@ -873,7 +869,7 @@ elif [[ -n $gateable_left ]]; then
     branch="gateable"
     # **ここでは CI も読む。** **ゲートが落とす条件そのもの**なので、
     # **外すと、マージできるようになった、まさにその瞬間に黙る** (#125 / #173 のレビュー)
-    witness="$(branch_witness "$gateable_left" checks)|mergeable=${mergeable_witness}"
+    witness="$(pr_witness "$picked")|checks=${checks_of[$picked]-}|mergeable=${mergeable_of[$picked]-}"
   fi
 elif ((ready >= 1 && in_progress < hands)); then
   # **PR ではないので、ここから先へは進めない**（`--who` は次の周で止まる）
@@ -914,19 +910,78 @@ else
   picked=""
 fi
 
-# **ふつうの呼び出しは、ここで決まり**である。
-# **`--who` は、自分の番に当たるまで次の PR を見る**（**当たらなければ、渡す相手なしで終わる**）。
-# **PR を持たない枝（`ready` / `promote` / `no-work`）は、そこで止まる。**
-((peek == 1)) || break
-[[ -n $to && $to != "$ROLE" && -n $picked ]] || break
+# **当たった枝を覚えて、次の PR へ進む。**
+# **PR を持たない枝（`ready` / `promote` / `no-work`）は、そこで止まる**
+# ——**進める先が無いのに回ると終わらない。**
+entry_to+=("$to")
+entry_reason+=("$reason")
+entry_branch+=("$branch")
+entry_witness+=("$witness")
+entry_pr+=("$picked")
+[[ -n $picked ]] || break
 skip_prs="$skip_prs $picked"
 done
 
-# **どの枝に入ったかと、その枝が読んだ入力**を 1 つの鍵にする (#274)。
+# **役ごとに指紋を持つ** (#359)。**その役が動ける枝を、上から順に並べたもの**である。
 #
-# **理由の文面は鍵にしない。** **`answered` は呼んだ役で宛先も文面も反転する**ので、
+# **どの枝に入ったかと、その枝が読んだ入力**を鍵にするのは #274 のまま——
+# **盤面ぜんぶを鍵にしない**（**何も動いていないのに通知が飛ぶ**）。**変えたのは
+# 「1 枝ぶん」から「その役のぶん」への広げ方だけ**である。
+#
+# **理由の文面は鍵にしない。** **`answered` は印で宛先が割れる**ので、
 # **文面を入れると、同じ指摘について 2 通出る** (#173 のレビュー)。
-readonly STATE="on=${branch}|${witness}"
+#
+# **持ち物が無い役は `on=none`。** **毎周回同じ値**なので、**そこでは何も起きない。**
+# **枝の候補ぜんぶを指紋にする** (#292 のレビュー)。**選ぶのは 1 件だが、指紋を
+# 1 件ぶんにすると、もう 1 件が動いても状態は同じ**——**送らない。** **枝を最後まで
+# 歩くので、その役の PR は全部ここに並ぶ。**
+#
+# **並びは番号順にする。** **`gh` の返す順に依存すると、並びが変わっただけで
+# 別状態になる**——**何も動いていないのに通知が飛ぶ**（#274 が減らそうとした側）。
+declare -A witness_of=()
+for index in "${!entry_to[@]}"; do
+  witness_of["${entry_to[$index]}|${entry_branch[$index]}|${entry_pr[$index]}"]="${entry_witness[$index]}"
+done
+declare -A state_of=()
+for role in "${ROLES[@]}"; do
+  state_of[$role]=""
+  seen_branches=""
+  for index in "${!entry_to[@]}"; do
+    [[ ${entry_to[$index]} == "$role" ]] || continue
+    entry_branch_name="${entry_branch[$index]}"
+    [[ " $seen_branches " != *" $entry_branch_name "* ]] || continue
+    seen_branches="$seen_branches $entry_branch_name"
+    # **その役・その枝のぶんを、PR 番号順に並べる**（**PR を持たない枝は 1 件だけ**）
+    group_prs=""
+    for other in "${!entry_to[@]}"; do
+      [[ ${entry_to[$other]} == "$role" && ${entry_branch[$other]} == "$entry_branch_name" ]] ||
+        continue
+      group_prs="${group_prs:+$group_prs }${entry_pr[$other]}"
+    done
+    group=""
+    for number in $(printf '%s\n' $group_prs | sort -n); do
+      group+="${group:+;}${witness_of["${role}|${entry_branch_name}|${number}"]-}"
+    done
+    # **PR を持たない枝**（`ready` / `promote` / `no-work`）は、その枝の材料をそのまま
+    [[ -n $group ]] || group="${entry_witness[$index]}"
+    state_of[$role]+="${state_of[$role]:+;}on=${entry_branch_name}|${group}"
+  done
+  # **持ち物が無い役は `on=none`。** **毎周回同じ値**なので、**そこでは何も起きない**
+  [[ -n ${state_of[$role]} ]] || state_of[$role]="on=none"
+done
+
+# **渡すのは相手役だけ** (#92。**自分自身へは送らない**)。**自分の番が上にあっても、
+# 下に相手の番があれば渡す** (#359)——**役は 2 つで、自己通知は抑止される**ので、
+# **出口が出す通知は、これまでどおり多くて 1 通**である（**手順書は変わらない**）。
+to=""
+reason=""
+for index in "${!entry_to[@]}"; do
+  [[ -n ${entry_to[$index]} && ${entry_to[$index]} != "$ROLE" ]] || continue
+  to="${entry_to[$index]}"
+  reason="${entry_reason[$index]}"
+  break
+done
+readonly STATE="${state_of[${to:-$ROLE}]}"
 
 # **「送った」と「見た」を分ける** (#125)。
 #
@@ -957,9 +1012,12 @@ readonly STATE="on=${branch}|${witness}"
 # **自分の番でも答える**（**そこが訊きたいところ**である）。**抑止も見ない**
 # ——**「同じ状態を既に伝えたか」は送るときの問い**で、**「いま誰の番か」とは別**である。
 if ((peek == 1)); then
-  [[ -n $to ]] || exit 1
-  printf '%s\t%s\n' "$to" "$reason"
-  exit 0
+  for index in "${!entry_to[@]}"; do
+    [[ ${entry_to[$index]} == "$ROLE" ]] || continue
+    printf '%s\t%s\n' "${entry_to[$index]}" "${entry_reason[$index]}"
+    exit 0
+  done
+  exit 1
 fi
 
 lock_records
@@ -979,21 +1037,18 @@ for role in "${ROLES[@]}"; do
   # **前の版が書いた記録には印が無い**（状態がそのまま入っている）。その場合は
   # 印が一致しないので「見ただけ」に落ちる——**多く送る側へ倒れる**ので害が無い
   # （`bin/loop-lease` の 1 行目と同じで、**記録は版をまたいで共有される**）。
-  if [[ ${stored%%"$FIELD"*} == "$INFORMED" && ${stored#*"$FIELD"} == "$STATE" ]]; then
+  if [[ ${stored%%"$FIELD"*} == "$INFORMED" && ${stored#*"$FIELD"} == "${state_of[$role]}" ]]; then
     # **送った記録は、上書きしない。** 上書きすると、**受け取った側が自分の周回を
     # 回しただけで「まだ送っていない」に戻り**、**送り合いになる**。
     informed[$role]=1
     continue
   fi
   informed[$role]=""
-  printf '%s' "${OBSERVED}${FIELD}${STATE}" >"$record" || {
+  printf '%s' "${OBSERVED}${FIELD}${state_of[$role]}" >"$record" || {
     echo "[FAIL] 送信記録を書き込めません: $record" >&2
     exit 2
   }
 done
-
-# **渡す相手がいなければ、ここで終わる**（記録は上で通してある）。
-[[ -n $to ]] || exit 1
 
 # **「送るかどうか」と「記録するかどうか」は別の判断である。**
 #
@@ -1002,17 +1057,21 @@ done
 #
 # **同じ条件で両方を決めると、記録が 1 回で止まる**（送らない周回はここへ来ないので、
 # 3 周に到達せず人を呼べない）。**気づかせたい状態でだけ黙る**ことになる。
+#
+# **渡す相手がいない周回より先に見る** (#359)。**食い違いは、渡す相手の有無とは
+# 別のこと**である——**後ろに置くと、自分の番しか無い盤面で黙る**（**そこがまさに
+# `untriaged`＝master の番**なので、**いちばん出したい場面で出なくなる**）。
 mismatch_exit=0
 if [[ -n $mismatched ]]; then
   echo "[WARN] PR #${mismatched}: 未解決スレッドがあるのに changes-requested がありません" >&2
   mismatch_exit=3
 fi
 
-# **自分自身へは送らない。** 自分が動けるなら次の周回でやればよい
-# （自己通知で新しい手順書に載れる保証も無い）。
+# **渡す相手がいなければ、ここで終わる**（記録は上で通してある）。
+#
 # **同じ状態で 2 通目を送らない。** 相手はもう知っている。
 # どちらの場合も**記録は通す**——その状態が続いていること自体が、記録したい事実である。
-if [[ $to == "$ROLE" || -n ${informed[$to]-} ]]; then
+if [[ -z $to || -n ${informed[$to]-} ]]; then
   ((mismatch_exit == 3)) && exit 3
   exit 1
 fi

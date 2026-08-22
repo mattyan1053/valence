@@ -1861,6 +1861,68 @@ describe("bin/loop-handoff", () => {
     });
   });
 
+  /**
+   * **前の枝が続いている間、後ろの枝の仕事が誰にも届かない**（#359）。
+   *
+   * **枝は排他で、指紋は「当たった 1 枝」で作っていた**——**`changes-requested` の枝に
+   * 入っている間、`ready` が 0 から 1 になっても同じ状態と読む。** **空いた worker は
+   * 次の cron まで動かない**（**実測 2026-08-22**。**症状は「何も起きていない」**なので
+   * `bin/loop-stall` にも乗らない）。
+   *
+   * **指紋を役ごとに持つ。** **その役が動ける枝を全部集めたものが、その役の状態**である
+   * ——**#274（2 通目を出さない）は役の中で保たれ**、**#125（送り合いにしない）は
+   * 「自分自身へは送らない」と「具体的な持ち物があるときだけ」がそのまま支える。**
+   */
+  describe("別々の手に、別々の仕事があるとき", () => {
+    it("前の枝が続いていても、ready が動けば worker を起こす", () => {
+      // **#359 の形**——**`changes-requested` は「片方の手が塞がっている」でしかない**
+      const busy: State = { prs: [{ number: 12, labels: ["changes-requested"] }] };
+      withState(busy);
+      expect(cycle("master").status, "1 通目が出ていない").toBe(0);
+
+      // **同じ状態なら、これまでどおり黙る**（退行の検出）
+      expect(run("master").status, "同じ状態で 2 通目を出している").toBe(1);
+
+      // **`ready` が 0 → 1。** **手は 2 本ある**ので、空いているほうに仕事がある
+      withState({ ...busy, ready: 1 });
+
+      expect(run("master").status, "ready が動いても誰も起こされない").toBe(0);
+      expect(run("master").stdout).toMatch(/^worker\t/);
+    });
+
+    it("自分の番が上にあっても、相手の番があれば渡す", () => {
+      // **自分の番は次の周回で自分がやればよい**（#92）が、**それで相手の番まで
+      // 隠れてはいけない**——**隠れると、相手は次の cron まで動かない。**
+      withState({
+        prs: [{ number: 12, unresolvedBy: ["worker"] }], // worker が返した → master の番
+        ready: 1,
+      });
+
+      const handoff = run("master");
+
+      expect(handoff.status, "自分の番で止まっている").toBe(0);
+      expect(handoff.stdout, "相手の番が隠れている").toMatch(/^worker\t/);
+    });
+
+    it("枝の優先順は変わらない", () => {
+      // **理由は、相手役のいちばん上の枝のもの**である
+      // ——**当否の判断が先**という並びは動かさない
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"] }],
+        ready: 1,
+      });
+
+      expect(run("master").stdout, "後ろの枝の理由になっている").toContain("#12");
+    });
+
+    it("相手に持ち物が無ければ、これまでどおり渡さない", () => {
+      // **緩めすぎない側の担保**——**「暇そうだから起こす」を許さない** (#125)
+      withState({ prs: [{ number: 12, unresolvedBy: ["worker"] }] });
+
+      expect(run("master").status, "持ち物が無いのに起こしている").toBe(1);
+    });
+  });
+
   describe("役で反転する宛先", () => {
     it("同じ指紋で 2 通目を送らない", () => {
       // **`informed` を宛先だけに書くと、同じ指紋のまま master→worker→master と
