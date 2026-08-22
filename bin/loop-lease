@@ -862,28 +862,45 @@ fi
 # ——**空同士の一致に頼らず、役で分ける**（**master の版ずれの受け口はそのまま働く**）。
 #
 # **前提: `set_role_paths` を通していること**（`STATE` を除いて走査する）。
+# **期限は写さない** (#385 のレビュー)。**測り方は `read_lease` が 1 箇所で持っている**
+# ——**「token が入っている」だけを見ると、期限切れの記録を「まだ持っている」と答え**、
+# **入口を飛ばした記録も、「切れている間に別の周回が入ったかもしれない」という警告も
+# 出ない**（`round_window` でまとめたのと同じ話）。
 held_under_other_name() {
-  local role="$1" want_owner="$2" candidate first second workspace
+  local role="$1" want_owner="$2" candidate candidate_scope found=1
+  local saved_state="$STATE" saved_activity="$ACTIVITY" saved_label="$SCOPE_LABEL"
   for candidate in "$common_dir/valence-loop-lease-$role"*; do
     [[ -f $candidate ]] || continue
     [[ $candidate != *.lock && $candidate != *.tmp ]] || continue
-    [[ $candidate != "$STATE" ]] || continue
-    first=""
-    second=""
-    workspace=""
-    # **1 行目は token と時刻、2 行目が周回の印、3 行目が作業場**である
-    { read -r first; read -r second; read -r workspace; } <"$candidate" 2>/dev/null
-    [[ -n ${first%%$'\t'*} ]] || continue
-    [[ $second == "$want_owner" ]] || continue
+    [[ $candidate != "$saved_state" ]] || continue
+    # **読むのは `read_lease`**（`alive` が lease を見るのと同じ形）。**期限切れなら
+    # `held_token` は空になる**ので、**この枝も本筋と同じ期限で切れる。**
+    candidate_scope="${candidate##*/valence-loop-lease-}"
+    STATE="$candidate"
+    ACTIVITY="$common_dir/valence-loop-activity-$candidate_scope"
+    SCOPE_LABEL="$candidate_scope"
+    lock_state || continue
+    read_lease quiet || {
+      exec 9>&-
+      continue
+    }
+    exec 9>&-
+    [[ -n $held_token ]] || continue
+    [[ $held_owner == "$want_owner" ]] || continue
     if [[ $role == "worker" ]]; then
       # **作業場が書かれていない記録は、この作業場のものと決めない。**
       # **偽の「持っている」より、余分な「飛ばした」のほうが安い**——
       # **前者は数え落としで気づけないが、後者は記録として残って読める。**
-      [[ -n ${WORKSPACE_PATH-} && $workspace == "${WORKSPACE_PATH-}" ]] || continue
+      [[ -n ${WORKSPACE_PATH-} && $held_workspace == "${WORKSPACE_PATH-}" ]] || continue
     fi
-    return 0
+    found=0
+    break
   done
-  return 1
+  # **借りた口を返す。** **呼んだ側は自分の記録を指したまま続ける**
+  STATE="$saved_state"
+  ACTIVITY="$saved_activity"
+  SCOPE_LABEL="$saved_label"
+  return "$found"
 }
 
 # **この周回が、その役の lease を持っているか。** **読み方はここ 1 つ** (#352)。

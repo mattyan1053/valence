@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -875,7 +876,8 @@ describe("worker が作業しているあいだは数えない", () => {
     if (options.startedAt === undefined) {
       rmSync(rounds, { force: true });
     } else {
-      writeFileSync(rounds, `${options.startedAt}\n`);
+      // **2 行目は作業場**（`acquire` が書く形。#385）——**印の鍵はこちらである**
+      writeFileSync(rounds, `${options.startedAt}\n${realpathSync(repo)}\n`);
     }
     const longest = join(repo, ".git", `valence-loop-roundlen-${scope}`);
     if (options.longestRound === undefined) {
@@ -938,7 +940,7 @@ describe("worker が作業しているあいだは数えない", () => {
     expect(Number.isFinite(ttl) && ttl > 0, "期限を読めない").toBe(true);
     writeFileSync(
       join(repo, ".git", `valence-loop-rounds-${scope}`),
-      `${Math.floor(Date.now() / 1000) - ttl - 60}\n`,
+      `${Math.floor(Date.now() / 1000) - ttl - 60}\n${realpathSync(workspace)}\n`,
     );
   }
 
@@ -1014,6 +1016,36 @@ describe("worker が作業しているあいだは数えない", () => {
       workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) - 100_000 });
 
       expect(aliveWorkers().stdout, "返した作業場を数え続けている").toBe("0");
+    });
+
+    it("名前が違っても、同じ作業場は 1 つと数える", () => {
+      // **足した列を、読む側でも数える** (#385 のレビュー)。**印の 2 行目に作業場が
+      // 入った**のに、**ここは名前を鍵にしていた**——**名前の作り方が変わると、
+      // 1 つの作業場が 2 つの scope として数えられる。**
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
+      writeFileSync(
+        join(repo, ".git", "valence-loop-rounds-worker-次の版の名前"),
+        `${Math.floor(Date.now() / 1000)}\n${realpathSync(repo)}\n`,
+      );
+
+      expect(aliveWorkers().stdout, "同じ作業場を 2 つとして数えている").toBe("1");
+    });
+
+    it("作業場の書かれていない印は、作業場として数えない", () => {
+      // **前の版が置いた印は、名前でしか持ち主を言わない**——**その名前が読めない版から
+      // 見ると、誰のものか分からない。** **「別の作業場」と決めて数えると、
+      // 版が入れ替わった直後だけ手の数が水増しされ**、**その印は二度と進まないので
+      // 「全員が進んだ」が成立しなくなる**（**停止カウンタが黙って止まる**）。
+      //
+      // **数えないほうへ倒す**——**手は 1 本少なく見え、停止はこれまでどおり数えられる。**
+      // **どちらも「気づける側」**である。
+      workerState({ activityAgo: 0, startedAt: Math.floor(Date.now() / 1000) });
+      writeFileSync(
+        join(repo, ".git", "valence-loop-rounds-worker-前の版の名前"),
+        `${Math.floor(Date.now() / 1000)}\n`,
+      );
+
+      expect(aliveWorkers().stdout, "持ち主の分からない印を、作業場として数えている").toBe("1");
     });
 
     it("上限も同じ数え方になる", () => {
@@ -1335,16 +1367,17 @@ describe("worker が作業しているあいだは数えない", () => {
     activityAgo: number;
   }): void {
     const now = Math.floor(Date.now() / 1000);
-    // **値は「この作業場のものと違う」ことだけが要る。** `bin/loop-stall` は
-    // scope を突き合わせるだけで、**そこからパスを読み取らない**（読み取れない）
+    // **値は「この作業場のものと違う」ことだけが要る。** **鍵は印の 2 行目（作業場）**
+    // で、**実測の記録は名前で引かれる**（#385）——**どちらも別物にしておく。**
     const scope = "worker-other-workspace";
+    const workspace = "/別の作業場/valence";
     writeFileSync(
       join(repo, ".git", `valence-loop-roundlen-${scope}`),
       `${options.longestRound}\n${options.longestRound}\n`,
     );
     writeFileSync(
       join(repo, ".git", `valence-loop-rounds-${scope}`),
-      `${now - options.startedAgo}\n`,
+      `${now - options.startedAgo}\n${workspace}\n`,
     );
     writeFileSync(
       join(repo, ".git", `valence-loop-activity-${scope}`),
@@ -1403,6 +1436,24 @@ describe("worker が作業しているあいだは数えない", () => {
     otherWorkspace({ longestRound: 600, startedAgo: 1, activityAgo: 10 });
 
     expect(stall().stdout, "誰の周回でも数が進まなくなっている").toContain("count=1");
+  });
+
+  it("前の版が置いた印は、数えるのを止めない", () => {
+    // **これが重いほう** (#385 のレビュー)。**名前を鍵にしていると、版が入れ替わった
+    // 直後は 1 つの作業場が 2 つの scope に見え**、**前の名前の印は二度と進まない**
+    // ——**`all_scopes_advanced` が永久に「進んでいない」を返し**、**周回は回っているのに
+    // 停止カウンタが増えない**（**いちばん壊れやすい瞬間に、人を呼ぶ仕組みだけが黙る**）。
+    const now = Math.floor(Date.now() / 1000);
+    workerState({ activityAgo: 10, startedAt: now - 600, longestRound: 600 });
+    // **前の版が置いた印**（**作業場が書かれておらず、名前も読めない**）。
+    // **窓の内側にあり、これ以降ずっと書き換わらない**
+    writeFileSync(join(repo, ".git", "valence-loop-rounds-worker-前の版の名前"), `${now}\n`);
+    expect(stall().stdout).toContain("count=0");
+
+    // **この作業場は、新しい周回を始めた**
+    workerState({ activityAgo: 10, startedAt: now - 1, longestRound: 600 });
+
+    expect(stall().stdout, "前の版の印で、数えるのが止まっている").toContain("count=1");
   });
 
   it("使われなくなった作業場は、数を止め続けない", () => {
@@ -2277,8 +2328,12 @@ describe("作業場ごとに数える", () => {
     // **安全な下限は「同時に走るループ数 + 1」**である（スクリプト自身が書いている）。
     // **作業場が増えたら、上限も増える**——**数を書き写さない**（§5）
     const now = Math.floor(Date.now() / 1000);
+    // **2 行目は作業場**（#385）——**鍵はこちらなので、別々の作業場にする**
     for (const scope of ["worker-aaa", "worker-bbb"]) {
-      writeFileSync(join(repo, ".git", `valence-loop-rounds-${scope}`), `${now}\n`);
+      writeFileSync(
+        join(repo, ".git", `valence-loop-rounds-${scope}`),
+        `${now}\n/作業場/${scope}\n`,
+      );
     }
 
     const counts = [1, 2, 3].map(() => stall(repo, ["no-work"]).stdout);

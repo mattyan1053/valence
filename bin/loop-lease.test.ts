@@ -2058,6 +2058,27 @@ describe("bin/loop-lease", () => {
       ).toBe(true);
     });
 
+    it("前の版の名前の lease が期限切れなら、持っているとは答えない", () => {
+      // **期限を写さない** (#385 のレビュー)。**本筋は `read_lease` が期限を見る**のに、
+      // **この枝は「token が入っていること」しか見ていなかった**——**期限切れの記録を
+      // 「まだ持っている」と答え**、**入口を飛ばした記録も、「切れている間に別の周回が
+      // 入ったかもしれない」という警告も出ない。**
+      const older = olderVersion();
+      expect(
+        runWith(older, ["acquire", "worker", stampFor("worker")]).status,
+        "前の版で取れていない",
+      ).toBe(0);
+      ageRecords();
+
+      const checked = runWith(SCRIPT, ["check"]);
+
+      expect(checked.stderr, "期限切れの記録を、まだ持っていると読んでいる").toContain("飛ばした");
+      expect(
+        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        "飛ばした周回が、記録されていない",
+      ).toBe(true);
+    });
+
     it("master が前の版の名前で持っていても、飛ばしたと記録しない", () => {
       // **役で分けた側の受け口** (#385 のレビュー)。**master は役ごとに 1 つで、
       // 作業場を持たない**——**記録の 3 行目は worker のときだけ書かれる**ので、
