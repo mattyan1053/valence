@@ -352,8 +352,13 @@ describe("bin/loop-handoff", () => {
     return runIn(repo, args, env);
   }
 
-  function run(role: string, env: Record<string, string> = {}): Run {
-    return runWith(role === "" ? [] : [role], env);
+  function run(role: string, env: Record<string, string> = {}, extra: string[] = []): Run {
+    return runWith(role === "" ? [...extra] : [role, ...extra], env);
+  }
+
+  /** **`--who` のあとに `--sent` を打つ。** 送信待ちを書いていないことを見る (#360)。 */
+  function sentAfterPeek(token: string): Run {
+    return runWith(["master", `--sent=${token}`]);
   }
 
   /** その役の lease を取り、token を返す。**周回を始める**（`cwd` はこの作業場）。 */
@@ -2189,6 +2194,71 @@ describe("bin/loop-handoff", () => {
       });
 
       expect(run("master").status).toBe(0);
+    });
+  });
+
+  /**
+   * **次に動けるのが自分でも、それを読めるようにする**（#360）。
+   *
+   * **出口は自分自身へは送らない**（#92）ので、**`to` が自分の役なら exit 1 で黙る**
+   * ——**「いまは自分の番だ」を、周回の側から読む手立てが無かった。**
+   * **master のステップ 2 は、そのぶんを大きさと古さで並べ直していた**
+   * ——**手番を持っている PR が、より小さい / 古い PR に毎周回負ける**（**実測 105 分**）。
+   *
+   * **読むだけの口を足す。** **同じ判定を、周回の並べ替えのために書き写さないため**
+   * である（`AGENTS.md` §5）。
+   */
+  describe("誰の番かを、読むだけで訊く", () => {
+    it("自分の番でも、誰の番かと理由を出す", () => {
+      // **ここが本題**——**ふつうに打つと、自己通知の抑止で黙る**
+      withState({ prs: [{ number: 12, unresolvedBy: ["worker"] }] });
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status, "自分の番を読めない").toBe(0);
+      expect(peeked.stdout, "宛先が出ない").toMatch(/^master\t/);
+      expect(peeked.stdout, "どの PR かが読めない").toMatch(/#12\b/);
+      expect(run("master").status, "ふつうに打てば、これまでどおり黙る").toBe(1);
+    });
+
+    it("相手の番なら、相手を出す", () => {
+      // **並べ替えに使う側は、自分の番かどうかで振る舞いを変える**
+      // ——**役を出さないと、その判断ができない**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      expect(run("master", {}, ["--who"]).stdout).toMatch(/^worker\t/);
+    });
+
+    it("渡す相手がいなければ 1 を返す", () => {
+      withState({});
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status).toBe(1);
+      expect(peeked.stdout).toBe("");
+    });
+
+    it("読むだけで、記録も送信待ちも書かない", () => {
+      // **並べ替えのために毎周回打つ**ので、**打っただけで指紋が動くと、
+      // その周回は「もう伝えた」ことにされる**——**出口の 1 通が消える。**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      expect(run("master", {}, ["--who"]).status).toBe(0);
+
+      // **送ると決めた記録が無い**ので、`--sent` は落ちる（**書いていない証拠**）
+      const token = acquireLease("master");
+      try {
+        expect(sentAfterPeek(token).status, "送信待ちを書いている").not.toBe(0);
+      } finally {
+        releaseLease("master", token);
+      }
+      // **指紋も動いていない**ので、**このあとふつうに打てば、これまでどおり渡せる**
+      expect(cycle("master").status, "打っただけで「伝えた」ことにされている").toBe(0);
+      expect(run("master").status, "抑止が効いていない").toBe(1);
+    });
+
+    it("知らない旗は、使い方の誤りとして落ちる", () => {
+      expect(run("master", {}, ["--whom"]).status).toBe(2);
     });
   });
 
