@@ -63,14 +63,18 @@ case "$?" in
   1)
     # **worker が push した。** **次の周回で読み直す。**
     echo "[FAIL] head が動いています（#$PR）。この周回は何も書きません" >&2
-    "${BASH_SOURCE[0]%/*}/loop-stall" "head-moved:$PR" >&2
+    # **数えられなかったら、そう言う** (#389 のレビュー)。**黙ると、人を呼ぶ道が
+    # 黙って伸びる**——**この口が分けた理由と同じ向き**である。
+    "${BASH_SOURCE[0]%/*}/loop-stall" "head-moved:$PR" >&2 ||
+      echo "[WARN] head が動いたことを記録できません（#$PR）" >&2
     exit 1
     ;;
   *)
     # **読めない**（gh / 認証 / GitHub）。**worker では解けない**ので、
     # **動いたのと同じ数え方にしない**——**続けば 3 周で人が呼ばれる側**である。
     echo "[FAIL] head を読み取れません（#$PR）。この周回は何も書きません" >&2
-    "${BASH_SOURCE[0]%/*}/loop-stall" "head-lookup-failed:$PR" >&2
+    "${BASH_SOURCE[0]%/*}/loop-stall" "head-lookup-failed:$PR" >&2 ||
+      echo "[WARN] head を読めなかったことを記録できません（#$PR）" >&2
     exit 3
     ;;
 esac
@@ -137,10 +141,44 @@ fi
 #
 # **識別子の書式は `bin/loop-stall` が持つ**（`awaiting-worker:<PR>@<head>`）。
 # **head が入るので、押し直されれば別の状態として数え直される。**
-if ! "${BASH_SOURCE[0]%/*}/loop-stall" "awaiting-worker:${PR}@${HEAD_SHA}"; then
-  # **記録できなくても、要求は出ている。** **止めない**——**言うことと、止めることは別**
-  # である (#270)。**次の周回が同じ状態をもう一度立てる。**
-  echo "[WARN] 待ちを記録できませんでした（#$PR）。要求そのものは出ています" >&2
+#
+# **ただし、著者がループの外にいるなら待たない** (#70。#389 のレビュー)。
+# **次に動くのは人**なので、**人待ちと同じ状態へ倒す**（`parked` + `awaiting-human`。
+# **状態は増やさない**）——**待つと、SHA が変わらないまま 3 周で `loop/STOP`** になり、
+# **一人の不在が全体停止になる。**
+#
+# **判定不能を「外」に倒さない**——**worker の対応待ちが人待ちに化け、誰も直さない。**
+# **`*)` で受ける**ので、**126 / 127（スクリプトが消えた）も待つ側**である。
+park_instead=0
+"${BASH_SOURCE[0]%/*}/loop-outside-author" "$PR" >/dev/null
+case "$?" in
+  0) park_instead=1 ;;
+  *) ;;
+esac
+
+if ((park_instead == 1)); then
+  gh label create awaiting-human --description "人の判断待ち" 2>/dev/null || true
+  # **保留にした head を残す。** **著者は自分で label を外せない**ことがある
+  # （fork には triage 権限が無い）ので、**動いたら master が外す。**
+  #
+  # **記録できないなら、保留にしない**——**記録の無い保留は誰も外せない**
+  # （**人が外すと決めた保留と区別が付かない**）。**そのときは、これまでどおり数える。**
+  if ! "${BASH_SOURCE[0]%/*}/loop-parked-head" record "$PR" "$HEAD_SHA"; then
+    echo "[WARN] 保留の head を記録できません（#$PR）。保留にせず、待ちとして数えます" >&2
+    park_instead=0
+  elif ! gh pr edit "$PR" --add-label parked --add-label awaiting-human; then
+    # **保留にできなかった。** **ループは止まる側にある**ので、これまでどおり数える
+    echo "[WARN] 保留にできません（#$PR）。待ちとして数えます" >&2
+    park_instead=0
+  fi
+fi
+
+if ((park_instead == 0)); then
+  if ! "${BASH_SOURCE[0]%/*}/loop-stall" "awaiting-worker:${PR}@${HEAD_SHA}"; then
+    # **記録できなくても、要求は出ている。** **止めない**——**言うことと、止めることは別**
+    # である (#270)。**次の周回が同じ状態をもう一度立てる。**
+    echo "[WARN] 待ちを記録できませんでした（#$PR）。要求そのものは出ています" >&2
+  fi
 fi
 
 echo "requested pr=$PR head=${HEAD_SHA:0:8}"

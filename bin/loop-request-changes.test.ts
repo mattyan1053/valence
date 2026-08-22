@@ -46,6 +46,12 @@ type Setup = {
   head?: 0 | 1 | 2;
   /** 何回目の label の読み取りで落ちるか（1 = 付ける前、2 = 付けたあとの確かめ）。 */
   failsOnRead?: number;
+  /** `bin/loop-outside-author` の答え（**0 = 外 / 1 = ループのアカウント / 2 = 読めない**）。 */
+  outside?: 0 | 1 | 2;
+  /** 保留の記録（`bin/loop-parked-head record`）が落ちるか。 */
+  parkedHeadFails?: boolean;
+  /** 停止の記録（`bin/loop-stall`）が落ちるか。 */
+  stallFails?: boolean;
   /** `gh` のどの呼び出しで落ちるか（部分一致）。 */
   failsOn?: string;
 };
@@ -121,7 +127,27 @@ function sandbox(setup: Setup = {}): { dir: string; calls: () => string[] } {
     [
       "#!/usr/bin/env bash",
       `printf '%s\\n' "loop-stall $*" >> ${JSON.stringify(log)}`,
-      "exit 0",
+      `exit ${setup.stallFails === true ? "2" : "0"}`,
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  // **著者がループの外にいるか**（判定は `bin/loop-outside-author` が持つ）
+  writeFileSync(
+    join(dir, "bin", "loop-outside-author"),
+    [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "loop-outside-author $*" >> ${JSON.stringify(log)}`,
+      `exit ${setup.outside ?? 1}`,
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  // **保留にした head の記録**（**記録できない保留は、誰も外せない**）
+  writeFileSync(
+    join(dir, "bin", "loop-parked-head"),
+    [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "loop-parked-head $*" >> ${JSON.stringify(log)}`,
+      `exit ${setup.parkedHeadFails === true ? "1" : "0"}`,
     ].join("\n"),
     { mode: 0o755 },
   );
@@ -257,6 +283,69 @@ describe("bin/loop-request-changes", () => {
     expect(only(calls(), "pr comment"), "確かめられていないのに投稿している").toEqual([]);
     expect(only(calls(), "--remove-label"), "拾えない状態のままにしている").not.toEqual([]);
     expect(done.stderr, "読めなかったと言っていない").toMatch(/読め/);
+  });
+
+  it("外の著者なら、待たない", () => {
+    // **著者がループの外にいるなら、待たない** (#70)——**SHA が変わらないまま
+    // 3 周で `loop/STOP`**、**一人の不在が全体停止になる**
+    const { dir, calls } = sandbox({ outside: 0 });
+
+    const done = request(dir);
+
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    expect(only(calls(), "awaiting-worker"), "外の著者を待っている").toEqual([]);
+    expect(only(calls(), "loop-parked-head record"), "保留の head を記録していない").not.toEqual(
+      [],
+    );
+    expect(only(calls(), "--add-label parked"), "保留にしていない").not.toEqual([]);
+  });
+
+  it("外か読めなければ、これまでどおり待つ", () => {
+    // **判定不能を「外」に倒さない**——**worker の対応待ちが人待ちに化け、誰も直さない**
+    const { dir, calls } = sandbox({ outside: 2 });
+
+    request(dir);
+
+    expect(only(calls(), "awaiting-worker"), "待ちを記録していない").not.toEqual([]);
+    expect(only(calls(), "--add-label parked"), "読めないのに保留にしている").toEqual([]);
+  });
+
+  it("ループのアカウントなら、これまでどおり待つ", () => {
+    // **上の 2 件が「外かどうか」で割れていることを、ここが支えている**
+    const { dir, calls } = sandbox({ outside: 1 });
+
+    request(dir);
+
+    expect(only(calls(), "awaiting-worker"), "待ちを記録していない").not.toEqual([]);
+  });
+
+  it("保留の記録に失敗したら、保留にせず、待ちを数える", () => {
+    // **記録の無い保留はステップ 2 が触らない**（**人が外すと決めた保留と区別が付かない**）
+    // ——**そのまま永久に残る**
+    const { dir, calls } = sandbox({ outside: 0, parkedHeadFails: true });
+
+    request(dir);
+
+    expect(only(calls(), "--add-label parked"), "記録できていないのに保留にしている").toEqual([]);
+    expect(only(calls(), "awaiting-worker"), "数えていない").not.toEqual([]);
+  });
+
+  it("保留にできなかったら、待ちを数える", () => {
+    // **ループは止まる側にあるので、これまでどおり数える**
+    const { dir, calls } = sandbox({ outside: 0, failsOn: "--add-label parked" });
+
+    request(dir);
+
+    expect(only(calls(), "awaiting-worker"), "数えていない").not.toEqual([]);
+  });
+
+  it("数えられなかったら、そう言う", () => {
+    // **人を呼ぶ道が黙って伸びる**——**この口が消しに来たものと同じ向き**である
+    const { dir } = sandbox({ head: 1, stallFails: true });
+
+    const done = request(dir);
+
+    expect(done.stderr, "数えられなかったことを言っていない").toMatch(/記録できません|数えられ/);
   });
 
   it("本文のファイルが無ければ、何も書かない", () => {
