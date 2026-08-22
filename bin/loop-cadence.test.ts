@@ -338,21 +338,6 @@ describe("読む先を、この仕組みが届く範囲に限る", () => {
 
     expect(done.status, "居る作業場を読み飛ばしている").toBe(1);
   });
-
-  it("作業場が書かれていない記録も、これまでどおり読む", () => {
-    // **列を足す前の記録**である——**「分からない」を「消えた」へ倒すと、
-    // 止まっている作業場が黙って消える**
-    const { dir } = workspace();
-    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
-      cwd: dir,
-      encoding: "utf8",
-    });
-    writeFileSync(join(dir, ".git", `valence-loop-starts-${scope.stdout.trim()}`), "1000\tcron\n");
-
-    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
-
-    expect(done.status, "古い記録を読み飛ばしている").toBe(1);
-  });
 });
 
 describe("入口が、通るすべての口で渡している", () => {

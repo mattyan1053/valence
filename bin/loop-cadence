@@ -95,7 +95,11 @@ starts=""
 # 立つ**——**見えるようにするために足した行が、嘘を言うことになる。**
 # **master 側も見たくなったら、あちらの入口が渡すようになってからである。**
 while IFS= read -r workspace_path; do
-  [[ -n $workspace_path ]] || continue
+  # **絶対パスで、いま在るものだけを見る。** **`./task` は前置きの警告を stdout へ
+  # 出すことがある**ので、**行をそのまま作業場として扱わない**（`bin/loop-stall` も
+  # 同じ形で「実在するものだけ」を見ている）。**消された作業場もここで落ちる**
+  # ——**一覧に残っていても、回っていないのが正しい。**
+  [[ $workspace_path == /* && -d $workspace_path ]] || continue
   # **名前の作り方は `bin/loop-lease` が持つ**（`scope`）——**ここでは訊くだけ。**
   # **中で呼ぶものに標準入力を渡さない**——**`while read` が読むはずの残りを食われると、
   # 2 つ目以降の作業場が黙って落ちる。**
@@ -117,17 +121,10 @@ while IFS= read -r workspace_path; do
   last_cron="-"
   last_poke="-"
   last_unknown="-"
-  gone=0
-  while IFS=$'\t' read -r at trigger where; do
+  # **3 列目（作業場）は読むために置いてある**——**`scope` は digest で、そこからは
+  # パスへ戻せない**ので、**記録を人が読むときの手がかりはこれだけ**である。
+  while IFS=$'\t' read -r at trigger _where; do
     [[ $at =~ ^[0-9]+$ ]] || continue
-    # **消えた作業場は、回っていないのが正しい** (#381 のレビュー)——**残った記録で
-    # 人を呼ばない。** **書かれていなければ読み飛ばさない**（**列を足す前の記録**）
-    # ——**「分からない」を「消えた」へ倒すと、止まっている作業場が黙って消える。**
-    if [[ -n ${where:-} && ! -d $where ]]; then
-      gone=1
-    else
-      gone=0
-    fi
     case "$trigger" in
       cron) last_cron="$at" ;;
       poke) last_poke="$at" ;;
@@ -136,12 +133,6 @@ while IFS= read -r workspace_path; do
       *) last_unknown="$at" ;;
     esac
   done <"$starts"
-
-  # **最後の 1 行が指す作業場で決める**——**途中で消えて作り直された作業場は、
-  # 新しいほうが残っている。**
-  if ((gone == 1)); then
-    continue
-  fi
 
   age="-"
   verdict="ok"
