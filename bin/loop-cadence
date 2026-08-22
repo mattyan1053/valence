@@ -67,18 +67,53 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
 }
 readonly common_dir
 
+# **居るはずの作業場を並べる** (#381 のレビュー 2 周目)。
+#
+# **記録だけを並べると、1 度も始まっていない作業場が列に出てこない**——**この仕組みが
+# 消しに来たものそのもの**である（**`./task loop:worker:add` で足した直後がそれ**）。
+#
+# **どこに居るかは `./task` が答える**——**足しているのがあちら**なので、**規則をここへ
+# 書き写すと、足す側と数える側で食い違う。**
+if ! workspaces="$("$(git rev-parse --show-toplevel)/task" loop:worker:paths 2>/dev/null)"; then
+  echo "[WARN] 作業場の一覧を読めません（./task loop:worker:paths）" >&2
+  exit 2
+fi
+if [[ -z $workspaces ]]; then
+  echo "[WARN] worker の作業場が 1 つも登録されていません" >&2
+  exit 2
+fi
+
 # **記録は作業場ごと**である（`bin/loop-lease` が書く。名前の作り方はあちらが持つ）。
 found=0
 stale=0
 undecidable=0
+workspace_path=""
+scope=""
+starts=""
 # **読むのは worker のぶんだけ** (#381 のレビュー)。**master の入口は `--trigger` を
 # 渡さない**ので、**そのまま読むと `unknown` になり、worker の cron が正常でも `stale` が
 # 立つ**——**見えるようにするために足した行が、嘘を言うことになる。**
 # **master 側も見たくなったら、あちらの入口が渡すようになってからである。**
-for starts in "$common_dir"/valence-loop-starts-worker*; do
-  [[ -f $starts ]] || continue
+while IFS= read -r workspace_path; do
+  [[ -n $workspace_path ]] || continue
+  # **名前の作り方は `bin/loop-lease` が持つ**（`scope`）——**ここでは訊くだけ。**
+  # **中で呼ぶものに標準入力を渡さない**——**`while read` が読むはずの残りを食われると、
+  # 2 つ目以降の作業場が黙って落ちる。**
+  if ! scope="$(cd "$workspace_path" 2>/dev/null &&
+    "${BASH_SOURCE[0]%/*}/loop-lease" scope worker 2>/dev/null </dev/null)" || [[ -z $scope ]]; then
+    echo "[WARN] 作業場の名前を作れません: $workspace_path" >&2
+    undecidable=1
+    continue
+  fi
+  starts="$common_dir/valence-loop-starts-$scope"
   found=1
-  scope="${starts##*/valence-loop-starts-}"
+  if [[ ! -f $starts ]]; then
+    # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
+    # ——**足したばかりの worker が、永久に見えなくなる。**
+    echo "scope=${scope:0:12} last_cron=- last_poke=- last_unknown=- age=- interval=${INTERVAL:-unknown} never"
+    stale=1
+    continue
+  fi
   last_cron="-"
   last_poke="-"
   last_unknown="-"
@@ -131,7 +166,7 @@ for starts in "$common_dir"/valence-loop-starts-worker*; do
     stale) stale=1 ;;
     unknown) undecidable=1 ;;
   esac
-done
+done <<<"$workspaces"
 
 if ((found == 0)); then
   # **記録が無いことと、始まっていないことは同じではない** ——**混ぜない。**
