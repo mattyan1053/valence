@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -547,6 +548,132 @@ describe("bin/loop-lease", () => {
 
       expect(line, "held の行が無い").not.toBe("");
       expect(line, "答える範囲が書かれていない").toContain("作業場");
+    });
+  });
+
+  /**
+   * **この token が、いま握られている lease のものか**を答える口（#352 / #355 のレビュー）。
+   *
+   * **周回はセッションでは区別できない。** **`round_owner` の真上にそう書いてある**
+   * ——**cron の周回と通知の周回は同じ本体から起きる**ので、**同じ値になる。**
+   * **入口 1.0 が直列化しようとしているのは、まさにその 2 つ**である
+   * ——**そこで「この周回のものだ」と答えたら、塞ぎに来た競合がそのまま残る。**
+   *
+   * **周回ごとに違う証拠は最初からある**——**`acquire` が返し、`release` が要求する
+   * token** である。**資格は token が持つ**（`release` と同じ線）。
+   */
+  describe("mine — この token が、いま握られている lease のものか", () => {
+    /**
+     * **別のセッションとして lease を取る。**
+     *
+     * **`round_owner` は「自分のセッションの外に出たところ」を印にする**ので、
+     * **同じセッションの中で bash を挟んでも同じ値のまま**である
+     * ——**`setsid` で切り離して初めて別セッションになる。**
+     */
+    function acquireInAnotherSession(role = "worker"): void {
+      const result = spawnSync(
+        "setsid",
+        ["--wait", "bash", "-c", `"${SCRIPT}" acquire ${role} ${stampFor(role)}`],
+        { cwd: sandbox, encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
+    }
+
+    it("いま握られている token なら 0 を返す", () => {
+      const token = acquire().stdout.trim();
+
+      expect(run(["mine", "worker", token]).status).toBe(0);
+    });
+
+    it("誰も持っていなければ 1 を返す", () => {
+      expect(run(["mine", "worker", "0123456789abcdef"]).status).toBe(1);
+    });
+
+    it("返したあとは 1 を返す", () => {
+      // **出口で先に返した周回**が、この形になる
+      const token = acquire().stdout.trim();
+      expect(run(["release", "worker", token]).status).toBe(0);
+
+      expect(run(["mine", "worker", token]).status).toBe(1);
+    });
+
+    it("同じセッションの中で別の周回が取り直していれば、1 を返す", () => {
+      // **これが本題** (#355 のレビュー)。**古い周回が返した直後に、cron の周回が
+      // 同じ lease を取る**——**セッションの印では 2 つが同じ値になる**ので、
+      // **古い周回の `--sent` が通ってしまっていた。**
+      //
+      // **`setsid` は要らない。** **実運用の形は、同じ本体から起きる 2 周回**である。
+      const previous = acquire().stdout.trim();
+      expect(run(["release", "worker", previous]).status).toBe(0);
+      const current = acquire().stdout.trim();
+
+      expect(current, "同じ token が返っていて、区別のしようがない").not.toBe(previous);
+      expect(run(["mine", "worker", previous]).status, "古い周回のものと読んでいる").toBe(1);
+      expect(run(["mine", "worker", current]).status, "いまの周回が締め出されている").toBe(0);
+    });
+
+    it("別のセッションが持っていても、自分のものとは読まない", () => {
+      // **`held` との違いはここ**である——**あちらは 0 を返す**（誰かが持っている）
+      acquireInAnotherSession();
+
+      expect(run(["held", "worker"]).status, "誰かが持っている状態になっていない").toBe(0);
+      expect(
+        run(["mine", "worker", "0123456789abcdef"]).status,
+        "他人の lease を自分のものと読んでいる",
+      ).toBe(1);
+    });
+
+    it("期限が切れていれば 1 を返す", () => {
+      // **`release` とは問いが違う** (#355 のレビュー)。**あちらは片付け**なので、
+      // **既に空きとして扱われている lease を片付けても、誰の判断も変わらない。**
+      // **`--sent` は抑止を書く**——**期限が切れた瞬間から `acquire` にとって空き**
+      // なので、**0 を返してから記録のロックを取るまでに、次の周回が入れる。**
+      // **その周回が進めた状態を「送った」ことにしてしまう** (#258)。
+      const token = acquire("worker", { LOOP_LEASE_TTL_SEC: "0" }).stdout.trim();
+
+      const answered = run(["mine", "worker", token], { LOOP_LEASE_TTL_SEC: "0" });
+
+      expect(answered.status, "期限切れを保持中として通している").toBe(1);
+      expect(answered.stderr, "期限切れだと分からない").toContain("期限切れ");
+    });
+
+    it("役ごとに見る", () => {
+      const token = acquire("master").stdout.trim();
+
+      expect(run(["mine", "master", token]).status).toBe(0);
+      expect(run(["mine", "worker", token]).status, "役をまたいで通している").toBe(1);
+    });
+
+    it("読むだけで、状態を変えない", () => {
+      const token = acquire().stdout.trim();
+
+      expect(run(["mine", "worker", token]).status).toBe(0);
+      expect(run(["release", "worker", token]).status, "見ただけで返せなくなっている").toBe(0);
+    });
+
+    it("token を渡さなければ、使い方の誤りとして落ちる", () => {
+      // **古い手順書が打つ形**である（#340 の版）——**「持っている」へ倒さない**
+      expect(run(["mine", "worker"]).status).toBe(2);
+    });
+
+    it("知らない役は 2 で落ちる", () => {
+      // **判定不能を「持っていない」へ倒さない**——**綴り違いで、正常な周回の
+      // 記録が上がらなくなる**
+      expect(run(["mine", "workers", "0123456789abcdef"]).status).toBe(2);
+    });
+
+    it("周回の途中で記録の名前が変わっても、引き当てる", () => {
+      // **worker は周回の途中で作業ツリーを入れ替える**（1.1 の同期、`gh pr checkout`）
+      // ——**`bin/loop-lease` 自身もそこで入れ替わる**ので、**記録の名前の作り方が
+      // 変わりうる**（#240）。**`release` は token で引き直している**——
+      // **こちらだけ名前で引くと、正しい順序の周回が「持っていない」に化ける。**
+      const token = acquire().stdout.trim();
+      const dir = join(sandbox, ".git");
+      const current = readdirSync(dir).find((name) => name.startsWith("valence-loop-lease-worker"));
+      expect(current, "lease の記録が見つからない").toBeDefined();
+      renameSync(join(dir, current ?? ""), join(dir, "valence-loop-lease-worker_前の版の名前"));
+
+      expect(run(["mine", "worker", token]).status, "名前でしか引いていない").toBe(0);
     });
   });
 

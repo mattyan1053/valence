@@ -59,6 +59,8 @@ usage() {
   echo "        bin/loop-lease release <役> <token>" >&2
   echo "        bin/loop-lease held <役>        その lease を誰かが持っているか（worker は呼んだ作業場の分）" >&2
   echo "                                        別の作業場の worker も見るなら busy（master は 1 つなので同じ）" >&2
+  echo "        bin/loop-lease mine <役> <token>  その token が、いま握られている lease のものか（読むだけ）" >&2
+  echo "                                        held は「誰かが持っているか」——順序が崩れても 0 になる" >&2
   echo "        bin/loop-lease check            この周回が持っていなければ言って記録する（止めない）" >&2
   echo "        bin/loop-lease busy <役>        その役の周回がどこかで走っているか（読むだけ）" >&2
   echo "        bin/loop-lease heartbeat <役>   活動を記録する（./task が呼ぶ）" >&2
@@ -785,6 +787,118 @@ if [[ $ACTION == "busy" ]]; then
   exit 0
 fi
 
+# **この周回が、その役の lease を持っているか。** **読み方はここ 1 つ** (#352)。
+#
+#   0 = 持っている / 1 = 持っていない / 2 = 読めない / 3 = 分からない
+#
+# **`check`（全部の役を回って言うだけ）と `mine`（役 1 つについて合否を返す）が、
+# 同じものを読む**——**写すと、片方だけ直したときに食い違う**（`AGENTS.md` §5。
+# **#159 で踏んだ形**）。
+#
+# **「読めない」と「分からない」を分ける。** **前者はロックや記録に届かなかった**、
+# **後者は届いたが突き合わせられない**（印が片方に無い・測っているものが違う）
+# ——**呼ぶ側で言うことが違う。**
+#
+# **どこで見たかを `taken` に残す**（`check` の案内が使う）。
+round_holds() {
+  local role="$1" owner="$2"
+  set_role_paths "$role" || return 2
+  lock_state || return 2
+  read_lease quiet || {
+    exec 9>&-
+    return 2
+  }
+  exec 9>&-
+  if [[ -z $held_token ]]; then
+    # **走っている最中に切れたのを、飛ばしたと誤診しない** (#260)。
+    # **原因が違えば、次にやることも違う**——**飛ばした周回は取り直せばよい**が、
+    # **切れた周回は「空いて見えた間に別の周回が入ったかもしれない」を疑う。**
+    #
+    # **気づけるのがここしかない。** **期限を見るのは `acquire` だけ**で、
+    # **走っている本人は出口の `release` まで気づけない**——**そのときには
+    # 重なりは既に起きている。** **`bin/loop-*` を打つたびにここを通る。**
+    if [[ -n $expired_token && -n $owner && -n $expired_owner && $expired_owner == "$owner" ]]; then
+      echo "[WARN] この周回の lease は期限切れです（${expired_over} 秒超過）。走っている最中に外れました" >&2
+      echo "       切れている間は空いて見えるので、別の周回が入っているかもしれません" >&2
+      echo "       出口では、同じ token でそのまま返せます（期限切れだったと言われます）" >&2
+      # **持っていた側として答える。** **飛ばしてはいない**ので、`./task loop:status` の
+      # 「入口を飛ばした周回」に混ぜると、**数えているものが濁る。**
+      return 0
+    fi
+    # **記録そのものが消えていても、跡は残っている** (#278 のレビュー)。
+    # **`expired_*` はプロセス内の変数**なので**この経路では必ず空**——
+    # **見にいく者がここにいないと、返した後の窓では誰も言えない。**
+    if [[ -n $owner ]] && superseded_has "" "$owner"; then
+      echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
+      echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
+      return 0
+    fi
+    return 1
+  fi
+  taken="$SCOPE_LABEL"
+  # **重なった後こそ知りたい** (#278 のレビュー)。**待っている間に切れて取り直された
+  # 周回は、次に何かを打ったときここへ来る**——**記録は上書き済みなので、
+  # 跡と突き合わせないと「別の周回が持っている」としか見えない。**
+  if [[ -n $owner && -n $held_owner && $held_owner != "$owner" ]] && superseded_has "" "$owner"; then
+    echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
+    echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
+    return 0
+  fi
+  # **印が片方でも無ければ、持ち主が自分かどうかは分からない。**
+  # **測っているものが違う**（`p:` と `s:`）ときも同じで、**分からない**である。
+  if [[ -z $owner || -z $held_owner || ${owner%%:*} != "${held_owner%%:*}" ]]; then
+    return 3
+  fi
+  [[ $held_owner == "$owner" ]] || return 1
+  return 0
+}
+
+# **この周回が持っているかを、役 1 つについて返す** (#352)。
+#
+# **`held` は「誰かが持っているか」**である——**返してから打った周回でも、別の周回が
+# 取っていれば 0 になる**ので、**順序が崩れたことは見えない。** **呼ぶ側が知りたいのは
+# 「いま自分が握っているか」**で、それを答えるのがここである。
+#
+# **判定不能を「持っている」へも「持っていない」へも倒さない**（exit 2）——
+# **倒す向きは呼ぶ側が決める**（`bin/loop-handoff --sent` は記録しない側へ倒す）。
+# **その token が置かれている記録へ乗り換える** (#240)。**周回の途中で
+# `bin/loop-lease` の版が入れ替わると、記録の名前の作り方が変わる**——
+# **名前ではなく token が資格**なので、**役のぶんだけ走査して引き当てる。**
+#
+# **`release` と `mine` が同じものを使う** (#355 のレビュー)。**片方だけ引き当てると、
+# 「返せるのに、持っていないと言われる」**——**正しい順序の周回の記録が上がらない。**
+#
+# **走査するのは自分の役のぶんだけ** (#290 のレビュー)。**`worker-` で切らない**
+# ——**いちばん古い版は `worker` の直後が `_`** である（#98）。
+#
+# **前提: `lock_state` を通していること**（**乗り換え先のロックを取り直す**——
+# **持っていたのは前の名前のロック**なので、**そのまま読むと別の周回と競る**）。
+#
+#   0 = 乗り換えた / 1 = 見つからない / 2 = 乗り換え先を読めない
+switch_to_renamed_state() {
+  local token="$1" candidate first
+  for candidate in "$common_dir/valence-loop-lease-$ROLE"*; do
+    [[ -f $candidate ]] || continue
+    [[ $candidate != *.lock && $candidate != *.tmp ]] || continue
+    [[ $candidate != "$STATE" ]] || continue
+    read -r first <"$candidate" 2>/dev/null || continue
+    [[ ${first%%$'\t'*} == "$token" ]] || continue
+    echo "[WARN] $SCOPE_LABEL の lease は、いまと違う名前で置かれていました" >&2
+    echo "       記録: ${candidate##*/}" >&2
+    echo "       周回の途中で bin/loop-lease の版が入れ替わっています（名前の作り方が違う）" >&2
+    exec 9>&-
+    lease_scope="${candidate##*/valence-loop-lease-}"
+    STATE="$candidate"
+    # **活動の記録も名前から作られる。** **期限の判定はそちらを見る**ので、
+    # **一緒に乗り換えないと、動いていた周回が「切れていた」に化ける。**
+    ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+    lock_state || return 2
+    read_lease quiet || return 2
+    return 0
+  done
+  return 1
+}
+
 if [[ $ACTION == "check" ]]; then
   # **役を渡す形は残さない。** 黙って無視すると、**役を書き固めた古い呼び出しが
   # 生き残っているのに、直したつもりになる**
@@ -793,66 +907,18 @@ if [[ $ACTION == "check" ]]; then
   unknown=""
   taken=""
   for role in "${ROLES[@]}"; do
-    # **理由を捨てない。** **なぜ読めないのかは、これらのメッセージにしか書かれていない**
-    set_role_paths "$role" || {
-      unknown="$unknown $role"
-      continue
-    }
-    lock_state || {
-      unknown="$unknown $role"
-      continue
-    }
-    read_lease quiet || {
-      unknown="$unknown $role"
-      exec 9>&-
-      continue
-    }
-    exec 9>&-
-    if [[ -z $held_token ]]; then
-      # **走っている最中に切れたのを、飛ばしたと誤診しない** (#260)。
-      # **原因が違えば、次にやることも違う**——**飛ばした周回は取り直せばよい**が、
-      # **切れた周回は「空いて見えた間に別の周回が入ったかもしれない」を疑う。**
-      #
-      # **気づけるのがここしかない。** **期限を見るのは `acquire` だけ**で、
-      # **走っている本人は出口の `release` まで気づけない**——**そのときには
-      # 重なりは既に起きている。** **`bin/loop-*` を打つたびにここを通る。**
-      if [[ -n $expired_token && -n $owner && -n $expired_owner && $expired_owner == "$owner" ]]; then
-        echo "[WARN] この周回の lease は期限切れです（${expired_over} 秒超過）。走っている最中に外れました" >&2
-        echo "       切れている間は空いて見えるので、別の周回が入っているかもしれません" >&2
-        echo "       出口では、同じ token でそのまま返せます（期限切れだったと言われます）" >&2
-        # **記録しない。** **飛ばしてはいない**ので、`./task loop:status` の
-        # 「入口を飛ばした周回」に混ぜると、**数えているものが濁る。**
-        exit 0
-      fi
-      # **記録そのものが消えていても、跡は残っている** (#278 のレビュー)。
-      # **`expired_*` はプロセス内の変数**なので**この経路では必ず空**——
-      # **見にいく者がここにいないと、返した後の窓では誰も言えない。**
-      if [[ -n $owner ]] && superseded_has "" "$owner"; then
-        echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
-        echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
-        exit 0
-      fi
-      continue
-    fi
-    taken="$SCOPE_LABEL"
-    # **重なった後こそ知りたい** (#278 のレビュー)。**待っている間に切れて取り直された
-    # 周回は、次に何かを打ったときここへ来る**——**記録は上書き済みなので、
-    # 跡と突き合わせないと「別の周回が持っている」としか見えない。**
-    if [[ -n $owner && -n $held_owner && $held_owner != "$owner" ]] && superseded_has "" "$owner"; then
-      echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
-      echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
-      # **飛ばしてはいない**ので、`./task loop:status` の件数には混ぜない
-      exit 0
-    fi
-    # **印が片方でも無ければ、持ち主が自分かどうかは分からない。**
-    # **測っているものが違う**（`p:` と `s:`）ときも同じで、**分からない**である。
-    # **分からないものを飛ばしと呼ばない**——**偽の記録より取りこぼしのほうが安い**
-    # （この記録は「同じ癖が続いていること」を読むためのもので、汚れると読めなくなる）。
-    if [[ -z $owner || -z $held_owner || ${owner%%:*} != "${held_owner%%:*}" ]]; then
-      exit 0
-    fi
-    # **自分の周回が持っていた。** ここだけが黙ってよい場合である
-    [[ $held_owner != "$owner" ]] || exit 0
+    # **理由を捨てない。** **なぜ読めないのかは、round_holds が出すメッセージに
+    # しか書かれていない**
+    round_holds "$role" "$owner"
+    case "$?" in
+      # **自分の周回が持っていた。** ここだけが黙ってよい場合である
+      0) exit 0 ;;
+      1) ;;
+      # **分からないものを飛ばしと呼ばない**——**偽の記録より取りこぼしのほうが安い**
+      # （この記録は「同じ癖が続いていること」を読むためのもので、汚れると読めなくなる）
+      3) exit 0 ;;
+      *) unknown="$unknown $role" ;;
+    esac
   done
   if [[ -n $unknown ]]; then
     # **読めない役があった。「持っていない」と言い切らない**——**記録にも残さない**
@@ -1031,7 +1097,7 @@ set_role_paths "$ROLE" || exit 2
 lock_state || exit 2
 # **`release` は引き継がない** (#278 のレビュー)。**「引き継ぎます」の直後に
 # 「返します」が出る**と、**文言を直しに来て逆の文言を増やすことになる。**
-if [[ $ACTION == "held" || $ACTION == "release" ]]; then
+if [[ $ACTION == "held" || $ACTION == "release" || $ACTION == "mine" ]]; then
   read_lease quiet || exit 2
 else
   read_lease || exit 2
@@ -1066,6 +1132,59 @@ held)
   # **`busy master` は `held master` と同じものを見る**——**「別の作業場も見るなら」と
   # 案内しても行き先が同じ**で、**#250 と同じ形（答えは正しく、説明が違う）になる。**
   [[ $ROLE == "worker" ]] && echo "       別の作業場も見るなら: bin/loop-lease busy $ROLE" >&2
+  exit 1
+  ;;
+mine)
+  # **この token が、いま握られている lease のものか** (#352 / #355 のレビュー)。
+  #
+  # **`held` は「誰かが持っているか」**である——**返した直後に別の周回が取っていれば
+  # 0 を返す**ので、**順序が崩れたことが消える。** **`check` は「この周回が持っているか」**
+  # だが、**見ているのはセッションの印**——**`round_owner` の真上に「同じセッションの中の
+  # 別周回は区別できない」と書いてある。**
+  #
+  # **入口 1.0 が直列化しようとしているのが、まさにその 2 つ**である
+  # （**cron の周回と、通知で始めた周回は同じ本体から起きる**）——**そこを
+  # 「この周回のものだ」と答えると、塞ぎに来た競合がそのまま残る。**
+  #
+  # **周回ごとに違う証拠は最初からある**——**`acquire` が返し、`release` が要求する
+  # token** である。**資格は token が持つ**（`release` と同じ線）。
+  [[ $# -eq 3 ]] || usage
+  if [[ -z $held_token && -z $expired_token ]]; then
+    switch_to_renamed_state "$3"
+    case "$?" in
+      0 | 1) ;;
+      *) exit 2 ;;
+    esac
+  fi
+  if [[ -n $held_token && $held_token == "$3" ]]; then
+    exit 0
+  fi
+  # **期限が切れていたら、その token のものでも通さない** (#355 のレビュー)。
+  #
+  # **`release` とは問いが違う。** **あちらは片付け**なので、**既に空きとして
+  # 扱われている lease を片付けても、誰の判断も変わらない**（だから #260 で
+  # 「切れていても持ち主は返せる」とした）。**こちらの呼び手は抑止を書く**——
+  # **`--sent` は `informed` を上げ、以後その状態では 2 通目を出さない。**
+  #
+  # **期限が切れた瞬間から、その lease は `acquire` にとって空き**である
+  # ——**ここで 0 を返してから、呼び手が記録のロックを取るまでに、次の周回が
+  # 入って `PENDING` を進められる。** **古い周回はその新しい状態を「送った」ことにする**
+  # ——**送っていない通知が、二度と送られなくなる** (#258)。
+  #
+  # **問いは「順序が崩れたか」ではない。** **「いま書こうとしている記録は、
+  # 自分が送ったものか」**である——**切れている間は、そこが保証されない。**
+  if [[ -n $expired_token && $expired_token == "$3" ]]; then
+    echo "[WARN] $SCOPE_LABEL の lease は期限切れです（${expired_over} 秒超過）。走っている最中に外れました" >&2
+    echo "       切れている間は空いて見えるので、別の周回が入っているかもしれません" >&2
+    echo "       返すこと自体はできます（bin/loop-lease release）——通さないのは、この token を資格として使うことです" >&2
+    exit 1
+  fi
+  echo "[INFO] $SCOPE_LABEL の lease は、この token のものではありません" >&2
+  if [[ -n $held_token ]]; then
+    echo "       いまは別の周回が持っています（返したあとに、次の周回が取っています）" >&2
+  else
+    echo "       誰も持っていません（この周回は、もう返しています）" >&2
+  fi
   exit 1
   ;;
 acquire | recover)
@@ -1216,28 +1335,15 @@ release)
   # **`worker-` で切らない。** **いちばん古い版は `worker` の直後が `_`**
   # （パスをそのまま畳んでいた。#98）——**残る側を数える**と 3 通りある
   # （`AGENTS.md` §5。**残る側は自分の diff に出てこない**）。
+  #
+  # **乗り換えは `switch_to_renamed_state` が持つ** (#355 のレビュー)——**`mine` も
+  # 同じものを使う**（**片方だけ引き当てると、返せるのに「持っていない」と言われる**）。
   if [[ -z $held_token && -z $expired_token ]]; then
-    for renamed_state in "$common_dir/valence-loop-lease-$ROLE"*; do
-      [[ -f $renamed_state ]] || continue
-      [[ $renamed_state != *.lock && $renamed_state != *.tmp ]] || continue
-      [[ $renamed_state != "$STATE" ]] || continue
-      read -r renamed_first <"$renamed_state" 2>/dev/null || continue
-      [[ ${renamed_first%%$'\t'*} == "$3" ]] || continue
-      echo "[WARN] $SCOPE_LABEL の lease は、いまと違う名前で置かれていました" >&2
-      echo "       記録: ${renamed_state##*/}" >&2
-      echo "       周回の途中で bin/loop-lease の版が入れ替わっています（名前の作り方が違う）" >&2
-      # **乗り換える先のロックを取り直す。** **持っていたのは前の名前のロック**なので、
-      # **そのまま書くと、同じ記録を触る別の周回と競る。**
-      exec 9>&-
-      lease_scope="${renamed_state##*/valence-loop-lease-}"
-      STATE="$renamed_state"
-      # **活動の記録も名前から作られる。** **期限の判定はそちらを見る**ので、
-      # **一緒に乗り換えないと、動いていた周回が「切れていた」に化ける。**
-      ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
-      lock_state || exit 2
-      read_lease quiet || exit 2
-      break
-    done
+    switch_to_renamed_state "$3"
+    case "$?" in
+      0 | 1) ;;
+      *) exit 2 ;;
+    esac
   fi
   # **期限切れの記録は、持ち主が返せる** (#260)。**返す資格は token が持つ**ので、
   # **切れたことは「返させない理由」にならない**——**断ると、後始末をする者が
