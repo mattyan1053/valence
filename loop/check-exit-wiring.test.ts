@@ -109,6 +109,7 @@ describe("./task check の終わりの印", () => {
   function runCheck(
     exec: string,
     timeoutSec?: number,
+    options: { seed?: string; breakRecorder?: boolean; ensureUp?: string } = {},
   ): { status: number; stdout: string; verdict: number } {
     const sandbox = mkdtempSync(join(tmpdir(), "check-state-wiring-"));
     try {
@@ -118,9 +119,21 @@ describe("./task check の終わりの印", () => {
       copyFileSync(join(REPO_ROOT, "bin/loop-check-state"), join(sandbox, "bin/loop-check-state"));
       chmodSync(join(sandbox, "task"), 0o755);
       chmodSync(join(sandbox, "bin/loop-check-state"), 0o755);
+      if (options.seed !== undefined) {
+        // **前の走りの記録**（**「前の緑が残る」を入力に置く**）
+        const dir = join(sandbox, ".git", "valence-check-state.d");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "前の走り"), `${options.seed}\n`);
+      }
+      if (options.breakRecorder === true) {
+        // **記録できない**（置き場所が読めない・スクリプトが落ちる）
+        writeFileSync(join(sandbox, "bin/loop-check-state"), "#!/usr/bin/env bash\nexit 2\n", {
+          mode: 0o755,
+        });
+      }
       const body = [
         `source ${JSON.stringify(join(sandbox, "task"))} >/dev/null 2>&1`,
-        "ensure_up() { :; }",
+        `ensure_up() { ${options.ensureUp ?? ":"}; }`,
         `exec_app() { ${exec}; }`,
         "cmd_check",
       ].join("; ");
@@ -152,6 +165,28 @@ describe("./task check の終わりの印", () => {
   it("走り終えたら、合否が記録に残る", () => {
     expect(runCheck("return 0").verdict, "緑が残っていない").toBe(0);
     expect(runCheck("return 3").verdict, "赤が残っていない").toBe(1);
+  });
+
+  it("コンテナを起こせなくても、前の緑は残らない", () => {
+    // **`ensure_up` が落ちる理由は、たいてい「その変更がコンテナを壊している」**
+    // ——**まさにそのとき、前の緑で commit が通ってはいけない** (#376 のレビュー)。
+    // **記録は `ensure_up` より前に置く。**
+    const result = runCheck("return 0", undefined, {
+      seed: "finished 0",
+      ensureUp: "return 1",
+    });
+
+    expect(result.verdict, "前の緑が残っている").not.toBe(0);
+  });
+
+  it("記録できなければ、印を出さずに落ちる", () => {
+    // **「打っていない」と「打ったが記録できなかった」は別**である
+    // ——**見分けられないので、記録できない check は使えないものとして落とす。**
+    // **印を出さない**のは、**印が「走り終えた」を意味するから**である。
+    const result = runCheck("return 0", undefined, { breakRecorder: true });
+
+    expect(result.status, "記録できないのに緑で返している").not.toBe(0);
+    expect(result.stdout, "走り終えた顔をしている").not.toContain("check-exit");
   });
 
   it("殺されたら、走っているままになる", () => {
