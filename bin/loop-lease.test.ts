@@ -1889,6 +1889,15 @@ describe("bin/loop-lease", () => {
   });
 
   describe("周回の途中で版が入れ替わっても、自分の lease を返せる", () => {
+    /** 作った別の作業場（`sandbox` の外に出るので、自分で片づける）。 */
+    const others: string[] = [];
+
+    afterEach(() => {
+      for (const dir of others.splice(0)) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     // **周回の途中で lease が消えた** (#240)。**消したものはいない**——
     // **記録の名前が、走っているスクリプトから毎回組み立てられる**ためである。
     //
@@ -1955,9 +1964,43 @@ describe("bin/loop-lease", () => {
       );
     }
 
-    function runWith(script: string, args: string[]): Run {
-      const result = spawnSync(script, args, { cwd: sandbox, encoding: "utf8" });
+    function runWith(script: string, args: string[], cwd = sandbox): Run {
+      const result = spawnSync(script, args, { cwd, encoding: "utf8" });
       return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
+
+    /**
+     * **同じ共通ディレクトリを見る、別の作業場**（worktree）を作る。
+     *
+     * **記録は `.git` の共通ディレクトリに置かれる**ので、**worker が 2 人いる実物と
+     * 同じ並び**になる——**別々の使い捨てリポジトリでは、記録が混ざらないので踏まない。**
+     */
+    function otherWorkspace(): string {
+      expect(
+        spawnSync(
+          "git",
+          [
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+          ],
+          { cwd: sandbox, encoding: "utf8" },
+        ).status,
+        "作業場を分ける土台を作れていない",
+      ).toBe(0);
+      const other = join(sandbox, "..", `${sandbox.split("/").pop()}-other`);
+      expect(
+        spawnSync("git", ["worktree", "add", "--detach", other], { cwd: sandbox, encoding: "utf8" })
+          .status,
+        "別の作業場を作れていない",
+      ).toBe(0);
+      others.push(other);
+      return other;
     }
 
     it("前の版が置いた記録でも、token で見つけて返せる", () => {
@@ -1987,6 +2030,56 @@ describe("bin/loop-lease", () => {
       expect(
         existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
         "健全な周回を、飛ばしとして記録している",
+      ).toBe(false);
+    });
+
+    it("別の作業場が持っている lease を、この周回のものと読まない", () => {
+      // **印だけでは、作業場を区別できない** (#385 のレビュー)。**周回の印は
+      // 「どのセッションが回しているか」**で、**このスクリプト自身が
+      // 「同じセッションの中の別周回は区別できない」と書いている**——
+      // **1 つのセッションから 2 つの作業場を回すと、隣の健全な lease を
+      // 「自分が旧名で持っている」と読む。**
+      //
+      // **倒れる先が悪い**——**入口を飛ばした周回が `record_missing` を通らず、
+      // この PR が受け口を足した当の記録が、そこだけ書かれない**（**数え落としは、
+      // 起きたときに気づけない**）。
+      const other = otherWorkspace();
+      expect(
+        runWith(SCRIPT, ["acquire", "worker", stampFor("worker")], other).status,
+        "隣の作業場が取れていない",
+      ).toBe(0);
+
+      const checked = runWith(SCRIPT, ["check"], sandbox);
+
+      expect(checked.stderr, "隣の lease を自分のものとして読んでいる").toContain("飛ばした");
+      expect(
+        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        "飛ばした周回が、記録されていない",
+      ).toBe(true);
+    });
+
+    it("master が前の版の名前で持っていても、飛ばしたと記録しない", () => {
+      // **役で分けた側の受け口** (#385 のレビュー)。**master は役ごとに 1 つで、
+      // 作業場を持たない**——**記録の 3 行目は worker のときだけ書かれる**ので、
+      // **worker と同じ条件を課すと、master の版ずれの受け口が黙って壊れる**
+      // （**空同士の一致で通っている状態を、意図として書き直した**）。
+      expect(
+        runWith(SCRIPT, ["acquire", "master", stampFor("master")]).status,
+        "master が取れていない",
+      ).toBe(0);
+      // **前の版が別の名前で置いた記録**（master の名前は役そのものだが、
+      // **走査は前方一致**なので、版が名前を変えればここに当たる）
+      renameSync(
+        join(sandbox, ".git", "valence-loop-lease-master"),
+        join(sandbox, ".git", "valence-loop-lease-master-前の版"),
+      );
+
+      const checked = runWith(SCRIPT, ["check"]);
+
+      expect(checked.stderr, "master の版ずれの受け口が働いていない").not.toContain("飛ばした");
+      expect(
+        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        "健全な master の周回を、飛ばしとして記録している",
       ).toBe(false);
     });
 
