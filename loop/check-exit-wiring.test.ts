@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -55,27 +57,6 @@ function checkBlocks(): { section: string; body: string }[] {
 }
 
 /**
- * `./task check` を、**コンテナを起こさずに**走らせる。
- *
- * **見たいのは合否の伝え方**であって、検査の中身ではない——
- * `ensure_up` と `exec_app` を差し替える。
- */
-function runCheck(exec: string, timeoutSec?: number): { status: number; stdout: string } {
-  const body = [
-    `source ${JSON.stringify(TASK)} >/dev/null 2>&1`,
-    "ensure_up() { :; }",
-    `exec_app() { ${exec}; }`,
-    "cmd_check",
-  ].join("; ");
-  const command = timeoutSec === undefined ? ["-c", body] : ["-c", body];
-  const result =
-    timeoutSec === undefined
-      ? spawnSync("bash", command, { encoding: "utf8" })
-      : spawnSync("timeout", [`${timeoutSec}`, "bash", ...command], { encoding: "utf8" });
-  return { status: result.status ?? -1, stdout: result.stdout };
-}
-
-/**
  * `./task check` が殺されると、終了コードが無いまま出力が緑に見える（#147）。
  *
  * **実際に起きた**（2026-08-11、PR #142 の周回）——**ログはテストが緑で進む様子だけ**、
@@ -114,6 +95,104 @@ describe("./task check の終わりの印", () => {
 
     expect(result.stdout, "殺されたのに走り終えた顔をしている").not.toContain("check-exit");
     expect(result.status, "timeout に殺されていない").not.toBe(0);
+  });
+
+  /**
+   * **`./task check` を、写した checkout の中で走らせる**（#375）。
+   *
+   * **実物の `.git` へ記録を書かせない** (#186)——**走らせた回数ぶん、
+   * この作業場の commit の可否が動く**（**実際に動いた**——**`sleep 30` を殺す試験が、
+   * 本物の記録へ「走っている」を書き残し、こちらの commit が止まった**）。
+   *
+   * **コンテナも起こさない**——**見たいのは合否の伝え方**であって、検査の中身ではない。
+   */
+  function runCheck(
+    exec: string,
+    timeoutSec?: number,
+    options: { seed?: string; breakRecorder?: boolean; ensureUp?: string } = {},
+  ): { status: number; stdout: string; verdict: number } {
+    const sandbox = mkdtempSync(join(tmpdir(), "check-state-wiring-"));
+    try {
+      expect(spawnSync("git", ["init", "--quiet", sandbox]).status).toBe(0);
+      mkdirSync(join(sandbox, "bin"), { recursive: true });
+      copyFileSync(TASK, join(sandbox, "task"));
+      copyFileSync(join(REPO_ROOT, "bin/loop-check-state"), join(sandbox, "bin/loop-check-state"));
+      chmodSync(join(sandbox, "task"), 0o755);
+      chmodSync(join(sandbox, "bin/loop-check-state"), 0o755);
+      if (options.seed !== undefined) {
+        // **前の走りの記録**（**「前の緑が残る」を入力に置く**）
+        const dir = join(sandbox, ".git", "valence-check-state.d");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "前の走り"), `${options.seed}\n`);
+      }
+      if (options.breakRecorder === true) {
+        // **記録できない**（置き場所が読めない・スクリプトが落ちる）
+        writeFileSync(join(sandbox, "bin/loop-check-state"), "#!/usr/bin/env bash\nexit 2\n", {
+          mode: 0o755,
+        });
+      }
+      const body = [
+        `source ${JSON.stringify(join(sandbox, "task"))} >/dev/null 2>&1`,
+        `ensure_up() { ${options.ensureUp ?? ":"}; }`,
+        `exec_app() { ${exec}; }`,
+        "cmd_check",
+      ].join("; ");
+      const run =
+        timeoutSec === undefined
+          ? spawnSync("bash", ["-c", body], { cwd: sandbox, encoding: "utf8" })
+          : spawnSync("timeout", [`${timeoutSec}`, "bash", "-c", body], {
+              cwd: sandbox,
+              encoding: "utf8",
+            });
+      const verdict = spawnSync(join(sandbox, "bin/loop-check-state"), ["--verdict"], {
+        cwd: sandbox,
+        encoding: "utf8",
+      });
+      return { status: run.status ?? -1, stdout: run.stdout ?? "", verdict: verdict.status ?? -1 };
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  }
+
+  it("走っている最中は、まだ終わっていないと記録されている", () => {
+    // **これが本体である。** **背景に回した起動側の完了通知を「check の完了」と
+    // 読んだ**（worker-1）——**走っている最中に読める記録があれば、そこで分かる。**
+    const result = runCheck("./bin/loop-check-state --verdict; echo verdict=$?; return 0");
+
+    expect(result.stdout, "走っている最中に「走っている」と読めない").toContain("verdict=3");
+  });
+
+  it("走り終えたら、合否が記録に残る", () => {
+    expect(runCheck("return 0").verdict, "緑が残っていない").toBe(0);
+    expect(runCheck("return 3").verdict, "赤が残っていない").toBe(1);
+  });
+
+  it("コンテナを起こせなくても、前の緑は残らない", () => {
+    // **`ensure_up` が落ちる理由は、たいてい「その変更がコンテナを壊している」**
+    // ——**まさにそのとき、前の緑で commit が通ってはいけない** (#376 のレビュー)。
+    // **記録は `ensure_up` より前に置く。**
+    const result = runCheck("return 0", undefined, {
+      seed: "finished 0",
+      ensureUp: "return 1",
+    });
+
+    expect(result.verdict, "前の緑が残っている").not.toBe(0);
+  });
+
+  it("記録できなければ、印を出さずに落ちる", () => {
+    // **「打っていない」と「打ったが記録できなかった」は別**である
+    // ——**見分けられないので、記録できない check は使えないものとして落とす。**
+    // **印を出さない**のは、**印が「走り終えた」を意味するから**である。
+    const result = runCheck("return 0", undefined, { breakRecorder: true });
+
+    expect(result.status, "記録できないのに緑で返している").not.toBe(0);
+    expect(result.stdout, "走り終えた顔をしている").not.toContain("check-exit");
+  });
+
+  it("殺されたら、走っているままになる", () => {
+    // **`done` を書けずに終わる**ので、**記録は「走っている」のまま**である
+    // ——**次の commit は、そこで止まる**（`bin/loop-commit-guard`）
+    expect(runCheck("sleep 30", 1).verdict, "殺されたのに終わった顔をしている").toBe(3);
   });
 
   /** そのブロックが push するか。 */

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,6 +92,116 @@ describe("bin/loop-commit-guard", () => {
     git("switch", "--quiet", "--detach", "HEAD");
 
     expect(guard().status, "rebase の途中で止まる").toBe(0);
+  });
+
+  /**
+   * **check が終わる前に、終わったと読める**（#375）。
+   *
+   * **2 つの作業場が、別々の日に踏んだ**——**背景に回した起動側の完了通知を
+   * check の完了と読んだ**（worker-1）、**完了通知と push を同じ流れで走らせ、
+   * `status` を読まなかった**（worker-2）。**どちらも赤いものを push している。**
+   *
+   * **止めるのは、判断を記憶に置かないため**である（`AGENTS.md` §5）。
+   * **2 人が別々に自分の確かめ方を発明していた**——**仕組みの側に無かった。**
+   */
+  describe("check の記録", () => {
+    /** その作業場の記録を置く。**`bin/loop-check-state` と同じ場所**である。 */
+    function state(line: string | null): void {
+      const dir = join(repo, ".git", "valence-check-state.d");
+      if (line === null) {
+        rmSync(dir, { recursive: true, force: true });
+        return;
+      }
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "A"), `${line}\n`);
+    }
+
+    beforeEach(() => {
+      git("switch", "--quiet", "-c", "feat/work");
+    });
+
+    it("走っている最中は止める", () => {
+      // **これが本体**——**終わっていないものを「終わった」と読ませない**
+      state("running");
+
+      const result = guard();
+
+      expect(result.status, "走っている最中に通している").toBe(1);
+      expect(result.stderr, "何が起きているか読めない").toMatch(/check/);
+    });
+
+    it("赤で終わっていたら止める", () => {
+      state("finished 1");
+
+      expect(guard().status, "赤いまま commit できている").toBe(1);
+    });
+
+    it("緑で終わっていれば通す", () => {
+      state("finished 0");
+
+      expect(guard().status, guard().stderr).toBe(0);
+    });
+
+    it("記録が無ければ通す（ただし黙らない）", () => {
+      // **打っていない人を止める口ではない**——**「無い」と「赤」を混ぜない**
+      state(null);
+
+      const result = guard();
+
+      expect(result.status).toBe(0);
+      expect(result.stderr, "記録が無いことを言っていない").toMatch(/check/);
+    });
+
+    it("読めない形なら、通す側に倒さない", () => {
+      state("なにか");
+
+      expect(guard().status).toBe(2);
+    });
+
+    it("見る口が無ければ通す（ただし黙らない）", () => {
+      // **古い checkout・写した作業場では、hook と guard だけがあって隣が無い**
+      // ——**そこで全部の commit を止めると、直しに行く経路が閉じ込められる**（#184）
+      const copied = mkdtempSync(join(tmpdir(), "guard-alone-"));
+      try {
+        mkdirSync(join(copied, "bin"), { recursive: true });
+        copyFileSync(SCRIPT, join(copied, "bin", "loop-commit-guard"));
+        chmodSync(join(copied, "bin", "loop-commit-guard"), 0o755);
+        state("finished 1"); // **赤い記録があっても、見る口が無ければ読めない**
+        const result = spawnSync(join(copied, "bin", "loop-commit-guard"), [], {
+          cwd: repo,
+          encoding: "utf8",
+        });
+
+        expect(result.status, "見る口が無いだけで全部止めている").toBe(0);
+        expect(result.stderr, "見ていないことを言っていない").toMatch(/loop-check-state/);
+      } finally {
+        rmSync(copied, { recursive: true, force: true });
+      }
+    });
+
+    it("detached でも見る", () => {
+      // **worker は detached のまま commit する**（手順書がそう書いている）
+      // ——**ここで返すと、worker の主要な経路で 1 度も見ない**（#176 の裏返し）
+      git("switch", "--quiet", "--detach", "HEAD");
+      state("finished 1");
+
+      expect(guard().status, "detached を素通りしている").toBe(1);
+    });
+
+    it("detached でも、緑なら通す", () => {
+      git("switch", "--quiet", "--detach", "HEAD");
+      state("finished 0");
+
+      expect(guard().status, guard().stderr).toBe(0);
+    });
+
+    it("main の上なら、check の記録より先に止まる", () => {
+      // **順番が結果を変える**——**緑でも `main` の上なら通さない**
+      git("switch", "--quiet", "main");
+      state("finished 0");
+
+      expect(guard().status).toBe(1);
+    });
   });
 
   it("読めなければ、通す側に倒さない", () => {
