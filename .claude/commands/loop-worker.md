@@ -1,4 +1,4 @@
-<!-- 版: 21de504bb95a -->
+<!-- 版: 55ecdb49d4eb -->
 ---
 name: "Loop: Worker"
 description: Issue の実装またはレビュー指摘への対応を 1 周だけ実行する
@@ -29,12 +29,14 @@ worker ループを **1 周だけ** 実行する。`/loop` が本コマンドを
 
 ### 1.0 同じ作業場の周回が走っていないか確かめる
 
-**直列化する単位は「作業場」であって「役」ではない**ので、**worker は何人いてもよい。**
-**冒頭で決着させる**——途中まで進んでから気づくと、`ready` を取った状態で止まる。
+**直列化の単位は「作業場」で、役ではない**（**worker は何人いてもよい**）。**冒頭で決着させる。**
 
 ```bash
-bin/loop-lease acquire worker "<この手順書の冒頭にある `版:` の値>"   # token を控える
+bin/loop-lease acquire worker "<冒頭の `版:` の値>" --trigger <cron|poke>  # token を控える
 ```
+
+**`--trigger` は、この周回がどう始まったか** (#378)——**cron が鳴ったなら `cron`、
+人や別のセッションに突かれたなら `poke`**（**混ぜると、突かれた日が健全に見える**）。
 
 - **exit 0** → 続ける。**この周回を終えるとき（何もせず終わる場合も含めて）必ず返す**
 
@@ -71,11 +73,9 @@ gh pr checkout --detach <PR番号>
 bin/loop-procedure-stamp worker "<読んだ印>"  # 揃ったか。判定はここ 1 箇所が持つ
 ```
 
-- **exit 0** → 揃った。**この周回はその PR の作業として続ける**（本体のステップ 3。
-  **本体もその枝で読む**）。**1.1 では `origin/main` へ移らない**——**`bin/loop-sync-main
-  --fetch-only` を使い**、**比較先は `after="$(git rev-parse HEAD)"` と書く**
-- **それ以外** → `bin/loop-lease release worker "<token>"` して終わる
-  （**押さえても素通りにはしない**——**揃わなければ返して終わる**）
+- **exit 0** → 揃った。**その PR の作業として続ける**（本体のステップ 3。**本体もその枝で
+  読む**）。**1.1 では移らず `--fetch-only` を使い**、**比較先は `$(git rev-parse HEAD)`**
+- **それ以外** → `bin/loop-lease release worker "<token>"` して終わる（**揃わなければ返す**）
 
 **入る枝が無いなら、`origin/main` へ戻す** (#369)。
 

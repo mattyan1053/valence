@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# **周回が始まっているかを見る** (#378)。
+#
+#   bin/loop-cadence
+#
+#   exit 0 = cron の周回が続いている
+#   exit 1 = 止まっている作業場がある（cron の周回が来ていない）
+#   exit 2 = 判定できない（間隔が分からない / 記録が無い）
+#
+# **`bin/loop-stall` が数えるのは「止まった周回」**で、**`bin/loop-procedure-changed` の
+# ぶんを数えるのが `procedure-churn`** (#367)——**どちらも「周回が始まっている」ことが前提**
+# である。**始まってすらいない周回は、その手前**にあり、**印は「周回が始まったとき」に
+# 付く**ので、**始まらなければ何も書かれない。**
+#
+# **実測**（2026-08-22、worker-1）: **要求を出してから 2.5 時間、その作業場は動かず、
+# カウンタは 2 つとも 0 だった。** **外からは「周回を始めたばかり」と見える**
+# ——**人に突かれて始まった周回も、cron の周回も、同じ印だった**からである。
+#
+# **だから、cron の周回だけを数える。** **人に突かれたぶんを混ぜると、
+# 突かれて動いた日が「健全」に見える**——**それが実測で起きたことである。**
+#
+# **止めない。** **`loop/STOP` は全ループを止める**ので、**「鳴っていない」で
+# 全部止めるのは重い**——**ここは見えるようにするだけ**である（#378 の指示）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+[[ $# -eq 0 ]] || {
+  echo "使い方: bin/loop-cadence   （引数は取らない）" >&2
+  echo "        exit 0 続いている / exit 1 止まっている / exit 2 判定できない" >&2
+  exit 2
+}
+
+# **いま。** **試験のためだけに外から渡せる**——**判定は時刻の差だけで決まる**ので、
+# **決まった時刻から見えないと、確かめようがない。**
+NOW="${LOOP_CADENCE_NOW:-$(date +%s)}"
+if ! [[ $NOW =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_CADENCE_NOW は epoch 秒で指定してください" >&2
+  exit 2
+fi
+readonly NOW
+
+# **間隔は、ループを起動した人が決めたものである** (#378 の完了条件)。
+#
+# **`/loop <間隔> /loop-worker` の <間隔> がそれ**で、**このリポジトリの中には無い**
+# ——**手順書へ数字を書き写さない**（写した瞬間に、起動した人の設定と食い違いうる）。
+# **渡されなければ「分からない」と答える**——**「異常なし」へ倒さない** (#304 と同じ向き)。
+INTERVAL="${LOOP_CRON_INTERVAL_SEC:-}"
+if [[ -n $INTERVAL ]] && { ! [[ $INTERVAL =~ ^[0-9]+$ ]] || ((INTERVAL < 1)); }; then
+  echo "[FAIL] 設定: LOOP_CRON_INTERVAL_SEC は 1 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+readonly INTERVAL
+
+# **何回ぶん落としたら言うか。** **1 回落としただけでは鳴らさない**
+# ——**cron の 1 回のずれ（実行が詰まった、機械が寝ていた）で人を呼ぶと、
+# 呼ばれる側がこの出力を読まなくなる。** **2 回続けて来なければ言う。**
+readonly MISSED_TICKS=2
+
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリを解決できません" >&2
+  exit 2
+}
+readonly common_dir
+
+# **記録は作業場ごと**である（`bin/loop-lease` が書く。名前の作り方はあちらが持つ）。
+found=0
+stale=0
+undecidable=0
+for starts in "$common_dir"/valence-loop-starts-*; do
+  [[ -f $starts ]] || continue
+  found=1
+  scope="${starts##*/valence-loop-starts-}"
+  last_cron="-"
+  last_poke="-"
+  last_unknown="-"
+  while IFS=$'\t' read -r at trigger; do
+    [[ $at =~ ^[0-9]+$ ]] || continue
+    case "$trigger" in
+      cron) last_cron="$at" ;;
+      poke) last_poke="$at" ;;
+      # **知らない印は「不明」へ入れる**——**cron へ倒さない**（渡し忘れた日から
+      # 何も見なくなる）。**綴りが変わったときも、こちらへ落ちる。**
+      *) last_unknown="$at" ;;
+    esac
+  done <"$starts"
+
+  age="-"
+  verdict="ok"
+  if [[ $last_cron == "-" ]]; then
+    # **一度も cron で始まっていない。** **突かれただけの作業場がこれ**である。
+    verdict="stale"
+  else
+    age=$((NOW - last_cron))
+    ((age < 0)) && age=0
+    if [[ -z $INTERVAL ]]; then
+      verdict="unknown"
+    elif ((age > INTERVAL * MISSED_TICKS)); then
+      verdict="stale"
+    fi
+  fi
+  if [[ -z $INTERVAL ]]; then
+    verdict="unknown"
+  fi
+
+  echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age interval=${INTERVAL:-unknown} $verdict"
+  case "$verdict" in
+    stale) stale=1 ;;
+    unknown) undecidable=1 ;;
+  esac
+done
+
+if ((found == 0)); then
+  # **記録が無いことと、始まっていないことは同じではない** ——**混ぜない。**
+  # **この仕組みが入る前の作業場**も、**一度も周回を回していない作業場**もここへ来る。
+  echo "[WARN] 周回が始まった記録がありません（no-record）" >&2
+  echo "       この仕組みが入る前の作業場か、まだ一度も回していない作業場です" >&2
+  exit 2
+fi
+
+((undecidable == 1)) && exit 2
+((stale == 1)) && exit 1
+exit 0
