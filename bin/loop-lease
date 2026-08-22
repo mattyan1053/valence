@@ -335,24 +335,6 @@ set_role_paths() {
 #
 # **限界を書いておく。** **同じセッションの中の別周回**（cron と通知が同じ本体から
 # 起きる形）は、この印では区別できない——**分からないものは飛ばしと呼ばない**方へ倒す。
-# 周回の印が「まだ生きている」と読める窓（秒）。**`bin/loop-stall` と同じ式**——
-# **いちばん長かった周回の 2 倍**で、既定は lease の期限である。
-#
-# **問いは 1 つなので、式も 1 つ** (#385 のレビュー)。**過渡期の枝（前の版の名前で
-# 置かれた印）と本筋が別々に書くと、片方だけ直して食い違う**——**固定の期限のままだと、
-# 周回が期限より長い作業場では、返した直後の印が「窓より古い」と捨てられる。**
-#
-# **実測は印と同じ名前で置かれている**（`rounds` → `roundlen`）ので、**旧名の印でも読める。**
-round_window() {
-  local rounds_file="$1" window="$TTL_SEC" len_file len_seconds
-  len_file="${rounds_file/valence-loop-rounds-/valence-loop-roundlen-}"
-  if [[ -f $len_file ]] && read -r len_seconds <"$len_file" 2>/dev/null \
-    && [[ $len_seconds =~ ^[0-9]+$ ]]; then
-    ((len_seconds * 2 <= window)) || window=$((len_seconds * 2))
-  fi
-  printf '%s' "$window"
-}
-
 round_owner() {
   local pid="$$" mysid ppid sid
   proc_field "$pid" 4 || return 1
@@ -378,6 +360,24 @@ round_owner() {
   # **食い違ったら「別の周回」ではなく「分からない」**へ倒す（`check` を読むこと）。
   proc_field "$mysid" 20 || return 1
   printf 's:%s:%s' "$mysid" "$PROC_FIELD"
+}
+
+# 周回の印が「まだ生きている」と読める窓（秒）。**`bin/loop-stall` と同じ式**——
+# **いちばん長かった周回の 2 倍**で、既定は lease の期限である。
+#
+# **問いは 1 つなので、式も 1 つ** (#385 のレビュー)。**過渡期の枝（前の版の名前で
+# 置かれた印）と本筋が別々に書くと、片方だけ直して食い違う**——**固定の期限のままだと、
+# 周回が期限より長い作業場では、返した直後の印が「窓より古い」と捨てられる。**
+#
+# **実測は印と同じ名前で置かれている**（`rounds` → `roundlen`）ので、**旧名の印でも読める。**
+round_window() {
+  local rounds_file="$1" window="$TTL_SEC" len_file len_seconds
+  len_file="${rounds_file/valence-loop-rounds-/valence-loop-roundlen-}"
+  if [[ -f $len_file ]] && read -r len_seconds <"$len_file" 2>/dev/null \
+    && [[ $len_seconds =~ ^[0-9]+$ ]]; then
+    ((len_seconds * 2 <= window)) || window=$((len_seconds * 2))
+  fi
+  printf '%s' "$window"
 }
 
 # `/proc/<pid>/stat` の値を 1 つ読む。**番号は comm の後ろから数える**
