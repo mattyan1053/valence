@@ -211,13 +211,16 @@ describe("bin/loop-review-commits", () => {
      */
     function allRowsOf(
       pr: number,
-      comments: { login: string; body: string }[],
+      comments: { login: string; body: string; at?: string }[],
       prBody = "本文",
     ): string {
       const dir = mkdtempSync(join(tmpdir(), "loop-review-commits-gh-"));
       symlinkSync("/usr/bin/bash", join(dir, "bash"));
       const rows = comments
-        .map((comment, index) => `${laterThanNow(60 + index)}\t${comment.login}\t${comment.body}`)
+        .map(
+          (comment, index) =>
+            `${comment.at ?? laterThanNow(60 + index)}\t${comment.login}\t${comment.body}`,
+        )
         .join("\n");
       writeFileSync(
         join(dir, "gh"),
@@ -257,7 +260,7 @@ describe("bin/loop-review-commits", () => {
     /** `--all` のうち `answer` の行だけ。 */
     function answersOf(
       pr: number,
-      comments: { login: string; body: string }[],
+      comments: { login: string; body: string; at?: string }[],
       prBody = "本文",
     ): string {
       return allRowsOf(pr, comments, prBody)
@@ -279,6 +282,23 @@ describe("bin/loop-review-commits", () => {
       ]);
 
       expect(answers.trim(), "レビューを通知としても数えている").toBe("");
+    });
+
+    it("同じ秒に届いた別の応答を、巻き添えで落とさない", () => {
+      // **時刻で対応付けると、同じ秒に届いた本物の通知まで重複として捨てる**
+      // （#361 のレビュー）——**`notice` が過少になり、上限を超えて要求を再送できる**
+      // （**#356 が塞いだ穴が開き直る**）。**対応付けるのは応答そのもの**である。
+      const at = laterThanNow(60);
+      const rows = allRowsOf(72, [
+        { at, login: BOT, body: "Reviewed commit: `abcdef1234`" },
+        { at, login: BOT, body: WENT_WRONG },
+      ]);
+
+      expect(rows, "SHA の行が出ていない").toContain("abcdef1234");
+      expect(
+        rows.split("\n").filter((line) => line.endsWith("\tanswer")).length,
+        "同じ秒の通知を巻き添えで落としている",
+      ).toBe(1);
     });
 
     it("SHA を持たない応答は、これまでどおり通知として出す", () => {
