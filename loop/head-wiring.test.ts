@@ -53,7 +53,7 @@ function writingSections(): [string, string][] {
   // **PR へ書く**もの: コメント・label・resolve・**SHA 付きの記録**。
   // Issue の起票や `ready` の付け替えは、**その PR の head に依らない**ので入れない。
   const writes =
-    /gh pr comment|gh pr edit|resolveReviewThread|resolve|bin\/loop-stall "[a-z-]+:<PR番号>@<SHA>"/;
+    /gh pr comment|gh pr edit|resolveReviewThread|resolve|bin\/loop-request-changes|bin\/loop-stall "[a-z-]+:<PR番号>@<SHA>"/;
   const pairs: [string, string][] = [];
   let heading = "";
   let writesHere = false;
@@ -78,6 +78,13 @@ function writingSections(): [string, string][] {
     // **片方の枝にしか無い**形が実際に残っていた（#166 のレビュー 2 周目）。
     // **同じ行に両方あるときは、その行が確認である**（散文で両方に触れる場合）
     if (line.includes("bin/loop-head same") && !writesHere) {
+      checkedFirst = true;
+    }
+    // **口そのものが先に確かめる** (#388)。**`bin/loop-request-changes` は head を
+    // 確かめてからでないと label もコメントも触らない**（`bin/loop-request-changes.test.ts`
+    // の `head が動いていたら、何も書かない`）——**呼ぶ側に確認を書き写させると、
+    // 写した側が古くなる。** **書き込みであることは上の `writes` が見ている。**
+    if (line.includes("bin/loop-request-changes")) {
       checkedFirst = true;
     }
     // **「resolve しない」は書かない宣言である。** 打ち消しを書き込みと読むと、

@@ -139,27 +139,25 @@ describe("状態が矛盾したとき", () => {
       );
     });
 
-    it("label が先、コメントが後の順序が保たれている", () => {
-      // **既存の決まりを変えない。** label を付けてから投稿する
-      // （投稿できて label が付かない状態を作らないため）。
+    it("要求は 1 つの口から出している", () => {
+      // **順序（label が先、コメントが後）と付け直しは、`bin/loop-request-changes` が
+      // 持つようになった** (#388)——**手順を並べると、いつか 1 つ飛ばされる**
+      // （**2026-08-22 に master が実際に飛ばした**。#382）。
       //
-      // **段そのものに範囲を絞る。** ステップ 4 全体で見ると、
-      // **別の節にある同じ 2 つの命令に当たって**、この段が無くても緑になる（実際になった）
+      // **段そのものに範囲を絞る。** ステップ 4 全体で見ると、**別の節にある同じ
+      // 命令に当たって**、この段が無くても緑になる（実際になった）
       const section = stepFour().split("まだ誰も答えていない指摘")[1]?.split("\n### ")[0] ?? "";
 
-      expect(positionOf(section, "--add-label changes-requested")).toBeLessThan(
-        positionOf(section, "gh pr comment"),
-      );
+      expect(positionOf(section, "bin/loop-request-changes")).toBeGreaterThanOrEqual(0);
     });
 
-    it("既に付いている PR へ新しい指摘が届いたときは、付け直すと書いてある", () => {
-      // **label は PR 全体の状態で、いつ判断したかも表している。**
-      // 既に付いていると `--add-label` は何も起こさない——**新しい指摘を見た記録が
-      // 残らないので、持ち手が master のまま動かず、worker へ渡らない**。
-      // 付け直さない限り、**この段を通っても状態が変わらない**
+    it("生の label 操作が、この段に残っていない", () => {
+      // **残っていると、そちらを打つ人が出る**——**忘れるのは、打つ手順があるから**である。
+      // **順序と付け直しそのものは `bin/loop-request-changes.test.ts` が見ている**
       const section = stepFour().split("まだ誰も答えていない指摘")[1]?.split("\n### ")[0] ?? "";
 
-      expect(section).toContain("--remove-label changes-requested");
+      expect(section, "label を手で付けている").not.toContain("--add-label changes-requested");
+      expect(section, "label を手で外している").not.toContain("--remove-label changes-requested");
     });
 
     it("機械的に付けるとは書いていない", () => {
