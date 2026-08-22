@@ -19,6 +19,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -133,6 +134,17 @@ describe("入口で最初に通るスクリプトが、lease 無しを記録す�
     expect(done.stderr, "記録を黙って行っている").toMatch(/lease/);
   });
 
+  it("一覧は、記録しない", () => {
+    // **一覧は問い合わせである**——**尋ねるたびに偽の「入口を飛ばした」が積まれると、
+    // 保つ 20 件が入れ替わり、本物が残らない**（#390 のレビュー）
+    const { dir } = workspace();
+
+    const done = run(dir, "loop-procedure-changed", ["--role", "worker", "--list"]);
+
+    expect(done.status, "一覧を出せていない").toBe(0);
+    expect(missingCount(dir), "問い合わせを「飛ばした」と数えている").toBe(0);
+  });
+
   it("入口の読み直しは、記録しない", () => {
     // **`--entry` は、印がずれた周回が lease を取る前に読む**（入口 1.0 の回復路。#373）
     // ——**そこで記録すると、正しく回復した周回が毎回「飛ばした」に数えられる。**
@@ -143,5 +155,77 @@ describe("入口で最初に通るスクリプトが、lease 無しを記録す�
 
     expect(done.status, "回復路で落ちている").toBe(0);
     expect(missingCount(dir), "回復路を「飛ばした」と数えている").toBe(0);
+  });
+});
+
+/**
+ * **ふつうの `./task check` が、共有の記録を動かさない**（#390 のレビュー）。
+ *
+ * **記録は作業場をまたいで 1 つ**で、**保つのは 20 件**である——**試験が実物の
+ * リポジトリに対して実物のスクリプトを走らせると、その場で記録が積まれ**、
+ * **数回の `./task check` で本物の「入口を飛ばした周回」が押し出される。**
+ *
+ * **見えるようにするために足した受け口の記録が、試験の音で埋まる**
+ * ——**`AGENTS.md` §5 が名指ししている形**である（#186。**観測をやめて、
+ * 自分の砂場に身代わりを置く**）。
+ */
+describe("試験が、共有の記録を汚さない", () => {
+  /** **記録する側のスクリプト**（一覧は実物から作る。**書き写さない**）。 */
+  function recordingScripts(): string[] {
+    return readdirSync(join(REPO_ROOT, "bin"))
+      .filter((name) => !name.endsWith(".test.ts"))
+      .filter((name) =>
+        readFileSync(join(REPO_ROOT, "bin", name), "utf8").includes('/loop-lease" check'),
+      );
+  }
+
+  /** 試験のファイル。**足された試験も自動で入る**（並べると、足した人が漏れる）。 */
+  function testFiles(): string[] {
+    return ["bin", "loop"].flatMap((dir) =>
+      readdirSync(join(REPO_ROOT, dir))
+        .filter((name) => name.endsWith(".test.ts"))
+        .map((name) => `${dir}/${name}`),
+    );
+  }
+
+  /**
+   * その呼び出しが、**実物のリポジトリで走るか**。
+   *
+   * **`cwd` を渡していない呼び出しは、vitest の cwd（＝実物）で走る。**
+   * **問い合わせ（`--list` / `--entry`）は記録より前に返る**ので、ここでは見ない
+   * （**下の 2 本が振る舞いで押さえている**）。
+   */
+  function runsOnRealRepo(call: string): boolean {
+    if (/"--list"|"--entry"/.test(call)) {
+      return false;
+    }
+    return !/cwd:/.test(call) || /cwd:\s*REPO_ROOT/.test(call);
+  }
+
+  /** その試験ファイルが、実物の置き場所から起こしている記録スクリプト。 */
+  function offendersIn(file: string, scripts: string[]): string[] {
+    const text = readFileSync(join(REPO_ROOT, file), "utf8");
+    return scripts.flatMap((script) => {
+      const spawn = new RegExp(
+        `(spawnSync|execFileSync)\\(\\s*join\\(REPO_ROOT,\\s*"bin/${script}"\\)`,
+        "g",
+      );
+      return [...text.matchAll(spawn)]
+        .map((match) => text.slice(match.index ?? 0, (match.index ?? 0) + 500))
+        .map((scope) => scope.split(/\n\s*\}\);/)[0] ?? scope)
+        .filter(runsOnRealRepo)
+        .map(() => `${file}: bin/${script}`);
+    });
+  }
+
+  it("記録するスクリプトを、実物のリポジトリに対して走らせない", () => {
+    // **危ないのは「実物の置き場所から起こす」形**である——**砂場へ写したものを
+    // 起こす呼び出し**（`join(dir, "bin", name)`）**は、記録も砂場へ行く。**
+    const scripts = recordingScripts();
+    expect(scripts.length, "記録する側が 1 つも無い").toBeGreaterThan(0);
+
+    const offenders = testFiles().flatMap((file) => offendersIn(file, scripts));
+
+    expect(offenders, "実物のリポジトリに対して走らせている").toEqual([]);
   });
 });
