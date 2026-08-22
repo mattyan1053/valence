@@ -1,4 +1,4 @@
-<!-- 版: 6ca8bcf9f2e7 -->
+<!-- 版: 89d589768c02 -->
 ---
 name: "Loop: Worker"
 description: Issue の実装またはレビュー指摘への対応を 1 周だけ実行する
@@ -116,14 +116,19 @@ bin/loop-procedure-changed --role worker "$before" "$after"
 **`exit 1` だけが「続けてよい」**（**1 以外はすべて捨てる**。master と同じ扱い）——
 **`exit 2` だけを並べない。** **判定器そのものが消えた・実行できない（126 / 127）ときは
 どの分岐にも入らず**、**「判定不能なら捨てる」が成立しなくなる。**
+**続けてよいなら `bin/loop-stall --reset procedure-churn`**——**続いていない。**
 
 **捨てるときは、この順で行う。**
 
 ```bash
+bin/loop-stall procedure-churn          # **捨てたことを数える** (#367)
 bin/loop-stall --reset main-sync-failed
 bin/loop-lease release worker "<token>"
 # ここで /loop-worker を呼び直す
 ```
+
+**捨てた周回は、数えないとどこにも残らない** (#367)——**外からは健全に見え、
+手順を直す PR が続くと実装側は毎周捨てて何もしない。** **数えれば人が呼ばれる。**
 
 **消してから返す。** **返してから消すと、間に入った周回が消える前のカウンタを読む。**
 **消すのは、同期の失敗のぶんだけ** (#266)——**全部消すと、呼び直した先が印ずれで
