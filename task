@@ -578,6 +578,28 @@ cmd_loop_stop_paths() {
   loop_stop_paths
 }
 
+# **worker の作業場を 1 行ずつ出す** (#378。`bin/loop-cadence` が読む。読むだけ)。
+#
+# **名前の規則を、数える側へ書き写さない** (#381 のレビュー)——**足しているのはここ**
+# （`cmd_loop_worker_add` は `${PWD}-worker-<名前>`、master は `${PWD}-master`）なので、
+# **どこに居るかを答えるのもここ**である。**写すと、足す側と数える側で食い違う。**
+#
+# **master の作業場は worker に数えない**——**あちらの入口は `--trigger` を渡さない**
+# ので、**混ぜると、worker の cron が正常でも「止まっている」と言うことになる。**
+cmd_loop_worker_paths() {
+  local main master
+  # **登録されているものが正**である（`loop_stop_paths` と同じ口）。
+  # **最初の 1 つが主の worktree**で、**master はその隣に `-master` で作られる。**
+  main="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+  if [[ -z $main ]]; then
+    echo "==> worktree の一覧を読めません" >&2
+    return 1
+  fi
+  master="${main}-master"
+  git worktree list --porcelain |
+    awk -v skip="$master" '/^worktree /{ if ($2 != skip) print $2 }'
+}
+
 # worker の作業場を増やす 例: ./task loop:worker:add b
 cmd_loop_worker_add() {
   local name="${1:-}" wt port existing found
@@ -763,8 +785,32 @@ show_stray_branches() {
   printf '%s\n' "$strays" | sed 's/^/  /'
 }
 
+# **周回が始まっているか** (#378)。**判定は `bin/loop-cadence` が持つ**——
+# **ここへ写すと、片方だけ直して食い違う。**
+#
+# **止めない。** **人が見るところに 1 行出すだけ**である。**分からないときも黙らない**
+# ——**「分からない」を「異常なし」と同じ静けさにしない。**
+show_cadence() {
+  local out status
+  # **`set -e` の下では、代入の失敗がそのまま打ち切りになる** ——**判定できない側で
+  # 止まると、この下の全部（STOP・PR・Issue）が出なくなる。**
+  if out="$(bin/loop-cadence 2>&1)"; then status=0; else status=$?; fi
+  case "$status" in
+    0) echo "周回: cron で回っています" ;;
+    1)
+      echo "周回: cron の周回が来ていない作業場があります"
+      printf '%s\n' "$out" | sed 's/^/  /'
+      ;;
+    *)
+      echo "周回: 始まっているか判定できません"
+      printf '%s\n' "$out" | sed 's/^/  /'
+      ;;
+  esac
+}
+
 # ループの現在地を表示する (open PR / Issue / STOP)
 cmd_loop_status() {
+  show_cadence
   show_missing_lease
   show_awaiting_human
   show_silent_park
