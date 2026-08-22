@@ -335,6 +335,24 @@ set_role_paths() {
 #
 # **限界を書いておく。** **同じセッションの中の別周回**（cron と通知が同じ本体から
 # 起きる形）は、この印では区別できない——**分からないものは飛ばしと呼ばない**方へ倒す。
+# 周回の印が「まだ生きている」と読める窓（秒）。**`bin/loop-stall` と同じ式**——
+# **いちばん長かった周回の 2 倍**で、既定は lease の期限である。
+#
+# **問いは 1 つなので、式も 1 つ** (#385 のレビュー)。**過渡期の枝（前の版の名前で
+# 置かれた印）と本筋が別々に書くと、片方だけ直して食い違う**——**固定の期限のままだと、
+# 周回が期限より長い作業場では、返した直後の印が「窓より古い」と捨てられる。**
+#
+# **実測は印と同じ名前で置かれている**（`rounds` → `roundlen`）ので、**旧名の印でも読める。**
+round_window() {
+  local rounds_file="$1" window="$TTL_SEC" len_file len_seconds
+  len_file="${rounds_file/valence-loop-rounds-/valence-loop-roundlen-}"
+  if [[ -f $len_file ]] && read -r len_seconds <"$len_file" 2>/dev/null \
+    && [[ $len_seconds =~ ^[0-9]+$ ]]; then
+    ((len_seconds * 2 <= window)) || window=$((len_seconds * 2))
+  fi
+  printf '%s' "$window"
+}
+
 round_owner() {
   local pid="$$" mysid ppid sid
   proc_field "$pid" 4 || return 1
@@ -750,7 +768,7 @@ if [[ $ACTION == "alive" ]]; then
       # 仕事を誰も拾えなくなる**（**古い印は書き直されないので、永久に**）。
       if read -r alive_started <"$alive_rounds" 2>/dev/null \
         && [[ $alive_started =~ ^[0-9]+$ ]] \
-        && ((now - alive_started >= TTL_SEC)); then
+        && ((now - alive_started >= $(round_window "$alive_rounds"))); then
         continue
       fi
       alive_unknown=1
@@ -763,13 +781,9 @@ if [[ $ACTION == "alive" ]]; then
       echo "[FAIL] 周回の印を読めません: $alive_rounds" >&2
       exit 2
     fi
-    # **実測があれば、それで窓を広げる**（**長い周回の途中で「死んだ」に落とさない**）
-    alive_window="$TTL_SEC"
-    alive_len="${alive_rounds/valence-loop-rounds-/valence-loop-roundlen-}"
-    if [[ -f $alive_len ]] && read -r alive_seconds <"$alive_len" 2>/dev/null \
-      && [[ $alive_seconds =~ ^[0-9]+$ ]]; then
-      ((alive_seconds * 2 <= alive_window)) || alive_window=$((alive_seconds * 2))
-    fi
+    # **実測があれば、それで窓を広げる**（**長い周回の途中で「死んだ」に落とさない**）。
+    # **式は `round_window` が 1 つだけ持つ**（上の過渡期の枝と同じもの。#385 のレビュー）
+    alive_window="$(round_window "$alive_rounds")"
     # **1 つでも窓の内なら回っている**（**前の版で始めた周回も、いまの周回である**）
     ((now - alive_started < alive_window)) && exit 0
   done

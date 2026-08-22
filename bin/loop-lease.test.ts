@@ -1668,6 +1668,27 @@ describe("bin/loop-lease", () => {
       expect(run(["alive", sandbox]).status, "古い印で、拾えなくなっている").toBe(1);
     });
 
+    it("前の版の名前で置かれた印も、窓は実測から決まる", () => {
+      // **窓を 2 つ持たない** (#385 のレビュー)。**過渡期の枝だけが固定の期限で
+      // 見ていると、周回が期限より長い作業場では、返した直後の印が「窓より古い」と
+      // 捨てられる**——**`exit 1` → `bin/loop-claim` が生きている持ち主から取り上げる**
+      // （**この PR が塞ぎに来た穴と同じ出口**）。
+      //
+      // **旧名の印にも実測は在る**（`valence-loop-roundlen-<旧 scope>`。名前の規則が
+      // 対応している）——**読めないのではなく、読んでいないだけ**である。
+      const ttl = Number(run(["ttl"]).stdout.trim());
+      const digest = createHash("sha256").update(sandbox).digest("hex");
+      markRoundWithOldName(sandbox, Math.floor(Date.now() / 1000) - (ttl + 600));
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-roundlen-worker-${digest}`),
+        `${ttl + 1200}\n`,
+      );
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status, "実測が窓に効いていない（生きている持ち主を捨てている）").toBe(2);
+    });
+
     it("周回の印が新しければ、走っていると答える", () => {
       markRound(sandbox, Math.floor(Date.now() / 1000));
 
