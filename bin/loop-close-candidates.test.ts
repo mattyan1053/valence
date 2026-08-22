@@ -195,6 +195,29 @@ describe("bin/loop-close-candidates", () => {
       expect(verdict.status, verdict.stderr).toBe(0);
     });
 
+    /**
+     * **ホストは 1 つではない** (#365 のレビュー)。**dependabot は
+     * `redirect.github.com` へ書き換える**ので、**そこに自分のリポジトリの番号が
+     * 出ることもある**——**そのリンクを外部として落とすと、本物の候補が黙って消える。**
+     *
+     * **倒れる先が `exit 2` ではなく `exit 0`（候補なし）**なので、**誰も見ない。**
+     */
+    it.each([
+      { host: "github.com", mine: true, shown: true },
+      { host: "github.com", mine: false, shown: false },
+      { host: "redirect.github.com", mine: true, shown: true },
+      { host: "redirect.github.com", mine: false, shown: false },
+    ])("$host のリンク（自分のもの: $mine）は $shown", ({ host, mine, shown }) => {
+      const target = mine ? "mattyan1053/valence" : "vercel/next.js";
+      const verdict = run(["357"], {
+        body: `<li>直したもの (<a href="https://${host}/${target}/issues/319">#319</a>)</li>\n`,
+        entries: { 319: { state: "OPEN", title: "ここの Issue" } },
+      });
+
+      expect(verdict.stdout.includes("319"), "自分のリンクを落としている").toBe(shown);
+      expect(verdict.status, verdict.stderr).toBe(shown ? 1 : 0);
+    });
+
     it("同じ本文の本物の候補は、これまでどおり出す", () => {
       // **これが無いと「静かになった」だけ**で、**見えなくなったのと区別が付かない**
       const verdict = run(["357"], {
