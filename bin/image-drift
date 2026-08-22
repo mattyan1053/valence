@@ -2,7 +2,7 @@
 # **走っているイメージが、いまの `Dockerfile` と食い違っていないかを見る** (#380)。
 #
 #   bin/image-drift digest          いまの build 入力の指紋を出す（`./task` が渡す）
-#   bin/image-drift check <イメージ> [<コンテナ>]  食い違っていれば、直し方を出す
+#   bin/image-drift check [--container <ID>] <イメージ>...  食い違っていれば、直し方を出す
 #
 #   exit 0 = 食い違いなし（**何も出さない**）／**そのイメージがまだ無い**
 #   exit 1 = 古い（**作り直し方**を出す）
@@ -43,7 +43,7 @@ readonly FIX="./task build && ./task up"
 
 usage() {
   echo "使い方: bin/image-drift digest           build 入力の指紋を出す" >&2
-  echo "        bin/image-drift check <イメージ> [<コンテナ>]  古ければ直し方を出す" >&2
+  echo "        bin/image-drift check [--container <ID>] <イメージ>...  古ければ直し方" >&2
   echo "        exit 0 食い違いなし / exit 1 古い / exit 2 判定できない" >&2
   exit 2
 }
@@ -84,31 +84,59 @@ case "$1" in
     digest
     ;;
   check)
-    [[ $# -eq 2 || $# -eq 3 ]] || usage
+    shift
+    # **走っているコンテナは、任意で受ける**（**`./task` が `docker ps` で引いて渡す**）
+    container=""
+    if [[ ${1-} == "--container" ]]; then
+      [[ $# -ge 2 ]] || usage
+      container="$2"
+      shift 2
+    fi
+    [[ $# -ge 1 ]] || usage
     want="$(digest)" || exit 2
     if ! command -v "$DOCKER" >/dev/null 2>&1; then
       echo "[FAIL] docker がありません。イメージが古いかどうかは分かりません" >&2
       exit 2
     fi
-    # **走っているコンテナがあれば、それが「いま使っているもの」である**
-    # ——**タグは作り直されていても、コンテナは古いイメージ ID のまま動く。**
-    target="$2"
+    # **見るのは、この作業場が使いうるものを全部** (#382 のレビュー)。
+    # **compose はサービスごとに別のタグを作る**（`image:` が無いため）ので、
+    # **`app` だけを見ると `supabase-cli` が古いまま使われる**——**`./task db:*` の入口**である。
+    #
+    # **走っているコンテナがあれば、それも見る**——**タグは作り直されていても、
+    # コンテナは古いイメージ ID のまま動く。**
+    declare -A label_of=()
     running=""
-    if [[ -n ${3-} ]]; then
-      running="$("$DOCKER" inspect "$3" --format '{{.Image}}' 2>/dev/null)" || running=""
+    if [[ -n $container ]]; then
+      running="$("$DOCKER" inspect "$container" --format '{{.Image}}' 2>/dev/null)" || running=""
     fi
-    [[ -z $running ]] || target="$running"
-    # **まだ無いイメージは「古い」ではない**——**compose がこれから作る。**
-    if ! have="$("$DOCKER" image inspect "$target" --format "{{index .Config.Labels \"$LABEL\"}}" 2>/dev/null)"; then
-      exit 0
-    fi
-    [[ $have != "$want" ]] || exit 0
-    if [[ -n $running ]]; then
-      echo "[WARN] 走っているコンテナは、いまの Dockerfile より古いかもしれません: $3" >&2
+    targets=("$@")
+    [[ -z $running ]] || targets=("$running" "${targets[@]}")
+    for ref in "${targets[@]}"; do
+      # **ラベルが 1 つも無いイメージでも落とさない** (#382 のレビュー)。
+      # **`.Config.Labels` は `null` になりうる**（**この仕組みより前のイメージ**）
+      # ——**版によっては `index` がそこで落ちる**ので、**「イメージが無い」に化ける。**
+      # **いちばん鳴らせたい相手が、いちばん静かになる。**
+      if ! label_of[$ref]="$("$DOCKER" image inspect "$ref" \
+        --format "{{if .Config.Labels}}{{index .Config.Labels \"$LABEL\"}}{{end}}" 2>/dev/null)"; then
+        # **まだ無いイメージは「古い」ではない**——**compose がこれから作る。**
+        unset "label_of[$ref]"
+        continue
+      fi
+    done
+    stale=""
+    for ref in "${targets[@]}"; do
+      [[ -n ${label_of[$ref]+set} ]] || continue
+      [[ ${label_of[$ref]} != "$want" ]] || continue
+      stale="$ref"
+      break
+    done
+    [[ -n $stale ]] || exit 0
+    if [[ $stale == "$running" ]]; then
+      echo "[WARN] 走っているコンテナは、いまの Dockerfile より古いかもしれません: $container" >&2
     else
-      echo "[WARN] このイメージは、いまの Dockerfile より古いかもしれません: $2" >&2
+      echo "[WARN] このイメージは、いまの Dockerfile より古いかもしれません: $stale" >&2
     fi
-    if [[ -z $have ]]; then
+    if [[ -z ${label_of[$stale]} ]]; then
       # **ラベルが無いのは、この仕組みより前に作られたイメージ**である
       echo "       いつの build か分かりません（この仕組みより前に作られています）" >&2
     fi

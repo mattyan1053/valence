@@ -890,7 +890,10 @@ warn_stale_containers() {
   container="$(docker ps -q \
     --filter "label=com.docker.compose.project=$(workspace_name)" \
     --filter "label=com.docker.compose.service=app" 2>/dev/null | head -1)" || container=""
-  ./bin/image-drift check "$(workspace_name)-app" "$container" || true
+  # **compose はサービスごとに別のタグを作る**（`image:` が無いため）ので、
+  # **`supabase-cli` も渡す**——**`./task db:*` の入口**である (#382 のレビュー)。
+  ./bin/image-drift check --container "$container" \
+    "$(workspace_name)-app" "$(workspace_name)-supabase-cli" || true
 }
 
 main() {

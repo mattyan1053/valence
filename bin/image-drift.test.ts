@@ -39,6 +39,14 @@ function checkout(
     label?: string | null;
     /** 走っているコンテナのイメージのラベル。**渡すと、コンテナがある状態**になる。 */
     runningLabel?: string;
+    /** もう 1 つのサービスのイメージのラベル（`<project>-supabase-cli` 相当）。 */
+    otherLabel?: string;
+    /**
+     * **ラベルが 1 つも無いイメージ**（`.Config.Labels` が `null`）。
+     *
+     * **版によっては `{{index …}}` がそこで落ちる**——**落ちる docker を作る。**
+     */
+    labelsNull?: boolean;
   } = {},
 ): string {
   const dir = mkdtempSync(join(tmpdir(), "image-drift-"));
@@ -65,6 +73,20 @@ function checkout(
       "fi",
       // イメージ → ラベル
       'if [[ $1 == "image" ]]; then',
+      // **ラベルが 1 つも無いイメージ**。**古い docker は index でここが落ちる**
+      ...(options.labelsNull === true
+        ? [
+            '  if [[ $* != *"if .Config.Labels"* ]]; then',
+            '    echo "template: :1:2: executing … index of untyped nil" >&2; exit 1',
+            "  fi",
+            "  printf '\\n'; exit 0",
+          ]
+        : []),
+      '  if [[ $3 == "もう一つ" ]]; then',
+      options.otherLabel === undefined
+        ? '    echo "No such image" >&2; exit 1'
+        : `    printf '%s\\n' ${JSON.stringify(options.otherLabel)}; exit 0`,
+      "  fi",
       '  if [[ $3 == "走っているイメージ" ]]; then',
       running === undefined
         ? '    echo "No such image" >&2; exit 1'
@@ -178,22 +200,24 @@ describe("bin/image-drift", () => {
     const digest = run(dir, ["digest"]).stdout.trim();
     const same = checkout({ label: digest, runningLabel: "前の指紋" });
 
-    const result = run(same, ["check", "valence-app", "コンテナ"]);
+    const result = run(same, ["check", "--container", "コンテナ", "valence-app"]);
 
     expect(result.status, "タグが新しいだけで黙っている").toBe(1);
     expect(result.stderr, "入れ替えまで案内していない").toContain("./task up");
     expect(dir).toBeTruthy();
   });
 
-  it("走っているコンテナが新しければ、何も言わない", () => {
+  it("使いうるものが全部新しければ、何も言わない", () => {
+    // **タグも見る** (#382 のレビュー)——**コンテナが新しくても、タグが古ければ、
+    // 次に作り直した（入れ替えた）ときに古いほうが使われる。**
     const dir = checkout();
     const digest = run(dir, ["digest"]).stdout.trim();
-    const same = checkout({ label: "前の指紋", runningLabel: digest });
+    const same = checkout({ label: digest, runningLabel: digest });
 
-    const result = run(same, ["check", "valence-app", "コンテナ"]);
+    const result = run(same, ["check", "--container", "コンテナ", "valence-app"]);
 
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stderr, "使っているものは新しいのに鳴っている").toBe("");
+    expect(result.stderr, "全部新しいのに鳴っている").toBe("");
   });
 
   it("sha256sum が無くても、指紋を出せる", () => {
@@ -207,6 +231,41 @@ describe("bin/image-drift", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim(), "git の hash になっていない").toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("ラベルが 1 つも無いイメージでも、鳴る", () => {
+    // **いちばん鳴らせたい相手**（**この仕組みより前に作られたイメージ**）である
+    // ——**版によっては `{{index …}}` がそこで落ち**、**「イメージが無い」に化ける。**
+    const dir = checkout({ labelsNull: true });
+
+    const result = run(dir, ["check", "valence-app"]);
+
+    expect(result.status, "いちばん鳴らせたい相手が、いちばん静かになっている").toBe(1);
+    expect(result.stderr).toContain("分かりません");
+  });
+
+  it("もう 1 つのサービスのイメージが古ければ、鳴る", () => {
+    // **compose はサービスごとに別のタグを作る**（`image:` が無い）——
+    // **`app` だけを見ると、`./task db:*` が古いイメージのまま走る**
+    const dir = checkout();
+    const digest = run(dir, ["digest"]).stdout.trim();
+    const mixed = checkout({ label: digest, otherLabel: "前の指紋" });
+
+    const result = run(mixed, ["check", "valence-app", "もう一つ"]);
+
+    expect(result.status, "もう 1 つのイメージを見ていない").toBe(1);
+    expect(result.stderr, "どのイメージが古いのか読めない").toContain("もう一つ");
+  });
+
+  it("どちらのイメージも新しければ、何も言わない", () => {
+    const dir = checkout();
+    const digest = run(dir, ["digest"]).stdout.trim();
+    const fresh = checkout({ label: digest, otherLabel: digest });
+
+    const result = run(fresh, ["check", "valence-app", "もう一つ"]);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toBe("");
   });
 
   it("実物の checkout でも、指紋を出せる", () => {
