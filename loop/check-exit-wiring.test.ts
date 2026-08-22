@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -114,6 +116,63 @@ describe("./task check の終わりの印", () => {
 
     expect(result.stdout, "殺されたのに走り終えた顔をしている").not.toContain("check-exit");
     expect(result.status, "timeout に殺されていない").not.toBe(0);
+  });
+
+  /**
+   * **`./task check` を、写した checkout の中で走らせる**（#375）。
+   *
+   * **実物の `.git` へ記録を書かせない** (#186)——**走らせた回数ぶん、
+   * この作業場の commit の可否が動く。**
+   */
+  function runCheckIn(exec: string, timeoutSec?: number): { stdout: string; verdict: number } {
+    const sandbox = mkdtempSync(join(tmpdir(), "check-state-wiring-"));
+    try {
+      expect(spawnSync("git", ["init", "--quiet", sandbox]).status).toBe(0);
+      mkdirSync(join(sandbox, "bin"), { recursive: true });
+      copyFileSync(TASK, join(sandbox, "task"));
+      copyFileSync(join(REPO_ROOT, "bin/loop-check-state"), join(sandbox, "bin/loop-check-state"));
+      chmodSync(join(sandbox, "task"), 0o755);
+      chmodSync(join(sandbox, "bin/loop-check-state"), 0o755);
+      const body = [
+        `source ${JSON.stringify(join(sandbox, "task"))} >/dev/null 2>&1`,
+        "ensure_up() { :; }",
+        `exec_app() { ${exec}; }`,
+        "cmd_check",
+      ].join("; ");
+      const run =
+        timeoutSec === undefined
+          ? spawnSync("bash", ["-c", body], { cwd: sandbox, encoding: "utf8" })
+          : spawnSync("timeout", [`${timeoutSec}`, "bash", "-c", body], {
+              cwd: sandbox,
+              encoding: "utf8",
+            });
+      const verdict = spawnSync(join(sandbox, "bin/loop-check-state"), ["--verdict"], {
+        cwd: sandbox,
+        encoding: "utf8",
+      });
+      return { stdout: run.stdout ?? "", verdict: verdict.status ?? -1 };
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  }
+
+  it("走っている最中は、まだ終わっていないと記録されている", () => {
+    // **これが本体である。** **背景に回した起動側の完了通知を「check の完了」と
+    // 読んだ**（worker-1）——**走っている最中に読める記録があれば、そこで分かる。**
+    const result = runCheckIn("./bin/loop-check-state --verdict; echo verdict=$?; return 0");
+
+    expect(result.stdout, "走っている最中に「走っている」と読めない").toContain("verdict=3");
+  });
+
+  it("走り終えたら、合否が記録に残る", () => {
+    expect(runCheckIn("return 0").verdict, "緑が残っていない").toBe(0);
+    expect(runCheckIn("return 3").verdict, "赤が残っていない").toBe(1);
+  });
+
+  it("殺されたら、走っているままになる", () => {
+    // **`done` を書けずに終わる**ので、**記録は「走っている」のまま**である
+    // ——**次の commit は、そこで止まる**（`bin/loop-commit-guard`）
+    expect(runCheckIn("sleep 30", 1).verdict, "殺されたのに終わった顔をしている").toBe(3);
   });
 
   /** そのブロックが push するか。 */

@@ -217,9 +217,20 @@ cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
 # **印だけで緑と読ませない**ため、**印に合否そのものを入れる**。
 cmd_check() {
   ensure_up
+  # **走っていることを、走る前に記録する** (#375)。**印は終わったときにしか出ない**
+  # ——**足りなかったのは、読む側を強いるもの**である（**2 つの作業場が、別々の日に
+  # 「終わったこと」を読み違えて赤いものを push した**）。
+  #
+  # **殺された周回は `done` を書けない**ので、**記録は「走っている」のまま残る**
+  # ——**`bin/loop-commit-guard` がそこで止める。**
+  #
+  # **記録できなくても、検査は走らせる** (#270 と同じ判断)——**言うことと、
+  # 止めることは別**である（**commit の側は「読めない」で止まる**）。
+  ./bin/loop-check-state running || echo "[WARN] check の記録を残せませんでした" >&2
   local status=0
   exec_app pnpm check || status=$?
   echo "check-exit=$status"
+  ./bin/loop-check-state done "$status" || echo "[WARN] check の合否を残せませんでした" >&2
   return "$status"
 }
 

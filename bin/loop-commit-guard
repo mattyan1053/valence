@@ -51,7 +51,49 @@ case "$status" in
     ;;
 esac
 
-[[ $branch == "$PROTECTED" ]] || exit 0
+if [[ $branch != "$PROTECTED" ]]; then
+  # **`./task check` が終わったかどうかも見る** (#375)。**印は終わったときにしか
+  # 書かれない**（`task` の `cmd_check`）**が、読む側を強いるものが無かった**
+  # ——**2 つの作業場が、別々の日に「終わったこと」を読み違えて赤いものを push した。**
+  #
+  # **判定は `bin/loop-check-state` が持つ** (`AGENTS.md` §5)——**ここは行き先だけ。**
+  # **判定する口が無いこと自体は、赤ではない** (#375)。**古い checkout・写した
+  # 作業場では、hook とこのスクリプトだけがあって隣が無いことがある**——
+  # **そこで全部の commit を止めると、直しに行く経路が閉じ込められる**（#184 の形）。
+  # **`main` を守る側は、この下でこれまでどおり効く。**
+  if [[ ! -x "${BASH_SOURCE[0]%/*}/loop-check-state" ]]; then
+    echo "[WARN] bin/loop-check-state が無いので、./task check の合否を見ていません" >&2
+    exit 0
+  fi
+  "${BASH_SOURCE[0]%/*}/loop-check-state" --verdict
+  case "$?" in
+    0) exit 0 ;;
+    4)
+      # **記録が無いのは「赤」ではない**——**打っていない人を止める口ではない。**
+      # **ただし黙らない**（**通したことが、緑の証拠だと読まれないように**）
+      echo "[WARN] この作業場に ./task check の記録がありません（合否は分かりません）" >&2
+      exit 0
+      ;;
+    3)
+      echo "[FAIL] ./task check がまだ走っています（終わっていません）" >&2
+      echo "       終わるまで待ってから commit してください——**途中のログは緑に見えます**" >&2
+      echo "       殺された周回も、ここへ来ます（記録は「走っている」のまま残る）:" >&2
+      echo "         ./task check   # 走り直して、末尾の check-exit=<合否> を見る" >&2
+      exit 1
+      ;;
+    1)
+      echo "[FAIL] 直近の ./task check が赤で終わっています" >&2
+      echo "       直してから、もう一度 ./task check を通してください" >&2
+      echo "       （赤いまま commit すると、CI が拾うまで往復が 1 回増えます）" >&2
+      exit 1
+      ;;
+    *)
+      echo "[FAIL] ./task check の記録を読めません" >&2
+      echo "       合否が分からないので、止めます（上の理由を読むこと）" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 # **止めるだけでは、止まった側は次に何をすればよいか分からない。**
 echo "[FAIL] $PROTECTED の上で commit しようとしています" >&2

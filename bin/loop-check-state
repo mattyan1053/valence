@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# **`./task check` が終わったかどうかを、記録として残す** (#375)。
+#
+#   bin/loop-check-state running       走り始めた
+#   bin/loop-check-state done <合否>   走り終えた
+#   bin/loop-check-state --verdict     いまの記録を読む
+#
+#   --verdict の終了コード:
+#     0 = 緑 / 1 = 赤 / 2 = 読めない・使い方の誤り / 3 = まだ走っている / 4 = 記録が無い
+#
+# **2 つの作業場が、別々の日に同じ罠を踏んだ**——**「終わったこと」を読み違えた**
+# （worker-1 は背景に回した起動側の完了通知を check の完了と読み、worker-2 は
+# 完了通知と push を同じ流れで走らせて `status` を読まなかった）。
+#
+# **印そのものは正しい。** **`task` の `cmd_check` は `exec_app pnpm check` が返ってから
+# `check-exit=<合否>` を出す**ので、**途中で殺されれば印は出ない**——
+# **足りないのは、読む側を強いるもの**である（`AGENTS.md` §5。**判断を記憶に置かない**）。
+#
+# **`running` を先に書くのが要点である。** **殺された周回は `done` を書けない**ので、
+# **記録は「走っている」のまま残る**——**「終わっていない」と読める。**
+#
+# **記録は作業場ごと**（`git rev-parse --git-dir`。**worktree ごとに分かれる**）
+# ——**別の作業場の check は、こちらの commit の可否と関係が無い。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-check-state running       走り始めた" >&2
+  echo "        bin/loop-check-state done <合否>   走り終えた" >&2
+  echo "        bin/loop-check-state --verdict     いまの記録を読む" >&2
+  echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+
+if ! git_dir="$(git rev-parse --git-dir 2>/dev/null)" || [[ -z $git_dir ]]; then
+  echo "[FAIL] git の作業ツリーの中に居るかどうかを読み取れません" >&2
+  exit 2
+fi
+readonly STATE="$git_dir/valence-check-state"
+
+case "$1" in
+  running)
+    [[ $# -eq 1 ]] || usage
+    printf 'running\n' >"$STATE" || {
+      echo "[FAIL] check の記録を書き込めません: $STATE" >&2
+      exit 2
+    }
+    ;;
+  done)
+    # **合否は数字である。** **数字以外を受けると、読む側が「知らない形」で止まる**
+    [[ $# -eq 2 && $2 =~ ^[0-9]+$ ]] || usage
+    printf 'done %s\n' "$2" >"$STATE" || {
+      echo "[FAIL] check の記録を書き込めません: $STATE" >&2
+      exit 2
+    }
+    ;;
+  --verdict)
+    [[ $# -eq 1 ]] || usage
+    # **記録が無いのは「赤」ではない**——**打っていないだけ**である
+    [[ -f $STATE ]] || exit 4
+    if ! read -r kind value <"$STATE"; then
+      echo "[FAIL] check の記録を読めません: $STATE" >&2
+      exit 2
+    fi
+    case "$kind" in
+      running) exit 3 ;;
+      done)
+        [[ $value =~ ^[0-9]+$ ]] || {
+          echo "[FAIL] check の記録の合否を読めません: $STATE" >&2
+          exit 2
+        }
+        ((value == 0)) && exit 0
+        exit 1
+        ;;
+      *)
+        echo "[FAIL] check の記録が読めない形です: $STATE" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *) usage ;;
+esac

@@ -58,6 +58,8 @@ describe("main の上での commit", () => {
     for (const [from, mode] of [
       [HOOK, 0o755],
       ["bin/loop-commit-guard", 0o755],
+      // **guard が見る口も要る** (#375)——**隣が無いと「見ていない」側へ倒れる**
+      ["bin/loop-check-state", 0o755],
       ["task", 0o755],
     ] as const) {
       mkdirSync(join(repo, from.slice(0, from.lastIndexOf("/")) || "."), { recursive: true });
