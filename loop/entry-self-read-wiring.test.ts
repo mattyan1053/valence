@@ -60,7 +60,7 @@ describe("配られた本文が古いとき", () => {
     const section = staleSection(role);
     const acquire = section.indexOf(`bin/loop-lease acquire ${role}`, section.indexOf("--entry"));
     const stall = section.indexOf("`bin/loop-stall procedure-stale` を通す");
-    const forward = section.indexOf("1.1", acquire);
+    const forward = section.indexOf("1.0 の続き", acquire);
 
     expect(forward, "取り直せたときの進み先が書いていない").toBeGreaterThan(acquire);
     expect(forward, "進む前に人を呼んでいる").toBeLessThan(stall);
@@ -75,6 +75,31 @@ describe("配られた本文が古いとき", () => {
 
     expect(between, "取り直せたときの分岐が無い").toMatch(/exit 0/);
     expect(between, "取り直せなかったときの分岐が無い").toMatch(/それ以外|読めない/);
+  });
+
+  it.each(ROLES)("%s は、跳ばずに 1.0 の続きへ戻る", (role) => {
+    // **跳ぶなら、跳び越すものは何かを数える** (#374 のレビュー。§5)。
+    // **1.0 には印の話のあとにも検査がある**（master なら作業ツリー）——
+    // **1.1 へ跳ぶと、そこを通らない**（**worker の作業場で `bin/loop-sync-main` が
+    // 走り、編集中の枝から離れる**）。
+    const section = staleSection(role);
+    const acquire = section.indexOf(`bin/loop-lease acquire ${role}`, section.indexOf("--entry"));
+    const forward = section.slice(acquire, section.indexOf("`bin/loop-stall procedure-stale` を通す"));
+
+    expect(forward, "1.0 の残りを跳び越している").not.toMatch(/1\.1 (から|へ)/);
+  });
+
+  it.each(ROLES)("%s は、取り直しが返しうる値を並べる", (role) => {
+    // **`AGENTS.md` が名指ししているのは終了コードのほう**である（1.1 の
+    // 「`exit 2` だけを並べない」）——**`acquire` にも同じことが当たる。**
+    // **並べないと、別の周回が走っているだけ（exit 1）で `procedure-stale` を積む。**
+    const section = staleSection(role);
+    const acquire = section.indexOf(`bin/loop-lease acquire ${role}`, section.indexOf("--entry"));
+    const branches = section.slice(acquire, section.indexOf("`bin/loop-stall procedure-stale` を通す"));
+
+    for (const code of ["exit 0", "exit 1", "exit 2"]) {
+      expect(branches, `${code} の行き先が書いていない`).toContain(code);
+    }
   });
 
   it.each(ROLES)("%s は、読み直したあとに印を突き合わせ直す", (role) => {
