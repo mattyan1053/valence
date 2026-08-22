@@ -242,7 +242,8 @@ if ((confirm_sent == 1)); then
     exit 2
   fi
   if ! "${BASH_SOURCE[0]%/*}/loop-lease" mine "$ROLE" "$sent_token"; then
-    echo "[FAIL] この周回は $ROLE の lease を持っていないので、送信を記録しません" >&2
+    echo "[FAIL] この token は $ROLE の lease の資格ではないので、送信を記録しません" >&2
+    echo "       返したあと・次の周回が取り直したあと・期限が切れたあと、のいずれかです（上の理由を読むこと）" >&2
     echo "       出口は 1 行ずつ別のコマンドで打ちます（返すのはいちばん最後）:" >&2
     echo "         bin/loop-handoff $ROLE" >&2
     echo "         # ここで 1 通送る" >&2

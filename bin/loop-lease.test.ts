@@ -623,6 +623,20 @@ describe("bin/loop-lease", () => {
       ).toBe(1);
     });
 
+    it("期限が切れていれば 1 を返す", () => {
+      // **`release` とは問いが違う** (#355 のレビュー)。**あちらは片付け**なので、
+      // **既に空きとして扱われている lease を片付けても、誰の判断も変わらない。**
+      // **`--sent` は抑止を書く**——**期限が切れた瞬間から `acquire` にとって空き**
+      // なので、**0 を返してから記録のロックを取るまでに、次の周回が入れる。**
+      // **その周回が進めた状態を「送った」ことにしてしまう** (#258)。
+      const token = acquire("worker", { LOOP_LEASE_TTL_SEC: "0" }).stdout.trim();
+
+      const answered = run(["mine", "worker", token], { LOOP_LEASE_TTL_SEC: "0" });
+
+      expect(answered.status, "期限切れを保持中として通している").toBe(1);
+      expect(answered.stderr, "期限切れだと分からない").toContain("期限切れ");
+    });
+
     it("役ごとに見る", () => {
       const token = acquire("master").stdout.trim();
 

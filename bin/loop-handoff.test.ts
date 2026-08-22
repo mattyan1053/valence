@@ -357,9 +357,13 @@ describe("bin/loop-handoff", () => {
   }
 
   /** その役の lease を取り、token を返す。**周回を始める**（`cwd` はこの作業場）。 */
-  function acquireLease(role: string): string {
+  function acquireLease(role: string, env: Record<string, string> = {}): string {
     const stamp = spawnSync(STAMP, [role], { encoding: "utf8" }).stdout.trim();
-    const acquired = spawnSync(LEASE, ["acquire", role, stamp], { cwd: repo, encoding: "utf8" });
+    const acquired = spawnSync(LEASE, ["acquire", role, stamp], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+    });
     expect(acquired.status, `lease を取れない: ${acquired.stderr}`).toBe(0);
     return acquired.stdout.trim();
   }
@@ -894,6 +898,23 @@ describe("bin/loop-handoff", () => {
         releaseLease("worker", token);
       }
 
+      expect(run("worker").status, "記録が上がっていて、2 通目が出ない").toBe(0);
+    });
+
+    it("期限が切れた token では、記録しない", () => {
+      // **期限が切れた瞬間から、その lease は `acquire` にとって空き**である
+      // ——**「持っている」と答えてから記録のロックを取るまでに、次の周回が
+      // `PENDING` を進められる**（#355 のレビュー）。**古い周回はその新しい状態を
+      // 「送った」ことにする**——**#258 が塞ぎに来たものそのもの。**
+      //
+      // **`mine` が 1 を返すだけでは足りない。** **出口がその 1 を無視していても
+      // 緑になる**ので、**記録しないところまで見る。**
+      const expired = { LOOP_LEASE_TTL_SEC: "0" };
+      const token = acquireLease("worker", expired);
+
+      const broken = runWith(["worker", `--sent=${token}`], expired);
+
+      expect(broken.status, "期限切れの token で記録できている").not.toBe(0);
       expect(run("worker").status, "記録が上がっていて、2 通目が出ない").toBe(0);
     });
 
