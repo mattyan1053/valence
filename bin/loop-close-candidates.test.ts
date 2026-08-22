@@ -49,7 +49,7 @@ function run(
     fail,
     repo = "mattyan1053/valence",
   }: { body: string; entries: Record<number, Entry>; fail?: string; repo?: string },
-): { status: number; stdout: string; stderr: string; cwd: string } {
+): { status: number; stdout: string; stderr: string; cwd: string; asked: string[] } {
   const dir = mkdtempSync(join(tmpdir(), "close-candidates-"));
   sandboxes.push(dir);
   const stub = join(dir, "gh");
@@ -72,12 +72,17 @@ function run(
       '  [[ $fail == "api" ]] && { echo "boom" >&2; exit 1; }',
       // 末尾の番号で引く（`repos/{owner}/{repo}/issues/<N>`）
       '  n="${2##*/}"',
+      // **引きに行った番号を残す** (#358)。**「引かない」を、結果ではなく
+      // 呼び出しで見る**——**404 を握り潰す実装でも、結果だけなら同じに見える**
+      `  printf '%s\\n' "$n" >>${JSON.stringify(join(dir, "asked"))}`,
       '  case "$n" in',
       ...Object.entries(entries).map(
         ([number, entry]) =>
           `  ${number}) printf '%s\\u001f%s\\u001f%s\\n' ${JSON.stringify(entry.state)} ${JSON.stringify(entry.title)} ${entry.pull ? "true" : "false"}; exit 0 ;;`,
       ),
-      '  *) echo "not found" >&2; exit 1 ;;',
+      // **本物の `gh` と同じ形で落とす** (#358)。**「無い」と「読めなかった」は
+      // 別**である——**本物は 404 のとき `gh: Not Found (HTTP 404)` を出す**
+      '  *) printf \'{"message":"Not Found","status":"404"}\'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;',
       "  esac",
       "fi",
       'echo "unexpected: $*" >&2; exit 1',
@@ -99,11 +104,13 @@ function run(
     env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
     timeout: 20_000,
   });
+  const askedFile = join(dir, "asked");
   return {
     status: result.status ?? -1,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
     cwd,
+    asked: existsSync(askedFile) ? readFileSync(askedFile, "utf8").split("\n").filter(Boolean) : [],
   };
 }
 
@@ -164,6 +171,65 @@ describe("bin/loop-close-candidates", () => {
         fail: "api",
       }).status,
     ).toBe(2);
+  });
+
+  /**
+   * **他のリポジトリの番号を、自分のものとして引きに行く**（#358）。
+   *
+   * **dependabot は release notes を丸ごと引用する**ので、**引用文の中の `#N` が
+   * 「このリポジトリの #N」に見える**——**実測で 30 行の `[FAIL]` が出て exit 2**
+   * （PR #357）。**倒す向きは正しい**（読めない → 閉じない）**が、判定が全体で 1 つ**
+   * なので、**同じ本文にある本物の閉じ忘れも一緒に落ちる。**
+   */
+  describe("引用に出てくる他のリポジトリの番号", () => {
+    /** **dependabot の本文の形**（リンクの中身が `#N`。リンク先は別のリポジトリ）。 */
+    const quoted =
+      "<li>Revert i18n localization change " +
+      '(<a href="https://redirect.github.com/vercel/next.js/issues/94905">#94905</a>) ' +
+      'in <a href="https://redirect.github.com/vercel/next.js/pull/97330">vercel/next.js#97330</a></li>';
+
+    it("引きに行かない", () => {
+      const verdict = run(["357"], { body: `${quoted}\n`, entries: {} });
+
+      expect(verdict.asked, "他のリポジトリの番号を引きに行っている").not.toContain("94905");
+      expect(verdict.status, verdict.stderr).toBe(0);
+    });
+
+    it("同じ本文の本物の候補は、これまでどおり出す", () => {
+      // **これが無いと「静かになった」だけ**で、**見えなくなったのと区別が付かない**
+      const verdict = run(["357"], {
+        body: `${quoted}\n\nRefs #319\n`,
+        entries: { 319: { state: "OPEN", title: "ここの Issue" } },
+      });
+
+      expect(verdict.status, verdict.stderr).toBe(1);
+      expect(verdict.stdout, "本物の候補まで落ちている").toContain("319");
+      expect(verdict.stdout, "他のリポジトリの番号が並んでいる").not.toContain("94905");
+    });
+
+    it("無い番号は、候補から外すだけにする", () => {
+      // **引用の形は書き手が変える**（#358 の手がかり）——**すり抜けたぶんは、
+      // 「無い」で落とす。** **1 件読めなかったことで、読めた候補まで落とさない。**
+      const verdict = run(["357"], {
+        body: "リリースノートより (#94905)\n\nRefs #319\n",
+        entries: { 319: { state: "OPEN", title: "ここの Issue" } },
+      });
+
+      expect(verdict.asked, "この形は引きに行く（そのうえで「無い」で落とす）").toContain("94905");
+      expect(verdict.status, "無い番号で、読めた候補まで落としている").toBe(1);
+      expect(verdict.stdout).toContain("319");
+    });
+
+    it("本当に読めなかったときは、これまでどおり止まる", () => {
+      // **倒す向きは変えない**——**404 以外は「分からない」**である
+      const verdict = run(["357"], {
+        body: "Refs #319\n",
+        entries: { 319: { state: "OPEN", title: "ここの Issue" } },
+        fail: "api",
+      });
+
+      expect(verdict.status, "読めないのに 0 件や 1 件で答えている").toBe(2);
+    });
   });
 
   it("使い方の誤りは、0 件と混ぜない", () => {

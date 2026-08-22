@@ -54,6 +54,26 @@ if ! body="$(gh pr view "$PR" --json body --jq '.body')"; then
   exit 2
 fi
 
+# **他所を指したリンクの中身は、ここの番号ではない** (#358)。
+#
+# **dependabot は release notes を丸ごと引用する**ので、**引用文の中の `#N` が
+# 「このリポジトリの #N」に見える**——**実測で 30 行の `[FAIL]`**（PR #357）。
+# **書式では区別できない**（`(#94905)` の直前は `(` で、修飾の判定に掛からない）。
+#
+# **リンク先なら区別できる。** **引用の中の `#N` は、そこでは自分のリポジトリを
+# 指していた**ので、**GitHub が書き換えたリンク（`.../vercel/next.js/issues/94905`）が
+# 付いている**——**そのリンクの中身は、ここの番号ではない。**
+#
+# **ここのリポジトリを指すリンクは、中身を残す**（**そちらは本物の参照**である）。
+# **リンクは入れ子にならない**ので、`[^"]*` と `[^<]*` で 1 つずつ当たる。
+#
+# **突き合わせは文字列で組み立てる**（#337 のレビューと同じ理由。**リポジトリ名の
+# `.` を ERE の任意の 1 文字にしない**）。
+here="$(printf '%s/%s' "$OWNER" "$REPO" | sed 's/[].[^$*\\/]/\\&/g')"
+scanned="$(printf '%s' "$body" \
+  | sed -E "s#<a href=\"https://github\\.com/${here}/[^\"]*\">([^<]*)</a>#\\1#g" \
+  | sed -E 's#<a href="[^"]*">[^<]*</a>##g')"
+
 # **本文の `#N` を拾う。** **`Closes` だけを見ない**——**`Refs #N` も
 # 「この PR が関わっている Issue」**であり、**閉じ忘れが起きるのはそちら**である。
 #
@@ -75,9 +95,9 @@ while read -r ref; do
   # **`#` の前が修飾**である（owner・リポジトリ名に `#` は入らない）
   [[ ${ref%%#*} == "$OWNER/$REPO" ]] || continue
   qualified+="${ref##*#}"$'\n'
-done < <(printf '%s' "$body" | grep -oE '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+')
+done < <(printf '%s' "$scanned" | grep -oE '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+')
 # **修飾の無い `#N` だけを拾う。** **直前が英数字・`/`・`-` なら修飾の一部**である
-bare="$(printf '%s' "$body" \
+bare="$(printf '%s' "$scanned" \
   | grep -oE '(^|[^A-Za-z0-9_/-])#[0-9]+' \
   | sed 's/.*#//')"
 # **重複は落とす**（同じ番号を 2 回引かない）
@@ -86,13 +106,31 @@ numbers="$(printf '%s\n%s\n' "$qualified" "$bare" \
 
 found=0
 failed=0
+# **「無い」と「読めなかった」を分ける** (#358)。**本物の `gh` は 404 のとき
+# `gh: Not Found (HTTP 404)` を出す**ので、**そこだけを候補から外す。**
+#
+# **すり抜けたぶんの受け皿**である——**引用の形は書き手が変える**ので、
+# **リンクを外すだけでは、いつか同じことが起きる。** **無い番号を「読めなかった」に
+# 混ぜると、1 件で本物の候補まで落ちる**（**この Issue の芯**）。
+#
+# **倒す向きは変えない。** **404 以外は、これまでどおり「分からない」**である。
+errors="$(mktemp)" || {
+  echo "[FAIL] 一時ファイルを作れません" >&2
+  exit 2
+}
+trap 'rm -f "$errors"' EXIT
 while read -r number; do
   [[ -n $number ]] || continue
   # **US 区切りで受ける。** **題名には空白もタブも入る**（`bin/loop-handoff` と同じ理由）。
   if ! info="$(gh api "repos/$OWNER/$REPO/issues/$number" \
-    --jq '"\(.state)\(.title)\(has("pull_request"))"' 2>/dev/null)"; then
+    --jq '"\(.state)\u001f\(.title)\u001f\(has("pull_request"))"' 2>"$errors")"; then
+    if grep -q "(HTTP 404)" "$errors"; then
+      # **ここに無い番号である。** **他のリポジトリの番号が混ざっても、ここで落ちる**
+      continue
+    fi
     # **読めなかったものを「閉じるものが無い」に倒さない。** **1 件でも読めなければ、
     # この周回の答えは「分からない」**である
+    cat "$errors" >&2
     echo "[FAIL] #$number を読めません" >&2
     failed=1
     continue
