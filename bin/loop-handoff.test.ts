@@ -277,6 +277,9 @@ describe("bin/loop-handoff", () => {
       join(path, "gh"),
       [
         "#!/usr/bin/env bash",
+        // **呼んだ回数を数える** (#363 のレビュー)。**出口は毎周回打たれる**ので、
+        // **候補が増えるほど問い合わせが増える形**になっていないかを見る
+        `printf '%s\\n' "$*" >>${JSON.stringify(join(repo, "gh-calls"))}`,
         ...failureLines(state),
         ...answerLines("repo view", "owner\nrepo"),
         // **理由の無い保留の問い合わせ**（`bin/loop-silent-park`）。**PR 一覧より先に置く**——
@@ -1858,6 +1861,123 @@ describe("bin/loop-handoff", () => {
       withState({ prs: [{ number: 12, unresolvedBy: ["us"] }] });
 
       expect(run("worker").stdout, "印が無いときに worker へ返している").toMatch(/^master\t/);
+    });
+  });
+
+  /**
+   * **前の枝が続いている間、後ろの枝の仕事が誰にも届かない**（#359）。
+   *
+   * **枝は排他で、指紋は「当たった 1 枝」で作っていた**——**`changes-requested` の枝に
+   * 入っている間、`ready` が 0 から 1 になっても同じ状態と読む。** **空いた worker は
+   * 次の cron まで動かない**（**実測 2026-08-22**。**症状は「何も起きていない」**なので
+   * `bin/loop-stall` にも乗らない）。
+   *
+   * **指紋を役ごとに持つ。** **その役が動ける枝を全部集めたものが、その役の状態**である
+   * ——**#274（2 通目を出さない）は役の中で保たれ**、**#125（送り合いにしない）は
+   * 「自分自身へは送らない」と「具体的な持ち物があるときだけ」がそのまま支える。**
+   */
+  describe("別々の手に、別々の仕事があるとき", () => {
+    it("前の枝が続いていても、ready が動けば worker を起こす", () => {
+      // **#359 の形**——**`changes-requested` は「片方の手が塞がっている」でしかない**
+      const busy: State = { prs: [{ number: 12, labels: ["changes-requested"] }] };
+      withState(busy);
+      expect(cycle("master").status, "1 通目が出ていない").toBe(0);
+
+      // **同じ状態なら、これまでどおり黙る**（退行の検出）
+      expect(run("master").status, "同じ状態で 2 通目を出している").toBe(1);
+
+      // **`ready` が 0 → 1。** **手は 2 本ある**ので、空いているほうに仕事がある
+      withState({ ...busy, ready: 1 });
+
+      expect(run("master").status, "ready が動いても誰も起こされない").toBe(0);
+      expect(run("master").stdout).toMatch(/^worker\t/);
+    });
+
+    it("自分の番が上にあっても、相手の番があれば渡す", () => {
+      // **自分の番は次の周回で自分がやればよい**（#92）が、**それで相手の番まで
+      // 隠れてはいけない**——**隠れると、相手は次の cron まで動かない。**
+      withState({
+        prs: [{ number: 12, unresolvedBy: ["worker"] }], // worker が返した → master の番
+        ready: 1,
+      });
+
+      const handoff = run("master");
+
+      expect(handoff.status, "自分の番で止まっている").toBe(0);
+      expect(handoff.stdout, "相手の番が隠れている").toMatch(/^worker\t/);
+    });
+
+    it("枝の優先順は変わらない", () => {
+      // **理由は、相手役のいちばん上の枝のもの**である
+      // ——**当否の判断が先**という並びは動かさない
+      withState({
+        prs: [{ number: 12, labels: ["changes-requested"] }],
+        ready: 1,
+      });
+
+      expect(run("master").stdout, "後ろの枝の理由になっている").toContain("#12");
+    });
+
+    it("相手に持ち物が無ければ、これまでどおり渡さない", () => {
+      // **緩めすぎない側の担保**——**「暇そうだから起こす」を許さない** (#125)
+      withState({ prs: [{ number: 12, unresolvedBy: ["worker"] }] });
+
+      expect(run("master").status, "持ち物が無いのに起こしている").toBe(1);
+    });
+  });
+
+  describe("版をまたいで読まれる記録", () => {
+    /** **古い版が読み書きしていた記録**（役ごとに 1 つ）。 */
+    function legacyRecord(role: string): string {
+      const record = join(repo, ".git", `valence-loop-handoff-${role}`);
+      return existsSync(record) ? readFileSync(record, "utf8") : "";
+    }
+
+    it("古い版が読む記録の中身を、書き換えない", () => {
+      // **`AGENTS.md` §5 が名指ししている形** (#363 のレビュー)。**記録は
+      // `.git` の共通ディレクトリにあり、版をまたいで共有される**——**役ごとに
+      // `bin/loop-sync-main` を通る**ので、**master が新版・worker が旧版**という
+      // 期間が、**それぞれの次の周回まで**続く。
+      //
+      // **役ごとの状態は、古い版が見ない場所へ足す**（**足す側にする**）。
+      const stale = "informed\u001fon=changes-requested|pr=12";
+      writeFileSync(join(repo, ".git", "valence-loop-handoff-worker"), stale);
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+
+      expect(cycle("master").status, "渡せていない").toBe(0);
+
+      expect(legacyRecord("worker"), "古い版の記録を書き換えている").toBe(stale);
+    });
+
+    it("足した先で、これまでどおり 2 通目を抑える", () => {
+      // **場所を変えたぶんが効いていること**（**別の場所に書いて、読んでいない**形を止める）
+      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      expect(cycle("master").status).toBe(0);
+
+      expect(run("master").status, "足した先を読んでいない").toBe(1);
+    });
+  });
+
+  describe("枝を歩くときの問い合わせ", () => {
+    /** `gh pr view --json mergeable` を呼んだ回数。**候補ごとに 1 回**が上限である。 */
+    function conflictChecks(): number {
+      const log = join(repo, "gh-calls");
+      if (!existsSync(log)) {
+        return 0;
+      }
+      return readFileSync(log, "utf8")
+        .split("\n")
+        .filter((line) => line.includes("mergeable")).length;
+    }
+
+    it("同じ PR の衝突判定を、何度も引き直さない", () => {
+      // **歩くたびに残り全件へ掛け直すと N(N+1)/2 回**になる (#363 のレビュー)
+      // ——**`--who` は毎周回打たれる**ので、**常時のコスト**である。
+      withState({ prs: [{ number: 12 }, { number: 13 }, { number: 14 }] });
+
+      run("master", {}, ["--who"]);
+
+      expect(conflictChecks(), "候補ごとに 1 回を超えて引いている").toBeLessThanOrEqual(3);
     });
   });
 
