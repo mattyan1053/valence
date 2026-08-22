@@ -138,6 +138,10 @@ while IFS= read -r workspace_path; do
   verdict="ok"
   if [[ $last_cron == "-" ]]; then
     # **一度も cron で始まっていない。** **突かれただけの作業場がこれ**である。
+    #
+    # **間隔は要らない** (#381 のレビュー 3 周目)。**間隔が要るのは「どれだけ経ったら
+    # 古いか」だけ**で、**1 本も無いことは、間隔を知らなくても言える**——
+    # **ここを `unknown` へ落とすと、人が 1 回突いた作業場が `never` から降りてしまう。**
     verdict="stale"
   else
     age=$((NOW - last_cron))
@@ -148,10 +152,6 @@ while IFS= read -r workspace_path; do
       verdict="stale"
     fi
   fi
-  if [[ -z $INTERVAL ]]; then
-    verdict="unknown"
-  fi
-
   echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age interval=${INTERVAL:-unknown} $verdict"
   case "$verdict" in
     stale) stale=1 ;;
@@ -167,6 +167,9 @@ if ((found == 0)); then
   exit 2
 fi
 
-((undecidable == 1)) && exit 2
+# **確定したものが先である** (#381 のレビュー 3 周目)。**見出しは終了コードだけで決まる**
+# ので、**「止まっている」を「判定できない」に負けさせると、人は「判定できません」しか
+# 読まない**——**列に出ていても、読まれなければ同じ**である。
 ((stale == 1)) && exit 1
+((undecidable == 1)) && exit 2
 exit 0

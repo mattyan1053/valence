@@ -365,62 +365,62 @@ describe("入口が、通るすべての口で渡している", () => {
  * なる。**「1 度も始まっていない worker」が、いちばん見落とされる**——
  * **この Issue が消しに来たものそのもの**である。
  */
+/**
+ * **足したばかりの作業場**（`./task loop:worker:add` と同じ形）。
+ *
+ * **作業場は worktree である**——**サブディレクトリでは、名前（scope）が
+ * 根と同じになる**ので、**「記録が無い作業場」の入力にならない。**
+ */
+function addedWorkspace(dir: string): string {
+  const added = `${dir}-worker-b`;
+  sandboxes.push(added);
+  // **worktree を作るには commit が要る**（未出生のブランチからは作れない）
+  const seeded = spawnSync(
+    "git",
+    [
+      "-c",
+      "user.email=loop@example.invalid",
+      "-c",
+      "user.name=loop",
+      "commit",
+      "--allow-empty",
+      "--quiet",
+      "-m",
+      "seed",
+    ],
+    { cwd: dir, encoding: "utf8" },
+  );
+  expect(seeded.status, seeded.stderr).toBe(0);
+  const done = spawnSync(
+    "git",
+    [
+      "-c",
+      "user.email=loop@example.invalid",
+      "-c",
+      "user.name=loop",
+      "worktree",
+      "add",
+      "--detach",
+      "--quiet",
+      added,
+      "HEAD",
+    ],
+    { cwd: dir, encoding: "utf8" },
+  );
+  expect(done.status, done.stderr).toBe(0);
+  return added;
+}
+
+/** **どこに作業場が居るかを答える口**を差し替える（本物は `./task` が持つ）。 */
+function withWorkspaceList(dir: string, paths: string[]): void {
+  writeFileSync(
+    join(dir, "task"),
+    `#!/usr/bin/env bash\nprintf '%s\\n' ${paths.map((path) => JSON.stringify(path)).join(" ")}\n`,
+    { mode: 0o755 },
+  );
+}
+
 describe("居るはずの作業場を、記録が無くても数える", () => {
-  /**
-   * **足したばかりの作業場**（`./task loop:worker:add` と同じ形）。
-   *
-   * **作業場は worktree である**——**サブディレクトリでは、名前（scope）が
-   * 根と同じになる**ので、**「記録が無い作業場」の入力にならない。**
-   */
-  function addedWorkspace(dir: string): string {
-    const added = `${dir}-worker-b`;
-    sandboxes.push(added);
-    // **worktree を作るには commit が要る**（未出生のブランチからは作れない）
-    const seeded = spawnSync(
-      "git",
-      [
-        "-c",
-        "user.email=loop@example.invalid",
-        "-c",
-        "user.name=loop",
-        "commit",
-        "--allow-empty",
-        "--quiet",
-        "-m",
-        "seed",
-      ],
-      { cwd: dir, encoding: "utf8" },
-    );
-    expect(seeded.status, seeded.stderr).toBe(0);
-    const done = spawnSync(
-      "git",
-      [
-        "-c",
-        "user.email=loop@example.invalid",
-        "-c",
-        "user.name=loop",
-        "worktree",
-        "add",
-        "--detach",
-        "--quiet",
-        added,
-        "HEAD",
-      ],
-      { cwd: dir, encoding: "utf8" },
-    );
-    expect(done.status, done.stderr).toBe(0);
-    return added;
-  }
-
-  /** **どこに作業場が居るかを答える口**を差し替える（本物は `./task` が持つ）。 */
-  function withWorkspaceList(dir: string, paths: string[]): void {
-    writeFileSync(
-      join(dir, "task"),
-      `#!/usr/bin/env bash\nprintf '%s\\n' ${paths.map((path) => JSON.stringify(path)).join(" ")}\n`,
-      { mode: 0o755 },
-    );
-  }
-
   it("1 度も始まっていない作業場を、止まっている側に数える", () => {
     // **記録が無いのは「始まっていない」**である——**列から落とすと、
     // 足したばかりの worker が永久に見えない**
@@ -490,5 +490,51 @@ describe("作業場を並べる口", () => {
   it("いま登録されている作業場から並べる", () => {
     // **`git worktree list` が正**である（`./task loop:stop-paths` と同じ口）
     expect(paths().length, "1 つも並べていない").toBeGreaterThanOrEqual(1);
+  });
+});
+
+/**
+ * **確定したものは、確定していないものに負けない**（#381 のレビュー 3 周目）。
+ *
+ * **間隔が要るのは「どれだけ経ったら古いか」だけ**である——**cron の記録が 1 本も
+ * 無いことは、間隔を知らなくても言える。** **現に `never` は間隔を見ずに答えている**
+ * のに、**記録が 1 行でもあると `unknown` へ移っていた**——**人が 1 回突くと、
+ * その作業場は `stale` から `unknown` へ落ちる**（**「突かれて動いた日が健全に
+ * 見える」の軽い版**）。
+ */
+describe("間隔が分からなくても、言えることは言う", () => {
+  it("cron の記録が無ければ、間隔を知らなくても止まっていると言う", () => {
+    const { dir } = workspace();
+    records(dir, [[9_000, "poke"]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+    expect(done.status, "間隔が無いと黙っている").toBe(1);
+    expect(done.stdout, "止まっていると言っていない").toMatch(/stale/);
+  });
+
+  it("cron の記録があるなら、間隔が無い側はこれまでどおり分からない", () => {
+    // **上の 1 件が「cron が無いこと」で赤いことを、ここが支えている**
+    const { dir } = workspace();
+    records(dir, [[9_000, "cron"]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+    expect(done.status, "間隔なしで古さを決めている").toBe(2);
+  });
+
+  it("確定した「止まっている」は、判定できない作業場に隠れない", () => {
+    // **見出しは終了コードだけで決まる**ので、**確定した異常が、確定していない
+    // ものに負けると、人は「判定できません」しか読まない**
+    const { dir } = workspace();
+    const other = addedWorkspace(dir);
+    records(dir, [[9_000, "cron"]]); // 間隔が無いので unknown
+    withWorkspaceList(dir, [dir, other]); // other は記録なし → never
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+    expect(done.status, "確定した止まりが隠れている").toBe(1);
+    expect(done.stdout, "両方出ていない").toMatch(/never/);
+    expect(done.stdout, "判定できない側も出ていない").toMatch(/unknown/);
   });
 });
