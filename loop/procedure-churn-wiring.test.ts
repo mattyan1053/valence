@@ -32,6 +32,31 @@ function syncSection(): string {
   return section;
 }
 
+/**
+ * **周回の出口**の節。**ここは、何もしなかった周回も通る**——
+ * **捨てた周回だけが通らない**（1.1 で lease を返して呼び直す）。
+ */
+function exitSection(): string {
+  const section = procedureText("worker").split("### 周回の出口")[1]?.split("\n## ")[0];
+  if (section === undefined) {
+    throw new Error("本体に「周回の出口」の節がありません");
+  }
+  return section;
+}
+
+/** 出口で必ず打つ bash ブロック（`bin/loop-handoff worker` が入っている側）。 */
+function exitBlock(): string {
+  const block = exitSection()
+    .split("```bash")
+    .slice(1)
+    .map((chunk) => chunk.split("```")[0] ?? "")
+    .find((chunk) => chunk.includes("bin/loop-handoff worker"));
+  if (block === undefined) {
+    throw new Error("出口の手順が bash ブロックに書かれていません");
+  }
+  return block;
+}
+
 /** 呼び直しの手前で何をするかが書かれた bash ブロック。 */
 function rerunBlock(): string {
   const block = syncSection()
@@ -57,10 +82,34 @@ describe("捨てた周回を数える", () => {
     expect(rerunBlock(), "数えた先から消している").not.toContain("--reset procedure-churn");
   });
 
-  it("前へ進めた周回では消す", () => {
-    // **続いていないなら残さない**——**残すと、無関係な障害で人が呼ばれる**
-    expect(syncSection(), "前へ進めても消していない").toContain(
+  it("判定を抜けただけでは消さない", () => {
+    // **`exit 1` が言うのは「手順が入れ替わっていない」だけ**で、**「前へ進んだ」では
+    // ない**（#368 のレビュー）——**捨てた周回が積んだぶんを、呼び直した先が
+    // まだ何もしないうちに消す。** **同じ事故がもう一度起きても鳴らない。**
+    expect(syncSection(), "判定のすぐ後ろで消している").not.toContain(
       "bin/loop-stall --reset procedure-churn",
+    );
+  });
+
+  it("出口まで来た周回が消す", () => {
+    // **捨てた周回は出口へ来られない**（1.1 で返して呼び直す）——
+    // **「出口を通った」が、この数え方にとっての「前へ進んだ」である**
+    expect(exitBlock(), "出口で消していない").toContain("bin/loop-stall --reset procedure-churn");
+  });
+
+  it("何もしなかった周回も、出口を通れば消える", () => {
+    // **手が空いている worker は、何もしない周回を正常に終える**——
+    // **そこで消えないと、健全なのに 3 周で止まる。**
+    // **`loop/STOP` は全ループを止める**ので、**遅らせすぎる側へ倒さない。**
+    expect(exitSection(), "出口を必ず通るとは書かれていない").toContain(
+      "何もしなかった場合も含めて",
+    );
+  });
+
+  it("出口でも、消すのはこの識別子だけ", () => {
+    // **引数無しの `--reset` は、この周回が見ていない障害のぶんまで消す**（#266）
+    expect(exitBlock().match(/bin\/loop-stall --reset(?! procedure-churn)/), "全部消している").toBe(
+      null,
     );
   });
 
