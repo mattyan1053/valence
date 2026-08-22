@@ -258,7 +258,16 @@ describe.each([{ role: "worker" }, { role: "master" }] as const)(
     it("本体が、実際に読める", () => {
       // **文面だけを見ていると、置き場所を間違えても気づかない**——
       // **本物のスクリプトに出させる**
+      // **砂場で起こす** (#390 のレビュー)。**記録（`valence-loop-lease-missing`）は
+      // cwd の git から決まる**ので、**実物のリポジトリで起こすと、ふつうの
+      // `./task check` が偽の「入口を飛ばした」を積む**——**保つ 20 件が入れ替わり、
+      // 本物が残らない**（`AGENTS.md` §5。**観測をやめて、自分の砂場に身代わりを置く**）。
+      // **読むのは実物の本体**である（スクリプトは自分の隣から辿る）。
+      const sandbox = mkdtempSync(join(tmpdir(), "procedure-body-"));
+      sandboxes.push(sandbox);
+      expect(spawnSync("git", ["init", "--quiet", "-b", "main", sandbox]).status).toBe(0);
       const shown = spawnSync(join(REPO_ROOT, "bin/loop-procedure-body"), [role], {
+        cwd: sandbox,
         encoding: "utf8",
       });
 
