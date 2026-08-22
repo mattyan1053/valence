@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# ローカルスタックを起動する。**runner のポート衝突だけを、限られた回数だけやり直す** (#366)。
+#
+#   bin/db-start
+#
+#   exit 0 = 起動した
+#   exit 1 = 起動できなかった（別の理由 / やり直しても同じ）
+#   exit 2 = 使い方の誤り
+#
+# **Supabase が使う 543xx は Linux の一時ポート範囲 (32768-60999) の内側**にあり、
+# **`supabase start` 自身が張る外向き接続の 1 本がその番号を掴んだまま bind へ進むと落ちる**
+# ——実測 2 回 (`failed to bind host port for 0.0.0.0:54322`)。
+# **CI は予約 (`ip_local_reserved_ports`) も入れてあるが、予約は「これから割り当てない」
+# であって、既に張られている接続には効かない。**
+#
+# **PR の中身とは関係が無い**ので、**そのまま赤にすると worker へ渡り、1 往復まるごと
+# 無駄になる** (#366)。**やり直せば通る**——**実際、これまでは人が `gh run rerun` を
+# 打っていた。** **その判定を、記憶ではなくここに置く** (`AGENTS.md` §5)。
+#
+# **やり直してよいのは起動だけである。** **試験まで広げると、落ちているのに緑になる**
+# (#210 と同じ向き)——**この口は起動しか実行しない。** **試験を通すのは呼ぶ側**で、
+# **通っていないことは `bin/db-start.test.ts` が CI の定義に対して見ている。**
+#
+# -e は使わない。落ちた理由を見てから分岐する。
+set -uo pipefail
+
+[[ $# -eq 0 ]] || {
+  echo "使い方: bin/db-start   （引数は取らない）" >&2
+  exit 2
+}
+
+# 何回まで試すか。**無限にやり直さない**——**塞いでいるのが runner でないなら、人が要る。**
+ATTEMPTS="${DB_START_ATTEMPTS:-3}"
+if ! [[ $ATTEMPTS =~ ^[0-9]+$ ]] || ((ATTEMPTS < 1)); then
+  echo "[FAIL] 設定: DB_START_ATTEMPTS は 1 以上の整数で指定してください" >&2
+  exit 2
+fi
+readonly ATTEMPTS
+
+# やり直す前に置く間。**掴んでいる接続が閉じるのを待つ**——**0 でも動く**（試験はそちら）。
+WAIT_SEC="${DB_START_WAIT_SEC:-5}"
+if ! [[ $WAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: DB_START_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+readonly WAIT_SEC
+
+# **この形で落ちたときだけ、やり直す。**
+#
+# **「1 回目が落ちたら」で判定しない**——**それでは本物の失敗（マイグレーションの誤り、
+# image の取得失敗）まで繰り返すことになり、通らないまま時間だけ延びる。**
+# **通ってしまうなら、それは隠したことになる。**
+readonly RETRYABLE='failed to bind host port|address already in use'
+
+attempt=1
+while :; do
+  out="$(mktemp)" || {
+    echo "[FAIL] 出力を受け取れません" >&2
+    exit 1
+  }
+  # **理由は、そのまま出す** (#366)。**飲み込むと、次に落ちたときに「原因不明」だけが残る。**
+  pnpm exec supabase start >"$out" 2>&1
+  status=$?
+  cat "$out" >&2
+
+  if ((status == 0)); then
+    rm -f "$out"
+    exit 0
+  fi
+
+  if ! grep -qE "$RETRYABLE" "$out"; then
+    # **runner の都合ではない。** **やり直さずに、そのまま落ちる。**
+    rm -f "$out"
+    exit "$status"
+  fi
+  rm -f "$out"
+
+  if ((attempt >= ATTEMPTS)); then
+    echo "[FAIL] ポートの衝突で ${ATTEMPTS} 回とも起動できませんでした" >&2
+    echo "       握っているものを見に行くこと（予約が効いていない可能性がある）" >&2
+    exit "$status"
+  fi
+
+  echo "[WARN] ポートの衝突で起動できませんでした（${attempt}/${ATTEMPTS}）。やり直します" >&2
+  # **残骸を残したまま上げ直さない**——**半分起きた状態が、次の bind を塞ぐ。**
+  # **落とせなくても進む**（**そもそも起きていないこともある**）。
+  pnpm exec supabase stop >/dev/null 2>&1
+  ((WAIT_SEC > 0)) && sleep "$WAIT_SEC"
+  attempt=$((attempt + 1))
+done
