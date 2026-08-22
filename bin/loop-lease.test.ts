@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -675,6 +677,24 @@ describe("bin/loop-lease", () => {
 
       expect(run(["mine", "worker", token]).status, "名前でしか引いていない").toBe(0);
     });
+  });
+
+  it("sha256sum が無くても、周回を始められる", () => {
+    // **ホストには何もインストールしない**（§2）ので、**あることを前提にできない**
+    // ——**入口 1.0 で必ず通る**ので、**無ければ周回が 1 つも始まらない**（#220 の形）。
+    const stub = mkdtempSync(join(tmpdir(), "no-sha256sum-"));
+    try {
+      writeFileSync(join(stub, "sha256sum"), "#!/usr/bin/env bash\nexit 127\n", { mode: 0o755 });
+      const token = acquire("worker", { PATH: `${stub}:${process.env.PATH ?? ""}` }).stdout.trim();
+
+      expect(token, "周回を始められない").not.toBe("");
+      expect(
+        run(["release", "worker", token], { PATH: `${stub}:${process.env.PATH ?? ""}` }).status,
+        "返せない",
+      ).toBe(0);
+    } finally {
+      rmSync(stub, { recursive: true, force: true });
+    }
   });
 
   it("知らない役は受け付けない", () => {
@@ -1595,6 +1615,80 @@ describe("bin/loop-lease", () => {
       );
     }
 
+    /**
+     * **前の版が置いた印**（#383 のレビュー）。
+     *
+     * **名前は本物の旧形式**（**パスの sha256**）である——**いまの digest の頭を
+     * 借りた偽物では、前方一致で必ず当たってしまい、踏む形にならない。**
+     */
+    function markRoundWithOldName(dir: string, epoch: number): void {
+      const digest = createHash("sha256").update(dir).digest("hex");
+      writeFileSync(join(sandbox, ".git", `valence-loop-rounds-worker-${digest}`), `${epoch}\n`);
+    }
+
+    it("前の版の名前で置かれた印を、回っていないと答えない", () => {
+      // **これが本題** (#383 のレビュー)。**指紋の作り方が変わると、前の版が書いた
+      // 名前には当たらない**——**`worker-<16 進>` は「知らない形」ではない**ので、
+      // **黙って「回っていない」へ落ち**、**`bin/loop-claim` がそこで引き継ぐ**
+      // （**生きている持ち主から取り上げる**。#296 / #298 が消しに来た形）。
+      markRoundWithOldName(sandbox, Math.floor(Date.now() / 1000));
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status, "生きている持ち主を、回っていないと答えている").not.toBe(1);
+      expect(answered.status, "判定できないとして止める側へ倒れていない").toBe(2);
+    });
+
+    it("印に作業場が入っていれば、名前が変わっても読める", () => {
+      // **名前ではなく中身で照らす**（#291 と同じ形）——**次の周回からは、
+      // 名前の作り方が変わっても当たる。**
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-rounds-worker-まったく違う名前"),
+        `${Math.floor(Date.now() / 1000)}\n${sandbox}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "中身で照らしていない").toBe(0);
+    });
+
+    it("別の作業場の印では、走っているとは答えない", () => {
+      // **緩めすぎない側**——**中身で照らすようにしても、他人の印は他人のもの**である
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-rounds-worker-よその作業場"),
+        `${Math.floor(Date.now() / 1000)}\n/どこか/別の作業場\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "他人の印で「走っている」と答えている").toBe(1);
+    });
+
+    it("窓より古い印は、判定を止めない", () => {
+      // **誰のものでも「いま回っている」ではない**——**そこで判定不能にすると、
+      // 落ちた作業場の仕事を誰も拾えなくなる**（**古い印は書き直されない**）。
+      markRoundWithOldName(sandbox, Math.floor(Date.now() / 1000) - 100_000);
+
+      expect(run(["alive", sandbox]).status, "古い印で、拾えなくなっている").toBe(1);
+    });
+
+    it("前の版の名前で置かれた印も、窓は実測から決まる", () => {
+      // **窓を 2 つ持たない** (#385 のレビュー)。**過渡期の枝だけが固定の期限で
+      // 見ていると、周回が期限より長い作業場では、返した直後の印が「窓より古い」と
+      // 捨てられる**——**`exit 1` → `bin/loop-claim` が生きている持ち主から取り上げる**
+      // （**この PR が塞ぎに来た穴と同じ出口**）。
+      //
+      // **旧名の印にも実測は在る**（`valence-loop-roundlen-<旧 scope>`。名前の規則が
+      // 対応している）——**読めないのではなく、読んでいないだけ**である。
+      const ttl = Number(run(["ttl"]).stdout.trim());
+      const digest = createHash("sha256").update(sandbox).digest("hex");
+      markRoundWithOldName(sandbox, Math.floor(Date.now() / 1000) - (ttl + 600));
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-roundlen-worker-${digest}`),
+        `${ttl + 1200}\n`,
+      );
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status, "実測が窓に効いていない（生きている持ち主を捨てている）").toBe(2);
+    });
+
     it("周回の印が新しければ、走っていると答える", () => {
       markRound(sandbox, Math.floor(Date.now() / 1000));
 
@@ -1639,6 +1733,9 @@ describe("bin/loop-lease", () => {
       // **前の版の名前も見る**ようにしたぶん、**広く拾いすぎない**ことを見る
       // ——**他人が回っているだけで「この作業場が回っている」と答えると、
       // 落ちた作業場の Issue が誰にも拾えなくなる**
+      //
+      // **答えは「回っている」ではない**（#383）——**作業場が書かれていない印は、
+      // 前の版のものかもしれない**ので、**判定できない側へ倒す。**
       const other = mkdtempSync(join(tmpdir(), "loop-lease-other-"));
       expect(spawnSync("git", ["init", "--quiet", other]).status).toBe(0);
       const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: other, encoding: "utf8" });
@@ -1648,7 +1745,7 @@ describe("bin/loop-lease", () => {
       );
       rmSync(other, { recursive: true, force: true });
 
-      expect(run(["alive", sandbox]).status, "別の作業場の印を自分のものにしている").toBe(1);
+      expect(run(["alive", sandbox]).status, "別の作業場の印を自分のものにしている").not.toBe(0);
     });
 
     it("digest の頭が短すぎる名前は、この作業場のものにしない", () => {
@@ -1662,7 +1759,9 @@ describe("bin/loop-lease", () => {
         `${Math.floor(Date.now() / 1000)}\n`,
       );
 
-      expect(run(["alive", sandbox]).status, "短い頭で他人と当たりうる").toBe(1);
+      // **「回っている」にはしない**（#383 で、作業場の書かれていない印は
+      // 「判定できない」へ倒すようにした——**短い頭も同じ扱い**である）
+      expect(run(["alive", sandbox]).status, "短い頭で他人と当たりうる").not.toBe(0);
     });
 
     it("自分の印が 1 つも無いところに知らない形があれば、判定できないと答える", () => {
@@ -1790,6 +1889,15 @@ describe("bin/loop-lease", () => {
   });
 
   describe("周回の途中で版が入れ替わっても、自分の lease を返せる", () => {
+    /** 作った別の作業場（`sandbox` の外に出るので、自分で片づける）。 */
+    const others: string[] = [];
+
+    afterEach(() => {
+      for (const dir of others.splice(0)) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     // **周回の途中で lease が消えた** (#240)。**消したものはいない**——
     // **記録の名前が、走っているスクリプトから毎回組み立てられる**ためである。
     //
@@ -1823,7 +1931,7 @@ describe("bin/loop-lease", () => {
       chmodSync(join(sandbox, "bin", "loop-procedure-stamp"), 0o755);
       const older = join(sandbox, "bin", "older-loop-lease");
       const source = readFileSync(SCRIPT, "utf8");
-      const changed = source.replace('lease_scope="worker-${digest%% *}"', formula);
+      const changed = source.replace('lease_scope="worker-$digest"', formula);
       expect(changed, "名前の作り方を差し替えられていない").not.toBe(source);
       writeFileSync(older, changed, { mode: 0o755 });
       return older;
@@ -1856,9 +1964,43 @@ describe("bin/loop-lease", () => {
       );
     }
 
-    function runWith(script: string, args: string[]): Run {
-      const result = spawnSync(script, args, { cwd: sandbox, encoding: "utf8" });
+    function runWith(script: string, args: string[], cwd = sandbox): Run {
+      const result = spawnSync(script, args, { cwd, encoding: "utf8" });
       return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    }
+
+    /**
+     * **同じ共通ディレクトリを見る、別の作業場**（worktree）を作る。
+     *
+     * **記録は `.git` の共通ディレクトリに置かれる**ので、**worker が 2 人いる実物と
+     * 同じ並び**になる——**別々の使い捨てリポジトリでは、記録が混ざらないので踏まない。**
+     */
+    function otherWorkspace(): string {
+      expect(
+        spawnSync(
+          "git",
+          [
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+          ],
+          { cwd: sandbox, encoding: "utf8" },
+        ).status,
+        "作業場を分ける土台を作れていない",
+      ).toBe(0);
+      const other = join(sandbox, "..", `${sandbox.split("/").pop()}-other`);
+      expect(
+        spawnSync("git", ["worktree", "add", "--detach", other], { cwd: sandbox, encoding: "utf8" })
+          .status,
+        "別の作業場を作れていない",
+      ).toBe(0);
+      others.push(other);
+      return other;
     }
 
     it("前の版が置いた記録でも、token で見つけて返せる", () => {
@@ -1869,6 +2011,97 @@ describe("bin/loop-lease", () => {
       const released = runWith(SCRIPT, ["release", "worker", held.stdout.trim()]);
 
       expect(released.status, released.stderr).toBe(0);
+    });
+
+    it("前の版の名前で持っている周回を、飛ばしたと記録しない", () => {
+      // **`check` は「この周回が持っているか」を見る** (#161)——**名前が変わると、
+      // 新しい名前を見て「持っていない」と読む。** **健全な周回が「入口を飛ばした」
+      // として記録され**、**その記録が読めなくなる**（**偽の記録より取りこぼしのほうが安い**）。
+      //
+      // **実地で踏んだ** (#383)——**古い名前で取った周回が、新しい版の `bin/loop-*` を
+      // 打つたびに 1 件ずつ積んだ。**
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+
+      const checked = runWith(SCRIPT, ["check"]);
+
+      expect(checked.status, checked.stderr).toBe(0);
+      expect(checked.stderr, "持っているのに飛ばしたと言っている").not.toContain("飛ばした");
+      expect(
+        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        "健全な周回を、飛ばしとして記録している",
+      ).toBe(false);
+    });
+
+    it("別の作業場が持っている lease を、この周回のものと読まない", () => {
+      // **印だけでは、作業場を区別できない** (#385 のレビュー)。**周回の印は
+      // 「どのセッションが回しているか」**で、**このスクリプト自身が
+      // 「同じセッションの中の別周回は区別できない」と書いている**——
+      // **1 つのセッションから 2 つの作業場を回すと、隣の健全な lease を
+      // 「自分が旧名で持っている」と読む。**
+      //
+      // **倒れる先が悪い**——**入口を飛ばした周回が `record_missing` を通らず、
+      // この PR が受け口を足した当の記録が、そこだけ書かれない**（**数え落としは、
+      // 起きたときに気づけない**）。
+      const other = otherWorkspace();
+      expect(
+        runWith(SCRIPT, ["acquire", "worker", stampFor("worker")], other).status,
+        "隣の作業場が取れていない",
+      ).toBe(0);
+
+      const checked = runWith(SCRIPT, ["check"], sandbox);
+
+      expect(checked.stderr, "隣の lease を自分のものとして読んでいる").toContain("飛ばした");
+      expect(
+        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        "飛ばした周回が、記録されていない",
+      ).toBe(true);
+    });
+
+    it("前の版の名前の lease が期限切れなら、持っているとは答えない", () => {
+      // **期限を写さない** (#385 のレビュー)。**本筋は `read_lease` が期限を見る**のに、
+      // **この枝は「token が入っていること」しか見ていなかった**——**期限切れの記録を
+      // 「まだ持っている」と答え**、**入口を飛ばした記録も、「切れている間に別の周回が
+      // 入ったかもしれない」という警告も出ない。**
+      const older = olderVersion();
+      expect(
+        runWith(older, ["acquire", "worker", stampFor("worker")]).status,
+        "前の版で取れていない",
+      ).toBe(0);
+      ageRecords();
+
+      const checked = runWith(SCRIPT, ["check"]);
+
+      expect(checked.stderr, "期限切れの記録を、まだ持っていると読んでいる").toContain("飛ばした");
+      expect(
+        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        "飛ばした周回が、記録されていない",
+      ).toBe(true);
+    });
+
+    it("master が前の版の名前で持っていても、飛ばしたと記録しない", () => {
+      // **役で分けた側の受け口** (#385 のレビュー)。**master は役ごとに 1 つで、
+      // 作業場を持たない**——**記録の 3 行目は worker のときだけ書かれる**ので、
+      // **worker と同じ条件を課すと、master の版ずれの受け口が黙って壊れる**
+      // （**空同士の一致で通っている状態を、意図として書き直した**）。
+      expect(
+        runWith(SCRIPT, ["acquire", "master", stampFor("master")]).status,
+        "master が取れていない",
+      ).toBe(0);
+      // **前の版が別の名前で置いた記録**（master の名前は役そのものだが、
+      // **走査は前方一致**なので、版が名前を変えればここに当たる）
+      renameSync(
+        join(sandbox, ".git", "valence-loop-lease-master"),
+        join(sandbox, ".git", "valence-loop-lease-master-前の版"),
+      );
+
+      const checked = runWith(SCRIPT, ["check"]);
+
+      expect(checked.stderr, "master の版ずれの受け口が働いていない").not.toContain("飛ばした");
+      expect(
+        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        "健全な master の周回を、飛ばしとして記録している",
+      ).toBe(false);
     });
 
     it("前の版が持っている lease は、いまの版の acquire にも見える", () => {

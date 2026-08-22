@@ -73,7 +73,12 @@ done <"$DOC" || {
   exit 2
 }
 
-if ! digest="$(printf '%s' "$body" | sha256sum)" || [[ -z ${digest%% *} ]]; then
+# **`git hash-object` で取る** (#383)。**`sha256sum` はホスト標準ではない**
+# ——**このスクリプトはホストで走り、入口で必ず通る**（**`git` は既に必須**）。
+#
+# **印の値そのものが変わる。** **走っているセッションの入口は一度ずれる**が、
+# **そこは既に道がある**——**捨てて呼び直し、届かなければディスクから読む** (#373)。
+if ! digest="$(printf '%s' "$body" | git hash-object --stdin)" || [[ -z $digest ]]; then
   echo "[FAIL] 印を計算できません" >&2
   exit 2
 fi

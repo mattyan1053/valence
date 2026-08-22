@@ -21,7 +21,7 @@ set -uo pipefail
 # 読み手は 2 つある。**上限**（同時に走るループの数。すぐ下）と、**数え方**
 # （worker が同じ周回の中かどうか。ずっと下）である。**生死の判定を 2 箇所に持つと、
 # 片方だけ直して食い違う**ので、**歩くのはここ 1 回だけ**にする (#239 のレビュー)。
-declare -A alive_scopes=() scope_started_at=() scope_windows=()
+declare -A alive_scopes=() scope_started_at=() scope_windows=() scope_name_of=()
 
 # **数えられなかったことを、0 件と混ぜない** (#304)。**空なら数えられている。**
 #
@@ -66,6 +66,7 @@ fail_scan() {
   alive_scopes=()
   scope_started_at=()
   scope_windows=()
+  scope_name_of=()
   alive_scan_failed="$1"
   return 1
 }
@@ -73,6 +74,7 @@ fail_scan() {
 scan_alive_scopes() {
   local common_dir="$1" script_dir="$2"
   local lease_ttl scope scope_rounds scope_started scope_window seconds len now_epoch
+  local scope_name scope_workspace
   local shared_window running_scopes
   if [[ -z $script_dir || ! -x "$script_dir/loop-lease" ]]; then
     fail_scan "bin/loop-lease を実行できません（${script_dir:-スクリプトの場所が不明}）"
@@ -128,12 +130,31 @@ scan_alive_scopes() {
   now_epoch="$(date +%s)"
   for scope_rounds in "$common_dir"/valence-loop-rounds-worker*; do
     [[ -f $scope_rounds ]] || continue
-    read -r scope_started <"$scope_rounds" 2>/dev/null || continue
+    scope_started=""
+    scope_workspace=""
+    # **2 行目は作業場**（#385。**lease の 3 行目と同じ形**）
+    { read -r scope_started; read -r scope_workspace; } <"$scope_rounds" 2>/dev/null
     [[ $scope_started =~ ^[0-9]+$ ]] || continue
-    scope="${scope_rounds##*/valence-loop-rounds-}"
+    scope_name="${scope_rounds##*/valence-loop-rounds-}"
+    # **鍵は作業場である** (#385 のレビュー)。**名前は版で変わる**——**名前を鍵にすると、
+    # 名前の作り方が変わった直後、1 つの作業場が 2 つの scope として数えられる。**
+    #
+    # **持ち主の書かれていない印は、作業場として数えない。** **前の版が置いた印は
+    # 名前でしか持ち主を言わず、その名前を読めない版から見ると誰のものか分からない**
+    # ——**「別の作業場」と決めると、手の数が水増しされ**、**その印は二度と進まないので
+    # `all_scopes_advanced` が永久に `1` を返す**（**停止カウンタが黙って止まる**）。
+    # **数えないほうへ倒す**——**手は 1 本少なく見え、停止はこれまでどおり数えられる。**
+    #
+    # **`,` と `=` を含む作業場は、名前を鍵のままにする**——**この記録は
+    # `<鍵>=<時刻>` を `,` で並べる**ので、**鍵に混ぜると読み直せなくなる**
+    # （**読めない印は「初めて見た」に倒れ、その識別子は数え始められない**）。
+    [[ -n $scope_workspace ]] || continue
+    scope="$scope_workspace"
+    [[ $scope != *[,=]* ]] || scope="$scope_name"
     # **実測が無い作業場もいる**（一度も返していない）。**そのときは既定の窓で見る**
+    # ——**実測の記録は印と同じ名前で置かれている**ので、**引くのは名前のほうである。**
     seconds=""
-    len="$common_dir/valence-loop-roundlen-$scope"
+    len="$common_dir/valence-loop-roundlen-$scope_name"
     if [[ -f $len ]]; then
       read -r seconds <"$len" 2>/dev/null || seconds=""
       [[ $seconds =~ ^[0-9]+$ ]] || seconds=""
@@ -143,8 +164,16 @@ scan_alive_scopes() {
       scope_window=$((seconds * 2))
       ((scope_window >= lease_ttl)) || scope_window="$lease_ttl"
     fi
+    # **同じ作業場の印が 2 つあるなら、新しいほうを採る**（**名前が変わった直後は
+    # 前の名前の印も残っている**——**古いほうで上書きすると、進んでいないように見える**）
+    if [[ -n ${scope_started_at[$scope]-} ]] &&
+      ((scope_started_at[$scope] >= scope_started)); then
+      scope_name_of["$scope_name"]="$scope"
+      continue
+    fi
     scope_started_at["$scope"]="$scope_started"
     scope_windows["$scope"]="$scope_window"
+    scope_name_of["$scope_name"]="$scope"
     ((now_epoch - scope_started < scope_window)) || continue
     alive_scopes["$scope"]="$scope_started"
   done
@@ -170,9 +199,13 @@ scan_alive_scopes() {
     fail_scan "bin/loop-lease running worker を読めません"
     return 1
   fi
+  # **`running` が並べるのは lease の名前**である——**印と同じ作り方の名前**なので、
+  # **走査で作った対応表で作業場へ引き直す** (#385)。**印が無い作業場は、これまでどおり
+  # 数えない**（**時刻が無いと「前回から進んだか」を言えない**）。
   while read -r scope; do
     [[ -n $scope ]] || continue
-    [[ -n ${scope_started_at[$scope]-} ]] || continue
+    scope="${scope_name_of[$scope]-}"
+    [[ -n $scope ]] || continue
     alive_scopes["$scope"]="${scope_started_at[$scope]}"
   done <<<"$running_scopes"
 

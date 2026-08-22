@@ -1,4 +1,4 @@
-<!-- 版: fbc226e6af2f -->
+<!-- 版: e8afc454d8f7 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
