@@ -264,14 +264,14 @@ describe("bin/loop-handoff", () => {
     const staleCounts = "0";
     // **ゲートと同じものを見る。** 未解決スレッドは GraphQL からしか取れない。
     // 1 行 1 スレッドで、**最後の発言の ID と書いた人**を返す
-    const threads = (state.prs ?? [])
-      .flatMap((pr) =>
-        (pr.unresolvedBy ?? []).map(
+    const threadsOf = (pr: NonNullable<State["prs"]>[number]): string =>
+      (pr.unresolvedBy ?? [])
+        .map(
           (who, index) =>
             `${pr.lastComment ?? 100 + index}${FIELD}${who === "bot" ? BOT_GRAPHQL : "mattyan1053"}${FIELD}${pr.threadsAt?.[index] ?? THREAD_AT}${FIELD}${bodyOf(who)}`,
-        ),
-      )
-      .join("\n");
+        )
+        .join("\n");
+    const threads = (state.prs ?? []).map(threadsOf).filter(Boolean).join("\n");
 
     writeFileSync(
       join(path, "gh"),
@@ -327,6 +327,16 @@ describe("bin/loop-handoff", () => {
         "    exit 1",
         "  fi",
         "fi",
+        // **スレッドは PR ごとに答える** (#362 の 2 度目のレビュー)。**まとめて返すと、
+        // どの PR も同じ「最後の発言」を持つ**ので、**枝の中で宛先が割れる形
+        // （`answered`）を試験に置けない**——**実物は PR ごとに違う。**
+        ...(state.prs ?? []).flatMap((pr) => [
+          `if [[ $* == *"reviewThreads"* && $* == *"number=${pr.number}"* ]]; then`,
+          `  printf '%b' ${JSON.stringify(threadsOf(pr))}`,
+          `  [[ -n ${JSON.stringify(threadsOf(pr))} ]] && echo`,
+          "  exit 0",
+          "fi",
+        ]),
         ...answerLines("api graphql", threads),
         // **ここから下は「古い一覧」である。** 検索の索引を経由する口は、
         // 付け替えた直後に古い値を返す。**これを見ていたら通知が落ちる**
@@ -2243,6 +2253,27 @@ describe("bin/loop-handoff", () => {
 
       expect(peeked.status, "自分の番が見つからない").toBe(0);
       expect(peeked.stdout, "上の枝で止まっている").toMatch(/^master\t/);
+      expect(peeked.stdout, "どの PR かが読めない").toMatch(/#13\b/);
+    });
+
+    it("同じ枝の中でも、宛先の違う PR を見つける", () => {
+      // **`answered` は、枝の中で宛先が PR ごとに割れる** (#362 のレビュー)。
+      // **他の枝は入った時点で宛先が決まっている**のに、**あそこだけ
+      // 「最後の発言の印」で反転する** (#174)——**master が 2 本に要求を出し、
+      // 片方だけ worker が返した**、それだけでこの形になる。
+      //
+      // **枝の名前で飛ばす実装では、ここで止まる**——**枝ではなく PR を進める。**
+      withState({
+        prs: [
+          { number: 12, unresolvedBy: ["master"] }, // master が書いた → worker の番
+          { number: 13, unresolvedBy: ["worker"] }, // worker が返した → master の番
+        ],
+      });
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status, "同じ枝の 2 本目を見ていない").toBe(0);
+      expect(peeked.stdout, "枝の先頭で止まっている").toMatch(/^master\t/);
       expect(peeked.stdout, "どの PR かが読めない").toMatch(/#13\b/);
     });
 
