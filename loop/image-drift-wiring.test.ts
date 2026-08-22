@@ -69,6 +69,27 @@ describe("イメージが古いことの合図", () => {
     expect(warn, "止める側にしている").toContain("|| true");
   });
 
+  it("見る側と、作り直す側が同じ集合である", () => {
+    // **鳴ったまま消せない警告を作らない** (#382 のレビュー。§5 / #184)——
+    // **`./task build` が作り直さないサービスを見ていると、案内どおり打っても
+    // 鳴り続ける**（**消せない警告は、読まれなくなる警告**）。
+    //
+    // **偽の docker を見ている試験からは、`./task` が何を作り直すかは見えない**
+    // ——**食い違っても、どちらも緑になる。**
+    const task = read("task");
+    const warn = task.split("warn_stale_containers() {")[1]?.split("\n}")[0] ?? "";
+    const build = task.split("cmd_build() {")[1]?.split("}")[0] ?? "";
+
+    const watched = [...warn.matchAll(/workspace_name\)-([a-z-]+)"/g)].map((m) => m[1]).sort();
+    const rebuilt = (build.match(/compose build ([a-z\- ]+)/)?.[1] ?? "")
+      .trim()
+      .split(/\s+/)
+      .sort();
+
+    expect(watched.length, "見ているサービスが読めない").toBeGreaterThan(0);
+    expect(rebuilt, "見ている集合と、作り直す集合が違う").toEqual(watched);
+  });
+
   it("止めずに、警告にする", () => {
     // **`bin/db-config-drift` と揃える**——**古いイメージでもほとんどの作業は進む**ので、
     // **止めると直しに行く経路まで閉じる**（#184 の形）

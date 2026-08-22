@@ -192,7 +192,11 @@ cmd_up() { ensure_network; compose up -d app; }
 cmd_down() { compose down; }
 
 # 開発イメージを再ビルドする
-cmd_build() { compose build app; }
+# **見る側と作り直す側を、同じ集合にする** (#382 のレビュー)。**`supabase-cli` は
+# `compose run --rm` で使う**ので **`./task up` では触らない**——**ここで作り直さないと、
+# 古いと判定された作業場は、案内どおり打っても永久に鳴り続ける**（#184 の形。
+# **消せない警告は、読まれなくなる警告**である）。
+cmd_build() { compose build app supabase-cli; }
 
 # コンテナとボリュームを破棄する
 cmd_clean() { compose down --volumes --remove-orphans; }
