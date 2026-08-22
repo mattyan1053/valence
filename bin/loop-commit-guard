@@ -43,7 +43,12 @@ case "$status" in
   # **detached HEAD。`main` ではないので、この検査の対象ではない。**
   # **rebase は detached のまま commit する**ので、ここで止めると
   # **手順書の `git rebase origin/main` が落ちる** (塞ぐ側が、通る道を塞ぐ)。
-  1) exit 0 ;;
+  #
+  # **ただし、下の検査へは進む** (#376 のレビュー)。**worker は detached のまま
+  # commit する**（手順書がそう書いている）ので、**ここで返すと、worker の主要な
+  # 経路では check の記録を 1 度も見ない**——**錠を作って、通らない道に掛けることになる**
+  # （#176 の裏返し）。
+  1) branch="" ;;
   *)
     echo "[FAIL] いま居るブランチを読み取れません (git symbolic-ref が $status)" >&2
     echo "       commit してよい場所かどうかが分からないので、止めます" >&2
@@ -51,7 +56,7 @@ case "$status" in
     ;;
 esac
 
-if [[ $branch != "$PROTECTED" ]]; then
+check_state() {
   # **`./task check` が終わったかどうかも見る** (#375)。**印は終わったときにしか
   # 書かれない**（`task` の `cmd_check`）**が、読む側を強いるものが無かった**
   # ——**2 つの作業場が、別々の日に「終わったこと」を読み違えて赤いものを push した。**
@@ -93,7 +98,10 @@ if [[ $branch != "$PROTECTED" ]]; then
       exit 2
       ;;
   esac
-fi
+}
+
+# **`main` の上かどうかを先に見る**——**緑でも `main` の上なら通さない。**
+[[ $branch == "$PROTECTED" ]] || check_state
 
 # **止めるだけでは、止まった側は次に何をすればよいか分からない。**
 echo "[FAIL] $PROTECTED の上で commit しようとしています" >&2

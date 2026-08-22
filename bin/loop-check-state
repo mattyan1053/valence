@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # **`./task check` が終わったかどうかを、記録として残す** (#375)。
 #
-#   bin/loop-check-state running       走り始めた
-#   bin/loop-check-state done <合否>   走り終えた
-#   bin/loop-check-state --verdict     いまの記録を読む
+#   bin/loop-check-state running <走りの id>            走り始めた
+#   bin/loop-check-state finished <走りの id> <合否>    走り終えた
+#   bin/loop-check-state --verdict                      いまの記録を読む
 #
 #   --verdict の終了コード:
 #     0 = 緑 / 1 = 赤 / 2 = 読めない・使い方の誤り / 3 = まだ走っている / 4 = 記録が無い
@@ -16,8 +16,15 @@
 # `check-exit=<合否>` を出す**ので、**途中で殺されれば印は出ない**——
 # **足りないのは、読む側を強いるもの**である（`AGENTS.md` §5。**判断を記憶に置かない**）。
 #
-# **`running` を先に書くのが要点である。** **殺された周回は `done` を書けない**ので、
+# **`running` を先に書くのが要点である。** **殺された周回は `finished` を書けない**ので、
 # **記録は「走っている」のまま残る**——**「終わっていない」と読める。**
+#
+# **走るたびに 1 つ置く** (#376 のレビュー。#130 と同じ形)。**1 つのファイルに
+# 上書きすると、2 本走ったときに後から終わったほうが勝ち**、**まだ走っている側が
+# 見えなくなる**——**「2 本走る」はこのリポジトリが既に前提にしている。**
+#
+# **`finished` という名前は、`done` を避けたもの**である——**`done` は bash の予約語**で、
+# **引数に置くと ShellCheck がループの終わりとして読む**（SC1010）。
 #
 # **記録は作業場ごと**（`git rev-parse --git-dir`。**worktree ごとに分かれる**）
 # ——**別の作業場の check は、こちらの commit の可否と関係が無い。**
@@ -26,9 +33,9 @@
 set -uo pipefail
 
 usage() {
-  echo "使い方: bin/loop-check-state running       走り始めた" >&2
-  echo "        bin/loop-check-state done <合否>   走り終えた" >&2
-  echo "        bin/loop-check-state --verdict     いまの記録を読む" >&2
+  echo "使い方: bin/loop-check-state running <走りの id>          走り始めた" >&2
+  echo "        bin/loop-check-state finished <走りの id> <合否>  走り終えた" >&2
+  echo "        bin/loop-check-state --verdict                    いまの記録を読む" >&2
   echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
   exit 2
 }
@@ -39,47 +46,91 @@ if ! git_dir="$(git rev-parse --git-dir 2>/dev/null)" || [[ -z $git_dir ]]; then
   echo "[FAIL] git の作業ツリーの中に居るかどうかを読み取れません" >&2
   exit 2
 fi
-readonly STATE="$git_dir/valence-check-state"
+readonly STATE_DIR="$git_dir/valence-check-state.d"
+
+# **id はファイル名になる。** **区切りやパスを含む値を受けない**
+valid_id() {
+  [[ $1 =~ ^[A-Za-z0-9_.-]+$ ]]
+}
 
 case "$1" in
   running)
-    [[ $# -eq 1 ]] || usage
-    printf 'running\n' >"$STATE" || {
-      echo "[FAIL] check の記録を書き込めません: $STATE" >&2
+    [[ $# -eq 2 ]] && valid_id "$2" || usage
+    mkdir -p "$STATE_DIR" || {
+      echo "[FAIL] check の記録を置けません: $STATE_DIR" >&2
+      exit 2
+    }
+    # **前の合否は捨てる** (#376 のレビュー)。**木はもう変わっている**ので、
+    # **前の周回の緑で、いまの commit を通さない。**
+    #
+    # **殺された周回の跡も、ここで片付ける。** **`finished` を書けずに終わった記録は
+    # 残り続ける**ので、**放っておくと何度走らせても「走っている」のまま**になり、
+    # **commit が永久に止まる**（#184 の形——**直しに行く経路が閉じ込められる**）。
+    #
+    # **生きているかは PID で見る。** **id は `./task` の PID である**（`task` が
+    # そう渡す）——**生きていない PID の記録は、走っている周回のものではありえない。**
+    # **数字でない id は、そう決められない**ので**残す**（**消すほうへ倒さない**）。
+    for old in "$STATE_DIR"/*; do
+      [[ -f $old ]] || continue
+      read -r kind _ <"$old" 2>/dev/null || continue
+      if [[ $kind == "finished" ]]; then
+        rm -f "$old"
+        continue
+      fi
+      old_id="${old##*/}"
+      [[ $old_id =~ ^[0-9]+$ ]] || continue
+      kill -0 "$old_id" 2>/dev/null || rm -f "$old"
+    done
+    printf 'running\n' >"$STATE_DIR/$2" || {
+      echo "[FAIL] check の記録を書き込めません: $STATE_DIR/$2" >&2
       exit 2
     }
     ;;
-  done)
+  finished)
     # **合否は数字である。** **数字以外を受けると、読む側が「知らない形」で止まる**
-    [[ $# -eq 2 && $2 =~ ^[0-9]+$ ]] || usage
-    printf 'done %s\n' "$2" >"$STATE" || {
-      echo "[FAIL] check の記録を書き込めません: $STATE" >&2
+    [[ $# -eq 3 ]] && valid_id "$2" && [[ $3 =~ ^[0-9]+$ ]] || usage
+    mkdir -p "$STATE_DIR" || {
+      echo "[FAIL] check の記録を置けません: $STATE_DIR" >&2
+      exit 2
+    }
+    printf 'finished %s\n' "$3" >"$STATE_DIR/$2" || {
+      echo "[FAIL] check の記録を書き込めません: $STATE_DIR/$2" >&2
       exit 2
     }
     ;;
   --verdict)
     [[ $# -eq 1 ]] || usage
     # **記録が無いのは「赤」ではない**——**打っていないだけ**である
-    [[ -f $STATE ]] || exit 4
-    if ! read -r kind value <"$STATE"; then
-      echo "[FAIL] check の記録を読めません: $STATE" >&2
-      exit 2
-    fi
-    case "$kind" in
-      running) exit 3 ;;
-      done)
-        [[ $value =~ ^[0-9]+$ ]] || {
-          echo "[FAIL] check の記録の合否を読めません: $STATE" >&2
-          exit 2
-        }
-        ((value == 0)) && exit 0
-        exit 1
-        ;;
-      *)
-        echo "[FAIL] check の記録が読めない形です: $STATE" >&2
+    [[ -d $STATE_DIR ]] || exit 4
+    found=0
+    worst=0
+    for record in "$STATE_DIR"/*; do
+      [[ -f $record ]] || continue
+      found=1
+      if ! read -r kind value <"$record"; then
+        echo "[FAIL] check の記録を読めません: $record" >&2
         exit 2
-        ;;
-    esac
+      fi
+      case "$kind" in
+        # **走っているものが 1 つでもあれば、そこで決まり**である
+        # ——**終わったものの合否より、いま走っていることが強い。**
+        running) exit 3 ;;
+        finished)
+          [[ $value =~ ^[0-9]+$ ]] || {
+            echo "[FAIL] check の記録の合否を読めません: $record" >&2
+            exit 2
+          }
+          # **赤が 1 つでもあれば赤**（**重なった 2 本のうち片方が落ちている**）
+          ((value == 0)) || worst=1
+          ;;
+        *)
+          echo "[FAIL] check の記録が読めない形です: $record" >&2
+          exit 2
+          ;;
+      esac
+    done
+    ((found == 1)) || exit 4
+    exit "$worst"
     ;;
   *) usage ;;
 esac

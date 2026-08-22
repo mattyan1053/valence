@@ -57,27 +57,6 @@ function checkBlocks(): { section: string; body: string }[] {
 }
 
 /**
- * `./task check` を、**コンテナを起こさずに**走らせる。
- *
- * **見たいのは合否の伝え方**であって、検査の中身ではない——
- * `ensure_up` と `exec_app` を差し替える。
- */
-function runCheck(exec: string, timeoutSec?: number): { status: number; stdout: string } {
-  const body = [
-    `source ${JSON.stringify(TASK)} >/dev/null 2>&1`,
-    "ensure_up() { :; }",
-    `exec_app() { ${exec}; }`,
-    "cmd_check",
-  ].join("; ");
-  const command = timeoutSec === undefined ? ["-c", body] : ["-c", body];
-  const result =
-    timeoutSec === undefined
-      ? spawnSync("bash", command, { encoding: "utf8" })
-      : spawnSync("timeout", [`${timeoutSec}`, "bash", ...command], { encoding: "utf8" });
-  return { status: result.status ?? -1, stdout: result.stdout };
-}
-
-/**
  * `./task check` が殺されると、終了コードが無いまま出力が緑に見える（#147）。
  *
  * **実際に起きた**（2026-08-11、PR #142 の周回）——**ログはテストが緑で進む様子だけ**、
@@ -122,9 +101,15 @@ describe("./task check の終わりの印", () => {
    * **`./task check` を、写した checkout の中で走らせる**（#375）。
    *
    * **実物の `.git` へ記録を書かせない** (#186)——**走らせた回数ぶん、
-   * この作業場の commit の可否が動く。**
+   * この作業場の commit の可否が動く**（**実際に動いた**——**`sleep 30` を殺す試験が、
+   * 本物の記録へ「走っている」を書き残し、こちらの commit が止まった**）。
+   *
+   * **コンテナも起こさない**——**見たいのは合否の伝え方**であって、検査の中身ではない。
    */
-  function runCheckIn(exec: string, timeoutSec?: number): { stdout: string; verdict: number } {
+  function runCheck(
+    exec: string,
+    timeoutSec?: number,
+  ): { status: number; stdout: string; verdict: number } {
     const sandbox = mkdtempSync(join(tmpdir(), "check-state-wiring-"));
     try {
       expect(spawnSync("git", ["init", "--quiet", sandbox]).status).toBe(0);
@@ -150,7 +135,7 @@ describe("./task check の終わりの印", () => {
         cwd: sandbox,
         encoding: "utf8",
       });
-      return { stdout: run.stdout ?? "", verdict: verdict.status ?? -1 };
+      return { status: run.status ?? -1, stdout: run.stdout ?? "", verdict: verdict.status ?? -1 };
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }
@@ -159,20 +144,20 @@ describe("./task check の終わりの印", () => {
   it("走っている最中は、まだ終わっていないと記録されている", () => {
     // **これが本体である。** **背景に回した起動側の完了通知を「check の完了」と
     // 読んだ**（worker-1）——**走っている最中に読める記録があれば、そこで分かる。**
-    const result = runCheckIn("./bin/loop-check-state --verdict; echo verdict=$?; return 0");
+    const result = runCheck("./bin/loop-check-state --verdict; echo verdict=$?; return 0");
 
     expect(result.stdout, "走っている最中に「走っている」と読めない").toContain("verdict=3");
   });
 
   it("走り終えたら、合否が記録に残る", () => {
-    expect(runCheckIn("return 0").verdict, "緑が残っていない").toBe(0);
-    expect(runCheckIn("return 3").verdict, "赤が残っていない").toBe(1);
+    expect(runCheck("return 0").verdict, "緑が残っていない").toBe(0);
+    expect(runCheck("return 3").verdict, "赤が残っていない").toBe(1);
   });
 
   it("殺されたら、走っているままになる", () => {
     // **`done` を書けずに終わる**ので、**記録は「走っている」のまま**である
     // ——**次の commit は、そこで止まる**（`bin/loop-commit-guard`）
-    expect(runCheckIn("sleep 30", 1).verdict, "殺されたのに終わった顔をしている").toBe(3);
+    expect(runCheck("sleep 30", 1).verdict, "殺されたのに終わった顔をしている").toBe(3);
   });
 
   /** そのブロックが push するか。 */

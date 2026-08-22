@@ -107,12 +107,13 @@ describe("bin/loop-commit-guard", () => {
   describe("check の記録", () => {
     /** その作業場の記録を置く。**`bin/loop-check-state` と同じ場所**である。 */
     function state(line: string | null): void {
-      const path = join(repo, ".git", "valence-check-state");
+      const dir = join(repo, ".git", "valence-check-state.d");
       if (line === null) {
-        rmSync(path, { force: true });
+        rmSync(dir, { recursive: true, force: true });
         return;
       }
-      writeFileSync(path, `${line}\n`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "A"), `${line}\n`);
     }
 
     beforeEach(() => {
@@ -130,13 +131,13 @@ describe("bin/loop-commit-guard", () => {
     });
 
     it("赤で終わっていたら止める", () => {
-      state("done 1");
+      state("finished 1");
 
       expect(guard().status, "赤いまま commit できている").toBe(1);
     });
 
     it("緑で終わっていれば通す", () => {
-      state("done 0");
+      state("finished 0");
 
       expect(guard().status, guard().stderr).toBe(0);
     });
@@ -165,7 +166,7 @@ describe("bin/loop-commit-guard", () => {
         mkdirSync(join(copied, "bin"), { recursive: true });
         copyFileSync(SCRIPT, join(copied, "bin", "loop-commit-guard"));
         chmodSync(join(copied, "bin", "loop-commit-guard"), 0o755);
-        state("done 1"); // **赤い記録があっても、見る口が無ければ読めない**
+        state("finished 1"); // **赤い記録があっても、見る口が無ければ読めない**
         const result = spawnSync(join(copied, "bin", "loop-commit-guard"), [], {
           cwd: repo,
           encoding: "utf8",
@@ -178,10 +179,26 @@ describe("bin/loop-commit-guard", () => {
       }
     });
 
+    it("detached でも見る", () => {
+      // **worker は detached のまま commit する**（手順書がそう書いている）
+      // ——**ここで返すと、worker の主要な経路で 1 度も見ない**（#176 の裏返し）
+      git("switch", "--quiet", "--detach", "HEAD");
+      state("finished 1");
+
+      expect(guard().status, "detached を素通りしている").toBe(1);
+    });
+
+    it("detached でも、緑なら通す", () => {
+      git("switch", "--quiet", "--detach", "HEAD");
+      state("finished 0");
+
+      expect(guard().status, guard().stderr).toBe(0);
+    });
+
     it("main の上なら、check の記録より先に止まる", () => {
       // **順番が結果を変える**——**緑でも `main` の上なら通さない**
       git("switch", "--quiet", "main");
-      state("done 0");
+      state("finished 0");
 
       expect(guard().status).toBe(1);
     });
