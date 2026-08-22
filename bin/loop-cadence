@@ -90,6 +90,8 @@ undecidable=0
 workspace_path=""
 scope=""
 starts=""
+window=0
+longest=""
 # **読むのは worker のぶんだけ** (#381 のレビュー)。**master の入口は `--trigger` を
 # 渡さない**ので、**そのまま読むと `unknown` になり、worker の cron が正常でも `stale` が
 # 立つ**——**見えるようにするために足した行が、嘘を言うことになる。**
@@ -148,8 +150,29 @@ while IFS= read -r workspace_path; do
     ((age < 0)) && age=0
     if [[ -z $INTERVAL ]]; then
       verdict="unknown"
-    elif ((age > INTERVAL * MISSED_TICKS)); then
-      verdict="stale"
+    else
+      # **窓は、実測があれば広げる** (#381 のレビュー 4 周目)。
+      #
+      # **記録が増えるのは `acquire` が取れたときだけ**である——**前の周回がまだ
+      # 走っていると、次の cron は「走っている周回がある」で何もせず終わる**ので、
+      # **鳴っていても記録は動かない。** **周回が窓を超えると、cron は来ているのに
+      # 「来ていない」と言う**——**「終わっていない」を「来ていない」に化けさせない。**
+      #
+      # **読むのは `bin/loop-lease` が書いた実測**（**その作業場でいちばん長かった
+      # 周回の秒数**。`alive` が同じ問題を同じもので解いている）——**判定は写さず、
+      # 実測だけを読む。**
+      #
+      # **広げるのは「走っていた時間 ＋ 待ち 1 回」まで**である。**次の周回が始まれる
+      # のは、前のが終わってから**で、**そこから次の cron までは最大で間隔 1 つ**——
+      # **それ以上待っても始まらないなら、鳴っていない。**
+      # **「長いかもしれない」で全部を黙らせない。**
+      window=$((INTERVAL * MISSED_TICKS))
+      if [[ -f "$common_dir/valence-loop-roundlen-$scope" ]] &&
+        read -r longest <"$common_dir/valence-loop-roundlen-$scope" 2>/dev/null &&
+        [[ $longest =~ ^[0-9]+$ ]]; then
+        ((longest + INTERVAL <= window)) || window=$((longest + INTERVAL))
+      fi
+      ((age > window)) && verdict="stale"
     fi
   fi
   echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age interval=${INTERVAL:-unknown} $verdict"

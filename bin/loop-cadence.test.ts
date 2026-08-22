@@ -538,3 +538,60 @@ describe("間隔が分からなくても、言えることは言う", () => {
     expect(done.stdout, "判定できない側も出ていない").toMatch(/unknown/);
   });
 });
+
+/**
+ * **長い周回は「来ていない」ではなく「終わっていない」**（#381 のレビュー 4 周目）。
+ *
+ * **`acquire` が記録を書くのは、取れたときだけ**である——**前の周回がまだ走っていると、
+ * 次の cron は「走っている周回がある」で何もせず終わる**ので、**記録は 1 行も増えない。**
+ * **周回が間隔の 2 倍を超えると、cron は鳴り続けているのに `stale` になる。**
+ *
+ * **#378 が消しに来たのは「外から見た印が、実際と違うこと」**である——
+ * **向きが逆なだけで、同じ誤診**である。
+ */
+describe("長い周回を、来ていないと言わない", () => {
+  /** その作業場でいちばん長かった周回の秒数（`bin/loop-lease` が書く）。 */
+  function roundLength(dir: string, seconds: number): void {
+    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(scope.status, scope.stderr).toBe(0);
+    writeFileSync(
+      join(dir, ".git", `valence-loop-roundlen-${scope.stdout.trim()}`),
+      `${seconds}\n`,
+    );
+  }
+
+  it("間隔の 2 倍より長い周回が走っていても、止まっているとは言わない", () => {
+    // **実測があるなら、それで窓を広げる**（`bin/loop-lease alive` と同じもの）
+    const { dir } = workspace();
+    records(dir, [[5_000, "cron"]]);
+    roundLength(dir, 4_800);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "終わっていないのを「来ていない」と言っている").toBe(0);
+  });
+
+  it("長い周回の実測があっても、本当に止まっていれば言う", () => {
+    // **「長いかもしれない」で全部を黙らせない**——**広げるのは実測のぶんだけ**
+    const { dir } = workspace();
+    records(dir, [[500, "cron"]]);
+    roundLength(dir, 4_800);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "止まっているのに黙っている").toBe(1);
+  });
+
+  it("周回の長さが分からなければ、これまでどおり間隔で見る", () => {
+    // **実測が無いときに広げると、この仕組みが何も言わなくなる**
+    const { dir } = workspace();
+    records(dir, [[5_000, "cron"]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "実測が無いのに広げている").toBe(1);
+  });
+});
