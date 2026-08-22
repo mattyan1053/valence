@@ -21,8 +21,7 @@ import type {
   PullRequestMerges,
   PullRequestMergeTarget,
 } from "../../application/ports/pull-request-merge";
-
-const API_ORIGIN = "https://api.github.com";
+import { repositoryUrl } from "./repository-url";
 
 /**
  * **試す順**（#331 のレビュー）。
@@ -150,7 +149,7 @@ export function createGitHubPullRequestMerges({
     userAccessToken: string,
     repository: PullRequestMergeTarget["repository"],
   ): Promise<(typeof MERGE_METHOD_PREFERENCE)[number] | undefined> {
-    const response = await fetchImpl(`${API_ORIGIN}/repos/${repository.owner}/${repository.name}`, {
+    const response = await fetchImpl(`${repositoryUrl(repository)}`, {
       headers: {
         accept: "application/vnd.github+json",
         authorization: `Bearer ${userAccessToken}`,
@@ -175,15 +174,12 @@ export function createGitHubPullRequestMerges({
     repository: PullRequestMergeTarget["repository"],
     number: number,
   ): Promise<string> {
-    const response = await fetchImpl(
-      `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/pulls/${number}`,
-      {
-        headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${userAccessToken}`,
-        },
+    const response = await fetchImpl(`${repositoryUrl(repository)}/pulls/${number}`, {
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${userAccessToken}`,
       },
-    );
+    });
     if (!response.ok) {
       throw new MergeFailed(response.status);
     }
@@ -221,22 +217,19 @@ export function createGitHubPullRequestMerges({
         return { kind: "base-changed" };
       }
 
-      const response = await fetchImpl(
-        `${API_ORIGIN}/repos/${repository.owner}/${repository.name}/pulls/${number}/merge`,
-        {
-          method: "PUT",
-          headers: {
-            accept: "application/vnd.github+json",
-            authorization: `Bearer ${userAccessToken}`,
-            "content-type": "application/json",
-          },
-          // **`sha` を載せる**（#331 のレビュー）——**盤面を出してから押すまでに
-          // push された変更を、確かめないままマージしない。**
-          // **載せて初めて、GitHub が head の食い違いを 409 で返す**
-          // （**載せなければ、下の 409 の分岐は原則として通らない**）。
-          body: JSON.stringify({ merge_method: method, sha: headSha }),
+      const response = await fetchImpl(`${repositoryUrl(repository)}/pulls/${number}/merge`, {
+        method: "PUT",
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${userAccessToken}`,
+          "content-type": "application/json",
         },
-      );
+        // **`sha` を載せる**（#331 のレビュー）——**盤面を出してから押すまでに
+        // push された変更を、確かめないままマージしない。**
+        // **載せて初めて、GitHub が head の食い違いを 409 で返す**
+        // （**載せなければ、下の 409 の分岐は原則として通らない**）。
+        body: JSON.stringify({ merge_method: method, sha: headSha }),
+      });
 
       return await interpretMergeResponse(response);
     },

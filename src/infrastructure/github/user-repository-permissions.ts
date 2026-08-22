@@ -18,8 +18,7 @@ import type {
   RepositoryPermissions,
 } from "../../application/ports/repository-permissions";
 import type { VisibleRepository } from "../../application/ports/visible-repositories";
-
-const API_ORIGIN = "https://api.github.com";
+import { repositoryUrl } from "./repository-url";
 
 /**
  * 使う項目だけを検証する。
@@ -62,15 +61,12 @@ export function createUserRepositoryPermissions({
       userAccessToken: string,
       repository: VisibleRepository,
     ): Promise<RepositoryAccessLevel> {
-      const response = await fetchImpl(
-        `${API_ORIGIN}/repos/${repository.owner}/${repository.name}`,
-        {
-          headers: {
-            accept: "application/vnd.github+json",
-            authorization: `Bearer ${userAccessToken}`,
-          },
+      const response = await fetchImpl(`${repositoryUrl(repository)}`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${userAccessToken}`,
         },
-      );
+      });
       if (!response.ok) {
         // **投げる。** **`none` を返すと、判定不能が「権限が無い」に化ける**
         // ——**押した人には嘘の理由が伝わる。**
