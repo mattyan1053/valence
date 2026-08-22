@@ -329,7 +329,11 @@ fi
 # **役は渡さない。** ここは `$ROLE` を知っているが、**知らない呼び出し側と
 # 同じ形にそろえる**（`check` が見るのは「この周回が、どれかの役の lease を
 # 自分として持っているか」で、役を当てる必要が無い）。
-"${BASH_SOURCE[0]%/*}/loop-lease" check || true
+# **読むだけの口では呼ばない** (#362 のレビュー)。**周回の外から打つ人がいる**
+# ——**`--who` は「読むだけ」と決めた口**なのに、**打つと `./task loop:status` へ
+# 偽の運用違反が残る**（**決めた契約と実装が食い違う**）。**周回の中から打つぶんは、
+# 同じ周回の出口（ふつうの呼び出し）がこれまでどおり通る。**
+((peek == 1)) || "${BASH_SOURCE[0]%/*}/loop-lease" check || true
 
 # **一覧（検索）を信じない。** `gh issue list` / `gh pr list` の label 絞り込みは
 # **検索の索引を経由するので、付け替えた直後は古い値が返る**（実測: `ready` を付けた直後、
@@ -714,7 +718,23 @@ while IFS="$FIELD" read -r number labels _head _labeled_at _body; do
 done <<<"$prs"
 
 # 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
-if [[ -n $silent_park ]]; then
+#
+# **枝は排他である。** **ふつうの呼び出しは、最初に当たった枝で決まる**——
+# **渡す相手は 1 人で、通知も 1 通**だからである。
+#
+# **`--who` は続きを読む** (#362 のレビュー)。**訊いているのは「自分の番はどれか」**で、
+# **上の枝が相手の番でも、下に自分の番があれば、それが答え**である——**そこで止めると、
+# 手番を持っている PR が小さい / 古い PR に毎周回負ける**（**#360 の芯がそのまま残る**）。
+#
+# **見た枝を覚えておいて、次の周で飛ばす。** **ふつうの呼び出しでは 1 周で抜ける**ので、
+# **`bin/loop-ci-status` への問い合わせが増えるのは `--who` だけ**である。
+skip_branches=""
+skipped_branch() {
+  [[ " $skip_branches " == *" $1 "* ]]
+}
+while :; do
+if [[ -n $silent_park ]] && ! skipped_branch silent-park; then
+  guard="silent-park"
   # **忘れられる側にある**ので、いちばん先に見る (#163)。**ステップ 2 は `parked` を
   # 選ばない**ので、**ここで渡さないと誰もその PR を見ない**。
   # **直せるのは master** である (理由を投稿し直すか、保留を戻す)。
@@ -723,14 +743,16 @@ if [[ -n $silent_park ]]; then
   # **読んだのは「理由の無い保留がある」ことだけ**である
   branch="silent-park"
   witness="silent-park=${silent_park}"
-elif [[ -n $untriaged ]]; then
+elif [[ -n $untriaged ]] && ! skipped_branch untriaged; then
+  guard="untriaged"
   # **当否を判断できるのは master だけ**である。**放っておくとループが止まる側**なので、
   # 他の持ち物より先に見る。
   to="master"
   reason="PR #${untriaged%% *} の指摘が未処理（当否を判断して changes-requested を付けるか、外出しする）"
   branch="untriaged"
   witness="$(branch_witness "$untriaged")"
-elif [[ -n $answered ]]; then
+elif [[ -n $answered ]] && ! skipped_branch answered; then
+  guard="answered"
   # **誰が書いたかは、発言の印で読む** (#174)。**呼んだ役では決めない。**
   #
   # **前は「呼んだ側は、その周回で書き終えている」で代用していた**——**前提であって
@@ -760,13 +782,15 @@ elif [[ -n $answered ]]; then
     # ここへ来る**。**書いた前提で文を作ると、していないことを言う** (#173 のレビュー)。
     reason="PR #${answered_first} の未解決スレッドの最後の発言が bot ではない（確認して resolve できる）"
   fi
-elif [[ -n $changes_requested ]]; then
+elif [[ -n $changes_requested ]] && ! skipped_branch changes-requested; then
+  guard="changes-requested"
   to="worker"
   reason="PR #${changes_requested%% *} に master の要求が残っている"
   # **CI は見ない。** **要求が残っているかどうかは、CI が進んでも変わらない**
   branch="changes-requested"
   witness="$(branch_witness "$changes_requested")"
-elif [[ -n $gateable ]]; then
+elif [[ -n $gateable ]] && ! skipped_branch gateable; then
+  guard="gateable"
   # **ゲートを回せる PR でも、コンフリクトしていれば行き先が違う** (#347)。
   # **master が指摘を resolve して label も外した直後**、**上の 2 つの手掛かりが
   # 両方消え**、**残っている `mergeable` を見ていなかった**——**どちらの役も呼ばれず、
@@ -833,7 +857,8 @@ elif [[ -n $gateable ]]; then
     # **外すと、マージできるようになった、まさにその瞬間に黙る** (#125 / #173 のレビュー)
     witness="$(branch_witness "$gateable" checks)|mergeable=${mergeable_witness}"
   fi
-elif ((ready >= 1 && in_progress < hands)); then
+elif ((ready >= 1 && in_progress < hands)) && ! skipped_branch ready; then
+  guard="ready"
   # **件数で絞らない** (#267)。**等号だと 2 件でどの枝にも入らず、
   # 「相手に持ち物が無い」と読まれて終わる**——**いちばん渡したい瞬間に落ちる。**
   #
@@ -848,7 +873,8 @@ elif ((ready >= 1 && in_progress < hands)); then
   # **`backlog` は読んでいない。** **起票や昇格で動くだけ**で、渡す理由は変わらない
   branch="ready"
   witness="ready=${ready}|in-progress=${in_progress}"
-elif ((promotable > 0 && ready == 0)); then
+elif ((promotable > 0 && ready == 0)) && ! skipped_branch promote; then
+  guard="promote"
   to="master"
   reason="昇格できる backlog が ${promotable} 件あり、ready が 0 件（昇格の番）"
   # **件数までは見ない。** **「1 件でもあるか」しか判断に使っていない**
@@ -866,7 +892,15 @@ else
   # **昇格できない `backlog` は、ここへ落ちる** (#312)。**件数も残す**——
   # **条件待ちが解けた瞬間に指紋が動く**ので、**そのとき master が起こされる**
   witness="ready=${ready}|in-progress=${in_progress}|backlog=${backlog}|promotable=${promotable}"
+  guard=""
 fi
+
+# **ふつうの呼び出しは、ここで決まり**である。
+# **`--who` は、自分の番に当たるまで下の枝を見る**（**当たらなければ、渡す相手なしで終わる**）。
+((peek == 1)) || break
+[[ -n $to && $to != "$ROLE" && -n $guard ]] || break
+skip_branches="$skip_branches $guard"
+done
 
 # **どの枝に入ったかと、その枝が読んだ入力**を 1 つの鍵にする (#274)。
 #

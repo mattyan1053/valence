@@ -356,6 +356,12 @@ describe("bin/loop-handoff", () => {
     return runWith(role === "" ? [...extra] : [role, ...extra], env);
   }
 
+  /** 入口を飛ばした記録。**git の共通ディレクトリに置く**（作業場をまたいで 1 つ）。 */
+  function peekMissingRecord(): string {
+    const record = join(repo, ".git", "valence-loop-lease-missing");
+    return existsSync(record) ? readFileSync(record, "utf8") : "";
+  }
+
   /** **`--who` のあとに `--sent` を打つ。** 送信待ちを書いていないことを見る (#360)。 */
   function sentAfterPeek(token: string): Run {
     return runWith(["master", `--sent=${token}`]);
@@ -2221,12 +2227,49 @@ describe("bin/loop-handoff", () => {
       expect(run("master").status, "ふつうに打てば、これまでどおり黙る").toBe(1);
     });
 
-    it("相手の番なら、相手を出す", () => {
-      // **並べ替えに使う側は、自分の番かどうかで振る舞いを変える**
-      // ——**役を出さないと、その判断ができない**
+    it("前の枝が相手の番でも、自分の番の PR を見つける", () => {
+      // **枝は排他である** (#362 のレビュー)。**上の枝が相手の番だと、そこで止まって
+      // しまい**、**下にある自分の番が出てこない**——**手順書は「相手の番なら従来の
+      // 順序」なので、その PR は小さい / 古い PR に毎周回負ける**（**上限が無い**という
+      // #360 の芯がそのまま残る）。
+      withState({
+        prs: [
+          { number: 12, labels: ["changes-requested"] }, // worker の番（上の枝）
+          { number: 13 }, // master の番（ゲートを回せる）
+        ],
+      });
+
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status, "自分の番が見つからない").toBe(0);
+      expect(peeked.stdout, "上の枝で止まっている").toMatch(/^master\t/);
+      expect(peeked.stdout, "どの PR かが読めない").toMatch(/#13\b/);
+    });
+
+    it("相手の番しか無ければ、何も出さない", () => {
+      // **訊いているのは「自分の番はどれか」**である——**相手の番を出しても
+      // 並べ替えには使えない**（**手順書はそれを捨てるだけ**）
       withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
 
-      expect(run("master", {}, ["--who"]).stdout).toMatch(/^worker\t/);
+      const peeked = run("master", {}, ["--who"]);
+
+      expect(peeked.status).toBe(1);
+      expect(peeked.stdout).toBe("");
+    });
+
+    it("読むだけの口は、入口を飛ばしたと記録しない", () => {
+      // **周回の外から打つ人がいる** (#362 のレビュー)——**読むだけのつもりで打つと、
+      // `./task loop:status` に偽の運用違反が残る。** **契約（読むだけ）と実装を
+      // 食い違わせない。**
+      withState({ prs: [{ number: 12 }] });
+
+      expect(run("master", {}, ["--who"]).status).toBe(0);
+
+      expect(peekMissingRecord(), "読むだけの口が、運用違反を作っている").toBe("");
+      // **ふつうに打つ側は、これまでどおり記録する**（退行の検出）
+      // ——**自分の番なので出口は黙る**（#92）が、**記録は分岐の前に通る**
+      run("master");
+      expect(peekMissingRecord(), "飛ばした周回を記録しなくなっている").not.toBe("");
     });
 
     it("渡す相手がいなければ 1 を返す", () => {
@@ -2241,7 +2284,12 @@ describe("bin/loop-handoff", () => {
     it("読むだけで、記録も送信待ちも書かない", () => {
       // **並べ替えのために毎周回打つ**ので、**打っただけで指紋が動くと、
       // その周回は「もう伝えた」ことにされる**——**出口の 1 通が消える。**
-      withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
+      withState({
+        prs: [
+          { number: 12, labels: ["changes-requested"] }, // 出口が渡す先（worker）
+          { number: 13 }, // master の番（`--who` が答えるほう）
+        ],
+      });
 
       expect(run("master", {}, ["--who"]).status).toBe(0);
 
