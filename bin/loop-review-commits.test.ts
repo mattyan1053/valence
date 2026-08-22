@@ -209,15 +209,18 @@ describe("bin/loop-review-commits", () => {
      * **`--all` から取る。** 「回数」と「最後の応答時刻」を**別々に取ると、
      * その間に着いた応答で食い違う**ので、**1 回の取得から両方を導く**形にしてある
      */
-    function answersOf(
+    function allRowsOf(
       pr: number,
-      comments: { login: string; body: string }[],
+      comments: { login: string; body: string; at?: string }[],
       prBody = "本文",
     ): string {
       const dir = mkdtempSync(join(tmpdir(), "loop-review-commits-gh-"));
       symlinkSync("/usr/bin/bash", join(dir, "bash"));
       const rows = comments
-        .map((comment, index) => `${laterThanNow(60 + index)}\t${comment.login}\t${comment.body}`)
+        .map(
+          (comment, index) =>
+            `${comment.at ?? laterThanNow(60 + index)}\t${comment.login}\t${comment.body}`,
+        )
         .join("\n");
       writeFileSync(
         join(dir, "gh"),
@@ -251,11 +254,59 @@ describe("bin/loop-review-commits", () => {
       });
       rmSync(dir, { recursive: true, force: true });
       expect(result.status, result.stderr).toBe(0);
-      return result.stdout
+      return result.stdout;
+    }
+
+    /** `--all` のうち `answer` の行だけ。 */
+    function answersOf(
+      pr: number,
+      comments: { login: string; body: string; at?: string }[],
+      prBody = "本文",
+    ): string {
+      return allRowsOf(pr, comments, prBody)
         .split("\n")
         .filter((line) => line.endsWith("\tanswer"))
         .join("\n");
     }
+
+    it("SHA を持つ応答を、レビューと通知の両方に出さない", () => {
+      // **1 つの応答は 1 行である**（#361 のレビュー）。
+      // **指摘なしのレビューは会話コメントで返り、SHA を持つ**——
+      // **それを `answer` にも出すと、数える側が同じ往復を 2 回数える。**
+      //
+      // **実測**（#357 / #354。どちらも同じ時刻で 2 行出ていた）:
+      //   2026-08-22T03:28:14Z  92af0f3876  live
+      //   2026-08-22T03:28:14Z  -           answer   ← これが余計
+      const answers = answersOf(70, [
+        { login: BOT, body: "Reviewed commit: `abcdef1234`\n\nNo issues found." },
+      ]);
+
+      expect(answers.trim(), "レビューを通知としても数えている").toBe("");
+    });
+
+    it("同じ秒に届いた別の応答を、巻き添えで落とさない", () => {
+      // **時刻で対応付けると、同じ秒に届いた本物の通知まで重複として捨てる**
+      // （#361 のレビュー）——**`notice` が過少になり、上限を超えて要求を再送できる**
+      // （**#356 が塞いだ穴が開き直る**）。**対応付けるのは応答そのもの**である。
+      const at = laterThanNow(60);
+      const rows = allRowsOf(72, [
+        { at, login: BOT, body: "Reviewed commit: `abcdef1234`" },
+        { at, login: BOT, body: WENT_WRONG },
+      ]);
+
+      expect(rows, "SHA の行が出ていない").toContain("abcdef1234");
+      expect(
+        rows.split("\n").filter((line) => line.endsWith("\tanswer")).length,
+        "同じ秒の通知を巻き添えで落としている",
+      ).toBe(1);
+    });
+
+    it("SHA を持たない応答は、これまでどおり通知として出す", () => {
+      // **上の 1 件が「SHA を持つときだけ落ちている」ことを、ここが支えている**
+      const answers = answersOf(71, [{ login: BOT, body: WENT_WRONG }]);
+
+      expect(answers.trim(), "応答不能の通知が落ちている").not.toBe("");
+    });
 
     /**
      * **review オブジェクトで返った応答**を `--all` に通し、`answer` の行を返す。
@@ -452,12 +503,20 @@ describe("bin/loop-review-commits", () => {
     it("印を持つ応答は、混入があってもレビューである", () => {
       // **自分でレビューだと名乗っている**ものまで落とすと、**きれいな PR ほど
       // マージできない**（この仕組みが最初に踏んだ逆転）
-      const answers = answersOf(53, [
+      // **見るのは「応答として残っているか」であって、`answer` の行があるかではない**
+      // (#361 のレビュー)。**SHA を持つ応答は `live` / `stale` の行で出る**ので、
+      // **待つ側（`answered_at`）はそちらから時刻を取れる**——
+      // **`answer` にも出すと、数える側が同じ往復を 2 回数える。**
+      const rows = allRowsOf(53, [
         { login: "mattyan1053", body: "@codex" },
         { login: BOT, body: `Reviewed commit: \`${LIVE.slice(0, 10)}\`` },
       ]);
 
-      expect(answers.trim(), "印を持つ応答を落としている").not.toBe("");
+      expect(rows, "印を持つ応答を落としている").toContain(LIVE.slice(0, 10));
+      expect(
+        rows.split("\n").filter((line) => line.trim() !== "").length,
+        "同じ応答を 2 行に出している",
+      ).toBe(1);
     });
 
     it("印を持たない応答は、レビューとして数えない", () => {

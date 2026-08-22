@@ -256,7 +256,19 @@ while IFS=$'\t' read -r at login body; do
     continue
   fi
   comments+="${at}"$'\t'"${sha}"$'\n'
-  answers+="${at}"$'\n'
+  # **応答不能の通知だけを `answers` に入れる** (#361 のレビュー)。
+  # **SHA を持つ応答は、`rows` の側で `live` / `stale` として出る**ので、
+  # **ここにも入れると `--all` が同じ応答を 2 行で出す**——
+  # **数える側（`bin/loop-review-budget`）が 1 回の往復を 2 回ぶん食う。**
+  #
+  # **時刻で突き合わせて落とす形にはしない。** **GitHub の時刻は秒までしかない**ので、
+  # **SHA 付きの応答と、別の応答不能コメントが同じ秒に届くと、本物の通知まで落ちる**
+  # ——**`notice` が過少になり、上限を超えて要求を再送できる**（#356 が塞いだ穴）。
+  # **入れないほうを選べば、突き合わせ自体が要らない。**
+  #
+  # **`pending` は動かない。** **待つ側は `answer` 以外の行でも最後の応答時刻を取る**
+  # ので、**SHA を持つ応答は `live` / `stale` の行から同じ時刻を取れる。**
+  [[ $sha == "-" ]] && answers+="${at}"$'\n'
 done <<<"$comments_raw"
 comments="${comments%$'\n'}"
 answers="${answers%$'\n'}"
@@ -341,6 +353,8 @@ done <<<"$rows"
 # **同じ head が既にレビュー済みでも `pending` が解ける**。
 # **両方を 1 回の取得から導けるようにしておく**（この仕組みの主題である）。
 if ((include_stale == 1)); then
+  # **`answers` に入るのは応答不能の通知だけ**である（上の組み立て）——
+  # **SHA を持つ応答はここへ来ない**ので、**突き合わせて落とす処理は要らない。**
   while IFS= read -r at; do
     [[ -n $at ]] || continue
     out+="${at}"$'\t'"-"$'\t'"answer"$'\n'

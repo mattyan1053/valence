@@ -431,3 +431,83 @@ describe("bin/loop-review-budget", () => {
     expect(budget.status).toBe(0);
   });
 });
+
+/**
+ * **応答不能の通知も、上限に数える**（#356）。
+ *
+ * **これがこの停止の直接の原因**である——**Codex の枠が尽きてエラー応答が返ると、
+ * `notice` は増えるが `rounds` は増えない**（SHA を持たないため）。
+ * **上限は `rounds` だけを見ていた**ので、**毎周回 `@codex review` を投げ直した。**
+ * **master は毎周「要求する」という仕事をしている**ので、**空転にも数えられず、
+ * `loop/STOP` にも到達しない**——**人が気づくまで止まらない。**
+ *
+ * **スクリプトのコメントは最初から「投げた要求と、bot からの応答不能通知も数える」と
+ * 書いてあった。** **実装がそれに追いついていなかった。**
+ */
+describe("応答不能の通知が続くとき、上限で止まる（#356）", () => {
+  /** エラー応答が n 回返った状態。**要求はすべて応答済み**（`pending` は 0）。 */
+  function erroredTimes(n: number): State {
+    const answers = Array.from({ length: n }, (_, i) => minutesAgo(100 - i * 10));
+    return {
+      reviews: [],
+      answers,
+      comments: answers.map((at, i) => request(minutesAgo(101 - i * 10))),
+      createdAt: minutesAgo(300),
+    };
+  }
+
+  it("エラー応答だけが続いても、上限に達したら要求しない", () => {
+    // **これが無いと、毎周回投げ続ける**（利用者が 5 日ループを止めた原因）
+    const budget = run(erroredTimes(2), { LOOP_MAX_REVIEW_ROUNDS: "2" });
+
+    expect(budget.stdout, budget.stdout).toContain("上限");
+    expect(budget.status).toBe(1);
+  });
+
+  it("上限の 1 つ手前なら、まだ要求できる", () => {
+    // **ただ厳しくするだけにしない**（#356 の完了条件）——**前後を必ず含める**
+    const budget = run(erroredTimes(1), { LOOP_MAX_REVIEW_ROUNDS: "2" });
+
+    expect(budget.status).toBe(0);
+  });
+
+  it("本物のレビューと通知は、同じ 1 つの予算を食う", () => {
+    // **どちらも「要求して往復した」1 回**である——**分けて数える理由が無い**
+    const budget = run(
+      {
+        reviews: [`${minutesAgo(90)}\t${"b".repeat(40)}\tlive`],
+        answers: [minutesAgo(60)],
+        comments: [request(minutesAgo(95)), request(minutesAgo(65))],
+        createdAt: minutesAgo(300),
+      },
+      { LOOP_MAX_REVIEW_ROUNDS: "2" },
+    );
+
+    expect(budget.stdout, budget.stdout).toContain("上限");
+    expect(budget.status).toBe(1);
+  });
+
+  it("数えた中身が読めるように出す", () => {
+    // **`rounds` を「レビューされた回数」のまま残す**——**読む側が誤解しない**ように、
+    // **予算を食った合計は別の名前で出す**（#356 の指示）
+    const budget = run(erroredTimes(1), { LOOP_MAX_REVIEW_ROUNDS: "2" });
+
+    expect(budget.stdout).toMatch(/rounds=0\b/);
+    expect(budget.stdout).toMatch(/notice=1\b/);
+    expect(budget.stdout).toMatch(/attempts=1\b/);
+  });
+
+  it("本物のレビューが返る経路は、これまでどおり", () => {
+    // **退行の検出**——**通知が 0 件なら、予算は今までと同じ数え方になる**
+    const budget = run(
+      {
+        reviews: [`${minutesAgo(60)}\t${"b".repeat(40)}\tlive`],
+        createdAt: minutesAgo(120),
+      },
+      { LOOP_MAX_REVIEW_ROUNDS: "2" },
+    );
+
+    expect(budget.status).toBe(0);
+    expect(budget.stdout).toMatch(/attempts=1\b/);
+  });
+});
