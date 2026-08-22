@@ -1306,10 +1306,10 @@ acquire | recover)
   forget_superseded "$owner"
   # **周回を始めた印。** 失敗しても lease は取れているので止めない——
   # 読む側 (bin/loop-stall) は印が無ければ「分からない」として、これまでどおり数える。
-  printf '%s\n' "$now" >"$ROUNDS.tmp" 2>/dev/null && mv -f "$ROUNDS.tmp" "$ROUNDS" 2>/dev/null || {
+  if ! { printf '%s\n' "$now" >"$ROUNDS.tmp" 2>/dev/null && mv -f "$ROUNDS.tmp" "$ROUNDS" 2>/dev/null; }; then
     rm -f "$ROUNDS.tmp" 2>/dev/null || true
     echo "[WARN] $SCOPE_LABEL の周回の印を書けません: $ROUNDS" >&2
-  }
+  fi
   echo "$token"
   ;;
 release)
@@ -1433,11 +1433,11 @@ release)
   for line in "${round_history[@]}"; do
     ((line > longest_round)) && longest_round="$line"
   done
-  printf '%s\n' "$longest_round" "${round_history[@]}" >"$ROUND_LEN.tmp" 2>/dev/null \
-    && mv -f "$ROUND_LEN.tmp" "$ROUND_LEN" 2>/dev/null || {
+  if ! { printf '%s\n' "$longest_round" "${round_history[@]}" >"$ROUND_LEN.tmp" 2>/dev/null \
+    && mv -f "$ROUND_LEN.tmp" "$ROUND_LEN" 2>/dev/null; }; then
     rm -f "$ROUND_LEN.tmp" 2>/dev/null || true
     echo "[WARN] $SCOPE_LABEL の周回の長さを記録できません: $ROUND_LEN" >&2
-  }
+  fi
   rm -f "$STATE" || {
     echo "[FAIL] lease を消せません: $STATE" >&2
     exit 2

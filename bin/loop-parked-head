@@ -69,11 +69,11 @@ record)
     echo "[FAIL] 記録の置き場を作れません: $STORE" >&2
     exit 2
   }
-  printf '%s\n' "$3" >"$FILE.tmp" 2>/dev/null && mv -f "$FILE.tmp" "$FILE" 2>/dev/null || {
+  if ! { printf '%s\n' "$3" >"$FILE.tmp" 2>/dev/null && mv -f "$FILE.tmp" "$FILE" 2>/dev/null; }; then
     rm -f "$FILE.tmp" 2>/dev/null || true
     echo "[FAIL] 保留にした head を記録できません: $FILE" >&2
     exit 2
-  }
+  fi
   ;;
 get)
   [[ $# -eq 2 ]] || usage

@@ -319,16 +319,14 @@ if ((confirm_sent == 1)); then
   # **見るのは宛先の記録だけ** (#359)。**指紋は役ごと**になったので、
   # **こちらの役の記録には、こちらの役の状態が入っている**——**送った状態と
   # 突き合わせる意味が無い**（**必ず食い違い、書かずに終える**）。
-  for role in "$sent_to"; do
-    record="$(role_record "$role")"
-    stored="$(cat "$record" 2>/dev/null || true)"
-    if [[ ${stored#*"$FIELD"} != "$sent_state" ]]; then
-      echo "[INFO] 送ったあいだに、より新しい状態が記録されました（$role）。巻き戻さずに終えます" >&2
-      rm -f "$PENDING" ||
-        echo "[WARN] 送信待ちの記録を消せません: $PENDING（次の周回が置き直す）" >&2
-      exit 0
-    fi
-  done
+  record="$(role_record "$sent_to")"
+  stored="$(cat "$record" 2>/dev/null || true)"
+  if [[ ${stored#*"$FIELD"} != "$sent_state" ]]; then
+    echo "[INFO] 送ったあいだに、より新しい状態が記録されました（$sent_to）。巻き戻さずに終えます" >&2
+    rm -f "$PENDING" ||
+      echo "[WARN] 送信待ちの記録を消せません: $PENDING（次の周回が置き直す）" >&2
+    exit 0
+  fi
   # **書くのは宛先の記録だけ** (#359)。
   #
   # **#173 のレビューが「送った側にも書く」とした理由は、指紋が役をまたいで
@@ -338,13 +336,11 @@ if ((confirm_sent == 1)); then
   # **指紋を役ごとに持つと、その形は作れない**——**worker の周回が見るのは
   # 「master の番の枝」で、master が送った「worker の番の枝」とは別の鍵**である。
   # **こちらの役の記録へ相手の状態を書くと、そちらの記録が壊れる。**
-  for role in "$sent_to"; do
-    record="$(role_record "$role")"
-    printf '%s' "${INFORMED}${FIELD}${sent_state}" >"$record" || {
-      echo "[FAIL] 送信記録を書き込めません: $record" >&2
-      exit 2
-    }
-  done
+  record="$(role_record "$sent_to")"
+  printf '%s' "${INFORMED}${FIELD}${sent_state}" >"$record" || {
+    echo "[FAIL] 送信記録を書き込めません: $record" >&2
+    exit 2
+  }
   # **消せなくても、記録は済んでいる。** 次の周回が置き直すか消すので自然に収まる
   rm -f "$PENDING" ||
     echo "[WARN] 送信待ちの記録を消せません: $PENDING（次の周回が置き直す）" >&2
@@ -410,7 +406,6 @@ prs="$(gh api graphql --paginate \
 # 未解決スレッドの「最後の発言」を PR 番号で引けるようにする。
 declare -A unresolved_of=()
 declare -A last_comment_of=()
-declare -A last_author_of=()
 # **最後の発言の本文。** **役の印を読むため**である (#174)
 declare -A last_body_of=()
 # **まだ誰も答えていないスレッドの数。** 件数とは別に持つ。
@@ -489,7 +484,6 @@ while IFS="$FIELD" read -r number _labels head labeled_at _body; do
     # **いちばん新しい発言を持つ。** ID は増える一方なので、大きいほうが新しい
     if [[ -z ${last_comment_of[$number]-} || $comment_id -gt ${last_comment_of[$number]} ]]; then
       last_comment_of[$number]="$comment_id"
-      last_author_of[$number]="$author"
       last_body_of[$number]="$body_line"
     fi
   done <<<"$threads"
@@ -844,7 +838,9 @@ elif [[ -n $gateable_left ]]; then
   # **同じ PR を 2 度引かない** (#363 のレビュー)。**枝は歩くたびに残りを見る**ので、
   # **その都度引き直すと N(N+1)/2 回**になる——**`--who` は毎周回打たれる**ので、
   # **常時のコスト**である。**状態は周回の中で変わらない**（**同じ盤面を読んでいる**）。
-  for candidate in $(printf '%s\n' $gateable_left | sort -n); do
+  read -ra gateable_all <<<"$gateable_left"
+  mapfile -t gateable_sorted < <(printf '%s\n' "${gateable_all[@]}" | sort -n)
+  for candidate in "${gateable_sorted[@]}"; do
     if [[ -z ${mergeable_of[$candidate]-} ]]; then
       "${BASH_SOURCE[0]%/*}/loop-ci-status" --conflicting "$candidate" >/dev/null
       case "$?" in
@@ -988,7 +984,9 @@ for role in "${ROLES[@]}"; do
       group_prs="${group_prs:+$group_prs }${entry_pr[$other]}"
     done
     group=""
-    for number in $(printf '%s\n' $group_prs | sort -n); do
+    read -ra group_all <<<"$group_prs"
+    mapfile -t group_sorted < <(printf '%s\n' "${group_all[@]}" | sort -n)
+    for number in "${group_sorted[@]}"; do
       group+="${group:+;}${witness_of["${role}|${entry_branch_name}|${number}"]-}"
     done
     # **PR を持たない枝**（`ready` / `promote` / `no-work`）は、その枝の材料をそのまま

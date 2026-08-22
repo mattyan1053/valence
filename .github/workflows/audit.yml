@@ -59,6 +59,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      # ./task と entrypoint は開発の入口。壊れると何も動かせなくなる。
+      # 対象は bin/lint-shell が持つ (#377)。**ここに一覧を書き写さない**——
+      # **書き写すと、次に足したスクリプトが黙って外れる**（AGENTS.md §5）。
+      # bin/ にはループの中身（lease・停止カウンタ・ゲート・出口）がある。
       - name: ShellCheck
-        run: shellcheck --shell=bash task docker-entrypoint.sh
+        run: bin/lint-shell

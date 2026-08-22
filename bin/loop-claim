@@ -64,6 +64,8 @@ readonly LOCK_WAIT_SEC="${LOOP_CLAIM_LOCK_WAIT_SEC:-10}"
 # ここは**拾えるほうへ倒す**——窓の中で落ちた周回は**何も作っていない**ので、
 # 引き継いでもやり直しになるだけで、失うものが無い。`bin/loop-lease` と同じ 30 分にして
 # あるのは、**1 周が長引くより十分に長い**という同じ理由による。
+# **名前で回して確かめている**（下の `for setting in …`）ので、**直接は現れない。**
+# shellcheck disable=SC2034
 readonly TTL_SEC="${LOOP_CLAIM_TTL_SEC:-1800}"
 
 # 着手したまま実装が出ていないと見なすまでの時間 (#264)。
@@ -396,6 +398,8 @@ if [[ $ACTION == "audit" ]]; then
     exit 2
   }
   mapfile -t repo_parts <<<"$repo_ref"
+  # **`$owner` などは GraphQL / jq の変数**である——**シェルに展開させない。**
+  # shellcheck disable=SC2016
   open_prs="$(gh api graphql --paginate \
     -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
     -f query='query($owner:String!,$repo:String!,$endCursor:String){

@@ -55,7 +55,7 @@ valid_id() {
 
 case "$1" in
   running)
-    [[ $# -eq 2 ]] && valid_id "$2" || usage
+    if [[ $# -ne 2 ]] || ! valid_id "$2"; then usage; fi
     mkdir -p "$STATE_DIR" || {
       echo "[FAIL] check の記録を置けません: $STATE_DIR" >&2
       exit 2
@@ -88,7 +88,7 @@ case "$1" in
     ;;
   finished)
     # **合否は数字である。** **数字以外を受けると、読む側が「知らない形」で止まる**
-    [[ $# -eq 3 ]] && valid_id "$2" && [[ $3 =~ ^[0-9]+$ ]] || usage
+    if [[ $# -ne 3 ]] || ! valid_id "$2" || [[ ! $3 =~ ^[0-9]+$ ]]; then usage; fi
     mkdir -p "$STATE_DIR" || {
       echo "[FAIL] check の記録を置けません: $STATE_DIR" >&2
       exit 2

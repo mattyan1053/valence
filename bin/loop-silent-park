@@ -65,6 +65,8 @@ mapfile -t repo_parts <<<"$repo_ref"
 # **最後の発言は「誰の」でも構わない。** ここで見たいのは
 # **保留にしてから、何か書かれたか**であって、書いた人ではない——
 # **役は同じアカウントで動く**ので、GitHub 側では master と worker を見分けられない。
+# **`$owner` などは GraphQL / jq の変数**である——**シェルに展開させない。**
+# shellcheck disable=SC2016
 rows="$(gh api graphql --paginate \
   -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
   -f query='query($owner:String!,$repo:String!,$endCursor:String){
