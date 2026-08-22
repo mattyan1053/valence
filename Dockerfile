@@ -65,6 +65,15 @@ RUN corepack enable
 
 USER node
 
+# **このイメージが、どの build 入力から作られたか** (#380)。
+# **`./task` が `bin/image-drift digest` の値を渡す**——**走っている作業場が
+# 「古いイメージのまま」動き続けるのを、使う前に知らせるため**である。
+#
+# **いちばん最後に置く。** **ARG は下の層のキャッシュを壊す**ので、
+# **ここより上は、指紋が変わっても作り直さなくてよい。**
+ARG VALENCE_BUILD_INPUTS=""
+LABEL valence.build-inputs="$VALENCE_BUILD_INPUTS"
+
 # 依存が無ければ入れてからコマンドを実行する。これで `compose up` した時点で
 # アプリが動いている状態になり、「コンテナは起動しているのに応答しない」を防ぐ。
 ENTRYPOINT ["docker-entrypoint.sh"]

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# **走っているイメージが、いまの `Dockerfile` と食い違っていないかを見る** (#380)。
+#
+#   bin/image-drift digest          いまの build 入力の指紋を出す（`./task` が渡す）
+#   bin/image-drift check [--container <ID>] <イメージ>...  食い違っていれば、直し方を出す
+#
+#   exit 0 = 食い違いなし（**何も出さない**）／**そのイメージがまだ無い**
+#   exit 1 = 古い（**作り直し方**を出す）
+#   exit 2 = 判定できない / 使い方の誤り
+#
+# **イメージに何かを足すと、走っている作業場は次の周回で赤くなる** (#379)——
+# **「作り直せ」を伝える口が無かった。** **`warn_stale_containers` は
+# `bin/db-config-drift` しか見ていない**ので、**`supabase/config.toml` のずれは鳴るのに、
+# **イメージそのものが古いときは鳴らない。**
+#
+# **何と比べるか。** **イメージに焼き込まれるファイル**（`Dockerfile` と
+# `docker-entrypoint.sh`）**の内容**である。**指紋はイメージのラベルに残す**
+# ——**残る側はイメージ**である（`AGENTS.md` §5）。**記録をファイルに置くと、
+# `./task` を通さずに作り直したときに嘘になる。**
+#
+# **commit では見ない。** **作業ツリーで直している最中は commit されていない**ので、
+# **「直したのに鳴らない」**になる——**内容で見れば、直した瞬間から鳴る。**
+#
+# **止めない。** **`bin/db-config-drift` と揃えて警告である**——**古いイメージでも
+# ほとんどの作業は進む**ので、**止めると直しに行く経路まで閉じる**（#184 の形）。
+#
+# **見るのは「いま使っているもの」である** (#382 のレビュー)。**`./task build` は
+# タグを作り直すだけ**で、**走っているコンテナは古いイメージ ID のまま**である
+# ——**タグだけを見ると、案内どおりに打った直後に「直った」と嘘をつく**
+# （**#376 の「前の緑が残る」と同じ形**）。**コンテナがあれば、そちらを見る。**
+#
+# **鳴りっぱなしにしない。** **鳴るのは本当に古いあいだだけ**で、
+# **作り直して入れ替えれば止まる**（**ラベルが新しくなる**）。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+readonly LABEL="valence.build-inputs"
+# **呼ぶものを差し替えられるようにしておく**（`bin/lint-shell` と同じ理由）——
+# **試験は「無いときに分からないと言う」を見たい**が、**入っている環境でも走る。**
+readonly DOCKER="${LOOP_DOCKER:-docker}"
+readonly FIX="./task build && ./task up"
+
+usage() {
+  echo "使い方: bin/image-drift digest           build 入力の指紋を出す" >&2
+  echo "        bin/image-drift check [--container <ID>] <イメージ>...  古ければ直し方" >&2
+  echo "        exit 0 食い違いなし / exit 1 古い / exit 2 判定できない" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+
+# **スクリプトの隣から辿る。** **cwd からではない**（`bin/lint-shell` と同じ理由）。
+readonly ROOT="${BASH_SOURCE[0]%/*}/.."
+
+# **イメージに焼き込まれるものだけを見る。** **`package.json` は入っていない**
+# （**依存は起動時に volume へ入れる**ので、**イメージを作り直す理由にならない**）。
+readonly INPUTS=("$ROOT/Dockerfile" "$ROOT/docker-entrypoint.sh")
+
+digest() {
+  local path
+  for path in "${INPUTS[@]}"; do
+    if [[ ! -f $path ]]; then
+      echo "[FAIL] build の入力が見つかりません: $path" >&2
+      return 2
+    fi
+  done
+  # **中身だけを混ぜる**（**パスを混ぜると、作業場ごとに違う指紋になる**）
+  #
+  # **`git hash-object` で取る** (#195 のレビュー)。**`sha256sum` はホスト標準ではない**
+  # ——**`./task` はホストで走る**ので、**入っていない機械で黙って空になる。**
+  # **`git` は既に必須**なので、依存が増えない。
+  local sum
+  if ! sum="$(cat "${INPUTS[@]}" | git hash-object --stdin)"; then
+    echo "[FAIL] build の入力を読めません" >&2
+    return 2
+  fi
+  printf '%s\n' "$sum"
+}
+
+case "$1" in
+  digest)
+    [[ $# -eq 1 ]] || usage
+    digest
+    ;;
+  check)
+    shift
+    # **走っているコンテナは、任意で受ける**（**`./task` が `docker ps` で引いて渡す**）
+    container=""
+    if [[ ${1-} == "--container" ]]; then
+      [[ $# -ge 2 ]] || usage
+      container="$2"
+      shift 2
+    fi
+    [[ $# -ge 1 ]] || usage
+    want="$(digest)" || exit 2
+    if ! command -v "$DOCKER" >/dev/null 2>&1; then
+      echo "[FAIL] docker がありません。イメージが古いかどうかは分かりません" >&2
+      exit 2
+    fi
+    # **見るのは、この作業場が使いうるものを全部** (#382 のレビュー)。
+    # **compose はサービスごとに別のタグを作る**（`image:` が無いため）ので、
+    # **`app` だけを見ると `supabase-cli` が古いまま使われる**——**`./task db:*` の入口**である。
+    #
+    # **走っているコンテナがあれば、それも見る**——**タグは作り直されていても、
+    # コンテナは古いイメージ ID のまま動く。**
+    declare -A label_of=()
+    running=""
+    if [[ -n $container ]]; then
+      running="$("$DOCKER" inspect "$container" --format '{{.Image}}' 2>/dev/null)" || running=""
+    fi
+    targets=("$@")
+    [[ -z $running ]] || targets=("$running" "${targets[@]}")
+    for ref in "${targets[@]}"; do
+      # **ラベルが 1 つも無いイメージでも落とさない** (#382 のレビュー)。
+      # **`.Config.Labels` は `null` になりうる**（**この仕組みより前のイメージ**）
+      # ——**版によっては `index` がそこで落ちる**ので、**「イメージが無い」に化ける。**
+      # **いちばん鳴らせたい相手が、いちばん静かになる。**
+      if ! label_of[$ref]="$("$DOCKER" image inspect "$ref" \
+        --format "{{if .Config.Labels}}{{index .Config.Labels \"$LABEL\"}}{{end}}" 2>/dev/null)"; then
+        # **まだ無いイメージは「古い」ではない**——**compose がこれから作る。**
+        unset "label_of[$ref]"
+        continue
+      fi
+    done
+    stale=""
+    for ref in "${targets[@]}"; do
+      [[ -n ${label_of[$ref]+set} ]] || continue
+      [[ ${label_of[$ref]} != "$want" ]] || continue
+      stale="$ref"
+      break
+    done
+    [[ -n $stale ]] || exit 0
+    if [[ $stale == "$running" ]]; then
+      echo "[WARN] 走っているコンテナは、いまの Dockerfile より古いかもしれません: $container" >&2
+    else
+      echo "[WARN] このイメージは、いまの Dockerfile より古いかもしれません: $stale" >&2
+    fi
+    if [[ -z ${label_of[$stale]} ]]; then
+      # **ラベルが無いのは、この仕組みより前に作られたイメージ**である
+      echo "       いつの build か分かりません（この仕組みより前に作られています）" >&2
+    fi
+    echo "       作り直して入れ替えるまで、足りないものは入っていません:" >&2
+    echo "         $FIX" >&2
+    exit 1
+    ;;
+  *) usage ;;
+esac

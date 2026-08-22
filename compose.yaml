@@ -10,6 +10,9 @@ x-dev-image: &dev-image
       HOST_UID: ${HOST_UID:-1000}
       HOST_GID: ${HOST_GID:-1000}
       DOCKER_GID: ${DOCKER_GID:-999}
+      # **build 入力の指紋** (#380)。**`./task` が渡す**——**空なら「いつの build か
+      # 分からない」**として、**使う前に作り直しを促す。**
+      VALENCE_BUILD_INPUTS: ${VALENCE_BUILD_INPUTS:-}
 
 services:
   # 開発コンテナ兼 dev サーバー。`compose up` した時点でアプリが動いている。
