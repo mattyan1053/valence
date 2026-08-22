@@ -42,9 +42,19 @@ if ! REVIEW_BOT="$("$bot_script_dir/loop-review-commits" --bot)" || [[ -z $REVIE
 fi
 readonly REVIEW_BOT
 
-# 1 つの PR に対して許すレビューの回数。
+# 1 つの PR に対して許すレビュー要求の回数。
 # 上限に達したら、未解決が残っていても追加のレビューは要求しない。
 # その場合は打ち切り基準 (AGENTS.md) に従って判断するか、人へエスカレーションする。
+#
+# **数えるのは「往復した回数」であって「レビューされた回数」ではない** (#356)。
+# **本物のレビューと、応答不能の通知 (`notice`) を同じ 1 つの予算から引く。**
+# **分けなかった理由**: どちらも「要求を投げて何かが返った」1 往復で、**費やしたものが
+# 同じ**である。**別の上限を持たせると、調整する所が 2 つになり**、
+# **「どちらで止まったのか」を読む側が毎回考えることになる** (§5 の YAGNI)。
+#
+# **投げた要求 (`requests`) は、これとは別に数えない。** **応答が返った要求は
+# `rounds` か `notice` のどちらかに必ず現れる**ので、**足すと同じ往復を二重に数える。**
+# **応答が返っていない要求は、下の `pending` が既に止めている。**
 readonly MAX_ROUNDS="${LOOP_MAX_REVIEW_ROUNDS:-2}"
 
 # PR を開くと自動で 1 度レビューが入る。それが届く前に要求を投げると、
@@ -171,7 +181,12 @@ for at in ${requests+"${requests[@]}"}; do
   [[ $at > $pending_at ]] && pending_at="$at"
 done
 
-echo "pr=$PR head=${head_sha:0:8} rounds=$rounds max=$MAX_ROUNDS reviewed_head=$reviewed_head pending=$pending"
+# **予算を食った往復の合計** (#356)。**`rounds` の意味は変えない**
+# ——**あれは「レビューされた回数」**で、**読む側がそう読む。**
+# **上限と比べるのはこちら**なので、**別の名前で出す。**
+attempts=$((rounds + notice))
+
+echo "pr=$PR head=${head_sha:0:8} rounds=$rounds notice=$notice attempts=$attempts max=$MAX_ROUNDS reviewed_head=$reviewed_head pending=$pending"
 
 # --- 判定 ---------------------------------------------------------------------
 # 現 head が既にレビュー済みなら、再要求は純粋な浪費でしかない。
@@ -211,7 +226,9 @@ if ((pending > 0)); then
 fi
 
 # 初回の自動レビューを待つ。猶予を過ぎても来ないなら、こちらから要求してよい。
-if ((rounds == 0)); then
+# **1 度も往復していないときだけ待つ** (#356)。**通知が返っているなら、
+# 自動で入るレビューは既に走って失敗している**——**待っても来ない。**
+if ((attempts == 0)); then
   if ! created_at="$(gh pr view "$PR" --json createdAt --jq '.createdAt' 2>/dev/null)" \
     || [[ -z $created_at ]]; then
     echo "[FAIL] PR #$PR の作成時刻を取得できません" >&2
@@ -226,11 +243,17 @@ if ((rounds == 0)); then
   fi
 fi
 
-if ((rounds >= MAX_ROUNDS)); then
-  echo "[NO] レビュー回数が上限 ($MAX_ROUNDS) に達している。これ以上は要求しない"
+if ((attempts >= MAX_ROUNDS)); then
+  echo "[NO] レビュー要求が上限 ($MAX_ROUNDS) に達している。これ以上は要求しない"
+  echo "     内訳: レビュー $rounds 回 / 応答不能の通知 $notice 回"
   echo "     未解決が残る場合は打ち切り基準で判断するか、人へエスカレーションする"
+  # **通知で埋まっているなら、待っても返らない。** **原因を添える**
+  # ——**黙って止まると、なぜ要求されないのかが読めない** (#356)。
+  if ((notice > 0)); then
+    echo "     通知が含まれる。レビューが使えない状態が続いていないか確認する"
+  fi
   exit 1
 fi
 
-echo "[OK] レビューを要求してよい (${rounds}/${MAX_ROUNDS} 回目)"
+echo "[OK] レビューを要求してよい (${attempts}/${MAX_ROUNDS} 回目)"
 exit 0
