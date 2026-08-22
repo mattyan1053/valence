@@ -5,8 +5,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -1923,6 +1925,45 @@ describe("bin/loop-handoff", () => {
       withState({ prs: [{ number: 12, unresolvedBy: ["worker"] }] });
 
       expect(run("master").status, "持ち物が無いのに起こしている").toBe(1);
+    });
+  });
+
+  /**
+   * **古い形の送信記録は、もう誰も読まない**（#364）。
+   *
+   * **#363 が役ごとの指紋を別の名前へ移したとき、古い記録は意図して残した**
+   * ——**消すと、まだ旧版で走っている周回が「送っていない」へ落ちる**（`AGENTS.md` §5）。
+   * **移行が終われば、残っているほうが害になる**——**次に読む人が「これが現役の
+   * 記録だ」と読む。**
+   *
+   * **名前で見る。** **消し忘れは、動かしても出てこない**（**誰も読まないので、
+   * 試験は緑のまま**）——**残っているかどうかは、書いてあるかどうかでしか分からない。**
+   */
+  describe("古い形の送信記録", () => {
+    /** `bin/` の下で、この名前に触れている行。**コメントも含める**（読む人が読む）。 */
+    function mentions(): string[] {
+      return readdirSync(BIN_DIR)
+        .filter((name) => !name.endsWith(".test.ts"))
+        .flatMap((name) => {
+          const path = join(BIN_DIR, name);
+          if (!statSync(path).isFile()) {
+            return [];
+          }
+          return readFileSync(path, "utf8")
+            .split("\n")
+            .filter((line) => line.includes("valence-loop-handoff-"))
+            .map((line) => `${name}: ${line.trim()}`);
+        });
+    }
+
+    it("名前がコードのどこにも残っていない", () => {
+      // **`by-role.` と `.pending` は別のもの**である（**役ごとの指紋**と、
+      // **作業場ごとの送信待ち**）——**そちらは現役なので残る。**
+      const legacy = mentions().filter(
+        (line) => !line.includes("by-role.") && !line.includes(".pending"),
+      );
+
+      expect(legacy, "古い記録の名前が残っている").toEqual([]);
     });
   });
 
