@@ -1,4 +1,4 @@
-<!-- 版: 55ecdb49d4eb -->
+<!-- 版: d7ddc29ee8f5 -->
 ---
 name: "Loop: Worker"
 description: Issue の実装またはレビュー指摘への対応を 1 周だけ実行する
@@ -53,7 +53,7 @@ bin/loop-lease acquire worker "<冒頭の `版:` の値>" --trigger <cron|poke> 
 **その前に、印を持つ木がここにあるかを見る** (#262 / #369)——**木を触る前に押さえる。**
 
 ```bash
-bin/loop-lease recover worker "<読んだ印>"    # token を控える
+bin/loop-lease recover worker "<読んだ印>" --trigger <cron|poke>   # token を控える
 ```
 
 - **exit 0** → 押さえた。下へ進む。**この先どの経路で終わるときも必ず返す**
@@ -104,7 +104,7 @@ bin/loop-procedure-stamp worker "<読んだ印>"  # 揃ったか。判定はこ�
 
 ```bash
 bin/loop-procedure-body --entry worker   # これがこの周回の入口である
-bin/loop-lease acquire worker "<読み直した入口の `版:` の値>"   # 印は捨てない
+bin/loop-lease acquire worker "<読み直した入口の 版>" --trigger <cron|poke>  # 印は捨てない
 ```
 
 - **exit 0**（`acquire`）→ **読み直した入口に従って、1.0 の続きから進む**（**返さない**）

@@ -87,15 +87,15 @@ function round(dir: string, stamp: string, trigger?: string): void {
  * 書いたものを、この試験の `cadence()` が読めること**（`実際に始めた周回が読める`）で
  * 両端を留めてある——**ここだけが緑になる形にはならない。**
  */
-function records(dir: string, lines: [number, string][]): void {
-  const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+function records(dir: string, lines: [number, string][], workspace = dir, role = "worker"): void {
+  const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", role], {
     cwd: dir,
     encoding: "utf8",
   });
   expect(scope.status, scope.stderr).toBe(0);
   writeFileSync(
     join(dir, ".git", `valence-loop-starts-${scope.stdout.trim()}`),
-    `${lines.map(([at, trigger]) => `${at}\t${trigger}`).join("\n")}\n`,
+    `${lines.map(([at, trigger]) => `${at}\t${trigger}\t${workspace}`).join("\n")}\n`,
   );
 }
 
@@ -273,5 +273,89 @@ describe("手順と表示が、この記録につながっている", () => {
     });
 
     expect(done.stdout, "判定できない側で打ち切られている").toContain("つづき");
+  });
+});
+
+/**
+ * **残る側を数える**（#381 のレビュー。`AGENTS.md` §5）。
+ *
+ * **足したのは worker の入口だけ**である——**master の入口は `--trigger` を渡さない**ので、
+ * **その記録を読むと `unknown` になり、worker の cron が正常でも `stale` が立つ。**
+ * **見えるようにするために足した行が、嘘を言うことになる。**
+ *
+ * **消えた作業場も残る**——**`.git` の共通ディレクトリは worktree をまたいで 1 つ**なので、
+ * **`./task loop:worker:remove` で消しても記録は残る。**
+ */
+describe("読む先を、この仕組みが届く範囲に限る", () => {
+  it("master の記録では、止まっていると言わない", () => {
+    // **master の入口は `--trigger` を渡さない**（この PR は worker の入口だけを直した）
+    const { dir } = workspace();
+    records(dir, [[9_900, "cron"]]);
+    records(dir, [[1_000, "unknown"]], dir, "master");
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "master のぶんで誤報している").toBe(0);
+    expect(done.stdout, "master の記録まで読んでいる").not.toMatch(/master/);
+  });
+
+  it("消えた作業場の記録では、止まっていると言わない", () => {
+    // **消した作業場は、回っていないのが正しい**——**残った記録で人を呼ばない**
+    const { dir } = workspace();
+    records(dir, [[9_900, "cron"]]);
+    const gone = join(dir, "居ない作業場");
+    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    writeFileSync(
+      join(dir, ".git", `valence-loop-starts-${scope.stdout.trim()}-消えたほう`),
+      `1000\tcron\t${gone}\n`,
+    );
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "消えた作業場で誤報している").toBe(0);
+  });
+
+  it("居る作業場のぶんは、これまでどおり読む", () => {
+    // **上の 2 件が「読まない」で緑になっていないこと**を、ここが支えている
+    const { dir } = workspace();
+    records(dir, [[1_000, "cron"]], dir);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "居る作業場を読み飛ばしている").toBe(1);
+  });
+
+  it("作業場が書かれていない記録は、読み飛ばさない", () => {
+    // **列を足す前の記録**である——**「分からない」を「消えた」へ倒すと、
+    // 止まっている作業場が黙って消える**
+    const { dir } = workspace();
+    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    writeFileSync(join(dir, ".git", `valence-loop-starts-${scope.stdout.trim()}`), "1000\tcron\n");
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "古い記録を読み飛ばしている").toBe(1);
+  });
+});
+
+describe("入口が、通るすべての口で渡している", () => {
+  it("acquire も recover も、どう始まったかを渡す", () => {
+    // **`--trigger` が最初の `acquire` にしかない**と、**回復と読み直しの経路
+    // （#374）で記録が `unknown` になる**——**その道はこの 2 日で何度も通っている**
+    const entry = readFileSync(join(REPO_ROOT, ".claude/commands/loop-worker.md"), "utf8");
+    const taking = entry
+      .split("\n")
+      .filter((line) => /bin\/loop-lease (acquire|recover) worker/.test(line));
+
+    expect(taking.length, "lease を取る口が見つからない").toBeGreaterThanOrEqual(3);
+    for (const line of taking) {
+      expect(line, `どう始まったかを渡していない: ${line}`).toContain("--trigger");
+    }
   });
 });

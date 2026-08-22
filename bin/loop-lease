@@ -1341,7 +1341,10 @@ acquire | recover)
   # 「分からない」と答える**（`bin/loop-cadence`）。
   #
   # **増え続けさせない。** **見るのは最後の 1 本ずつ**なので、**古い行は落としてよい。**
-  if ! printf '%s\t%s\n' "$now" "$TRIGGER" >>"$STARTS" 2>/dev/null; then
+  # **作業場も書く** (#381 のレビュー)。**共通ディレクトリは worktree をまたいで 1 つ**
+  # なので、**消した作業場の記録も残る**——**読む側が「まだ居るか」を見られるようにする。**
+  # **scope からは戻せない**（digest である）ので、**ここで書くしかない。**
+  if ! printf '%s\t%s\t%s\n' "$now" "$TRIGGER" "$workspace" >>"$STARTS" 2>/dev/null; then
     echo "[WARN] $SCOPE_LABEL の周回の始まりを書けません: $STARTS" >&2
   elif kept_starts="$(tail -n "$RECENT_STARTS" "$STARTS" 2>/dev/null)"; then
     if ! { printf '%s\n' "$kept_starts" >"$STARTS.tmp" 2>/dev/null &&

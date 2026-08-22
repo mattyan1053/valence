@@ -71,15 +71,28 @@ readonly common_dir
 found=0
 stale=0
 undecidable=0
-for starts in "$common_dir"/valence-loop-starts-*; do
+# **読むのは worker のぶんだけ** (#381 のレビュー)。**master の入口は `--trigger` を
+# 渡さない**ので、**そのまま読むと `unknown` になり、worker の cron が正常でも `stale` が
+# 立つ**——**見えるようにするために足した行が、嘘を言うことになる。**
+# **master 側も見たくなったら、あちらの入口が渡すようになってからである。**
+for starts in "$common_dir"/valence-loop-starts-worker*; do
   [[ -f $starts ]] || continue
   found=1
   scope="${starts##*/valence-loop-starts-}"
   last_cron="-"
   last_poke="-"
   last_unknown="-"
-  while IFS=$'\t' read -r at trigger; do
+  gone=0
+  while IFS=$'\t' read -r at trigger where; do
     [[ $at =~ ^[0-9]+$ ]] || continue
+    # **消えた作業場は、回っていないのが正しい** (#381 のレビュー)——**残った記録で
+    # 人を呼ばない。** **書かれていなければ読み飛ばさない**（**列を足す前の記録**）
+    # ——**「分からない」を「消えた」へ倒すと、止まっている作業場が黙って消える。**
+    if [[ -n ${where:-} && ! -d $where ]]; then
+      gone=1
+    else
+      gone=0
+    fi
     case "$trigger" in
       cron) last_cron="$at" ;;
       poke) last_poke="$at" ;;
@@ -88,6 +101,12 @@ for starts in "$common_dir"/valence-loop-starts-*; do
       *) last_unknown="$at" ;;
     esac
   done <"$starts"
+
+  # **最後の 1 行が指す作業場で決める**——**途中で消えて作り直された作業場は、
+  # 新しいほうが残っている。**
+  if ((gone == 1)); then
+    continue
+  fi
 
   age="-"
   verdict="ok"
