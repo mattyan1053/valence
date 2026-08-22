@@ -59,7 +59,7 @@ usage() {
   echo "        bin/loop-lease release <役> <token>" >&2
   echo "        bin/loop-lease held <役>        その lease を誰かが持っているか（worker は呼んだ作業場の分）" >&2
   echo "                                        別の作業場の worker も見るなら busy（master は 1 つなので同じ）" >&2
-  echo "        bin/loop-lease mine <役>        この周回がその役の lease を持っているか（読むだけ）" >&2
+  echo "        bin/loop-lease mine <役> <token>  その token が、いま握られている lease のものか（読むだけ）" >&2
   echo "                                        held は「誰かが持っているか」——順序が崩れても 0 になる" >&2
   echo "        bin/loop-lease check            この周回が持っていなければ言って記録する（止めない）" >&2
   echo "        bin/loop-lease busy <役>        その役の周回がどこかで走っているか（読むだけ）" >&2
@@ -861,25 +861,43 @@ round_holds() {
 #
 # **判定不能を「持っている」へも「持っていない」へも倒さない**（exit 2）——
 # **倒す向きは呼ぶ側が決める**（`bin/loop-handoff --sent` は記録しない側へ倒す）。
-if [[ $ACTION == "mine" ]]; then
-  [[ $# -eq 2 ]] || usage
-  owner="$(round_owner)" || owner=""
-  taken=""
-  round_holds "$ROLE" "$owner"
-  case "$?" in
-    0) exit 0 ;;
-    1)
-      echo "[INFO] この周回は $ROLE の lease を持っていません（$SCOPE_LABEL）" >&2
-      exit 1
-      ;;
-    *)
-      # **読めない / 分からない**——**どちらも「持っていない」とは違う。**
-      echo "[FAIL] この周回が $ROLE の lease を持っているか判定できません" >&2
-      echo "       記録や印を読めないので、突き合わせられません（上の理由を読むこと）" >&2
-      exit 2
-      ;;
-  esac
-fi
+# **その token が置かれている記録へ乗り換える** (#240)。**周回の途中で
+# `bin/loop-lease` の版が入れ替わると、記録の名前の作り方が変わる**——
+# **名前ではなく token が資格**なので、**役のぶんだけ走査して引き当てる。**
+#
+# **`release` と `mine` が同じものを使う** (#355 のレビュー)。**片方だけ引き当てると、
+# 「返せるのに、持っていないと言われる」**——**正しい順序の周回の記録が上がらない。**
+#
+# **走査するのは自分の役のぶんだけ** (#290 のレビュー)。**`worker-` で切らない**
+# ——**いちばん古い版は `worker` の直後が `_`** である（#98）。
+#
+# **前提: `lock_state` を通していること**（**乗り換え先のロックを取り直す**——
+# **持っていたのは前の名前のロック**なので、**そのまま読むと別の周回と競る**）。
+#
+#   0 = 乗り換えた / 1 = 見つからない / 2 = 乗り換え先を読めない
+switch_to_renamed_state() {
+  local token="$1" candidate first
+  for candidate in "$common_dir/valence-loop-lease-$ROLE"*; do
+    [[ -f $candidate ]] || continue
+    [[ $candidate != *.lock && $candidate != *.tmp ]] || continue
+    [[ $candidate != "$STATE" ]] || continue
+    read -r first <"$candidate" 2>/dev/null || continue
+    [[ ${first%%$'\t'*} == "$token" ]] || continue
+    echo "[WARN] $SCOPE_LABEL の lease は、いまと違う名前で置かれていました" >&2
+    echo "       記録: ${candidate##*/}" >&2
+    echo "       周回の途中で bin/loop-lease の版が入れ替わっています（名前の作り方が違う）" >&2
+    exec 9>&-
+    lease_scope="${candidate##*/valence-loop-lease-}"
+    STATE="$candidate"
+    # **活動の記録も名前から作られる。** **期限の判定はそちらを見る**ので、
+    # **一緒に乗り換えないと、動いていた周回が「切れていた」に化ける。**
+    ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
+    lock_state || return 2
+    read_lease quiet || return 2
+    return 0
+  done
+  return 1
+}
 
 if [[ $ACTION == "check" ]]; then
   # **役を渡す形は残さない。** 黙って無視すると、**役を書き固めた古い呼び出しが
@@ -1079,7 +1097,7 @@ set_role_paths "$ROLE" || exit 2
 lock_state || exit 2
 # **`release` は引き継がない** (#278 のレビュー)。**「引き継ぎます」の直後に
 # 「返します」が出る**と、**文言を直しに来て逆の文言を増やすことになる。**
-if [[ $ACTION == "held" || $ACTION == "release" ]]; then
+if [[ $ACTION == "held" || $ACTION == "release" || $ACTION == "mine" ]]; then
   read_lease quiet || exit 2
 else
   read_lease || exit 2
@@ -1114,6 +1132,47 @@ held)
   # **`busy master` は `held master` と同じものを見る**——**「別の作業場も見るなら」と
   # 案内しても行き先が同じ**で、**#250 と同じ形（答えは正しく、説明が違う）になる。**
   [[ $ROLE == "worker" ]] && echo "       別の作業場も見るなら: bin/loop-lease busy $ROLE" >&2
+  exit 1
+  ;;
+mine)
+  # **この token が、いま握られている lease のものか** (#352 / #355 のレビュー)。
+  #
+  # **`held` は「誰かが持っているか」**である——**返した直後に別の周回が取っていれば
+  # 0 を返す**ので、**順序が崩れたことが消える。** **`check` は「この周回が持っているか」**
+  # だが、**見ているのはセッションの印**——**`round_owner` の真上に「同じセッションの中の
+  # 別周回は区別できない」と書いてある。**
+  #
+  # **入口 1.0 が直列化しようとしているのが、まさにその 2 つ**である
+  # （**cron の周回と、通知で始めた周回は同じ本体から起きる**）——**そこを
+  # 「この周回のものだ」と答えると、塞ぎに来た競合がそのまま残る。**
+  #
+  # **周回ごとに違う証拠は最初からある**——**`acquire` が返し、`release` が要求する
+  # token** である。**資格は token が持つ**（`release` と同じ線）。
+  [[ $# -eq 3 ]] || usage
+  if [[ -z $held_token && -z $expired_token ]]; then
+    switch_to_renamed_state "$3"
+    case "$?" in
+      0 | 1) ;;
+      *) exit 2 ;;
+    esac
+  fi
+  if [[ -n $held_token && $held_token == "$3" ]]; then
+    exit 0
+  fi
+  # **期限切れでも、その token のものなら「持っている」側**である (#260)。
+  # **返していないのだから、順序は崩れていない**——**`release` が「切れていても
+  # 持ち主は返せる」としているのと同じ線**である。**ただし黙らない。**
+  if [[ -n $expired_token && $expired_token == "$3" ]]; then
+    echo "[WARN] $SCOPE_LABEL の lease は期限切れです（${expired_over} 秒超過）。走っている最中に外れました" >&2
+    echo "       切れている間は空いて見えるので、別の周回が入っているかもしれません" >&2
+    exit 0
+  fi
+  echo "[INFO] $SCOPE_LABEL の lease は、この token のものではありません" >&2
+  if [[ -n $held_token ]]; then
+    echo "       いまは別の周回が持っています（返したあとに、次の周回が取っています）" >&2
+  else
+    echo "       誰も持っていません（この周回は、もう返しています）" >&2
+  fi
   exit 1
   ;;
 acquire | recover)
@@ -1264,28 +1323,15 @@ release)
   # **`worker-` で切らない。** **いちばん古い版は `worker` の直後が `_`**
   # （パスをそのまま畳んでいた。#98）——**残る側を数える**と 3 通りある
   # （`AGENTS.md` §5。**残る側は自分の diff に出てこない**）。
+  #
+  # **乗り換えは `switch_to_renamed_state` が持つ** (#355 のレビュー)——**`mine` も
+  # 同じものを使う**（**片方だけ引き当てると、返せるのに「持っていない」と言われる**）。
   if [[ -z $held_token && -z $expired_token ]]; then
-    for renamed_state in "$common_dir/valence-loop-lease-$ROLE"*; do
-      [[ -f $renamed_state ]] || continue
-      [[ $renamed_state != *.lock && $renamed_state != *.tmp ]] || continue
-      [[ $renamed_state != "$STATE" ]] || continue
-      read -r renamed_first <"$renamed_state" 2>/dev/null || continue
-      [[ ${renamed_first%%$'\t'*} == "$3" ]] || continue
-      echo "[WARN] $SCOPE_LABEL の lease は、いまと違う名前で置かれていました" >&2
-      echo "       記録: ${renamed_state##*/}" >&2
-      echo "       周回の途中で bin/loop-lease の版が入れ替わっています（名前の作り方が違う）" >&2
-      # **乗り換える先のロックを取り直す。** **持っていたのは前の名前のロック**なので、
-      # **そのまま書くと、同じ記録を触る別の周回と競る。**
-      exec 9>&-
-      lease_scope="${renamed_state##*/valence-loop-lease-}"
-      STATE="$renamed_state"
-      # **活動の記録も名前から作られる。** **期限の判定はそちらを見る**ので、
-      # **一緒に乗り換えないと、動いていた周回が「切れていた」に化ける。**
-      ACTIVITY="$common_dir/valence-loop-activity-$lease_scope"
-      lock_state || exit 2
-      read_lease quiet || exit 2
-      break
-    done
+    switch_to_renamed_state "$3"
+    case "$?" in
+      0 | 1) ;;
+      *) exit 2 ;;
+    esac
   fi
   # **期限切れの記録は、持ち主が返せる** (#260)。**返す資格は token が持つ**ので、
   # **切れたことは「返させない理由」にならない**——**断ると、後始末をする者が

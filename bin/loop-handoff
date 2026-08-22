@@ -99,7 +99,8 @@ done
 readonly FIELD=$'\037'
 
 usage() {
-  echo "使い方: bin/loop-handoff <役> [--sent]   役: ${ROLES[*]}" >&2
+  echo "使い方: bin/loop-handoff <役> [--sent=<token>]   役: ${ROLES[*]}" >&2
+  echo "        token は入口の bin/loop-lease acquire が出したもの（握ったまま打つ）" >&2
   exit 2
 }
 
@@ -115,12 +116,31 @@ done
 }
 
 # **送信が成功したことを伝える口** (#258)。**呼んだ側にしか分からない。**
+#
+# **token を `--sent=` の中に入れる** (#355 のレビュー)。**別の引数として足さない**
+# ——**古い版のスクリプトがディスクに残っている周回**では、**`bin/loop-handoff <役>
+# --sent <token>` は「引数が 3 つ」なので `$# -eq 2` を外れ**、**ふつうの判定として
+# 走ってしまう**（**出力を出して exit 0、記録はしない**——**呼んだ側は成功と読む**）。
+# **`--sent=<token>` なら `$2` が `--sent` と一致しないので、古い版は usage で落ちる**
+# ——**黙って別の意味に読まれるより、落ちるほうが安い**（`AGENTS.md` §5。#281）。
+#
+# **逆向き（新しいスクリプト × 古い手順書）は、下で「記録しない」へ倒す。**
 confirm_sent=0
+sent_token=""
 if [[ $# -eq 2 ]]; then
-  [[ $2 == "--sent" ]] || usage
-  confirm_sent=1
+  case "$2" in
+    --sent=*)
+      confirm_sent=1
+      sent_token="${2#--sent=}"
+      ;;
+    --sent)
+      # **古い手順書が打つ形。** **usage で落とさない**——**何が足りないかを言う**
+      confirm_sent=1
+      ;;
+    *) usage ;;
+  esac
 fi
-readonly confirm_sent
+readonly confirm_sent sent_token
 
 # **読めなかったら「送らない」に倒さない。** 倒すと、止まっていることに気づけない。
 fail_unknown() {
@@ -215,12 +235,18 @@ if ((confirm_sent == 1)); then
   # **どの周回も入口 1.0 で lease を取る**ので、**握っていないのは順序が崩れたときだけ**
   # である。**崩れた周回では記録が上がらず、次の周回で 2 通目が出る**——
   # **それでよい**（**届かないより安い**）。
-  if ! "${BASH_SOURCE[0]%/*}/loop-lease" mine "$ROLE"; then
+  if [[ -z $sent_token ]]; then
+    echo "[FAIL] --sent には lease の token が要ります（入口の acquire が出したもの）" >&2
+    echo "       この周回の送信は記録されていません——次の周回が同じ状態をもう一度立ち上げます" >&2
+    echo "         bin/loop-handoff $ROLE --sent=\"<token>\"" >&2
+    exit 2
+  fi
+  if ! "${BASH_SOURCE[0]%/*}/loop-lease" mine "$ROLE" "$sent_token"; then
     echo "[FAIL] この周回は $ROLE の lease を持っていないので、送信を記録しません" >&2
     echo "       出口は 1 行ずつ別のコマンドで打ちます（返すのはいちばん最後）:" >&2
     echo "         bin/loop-handoff $ROLE" >&2
     echo "         # ここで 1 通送る" >&2
-    echo "         bin/loop-handoff $ROLE --sent" >&2
+    echo "         bin/loop-handoff $ROLE --sent=\"<token>\"" >&2
     echo "         bin/loop-lease release $ROLE \"<token>\"" >&2
     echo "       この周回の送信は記録されていません——次の周回が同じ状態をもう一度立ち上げます" >&2
     exit 2

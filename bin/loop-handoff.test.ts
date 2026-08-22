@@ -356,27 +356,40 @@ describe("bin/loop-handoff", () => {
     return runWith(role === "" ? [] : [role], env);
   }
 
-  /**
-   * 送信が成功したことを伝える口。**呼んだ側にしか分からない。**
-   *
-   * **lease を握ったまま打つ** (#352)。**出口の順序はそれ**である（#340。
-   * **返すのはいちばん最後**）——**試験のほうが崩れた順序で打っていると、
-   * 崩れを検出する実装を入れた瞬間に、正しい周回まで全部赤くなる。**
-   */
-  function sent(role: string, env: Record<string, string> = {}): Run {
+  /** その役の lease を取り、token を返す。**周回を始める**（`cwd` はこの作業場）。 */
+  function acquireLease(role: string): string {
     const stamp = spawnSync(STAMP, [role], { encoding: "utf8" }).stdout.trim();
     const acquired = spawnSync(LEASE, ["acquire", role, stamp], { cwd: repo, encoding: "utf8" });
     expect(acquired.status, `lease を取れない: ${acquired.stderr}`).toBe(0);
+    return acquired.stdout.trim();
+  }
+
+  function releaseLease(role: string, token: string): void {
+    const released = spawnSync(LEASE, ["release", role, token], { cwd: repo, encoding: "utf8" });
+    expect(released.status, `lease を返せない: ${released.stderr}`).toBe(0);
+  }
+
+  /**
+   * 送信が成功したことを伝える口。**呼んだ側にしか分からない。**
+   *
+   * **lease を握ったまま、その token で打つ** (#352 / #355 のレビュー)。
+   * **出口の順序はそれ**である（#340。**返すのはいちばん最後**）——**試験のほうが
+   * 崩れた順序で打っていると、崩れを検出する実装を入れた瞬間に、正しい周回まで赤くなる。**
+   */
+  function sent(role: string, env: Record<string, string> = {}): Run {
+    const token = acquireLease(role);
     try {
-      return runWith([role, "--sent"], env);
+      return runWith([role, `--sent=${token}`], env);
     } finally {
-      spawnSync(LEASE, ["release", role, acquired.stdout.trim()], { cwd: repo, encoding: "utf8" });
+      releaseLease(role, token);
     }
   }
 
   /** **lease を返してから `--sent` を打つ。** 崩れた順序そのもの (#352)。 */
   function sentAfterRelease(role: string, env: Record<string, string> = {}): Run {
-    return runWith([role, "--sent"], env);
+    const token = acquireLease(role);
+    releaseLease(role, token);
+    return runWith([role, `--sent=${token}`], env);
   }
 
   /**
@@ -851,6 +864,37 @@ describe("bin/loop-handoff", () => {
       // **打ち直せる形で言う**——**「順序が違う」とだけ言われても、
       // 次に何をすればよいかが分からない**
       expect(broken.stderr, "打ち直す手が出ていない").toContain("bin/loop-handoff worker --sent");
+    });
+
+    it("同じセッションの中で次の周回が取り直していても、記録しない", () => {
+      // **これが本題** (#355 のレビュー)。**古い周回が返した直後に cron の周回が
+      // 取る**——**セッションの印では 2 つが同じ値になる**ので、**古い周回の
+      // `--sent` が通っていた。** **入口 1.0 が直列化しようとしているのが、
+      // まさにこの 2 つ**である（**同じ本体から起きる**）。
+      const previous = acquireLease("worker");
+      releaseLease("worker", previous);
+      const current = acquireLease("worker");
+
+      const broken = runWith(["worker", `--sent=${previous}`]);
+
+      expect(broken.status, "古い周回の token で記録できている").not.toBe(0);
+      releaseLease("worker", current);
+      expect(run("worker").status, "記録が上がっていて、2 通目が出ない").toBe(0);
+    });
+
+    it("token を渡さなければ、記録しない", () => {
+      // **古い手順書が打つ形**である（#340 の版。**`--sent` だけを渡す**）——
+      // **倒す向きは「記録しない」**（**次の周回が同じ状態をもう一度立ち上げる**）。
+      const token = acquireLease("worker");
+      try {
+        const broken = runWith(["worker", "--sent"]);
+
+        expect(broken.status, "token 無しで記録できている").not.toBe(0);
+      } finally {
+        releaseLease("worker", token);
+      }
+
+      expect(run("worker").status, "記録が上がっていて、2 通目が出ない").toBe(0);
     });
 
     it("握っている周回では、これまでどおり記録できる", () => {
