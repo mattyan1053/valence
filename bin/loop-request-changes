@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# **要求を 1 つの操作として出す** (#388)。
+#
+#   bin/loop-request-changes <PR番号> <判定に使った head SHA> <本文ファイル>
+#
+#   exit 0 = 出した（label を付け直し、投稿し、待ちを記録した）
+#   exit 1 = 出していない（head が動いた / 途中で落ちた。**どこまで進んだかを言う**）
+#   exit 2 = 使い方の誤り
+#
+# **順序にも、付け直しにも意味がある。**
+#
+# **label は錠なので先に付ける**——**コメントだけ残ると、次の周回でゲートが通る**
+# （**要求だけが残って label が付かない**）。**付けたつもりで失敗していても同じ**なので、
+# **付いたことを確かめてから投稿する。**
+#
+# **既に付いている PR へ新しい指摘を出すときは、付け直す**——**label は PR 全体の状態で、
+# 指摘ごとの印ではない。** **`bin/loop-handoff` は label より後に立ったスレッドを
+# 「まだ見ていない」と読む**ので、**付け直さないと、新しい指摘を見た記録がどこにも残らない。**
+#
+# **忘れても、その場では何も起きない** (#382 で master が実際に忘れた)。**label は付いて
+# いる。コメントも出ている。** **壊れるのは、時刻を読む側**である——**#387 が入ってからは、
+# 受け渡しが master を指したままになり、誰も worker に伝えない。**
+#
+# **だから、打つ手順を無くす。** **手順書に並んだコマンドは、いつか 1 つ飛ばされる。**
+#
+# -e は使わない。落ちた場所を言ってから終わる。
+set -uo pipefail
+
+readonly LABEL="changes-requested"
+
+usage() {
+  echo "使い方: bin/loop-request-changes <PR番号> <head SHA> <本文ファイル>" >&2
+  echo "        exit 0 出した / exit 1 出していない / exit 2 使い方の誤り" >&2
+  exit 2
+}
+
+[[ $# -eq 3 ]] || usage
+readonly PR="$1"
+readonly HEAD_SHA="$2"
+readonly BODY="$3"
+
+[[ $PR =~ ^[0-9]+$ ]] || usage
+[[ $HEAD_SHA =~ ^[0-9a-f]{7,40}$ ]] || usage
+
+# **本文が無いなら、何も触らない。** **投稿の直前で落ちると、label だけが付く。**
+if [[ ! -f $BODY ]]; then
+  echo "[FAIL] 本文のファイルがありません: $BODY" >&2
+  echo "       label もコメントも触っていません" >&2
+  exit 1
+fi
+
+# **読んだ指摘は、評価した head に対するもの**である。**動いていたら何も書かない**
+# ——**判定は `bin/loop-head` が持つ**（ここへ書き写さない）。
+if ! "${BASH_SOURCE[0]%/*}/loop-head" same "$PR" "$HEAD_SHA"; then
+  echo "[FAIL] head が動いています（#$PR）。この周回は何も書きません" >&2
+  exit 1
+fi
+
+# **いま付いているか。** **付いていない label を外そうとすると `gh` が落ちる**ので、
+# **外すのは付いているときだけ**である——**落ちた理由が「無かった」だと、
+# 次へ進んでよいのか読めない。**
+if ! labels="$(gh pr view "$PR" --json labels --jq '.labels[].name')"; then
+  echo "[FAIL] いまの label を読めません（#$PR）。何も触っていません" >&2
+  exit 1
+fi
+
+if grep -qxF "$LABEL" <<<"$labels"; then
+  # **付け直して初めて、判断した記録になる。**
+  if ! gh pr edit "$PR" --remove-label "$LABEL"; then
+    echo "[FAIL] label を外せません（#$PR）。コメントは投稿していません" >&2
+    exit 1
+  fi
+fi
+
+if ! gh pr edit "$PR" --add-label "$LABEL"; then
+  # **外したまま落ちることはある。** **黙って落ちはしない**——**label が無い状態は
+  # `bin/loop-handoff` が `handoff-mismatch` として記録する。**
+  echo "[FAIL] label を付けられません（#$PR）。コメントは投稿していません" >&2
+  echo "       label が外れたままかもしれません（次の周回で handoff-mismatch に出ます）" >&2
+  exit 1
+fi
+
+# **付いたことを確かめてから投稿する** (#382 と同じ順序)。**付けたつもりで失敗していると、
+# 要求だけが残って次の周回でゲートが通る。**
+if ! after="$(gh pr view "$PR" --json labels --jq '.labels[].name')" ||
+  ! grep -qxF "$LABEL" <<<"$after"; then
+  echo "[FAIL] label が付いていません（#$PR）。コメントは投稿していません" >&2
+  exit 1
+fi
+
+if ! gh pr comment "$PR" --body-file "$BODY"; then
+  # **戻せない**（label は付いている）——**言わないと、worker が呼ばれて何も無い。**
+  echo "[FAIL] コメントを投稿できません（#$PR）" >&2
+  echo "       label は付いた状態です。待ちは記録していません" >&2
+  echo "       同じ本文で打ち直すこと（付け直しは、この口が面倒を見ます）" >&2
+  exit 1
+fi
+
+# **待ちを記録するのは、出せたときだけ** (#258 と同じ形)。**出していないのに記録すると、
+# 返事が来ないまま止まっても、その状態が「もう報せた」に見える。**
+#
+# **識別子の書式は `bin/loop-stall` が持つ**（`awaiting-worker:<PR>@<head>`）。
+# **head が入るので、押し直されれば別の状態として数え直される。**
+if ! "${BASH_SOURCE[0]%/*}/loop-stall" "awaiting-worker:${PR}@${HEAD_SHA}"; then
+  # **記録できなくても、要求は出ている。** **止めない**——**言うことと、止めることは別**
+  # である (#270)。**次の周回が同じ状態をもう一度立てる。**
+  echo "[WARN] 待ちを記録できませんでした（#$PR）。要求そのものは出ています" >&2
+fi
+
+echo "requested pr=$PR head=${HEAD_SHA:0:8}"
