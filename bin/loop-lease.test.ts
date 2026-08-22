@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -1614,6 +1615,59 @@ describe("bin/loop-lease", () => {
       );
     }
 
+    /**
+     * **前の版が置いた印**（#383 のレビュー）。
+     *
+     * **名前は本物の旧形式**（**パスの sha256**）である——**いまの digest の頭を
+     * 借りた偽物では、前方一致で必ず当たってしまい、踏む形にならない。**
+     */
+    function markRoundWithOldName(dir: string, epoch: number): void {
+      const digest = createHash("sha256").update(dir).digest("hex");
+      writeFileSync(join(sandbox, ".git", `valence-loop-rounds-worker-${digest}`), `${epoch}\n`);
+    }
+
+    it("前の版の名前で置かれた印を、回っていないと答えない", () => {
+      // **これが本題** (#383 のレビュー)。**指紋の作り方が変わると、前の版が書いた
+      // 名前には当たらない**——**`worker-<16 進>` は「知らない形」ではない**ので、
+      // **黙って「回っていない」へ落ち**、**`bin/loop-claim` がそこで引き継ぐ**
+      // （**生きている持ち主から取り上げる**。#296 / #298 が消しに来た形）。
+      markRoundWithOldName(sandbox, Math.floor(Date.now() / 1000));
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status, "生きている持ち主を、回っていないと答えている").not.toBe(1);
+      expect(answered.status, "判定できないとして止める側へ倒れていない").toBe(2);
+    });
+
+    it("印に作業場が入っていれば、名前が変わっても読める", () => {
+      // **名前ではなく中身で照らす**（#291 と同じ形）——**次の周回からは、
+      // 名前の作り方が変わっても当たる。**
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-rounds-worker-まったく違う名前"),
+        `${Math.floor(Date.now() / 1000)}\n${sandbox}\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "中身で照らしていない").toBe(0);
+    });
+
+    it("別の作業場の印では、走っているとは答えない", () => {
+      // **緩めすぎない側**——**中身で照らすようにしても、他人の印は他人のもの**である
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-rounds-worker-よその作業場"),
+        `${Math.floor(Date.now() / 1000)}\n/どこか/別の作業場\n`,
+      );
+
+      expect(run(["alive", sandbox]).status, "他人の印で「走っている」と答えている").toBe(1);
+    });
+
+    it("窓より古い印は、判定を止めない", () => {
+      // **誰のものでも「いま回っている」ではない**——**そこで判定不能にすると、
+      // 落ちた作業場の仕事を誰も拾えなくなる**（**古い印は書き直されない**）。
+      markRoundWithOldName(sandbox, Math.floor(Date.now() / 1000) - 100_000);
+
+      expect(run(["alive", sandbox]).status, "古い印で、拾えなくなっている").toBe(1);
+    });
+
     it("周回の印が新しければ、走っていると答える", () => {
       markRound(sandbox, Math.floor(Date.now() / 1000));
 
@@ -1658,6 +1712,9 @@ describe("bin/loop-lease", () => {
       // **前の版の名前も見る**ようにしたぶん、**広く拾いすぎない**ことを見る
       // ——**他人が回っているだけで「この作業場が回っている」と答えると、
       // 落ちた作業場の Issue が誰にも拾えなくなる**
+      //
+      // **答えは「回っている」ではない**（#383）——**作業場が書かれていない印は、
+      // 前の版のものかもしれない**ので、**判定できない側へ倒す。**
       const other = mkdtempSync(join(tmpdir(), "loop-lease-other-"));
       expect(spawnSync("git", ["init", "--quiet", other]).status).toBe(0);
       const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: other, encoding: "utf8" });
@@ -1667,7 +1724,7 @@ describe("bin/loop-lease", () => {
       );
       rmSync(other, { recursive: true, force: true });
 
-      expect(run(["alive", sandbox]).status, "別の作業場の印を自分のものにしている").toBe(1);
+      expect(run(["alive", sandbox]).status, "別の作業場の印を自分のものにしている").not.toBe(0);
     });
 
     it("digest の頭が短すぎる名前は、この作業場のものにしない", () => {
@@ -1681,7 +1738,9 @@ describe("bin/loop-lease", () => {
         `${Math.floor(Date.now() / 1000)}\n`,
       );
 
-      expect(run(["alive", sandbox]).status, "短い頭で他人と当たりうる").toBe(1);
+      // **「回っている」にはしない**（#383 で、作業場の書かれていない印は
+      // 「判定できない」へ倒すようにした——**短い頭も同じ扱い**である）
+      expect(run(["alive", sandbox]).status, "短い頭で他人と当たりうる").not.toBe(0);
     });
 
     it("自分の印が 1 つも無いところに知らない形があれば、判定できないと答える", () => {

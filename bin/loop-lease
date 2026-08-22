@@ -734,9 +734,26 @@ if [[ $ACTION == "alive" ]]; then
   for alive_rounds in "$common_dir"/valence-loop-rounds-worker*; do
     [[ -f $alive_rounds ]] || continue
     alive_name="${alive_rounds##*/valence-loop-rounds-}"
-    if ! worker_name_is_mine "$alive_name" "$alive_path"; then
-      # **知らない形は素通りしない**（上記）。**この作業場のものかもしれない**
-      worker_name_is_known_form "$alive_name" || alive_unknown=1
+    # **中身で照らすほうが先** (#383 のレビュー)。**印の 2 行目に作業場がある**なら、
+    # **名前の作り方が変わっても当たる**（`lease` の 3 行目と同じ形。#291）。
+    alive_marked=""
+    { read -r _ && read -r alive_marked; } <"$alive_rounds" 2>/dev/null || alive_marked=""
+    if [[ -n $alive_marked ]]; then
+      [[ $alive_marked == "$alive_path" ]] || continue
+    elif ! worker_name_is_mine "$alive_name" "$alive_path"; then
+      # **作業場が書かれておらず、名前でも当たらない**——**前の版が置いた印は
+      # この形である**（**名前は本物の旧指紋で、いまの digest では照らせない**）。
+      # **「よその作業場のもの」と決めつけない**——**判定できない側へ倒す。**
+      #
+      # **ただし、窓より古い印は迷わない** (#298 の 2 周目と同じ向き)。**誰のものでも
+      # 「いま回っている」ではない**ので、**そこで判定不能にすると、落ちた作業場の
+      # 仕事を誰も拾えなくなる**（**古い印は書き直されないので、永久に**）。
+      if read -r alive_started <"$alive_rounds" 2>/dev/null \
+        && [[ $alive_started =~ ^[0-9]+$ ]] \
+        && ((now - alive_started >= TTL_SEC)); then
+        continue
+      fi
+      alive_unknown=1
       continue
     fi
     # **この作業場の名乗りが 1 つでも見えたか**（下の「判定できない」を狭める）
@@ -1364,7 +1381,13 @@ acquire | recover)
   forget_superseded "$owner"
   # **周回を始めた印。** 失敗しても lease は取れているので止めない——
   # 読む側 (bin/loop-stall) は印が無ければ「分からない」として、これまでどおり数える。
-  if ! { printf '%s\n' "$now" >"$ROUNDS.tmp" 2>/dev/null && mv -f "$ROUNDS.tmp" "$ROUNDS" 2>/dev/null; }; then
+  # **印にも作業場を書く** (#383 のレビュー)。**名前の作り方は版で変わる**ので、
+  # **名前だけで照らすと、前の版が置いた印に当たらない**——**生きている持ち主が
+  # 「回っていない」に落ち、`bin/loop-claim` がそこで引き継ぐ**（#296 / #298 の形）。
+  # **lease は 3 行目の作業場で照らしている**（#291）——**印も同じにする。**
+  round_mark="$now"
+  [[ -z ${WORKSPACE_PATH-} ]] || round_mark+=$'\n'"$WORKSPACE_PATH"
+  if ! { printf '%s\n' "$round_mark" >"$ROUNDS.tmp" 2>/dev/null && mv -f "$ROUNDS.tmp" "$ROUNDS" 2>/dev/null; }; then
     rm -f "$ROUNDS.tmp" 2>/dev/null || true
     echo "[WARN] $SCOPE_LABEL の周回の印を書けません: $ROUNDS" >&2
   fi
