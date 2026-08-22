@@ -26,9 +26,14 @@ const PROCEDURE = ".claude/commands/loop-worker.md";
 function syncBlock(): string {
   const body = readFileSync(join(REPO_ROOT, PROCEDURE), "utf8");
   const blocks = [...body.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => match[1] ?? "");
-  // **rebase の前にも同じ口を通る**（`--fetch-only`）ので、そちらを外す
+  // **rebase の前にも同じ口を通る**（`--fetch-only`）ので、そちらを外す。
+  // **1.0 の「枝から戻る」も同じ口を通る** (#369)——**あちらは戻すだけで、
+  // 入れ替わったかは見ない**ので、**`bin/loop-procedure-changed` の有無で分ける。**
   const found = blocks.filter(
-    (block) => block.includes("bin/loop-sync-main") && !block.includes("--fetch-only"),
+    (block) =>
+      block.includes("bin/loop-sync-main") &&
+      !block.includes("--fetch-only") &&
+      block.includes("bin/loop-procedure-changed"),
   );
   expect(found, "「main を最新化する」ブロックが 1 つに絞れない").toHaveLength(1);
   return found[0] ?? "";
