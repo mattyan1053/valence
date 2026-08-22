@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # **手順書の本体を、ディスクから読む** (#319)。
 #
-#   bin/loop-procedure-body <役>
+#   bin/loop-procedure-body <役>            本体を出す
+#   bin/loop-procedure-body --entry <役>    入口を出す (#373)
 #
-#   exit 0 = 本体を標準出力へ出した
-#   exit 2 = 読めない（本体が無い / 使い方の誤り）——**この周回は何もせず終わる**
+#   exit 0 = 標準出力へ出した
+#   exit 2 = 読めない（無い / 使い方の誤り）——**この周回は何もせず終わる**
 #
 # **`/loop <間隔> /loop-worker` は、登録した時点の本文を cron で再生する。**
 # **ディスクの `.claude/commands/loop-<役>.md` を毎回読み直すわけではない**ので、
@@ -18,6 +19,16 @@
 # **読めなければ止まる。** **入口には本体が無い**ので、**「読めないまま進む」は
 # 「手順の大半を飛ばす」ことと同じ**である——**黙って古い手順で走らせない。**
 #
+# **入口もここから読めるようにした** (#373)。**配られた本文が古いとき、呼び直しで
+# 新しい版が届く保証は無い**（**実測で 2 回中 1 回**。#94）——**届かなければ、
+# 人が来るまで動けない。** **読む先がディスクにあれば、その周回のうちに前へ進める。**
+#
+# **印の検査は捨てない** (#241 / #243 / #244)——**読み直した本文の印で `acquire` を
+# 打ち直す**ので、**「古い手順で走り続ける」形にはならない**（**印の行も出す**）。
+#
+# **同じスクリプトに置くのは、仕事が同じだから**である（**ディスクから手順を読む**）
+# ——**読めなかったときの倒し方も 1 つで済む。**
+#
 # **成功と失敗を、終了コードで分ける。** **本体が空でも出力は空**なので、
 # **出力の有無で判断させない**（**読む側は終了コードを見る**）。
 #
@@ -27,11 +38,19 @@ set -uo pipefail
 readonly ROLES=(master worker)
 
 usage() {
-  echo "使い方: bin/loop-procedure-body <役>" >&2
+  echo "使い方: bin/loop-procedure-body <役>            本体を出す" >&2
+  echo "        bin/loop-procedure-body --entry <役>    入口を出す" >&2
   echo "        役: ${ROLES[*]}" >&2
-  echo "        exit 0 本体を出した / exit 2 読めない" >&2
+  echo "        exit 0 出した / exit 2 読めない" >&2
   exit 2
 }
+
+WANT_ENTRY=0
+if [[ ${1-} == "--entry" ]]; then
+  WANT_ENTRY=1
+  shift
+fi
+readonly WANT_ENTRY
 
 [[ $# -eq 1 ]] || usage
 
@@ -44,15 +63,22 @@ done
 readonly ROLE
 
 # **スクリプトの隣から辿る。** **cwd からではない**——**このスクリプトが属する
-# チェックアウトの本体**を読みたい（`bin/loop-procedure-stamp` と同じ理由）。
-readonly BODY="${BASH_SOURCE[0]%/*}/../loop/procedure/$ROLE.md"
+# チェックアウトの手順**を読みたい（`bin/loop-procedure-stamp` と同じ理由。
+# **入口の置き場所も、あちらと同じところを見る**）。
+if ((WANT_ENTRY == 1)); then
+  readonly DOC="${BASH_SOURCE[0]%/*}/../.claude/commands/loop-$ROLE.md"
+  readonly WHAT="入口"
+else
+  readonly DOC="${BASH_SOURCE[0]%/*}/../loop/procedure/$ROLE.md"
+  readonly WHAT="本体"
+fi
 
-if [[ ! -f $BODY ]]; then
-  echo "[FAIL] 手順書の本体が見つかりません: $BODY" >&2
+if [[ ! -f $DOC ]]; then
+  echo "[FAIL] 手順書の${WHAT}が見つかりません: $DOC" >&2
   exit 2
 fi
 
-if ! cat "$BODY"; then
-  echo "[FAIL] 手順書の本体を読めません: $BODY" >&2
+if ! cat "$DOC"; then
+  echo "[FAIL] 手順書の${WHAT}を読めません: $DOC" >&2
   exit 2
 fi
