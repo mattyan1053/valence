@@ -53,6 +53,15 @@ describe.each(ROLES)("%s の出口が、木を戻す", (role) => {
     expect(returns, "返したあとに木を動かしている").toBeLessThan(releases);
   });
 
+  it("戻れたら、カウンタを消す", () => {
+    // **消さないと、散発的な失敗が何周うまくいっても足し算される** (#406 のレビュー)
+    // ——**3 周続いた扱いで全ループが止まる。** **`main-sync-failed` と同じ形**で、
+    // **前へ進んだ証拠は「戻れたこと」**である（#266）。
+    expect(exitSection(role), "戻れた周回が、カウンタを消していない").toContain(
+      "bin/loop-stall --reset return-main-failed",
+    );
+  });
+
   it("戻せなかったときの行き先が書いてある", () => {
     // **戻せない理由は実在する**（**commit していない変更、切り替えの失敗**）——
     // **黙って進まない**（#405 の完了条件）。**識別子は `bin/loop-stall` が持つ。**

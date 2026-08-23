@@ -425,6 +425,10 @@ readonly WORKSPACE_SCOPED=(
   # **#367 が狙っているのは「手順 PR のマージと打ち切りが交互に続く」形**なので、
   # **master が進むたびに消えると、狙った場面でだけ鳴らない。**
   "procedure-churn"
+  # **dirty も切り替えの失敗も、その作業ツリー固有**である (#406 のレビュー)
+  # ——**隣に `dirty` と `main-sync-failed` が並んでいるのと同じ理由。**
+  # **共有のままだと、別々の作業場が 1 回ずつ失敗しただけで上限に近づく。**
+  "return-main-failed"
   "wrong-branch"
   "too-many-own-prs"
   "local-ci-failed"

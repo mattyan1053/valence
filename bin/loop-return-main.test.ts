@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-return-main", import.meta.url));
+const SYNC = fileURLToPath(new URL("./loop-sync-main", import.meta.url));
 
 type Run = { status: number; stdout: string; stderr: string };
 
@@ -36,6 +37,16 @@ describe("bin/loop-return-main", () => {
     git(cwd, "add", "-A");
     git(cwd, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", `edit ${path}`);
     return spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).stdout.trim();
+  }
+
+  /**
+   * **この周回の同期**。**戻る先は、ここで控えた SHA** である（#406 のレビュー）
+   * ——**`origin/main` は ref なので、この周回の途中でも動く**（**master は毎周回
+   * fetch する**）。
+   */
+  function syncRound(): void {
+    const synced = spawnSync(SYNC, [], { cwd: repo, encoding: "utf8" });
+    expect(synced.status, `同期できない: ${synced.stderr}`).toBe(0);
   }
 
   function run(cwd = repo): Run {
@@ -69,8 +80,9 @@ describe("bin/loop-return-main", () => {
     rmSync(origin, { recursive: true, force: true });
   });
 
-  it("枝の上にいたら、origin/main の先端へ戻す", () => {
+  it("枝の上にいたら、この周回が同期した先へ戻す", () => {
     // **これが本題。** **戻さないと、次の周回は必ず捨てられる**
+    syncRound();
     git(repo, "switch", "--quiet", "-c", "feat/x");
     const onBranch = commitIn(repo, "README.md", "枝の変更\n");
     expect(head(), "枝の上にいない").toBe(onBranch);
@@ -80,7 +92,8 @@ describe("bin/loop-return-main", () => {
     expect(head(), "origin/main へ戻っていない").toBe(originMain());
   });
 
-  it("もともと origin/main の先端なら、何もしない", () => {
+  it("もともとその先端なら、何もしない", () => {
+    syncRound();
     // **master は枝へ移らない**（**当たるのは worker だけ**）——**手順は 1 つ**なので、
     // **移っていない周回でも通る**必要がある
     expect(head()).toBe(originMain());
@@ -91,6 +104,7 @@ describe("bin/loop-return-main", () => {
   it("dirty なら、戻さずに言う", () => {
     // **持ったまま移ると、どの枝の作業か消える**（1.0 と同じ判断）——
     // **黙って進まない**（#405 の完了条件）
+    syncRound();
     git(repo, "switch", "--quiet", "-c", "feat/x");
     const onBranch = commitIn(repo, "README.md", "枝の変更\n");
     writeFileSync(join(repo, "README.md"), "まだ commit していない\n");
@@ -100,6 +114,43 @@ describe("bin/loop-return-main", () => {
     expect(answered.status, "dirty のまま動いている").toBe(1);
     expect(head(), "dirty なのに木を動かしている").toBe(onBranch);
     expect(answered.stderr, "理由を言っていない").toMatch(/dirty|変更/);
+  });
+
+  it("周回の途中で ref が動いても、検査していない版へは入れない", () => {
+    // **これがいちばん重い** (#406 のレビュー)。**`origin/main` は ref なので、
+    // この周回の途中でも動く**（**master は毎周回 fetch し、refs/remotes は作業場
+    // どうしで共有**）——**そのあとに打つのは出口の残り**（`loop-stall` /
+    // `loop-handoff` / **`loop-lease release`**）で、**入れ替わった版がそこで走る。**
+    //
+    // **入口はまさにこれを捨てている**（「1 以外はすべて捨てる」）——**出口で
+    // 検査なしに同じことをしない。** **`release` が落ちれば lease が残る。**
+    syncRound();
+    const synced = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: repo,
+      encoding: "utf8",
+    }).stdout.trim();
+    git(repo, "switch", "--quiet", "-c", "feat/x");
+    commitIn(repo, "README.md", "枝の変更\n");
+    // **別の作業場が先に fetch した**（**ref だけが動く**）
+    commitIn(origin, "README.md", "あとから入った main\n");
+    git(repo, "fetch", "--quiet", "origin", "main");
+    expect(originMain(), "ref が動いていない（この試験は成立していない）").not.toBe(synced);
+
+    expect(run().status, run().stderr).toBe(0);
+
+    expect(head(), "検査していない版へ入っている").toBe(synced);
+  });
+
+  it("同期の記録が無ければ、判定できないと言う", () => {
+    // **「戻せなかった」と「そもそも、どこへ戻るのか分からない」を混ぜない。**
+    // **ref で代用しない**——**代用した瞬間、上の穴が黙って開く。**
+    git(repo, "switch", "--quiet", "-c", "feat/x");
+    commitIn(repo, "README.md", "枝の変更\n");
+
+    const answered = run();
+
+    expect(answered.status, "記録が無いのに戻っている").toBe(2);
+    expect(answered.stderr, "何が分からないのかが出ていない").toMatch(/同期/);
   });
 
   it("追跡していない場所では、判定できないと言う", () => {

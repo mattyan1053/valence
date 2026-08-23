@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 周回の出口で、**作業ツリーを `origin/main` の先端へ戻す** (#405)。
+# 周回の出口で、**作業ツリーを、この周回が同期した先へ戻す** (#405 / #406 のレビュー)。
 #
 #   bin/loop-return-main
 #
@@ -40,8 +40,25 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 2
 fi
 
-if ! target="$(git rev-parse --verify --quiet "origin/main^{commit}")" || [[ -z $target ]]; then
-  echo "[FAIL] origin/main を特定できません（戻る先が分かりません）" >&2
+# **戻るのは、この周回が同期した SHA** である (#406 のレビュー)——**`origin/main` は
+# ref なので、この周回の途中でも動く**（**master は毎周回 fetch し、`refs/remotes` は
+# 作業場どうしで共有**）。**ref で戻ると、検査していない版の上で出口の残りを打つ**
+# ——**入口はまさにそれを捨てている**（「1 以外はすべて捨てる」）。
+#
+# **ref で代用しない。** **代用した瞬間、この穴が黙って開く**——**記録が無いなら
+# 「どこへ戻るのか分からない」と答える**（**戻せなかったのとは別の状態**）。
+if ! git_dir="$(git rev-parse --git-dir 2>/dev/null)" || [[ -z $git_dir ]]; then
+  echo "[FAIL] この作業場の git ディレクトリを特定できません" >&2
+  exit 2
+fi
+readonly SYNCED="$git_dir/valence-loop-synced-main"
+if ! read -r target <"$SYNCED" 2>/dev/null || [[ -z $target ]]; then
+  echo "[FAIL] この周回が同期した先の記録がありません: $SYNCED" >&2
+  echo "       戻る先が分かりません（bin/loop-sync-main を通した周回だけが戻れます）" >&2
+  exit 2
+fi
+if ! target="$(git rev-parse --verify --quiet "$target^{commit}")" || [[ -z $target ]]; then
+  echo "[FAIL] 同期した先の commit を特定できません: $SYNCED" >&2
   exit 2
 fi
 
@@ -66,8 +83,8 @@ if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
   exit 1
 fi
 
-if ! git switch --detach origin/main >/dev/null 2>&1; then
-  echo "[FAIL] origin/main へ戻せません（切り替えに失敗しました）" >&2
+if ! git switch --detach "$target" >/dev/null 2>&1; then
+  echo "[FAIL] 同期した先へ戻せません（切り替えに失敗しました）: $target" >&2
   exit 1
 fi
 exit 0
