@@ -229,6 +229,35 @@ cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
 #
 # **印は走り終えた証拠でもある。** 途中で殺されればここまで来ないので出ない。
 # **印だけで緑と読ませない**ため、**印に合否そのものを入れる**。
+# **共有の記録のうち、この作業場が書いた行** (#398 のレビュー)。
+#
+# **行数では見ない。** **上限（20 行）に達した記録は、増えても行数が変わらない**
+# ——**いちばん効かせたい場面で黙る**（**満杯なのは、まさに汚れているとき**である）。
+#
+# **他の作業場のぶんも見ない。** **`./task check` は 5 分走る**ので、**その間に別の
+# 作業場が 1 行書けば、こちらが何も汚していなくても赤**になる——**合否が他人の持ち物で
+# 決まる**（`AGENTS.md` §5 / #186）。**3 列目が、書いた作業場である。**
+lease_record_snapshot() {
+  local common record
+  common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ -n $common ]] || return 1
+  record="$common/valence-loop-lease-missing"
+  # **無いのは正常**（**1 度も飛ばしていない**）
+  [[ -e $record ]] || return 0
+  [[ -f $record ]] || return 1
+  cat "$record"
+}
+
+# **前後を比べて、この作業場が新しく書いた行を出す。** **1 行でもあれば exit 0。**
+lease_record_intruders() {
+  local before="$1" after="$2" mine="$3" added
+  # **増えた行だけを見る**（**畳まれて消えた行は関係ない**）
+  added="$(grep -Fxv -f "$before" "$after" 2>/dev/null || true)"
+  [[ -n $added ]] || return 1
+  printf '%s\n' "$added" | awk -F'\t' -v mine="$mine" 'NF >= 3 && $3 == mine' | grep -q . || return 1
+  printf '%s\n' "$added" | awk -F'\t' -v mine="$mine" 'NF >= 3 && $3 == mine'
+}
+
 cmd_check() {
   # **走っていることを、走る前に記録する** (#375)。**印は終わったときにしか出ない**
   # ——**足りなかったのは、読む側を強いるもの**である（**2 つの作業場が、別々の日に
@@ -250,9 +279,41 @@ cmd_check() {
     echo "[FAIL] check の記録を残せません。合否を記録できない check は使えません" >&2
     return 2
   fi
+  # **試験の一式が、共有の記録を汚していないかを測る** (#397)。
+  #
+  # **本文の走査では別名を追い切れない**（#390 / #393 / #394 で 3 度足した）——
+  # **記録そのものを見れば、別名は関係ない。** **増えたのがどの試験かは分からなくて
+  # よい**（**増えたことが分かれば、探せる**）。
+  #
+  # **読めなければ、この check は使えない**——**「読めなかった」を「増えていない」に
+  # しない**（**黙って通ると、この見張りが何も見ていない状態で緑になる**）。
+  # **試験が、共有の記録へ書いていないか** (#397 / #398 のレビュー)。
+  # **読めなければ通さない**——**「読めなかった」を「書いていない」にしない。**
+  local before_file after_file intruders
+  before_file="$(mktemp)" || return 2
+  if ! lease_record_snapshot >"$before_file"; then
+    echo "[FAIL] 入口を飛ばした実行の記録を読めません。汚していないことを確かめられません" >&2
+    rm -f "$before_file"
+    return 2
+  fi
   ensure_up
   local status=0
   exec_app pnpm check || status=$?
+  after_file="$(mktemp)" || {
+    rm -f "$before_file"
+    return 2
+  }
+  if ! lease_record_snapshot >"$after_file"; then
+    echo "[FAIL] 記録を読めません（試験のあと）。汚していないことを確かめられません" >&2
+    status=2
+  elif intruders="$(lease_record_intruders "$before_file" "$after_file" "$PWD")"; then
+    echo "[FAIL] 試験が、この作業場の入口を飛ばした実行を記録しました" >&2
+    printf '%s\n' "$intruders" | sed 's/^/       /' >&2
+    echo "       実物のリポジトリに対して実物のスクリプトを走らせた試験があります" >&2
+    echo "       砂場（cwd）を渡すこと。記録は cwd の git から決まります" >&2
+    status=1
+  fi
+  rm -f "$before_file" "$after_file"
   # **記録してから印を出す。** **印は「走り終えた」を意味する**ので、
   # **記録できないまま出すと、読む側は「終わった」と読む**——**記録は
   # 「走っている」のまま残る**ので、**commit の側でも止まる。**

@@ -10,6 +10,10 @@
  * 記録は「どこまで進んだか」で決まる。**
  *
  * **止めない。** **記録するだけ**である（`bin/loop-lease check` は `|| true` で呼ぶ）。
+ *
+ * **これで全部ではない** (#397)。**JavaScript の別名は正規表現で数え切れない**
+ * ——**ここは「いちばん外側の安い網」**である。**汚していないことそのものは、
+ * `./task check` が記録の前後を突き合わせて見ている**（`loop/record-growth-guard.test.ts`）。
  */
 
 import { spawnSync } from "node:child_process";

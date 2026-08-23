@@ -29,7 +29,13 @@ describe("bin/loop-procedure-body", () => {
   });
 
   function run(args: string[], script: string = SCRIPT): { status: number; stdout: string } {
-    const result = spawnSync(script, args, { encoding: "utf8" });
+    // **砂場で起こす** (#398 のレビュー)。**`bin/loop-lease check` は cwd の git へ
+    // 「入口を飛ばした実行」を書く**——**実物のリポジトリで起こすと、そこへ積まれる**
+    // （**保つのは 20 件**なので、**本物が押し出される**）。
+    // **本体はスクリプトの隣から辿る**ので、**cwd は何でもよい。**
+    const cwd = mkdtempSync(join(tmpdir(), "procedure-body-cwd-"));
+    sandboxes.push(cwd);
+    const result = spawnSync(script, args, { cwd, encoding: "utf8" });
     return { status: result.status ?? -1, stdout: result.stdout };
   }
 

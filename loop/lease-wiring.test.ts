@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -16,7 +17,9 @@ function usage(): string {
   const result = execFileSync(
     "bash",
     ["-c", `"${join(REPO_ROOT, "bin/loop-lease")}" 2>&1 || true`],
-    { cwd: REPO_ROOT, encoding: "utf8" },
+    // **砂場で引く** (#398 のレビュー)。**使い方は cwd に依らない**が、
+    // **`bin/loop-lease check` は cwd の git へ書く。**
+    { cwd: mkdtempSync(join(tmpdir(), "lease-usage-")), encoding: "utf8" },
   );
   return result;
 }
