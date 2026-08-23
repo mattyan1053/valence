@@ -88,7 +88,9 @@ function queriesIn(text: string, commands: Set<string>): string[] {
   // **コメントは外す**——**説明の中の `./task db:up` は、呼んでいない。**
   const code = text.split("\n").map(withoutComment).join("\n");
   const found: string[] = [];
-  for (const substitution of code.matchAll(/\$\((?:[^()]|\([^()]*\))*\)/g)) {
+  // **逃がした `$(` は、実行されない** (#425 のレビュー)——**案内としてコマンドの例を
+  // 文字列で出す行がある**（`bin/lint-shell` / `bin/loop-lease`）。
+  for (const substitution of code.matchAll(/(?<!\\)\$\((?:[^()]|\([^()]*\))*\)/g)) {
     // **入れ子の `$( )` だけを潰す**（**外側の `$( )` は剥がしてから**）
     // ——**`"$(git …)/task"` の中身は口ではない。**
     // **外側ごと潰すと、`$(./task port)` が丸ごと消える**（**空振りする**）。
@@ -169,6 +171,13 @@ describe("見落とす形を、入力に置く", () => {
   it("説明の中の口は、数えない", () => {
     // **コメントには `./task db:up` が何度も出てくる**
     expect(queriesIn('# 直し方: x="$(./task db:up)"\n', commands)).toEqual([]);
+  });
+
+  it("逃がした `$(` は、数えない", () => {
+    // **文字列として出す例**である（**実行されない**）——**このリポジトリは、
+    // 案内としてコマンドの例を文字列で出す**（`bin/lint-shell` / `bin/loop-lease`）。
+    // **拾うと、書いた人には理由の分からない赤が出る**（#425 のレビュー）。
+    expect(queriesIn('echo "使い方: \\$(./task doctor)" >&2\n', commands)).toEqual([]);
   });
 
   it("行末のコメントの中の口も、数えない", () => {
