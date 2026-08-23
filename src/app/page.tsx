@@ -8,6 +8,7 @@
  */
 
 import { visibleRepositoriesForCurrentUser } from "../composition/auth";
+import { RepositoryList } from "../ui/repository-list/repository-list";
 
 /**
  * **要求ごとに描く。静的に生成させない** (#213 のレビュー)。
@@ -23,16 +24,6 @@ import { visibleRepositoriesForCurrentUser } from "../composition/auth";
  * **外さないこと。** **速くはなるが、その速さは「誰にとっても同じ画面」と引き換え**である。
  */
 export const dynamic = "force-dynamic";
-
-/**
- * 読めなかったものの注記。**件数だけを出す** (#213 のレビュー)。
- *
- * **理由は画面へ出さない**——**Zod のメッセージには値が入りうる**
- * （`app-credentials.ts` が「Zod のエラーを持ち上げない」としているのと同じ理由）。
- */
-export function invalidNote(count: number): string | undefined {
-  return count === 0 ? undefined : `${count} 件は読めませんでした。`;
-}
 
 /**
  * 盤面への行き先 (#314)。
@@ -53,22 +44,15 @@ export default async function Home() {
       <h1 className="font-mono text-3xl font-bold tracking-tight">Valence</h1>
       <p className="text-lg">AI 時代の PR コントロールセンター</p>
       {result.kind === "listed" ? (
-        <>
-          <ul className="flex flex-col gap-1 text-sm">
-            {result.listing.repositories.map((repository) => (
-              <li key={`${repository.owner}/${repository.name}`}>
-                {/* **並べるだけでは、盤面へ行けない** (#314)。**名前を入力させない** */}
-                <a className="underline" href={boardPath(repository)}>
-                  {repository.owner}/{repository.name}
-                </a>
-              </li>
-            ))}
-          </ul>
-          {/* **黙って捨てない。** **消すと「読めなかった」が「見えなかった」に化ける** */}
-          {result.listing.invalid.length > 0 ? (
-            <p className="text-sm opacity-70">{invalidNote(result.listing.invalid.length)}</p>
-          ) : undefined}
-        </>
+        <RepositoryList
+          // **行き先はここで組む** (#417 のレビュー)。**経路は `app` の話**で、
+          // **表示の部品は `app` を import できない**（`AGENTS.md` §3 の表）
+          repositories={result.listing.repositories.map((repository) => ({
+            ...repository,
+            href: boardPath(repository),
+          }))}
+          unreadable={result.listing.invalid.length}
+        />
       ) : (
         <p className="text-sm">
           {result.kind === "signed-out"

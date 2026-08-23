@@ -13,25 +13,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { boardPath, dynamic, invalidNote } from "./page";
-
-describe("読めなかったものを画面から消さない", () => {
-  // **port が `invalid` を残しているのは、この最後の 1 歩のため**である
-  // （**捨てると「読めなかった」が「見えなかった」に化ける**）——
-  // **画面が `repositories` だけを描くと、そこで化ける**（#213 のレビュー）。
-  it("読めなかったものがあれば、件数が出る", () => {
-    expect(invalidNote(2)).toContain("2");
-  });
-
-  it("無ければ、何も出さない", () => {
-    expect(invalidNote(0)).toBeUndefined();
-  });
-
-  it("理由は画面へ出さない", () => {
-    // **Zod のメッセージには値が入りうる**（`app-credentials.ts` と同じ理由）
-    expect(invalidNote(1)).not.toMatch(/expected|received|invalid_type/i);
-  });
-});
+import { boardPath, dynamic } from "./page";
 
 describe("盤面への行き先", () => {
   // **並べるだけでは、依存グラフもリスク Tier も見られない** (#314)
