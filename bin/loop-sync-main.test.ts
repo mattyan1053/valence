@@ -89,7 +89,14 @@ describe("bin/loop-sync-main", () => {
 
     const count = (path: string) =>
       existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").length : 0;
+    // **砂場で起こす** (#393)。**記録（`valence-loop-lease-missing`）は cwd の git から
+    // 決まる**ので、**実物のリポジトリで起こすと、そこへ積まれうる**——
+    // **いま積まれていないのは身代わりの `git` が `rev-parse` を知らないから**で、
+    // **覚えた日に黙って戻る。** **身代わりに頼らず、行き先を離しておく。**
+    const workdir = join(sandbox, "cwd");
+    mkdirSync(workdir, { recursive: true });
     const result = spawnSync(SCRIPT, options.args ?? [], {
+      cwd: workdir,
       encoding: "utf8",
       env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
     });
