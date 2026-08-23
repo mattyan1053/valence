@@ -118,6 +118,31 @@ describe("開発の手引きは、作業場ごとの port を訊く", () => {
     }
   });
 
+  it("転送は、Supabase の口も通す", () => {
+    // **認可の行き先はブラウザが読む値**（`NEXT_PUBLIC_SUPABASE_URL` =
+    // `http://localhost:54321`）——**アプリの口だけを転送すると、ブラウザは
+    // 「自分の localhost」の 54321 を叩き、そこに誰も居ない**（#418 のレビュー）。
+    // **#409 が止まったのは認可画面**で、**この手順はそこへ辿り着かせるためのもの**である。
+    const forwarding = commands().filter((line) => line.includes("ssh -L"));
+
+    expect(forwarding.length, "転送の例が無い").toBeGreaterThan(0);
+    for (const line of forwarding) {
+      expect(line, "Supabase の口を転送していない").toContain("54321");
+    }
+  });
+
+  it("固定の番号には、固定でよい理由が添えてある", () => {
+    // **書き写してよいものと、いけないもの**を分ける——**アプリの port は作業場ごとに
+    // 違う**（`./task` が決める）が、**54321 は Supabase CLI が固定で publish する**
+    // （**変える設定が無い**。`AGENTS.md` §6）。**理由が無いと、次に読む人が
+    // 「ここも訊く形にすべきでは」で迷う**か、**逆に app の port も書き写す。**
+    const text = readFileSync(SKILL, "utf8");
+    const near = text.slice(text.indexOf("54321:localhost:54321"));
+
+    expect(near, "固定でよい理由が無い").toMatch(/固定/);
+    expect(near, "誰が publish しているのかが無い").toMatch(/Supabase CLI/);
+  });
+
   it("自分の作業場のものかを確かめる手がある", () => {
     // **間違えてもエラーにならない**ので、**確かめる手が要る**——
     // **その port を publish しているコンテナの名前を見る。**

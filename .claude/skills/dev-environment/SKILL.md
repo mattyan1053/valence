@@ -148,11 +148,19 @@ DB を覗くときは `./task db:psql`（studio は無効）。
 
 ```bash
 # ここは、作業場のある機械で打つ
-port="$(./task port)"
+./task db:up         # **Supabase も要る**（`./task up` は app しか起こさない）
 ./task up            # 動いていなければ
+port="$(./task port)"
 ```
 
-**リモートの VM に作業場があるなら、転送してから開く**（下の「リモート VM から使う」）。
+**`./task db:up` を飛ばすと、認可画面まで行けない**——**ログインの開始は
+`SUPABASE_URL`（`http://kong:8000`）へ繋ぐ**ので、**スタックが止まっていれば
+そこで落ちる。** **初めて開くときは、まさにその状態**である。
+
+**リモートの VM に作業場があるなら、転送してから開く**（下の「リモート VM から使う」）
+——**アプリの口だけでは足りない。** **認可の行き先はブラウザが読む値
+（`NEXT_PUBLIC_SUPABASE_URL` = `http://localhost:54321`）**なので、
+**ブラウザは「自分の localhost」の 54321 を叩く。**
 
 1. ブラウザで `http://127.0.0.1:<port>/` を開く
 2. **ログインへ** → **GitHub でログイン** → **GitHub の認可画面で許可する**（初回だけ）
@@ -190,7 +198,13 @@ gh pr list --repo <owner>/<name> --state open --json number --jq '.[].number'
 # ディレクトリ名から別の port が出る**（`valence` という名前の clone が手元にあれば、
 # **転送は通り、画面も開く**。**開いたのは別の作業場のアプリ**である）
 port="$(ssh <user>@<remote-vm> 'cd <作業場のパス> && ./task port')"
-ssh -L "$port:localhost:$port" <user>@<remote-vm>
+ssh -L "$port:localhost:$port" -L 54321:localhost:54321 <user>@<remote-vm>
 ```
 
-ブラウザから Supabase を直接叩くようになったら `-L 54321:localhost:54321` も足す。
+**Supabase の口（54321）も要る。** **ログインすると、ブラウザは
+`NEXT_PUBLIC_SUPABASE_URL`（`http://localhost:54321`）へ行く**——**アプリの口だけを
+転送すると、認可画面へ辿り着けない。**
+
+**こちらは番号を書き写してよい。** **アプリの port は作業場ごとに違う**（`./task` が
+決める。#82）が、**54321 を publish しているのは Supabase CLI で、固定である**
+（**変える設定は無い**。`AGENTS.md` §6）——**訊く先が無いものは、訊けない。**
