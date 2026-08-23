@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -102,6 +102,88 @@ describe("bin/loop-procedure-changed", () => {
     git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "本体と試験");
 
     expect(run(before).status).toBe(0);
+  });
+
+  describe("捨てた周回を、あとから数えられるようにする（#400）", () => {
+    /** 積まれた記録の行。**読み口はこのスクリプトが持つ。** */
+    function churnLog(): string[] {
+      const listed = runRaw("--role", "master", "--churn-log");
+      return listed.stdout.split("\n").filter(Boolean);
+    }
+
+    it("入れ替わりを見つけたら、何が入れ替わったかを残す", () => {
+      // **`procedure-churn` は「捨てた」という事実だけを数える** (#367)。**中身が
+      // 違うものが同じ名前で数えられている**——**他人が入れ替えたものを踏んだ**のと、
+      // **自分が撒いた種**（**自分が直した `task` の 1 行で、自分の次の周回が捨てられる**）
+      // が混ざると、**「続くと実装が進まない」の判断が濁る。**
+      const before = commit("src/a.ts", "前\n");
+      const after = commit("task", "後\n");
+
+      expect(run(before).status, "入れ替わりを見つけていない").toBe(0);
+
+      const lines = churnLog();
+      expect(lines.length, "捨てた周回が残っていない").toBe(1);
+      expect(lines[0], "何が入れ替わったかが無い").toContain("task");
+      expect(lines[0], "どの役かが無い").toContain("master");
+      expect(lines[0], "どの版からどの版へかが無い").toContain(`${before}..${after}`);
+    });
+
+    it("変わっていない周回は、残さない", () => {
+      // **数えたいのは「捨てた周回」**である——**通った周回まで積むと、
+      // 記録は「毎周回 1 行」になり、押し出しで本物が消える**（#401 の向き）
+      const before = commit("bin/loop-gate", "前\n");
+      commit("src/only.ts", "後\n");
+
+      expect(run(before).status, "変わったと判定している").toBe(1);
+
+      expect(churnLog(), "捨てていない周回を積んでいる").toEqual([]);
+    });
+
+    it("問い合わせでは積まない", () => {
+      // **`--list` も `--churn-log` も読むだけ**である（#390 と同じ向き）
+      const before = commit("task", "前\n");
+      commit("task", "後\n");
+      expect(run(before).status).toBe(0);
+
+      runRaw("--role", "master", "--list");
+      churnLog();
+
+      expect(churnLog().length, "尋ねるたびに積んでいる").toBe(1);
+    });
+
+    it("記録が無ければ、記録が無いと答える", () => {
+      // **「無い」と「読めない」を混ぜない**（`--verdict` / `--durations` と同じ語彙）
+      expect(runRaw("--role", "master", "--churn-log").status).toBe(4);
+    });
+
+    it("記録が伸び続けない", () => {
+      const before = commit("task", "前\n");
+      for (let index = 0; index < 12; index += 1) {
+        commit("task", `後 ${index}\n`);
+        expect(run(before).status).toBe(0);
+      }
+
+      expect(churnLog().length, "捨てるたびに伸びている").toBeLessThanOrEqual(10);
+    });
+
+    it("記録が書けなくても、周回は止めない", () => {
+      // **#270 の向き**——**測るための記録が落ちても、捨てる判断は返す**
+      const before = commit("src/a.ts", "前\n");
+      commit("task", "後\n");
+      // **積む先の錠を、開けない形にする**（**書けなければ積めない**）
+      const lock = join(repo, ".git", "valence-loop-churn.lock");
+      writeFileSync(lock, "");
+      chmodSync(lock, 0o444);
+
+      const answered = run(before);
+
+      expect(answered.status, "記録できないことで、判定が変わっている").toBe(0);
+      expect(answered.stdout, "捨てた理由が出ていない").toContain("task");
+      // **語を名指しする**——**別の WARN（lease の確認など）で満たさない**
+      expect(answered.stderr, "書けなかったことを黙っている").toMatch(
+        /\[WARN\] 捨てた周回を記録できません/,
+      );
+    });
   });
 
   it("--list は、除いているものも隠さない", () => {
