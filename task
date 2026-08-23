@@ -219,7 +219,7 @@ cmd_restart() { ensure_up; compose restart app; }
 # 任意の pnpm コマンドを流す 例: ./task pnpm add zod
 cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
 
-# lint + typecheck + 依存方向 + テスト をまとめて実行する
+# lint (Biome + bash) + typecheck + 依存方向 + テスト をまとめて実行する
 # **最後の 1 行で「走り終えた」と「合否」を同時に言う** (#147)。
 #
 # **途中で殺されると、終了コードが取れないまま出力だけが残る**——**その出力は、
