@@ -1,10 +1,10 @@
 /**
  * **起動だけをやり直す**（#366）。
  *
- * **`database policies` は、runner の都合で落ちることがある**——**Supabase が使う
- * 543xx は Linux の一時ポート範囲の内側**にあり、**`supabase start` 自身が張る
- * 外向き接続の 1 本が 54322 を掴んだまま bind へ進むと落ちる**
- * （実測 2 回。`failed to bind host port for 0.0.0.0:54322`）。
+ * **`database policies` は、runner の都合で落ちることがある**——**`supabase start` が
+ * `failed to bind host port for 0.0.0.0:54322` で落ちた**（**実測 2 回**）。
+ * **原因は分かっていない**（#436。**前に書いてあった「外向き接続が掴んでいたから」は、
+ * 症状から引いた見立て**で、**#434 の実測と食い違う**）。
  *
  * **PR の中身とは関係が無い**ので、**worker へ渡すと 1 往復まるごと無駄になる。**
  *
@@ -267,5 +267,40 @@ describe("CI が、起動と試験を分けている", () => {
     expect(step("Run database policy tests"), "試験までやり直している").not.toContain(
       "bin/db-start",
     );
+  });
+});
+
+/**
+ * **残る側に、確かめられていない原因が書いてあった**（#436）。
+ *
+ * **実測されているのは症状**（`failed to bind host port`。2 回）で、
+ * **「外向きの接続が掴んでいたから」は、そこから引いた見立て**である
+ * ——**#434 の実測（外向きの ESTABLISHED は docker の publish を妨げない）と食い違う。**
+ *
+ * **振る舞いは壊れていない**（**やり直す条件は症状で書いてある**）。
+ * **困るのは、次に踏んだ人がそこで調べるのをやめること**——**#431 の赤を、
+ * まさにその見立てで説明しかけた。**
+ */
+describe("見出しが、確かめられていることだけを言う", () => {
+  const header = readFileSync(SCRIPT, "utf8").split("set -uo pipefail")[0] ?? "";
+
+  it("原因は分かっていない、と書いてある", () => {
+    expect(header, "原因が確かめられていないことを言っていない").toMatch(/原因は分かっていない/);
+  });
+
+  it("やり直す条件は、症状のままである", () => {
+    // **見出しを直しても、動きは変えない**（#436 の範囲外）
+    // ——**症状で書いてあるのは正しい**（**原因が何であれ、やり直す動きは正しい**）
+    const script = readFileSync(SCRIPT, "utf8");
+
+    expect(script, "やり直す条件が症状で書かれていない").toContain(
+      "readonly RETRYABLE='failed to bind host port|address already in use'",
+    );
+  });
+
+  it("分かったことへ辿れる", () => {
+    // **「外向きの接続は妨げない」は実測されている**（#434 / `bin/port-free`）
+    // ——**次に読む人が、そこから続きを調べられるようにする**
+    expect(header, "分かっていることの在り処が書いていない").toMatch(/bin\/port-free|#434/);
   });
 });
