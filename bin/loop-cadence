@@ -83,6 +83,31 @@ if [[ -z $workspaces ]]; then
   exit 2
 fi
 
+# **いま周回を回している作業場** (#444)。**走っている最中に鳴った cron は
+# `acquire` が exit 1 で終わる**ので、**記録が 1 行も増えない**——**外からは古く
+# 見えるが、止まってはいない**（**実測: 60 分ぶん増えていない worker が `stale` に
+# 落ちた**）。
+#
+# **判定は `bin/loop-lease` が持つ**（`running`）——**期限切れの lease は並ばない**
+# ので、**落ちたまま握りっぱなしの周回は、これまでどおり `stale` へ落ちる。**
+#
+# **読めなければ、空にする**（**「回していない」側へ倒す**）——**読めないことで
+# 見張りが黙ると、止まっても言わなくなる。**
+running_scopes=""
+if ! running_scopes="$("${BASH_SOURCE[0]%/*}/loop-lease" running worker 2>/dev/null </dev/null)"; then
+  running_scopes=""
+fi
+if ! master_running="$("${BASH_SOURCE[0]%/*}/loop-lease" running master 2>/dev/null </dev/null)"; then
+  master_running=""
+fi
+running_scopes="$running_scopes"$'\n'"$master_running"
+
+# その作業場が、いま回しているか。
+is_running() {
+  [[ -n $1 ]] || return 1
+  printf '%s\n' "$running_scopes" | grep -qxF "$1"
+}
+
 # **記録は作業場ごと**である（`bin/loop-lease` が書く。名前の作り方はあちらが持つ）。
 found=0
 stale=0
@@ -275,6 +300,9 @@ evaluate_scope() {
         ((longest + interval <= window)) || window=$((longest + interval))
       fi
       ((age > window)) && verdict="stale"
+      # **回している最中は、止まっているとは言わない** (#444)——**鳴った cron が
+      # 記録に残らないのは、そこで `acquire` が終わっているから**である。
+      [[ $verdict != "stale" ]] || ! is_running "$scope" || verdict="running"
     fi
   fi
   echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"

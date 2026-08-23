@@ -494,6 +494,45 @@ describe("周回が始まったことを、どう始まったかごと残す", (
       expect(done.stdout, "止まったと言っていない").toMatch(/stale/);
     });
 
+    it("周回を回している最中なら、止まっているとは言わない", () => {
+      // **走っている最中に鳴った cron は `acquire` で終わる**ので、**記録が 1 行も
+      // 増えない**（#444）——**外からは古く見えるが、止まってはいない。**
+      // **判定は `bin/loop-lease` が持つ**（**期限切れの lease は並ばない**）。
+      const { dir, stamp } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+        [4_600, "cron"],
+      ]);
+      // **返さない**（＝いま回している）
+      const taken = spawnSync(join(dir, "bin/loop-lease"), ["acquire", "worker", stamp], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+      expect(taken.status, taken.stderr).toBe(0);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.stdout, "回している最中なのに、止まったと言っている").not.toMatch(/stale/);
+      expect(done.stdout, "回していることが読めない").toMatch(/running/);
+      expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    });
+
+    it("回していないなら、これまでどおり止まったと言う", () => {
+      // **上の 1 件が「回しているから」で緑なことを、ここが支えている**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+        [4_600, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "止まっているのに黙っている").toBe(1);
+      expect(done.stdout, "止まったと言っていない").toMatch(/stale/);
+    });
+
     it("渡された間隔なら、記録の大きな間で窓を広げない", () => {
       // **「渡されたものが正」**である（#378。#443 のレビュー）——**測るのは渡されて
       // いないときだけ**なのに、**窓のほうが記録の間で広がっていた。**
@@ -1027,4 +1066,25 @@ describe("master の周回も見る", () => {
     expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
     expect(done.stdout, "居ない master のことを言っている").not.toMatch(/scope=master/);
   });
+});
+
+/**
+ * **混ざるものを、元から入れない**（#444）。
+ *
+ * **捨てて呼び直した周回は、同じ cron の刻みの 2 回目**である——**そこで
+ * `--trigger cron` を渡すと、34〜91 秒の間が記録に入り**、**周期として読まれる**
+ * （**実測: `interval=~91`。窓が約 3 分になっていた**）。
+ *
+ * **両方の役に掛ける。** **master は前から `poke` を渡していた**が、**入口の文は
+ * どちらとも読めた**——**同じ 1 文を、2 つの役が違う側に読んでいた。**
+ * **片方だけ直すと、記録の意味が役で違うまま**である。
+ */
+describe("呼び直した周回を、cron として記録しない", () => {
+  for (const role of ["worker", "master"] as const) {
+    it(`${role} の入口が、呼び直しは poke だと書いている`, () => {
+      const entry = readFileSync(join(REPO_ROOT, `.claude/commands/loop-${role}.md`), "utf8");
+
+      expect(entry, "呼び直しの trigger が書いていない").toMatch(/呼び直(し|した).{0,40}poke/);
+    });
+  }
 });
