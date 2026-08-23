@@ -202,8 +202,18 @@ describe("試験が、共有の記録を汚さない", () => {
     }
     // **`cwd,` の省略記法も「渡している」**である——**見落とすと、砂場で走っている
     // 呼び出しを咎める**（**締めすぎると、この見張りが読まれなくなる**）
-    const passesCwd = /cwd:\s*(?!REPO_ROOT)/.test(call) || /(\{|\s)cwd,/.test(call);
-    return !passesCwd;
+    if (/[{,]\s*cwd,/.test(call)) {
+      return false;
+    }
+    const named = /cwd:\s*([^,\n]+)/.exec(call);
+    if (named === null) {
+      return true;
+    }
+    // **`REPO_ROOT` を含む cwd は砂場ではない** (#394 のレビュー)。**先読みで
+    // 「REPO_ROOT でない」を書くと、`\s*` が 0 文字まで戻って必ず成功する**
+    // ——**実物を名指しした呼び出しが砂場に読まれていた。**
+    // **リポジトリの下も同じ git** なので、**含んでいたら実物である。**
+    return (named[1] ?? "").includes("REPO_ROOT");
   }
 
   /**
@@ -220,12 +230,41 @@ describe("試験が、共有の記録を汚さない", () => {
     return forms.flatMap((form) => [...text.matchAll(form)].map((match) => match[1] ?? ""));
   }
 
+  /**
+   * **第 1 引数を、括弧の中のカンマで切らずに取る** (#394 のレビュー)。
+   *
+   * **`[^,\n]+` は `join(REPO_ROOT, "bin/…")` の内側のカンマで止まる**
+   * ——**直に書いた呼び出しが、そのぶん丸ごと外れていた。**
+   */
+  function firstArgument(text: string, from: number): string {
+    let depth = 0;
+    const ends = (letter: string): boolean => {
+      if (letter === "(") {
+        depth++;
+        return false;
+      }
+      if (letter === ")") {
+        return depth-- === 0;
+      }
+      return letter === "," && depth === 0;
+    };
+    for (let at = from; at < text.length; at++) {
+      if (ends(text[at] ?? "")) {
+        return text.slice(from, at);
+      }
+    }
+    return text.slice(from);
+  }
+
   /** 起こしている呼び出し（第 1 引数と、その呼び出しの範囲）。 */
   function spawnCalls(text: string): { target: string; call: string }[] {
-    return [...text.matchAll(/(spawnSync|execFileSync)\(\s*([^,\n]+),/g)].map((match) => {
+    return [...text.matchAll(/(spawnSync|execFileSync)\(/g)].map((match) => {
       const from = match.index ?? 0;
       const scope = text.slice(from, from + 500);
-      return { target: match[2] ?? "", call: scope.split(/\n\s*\}\);/)[0] ?? scope };
+      return {
+        target: firstArgument(text, from + match[0].length),
+        call: scope.split(/\n\s*\}\);/)[0] ?? scope,
+      };
     });
   }
 
@@ -285,6 +324,41 @@ describe("試験が、共有の記録を汚さない", () => {
       ].join("\n");
 
       expect(offendersIn("例", text, scripts)).toEqual(["例: bin/loop-procedure-body"]);
+    });
+
+    it("直に書いた呼び出しにも、これまでどおり当たる", () => {
+      // **前の版が当てていた形**である（#394 のレビュー）——**強めたつもりで、
+      // 当たっていたものを外さない。** **入力に「これから当てたい形」しか
+      // 置かないと、外れたことに誰も気づかない。**
+      const text = 'spawnSync(join(REPO_ROOT, "bin/loop-procedure-body"), ["worker"], {});';
+
+      expect(offendersIn("例", text, scripts), "直に書いた形が外れている").toEqual([
+        "例: bin/loop-procedure-body",
+      ]);
+    });
+
+    it("cwd に実物を名指ししていたら、当たる", () => {
+      // **これも前の版が当てていた形**である——**`cwd: REPO_ROOT` は砂場ではない。**
+      const text = [
+        'const BODY = join(REPO_ROOT, "bin/loop-procedure-body");',
+        'spawnSync(BODY, ["worker"], { cwd: REPO_ROOT, encoding: "utf8" });',
+      ].join("\n");
+
+      expect(offendersIn("例", text, scripts), "実物を名指ししたのに砂場と読んでいる").toEqual([
+        "例: bin/loop-procedure-body",
+      ]);
+    });
+
+    it("リポジトリの下を cwd にしても、当たる", () => {
+      // **同じ git の中なら、記録の行き先も同じ**である——**砂場ではない。**
+      const text = [
+        'const BODY = join(REPO_ROOT, "bin/loop-procedure-body");',
+        'spawnSync(BODY, ["worker"], { cwd: join(REPO_ROOT, "loop"), encoding: "utf8" });',
+      ].join("\n");
+
+      expect(offendersIn("例", text, scripts), "同じ git の中を砂場と読んでいる").toEqual([
+        "例: bin/loop-procedure-body",
+      ]);
     });
 
     it("砂場を渡していれば、当たらない", () => {
