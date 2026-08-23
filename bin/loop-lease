@@ -40,6 +40,16 @@ readonly TTL_SEC="${LOOP_LEASE_TTL_SEC:-1800}"
 
 # 飛ばした記録を何件残すか。**増え続けないための上限**であって、意味のある数ではない。
 readonly MISSING_KEEP_DEFAULT=20
+
+# **記録に残す作業場の数** (#403 のレビュー)。**作業場ごとに上限を持たせただけでは、
+# 作業場が増えたぶん増え続ける**——**名前は自由に付けられる**ので、**消した作業場の
+# 行も永久に残る。**
+#
+# **「いま実在する作業場だけ残す」では消せない**（**`./task loop:worker:paths` は
+# worker のぶんしか並べない**。master の作業場は意図して除外。#381）——**見るのは
+# 「最近その作業場から記録があったか」**である。**古い作業場から丸ごと落とす。**
+readonly MISSING_SCOPES_DEFAULT=8
+MISSING_SCOPES="${LOOP_LEASE_MISSING_SCOPES:-$MISSING_SCOPES_DEFAULT}"
 MISSING_KEEP="${LOOP_LEASE_MISSING_KEEP:-$MISSING_KEEP_DEFAULT}"
 
 # 読み書きのロックを待つ時間。ここは一瞬で終わる操作なので短くてよい。
@@ -174,6 +184,13 @@ fi
 # 畳む処理ごと飛ぶ**ので、**追記だけが毎回残る**——**この記録に上限を付けた理由
 # （際限なく積む記録は、読む気を失わせるぶん、無いのと同じ）に、設定 1 つで戻る**。
 # しかも**上限に達していないのか畳めていないのか、見分けが付かない**。
+if ! [[ $MISSING_SCOPES =~ ^[1-9][0-9]*$ ]]; then
+  echo "[WARN] 設定: LOOP_LEASE_MISSING_SCOPES は 1 以上の整数（作業場）で指定してください" >&2
+  echo "       ${MISSING_SCOPES_DEFAULT} 作業場で畳みます（この設定は無視します）" >&2
+  MISSING_SCOPES="$MISSING_SCOPES_DEFAULT"
+fi
+readonly MISSING_SCOPES
+
 if ! [[ $MISSING_KEEP =~ ^[1-9][0-9]*$ ]]; then
   echo "[WARN] 設定: LOOP_LEASE_MISSING_KEEP は 1 以上の整数（件）で指定してください" >&2
   echo "       ${MISSING_KEEP_DEFAULT} 件で畳みます（この設定は無視します）" >&2
@@ -562,9 +579,24 @@ record_missing() {
   #
   # **畳めなかったら言う**（`2>/dev/null` を置かない）。**落ちる理由は設定だけではない**
   # ——記録が読めない場合もここを通る。**黙ると「上限に達していない」と見分けが付かない**。
-  if ! kept="$(awk -F'\t' -v keep="$MISSING_KEEP" '
-      NR == FNR { total[$3]++; next }
-      { seen[$3]++; if (seen[$3] > total[$3] - keep) print }
+  if ! kept="$(awk -F'\t' -v keep="$MISSING_KEEP" -v scopes="$MISSING_SCOPES" '
+      NR == FNR { total[$3]++; newest[$3] = FNR; next }
+      FNR == 1 {
+        # **残す作業場を、最後に記録した順で選ぶ** (#403 のレビュー)——**古い作業場から
+        # 丸ごと落とす。** **いま書いたぶんは、いちばん新しいので必ず残る。**
+        for (where in newest) {
+          rank = 1
+          for (other in newest) {
+            if (newest[other] > newest[where]) rank++
+          }
+          if (rank <= scopes) live[where] = 1
+        }
+      }
+      {
+        if (!($3 in live)) next
+        seen[$3]++
+        if (seen[$3] > total[$3] - keep) print
+      }
     ' "$record" "$record")" \
     || ! printf '%s\n' "$kept" >"$record.tmp.$$" \
     || ! mv -f "$record.tmp.$$" "$record"; then

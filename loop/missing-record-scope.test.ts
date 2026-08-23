@@ -156,3 +156,120 @@ describe("記録の上限は、作業場ごとに数える", () => {
     ]);
   });
 });
+
+/**
+ * **残しても、読む口に届かなければ同じ**（#403 のレビュー）。
+ *
+ * **`./task loop:status` は末尾 3 行しか見せていなかった**——**うるさい作業場が
+ * 3 行書けば、静かな作業場の行はファイルに残っていても画面には出ない。**
+ * **#401 が言っていたのは、そこ**である（**§5: 入れたが、実行される場所に届いていない**）。
+ */
+describe("読む口が、作業場ごとに見せる", () => {
+  /** `./task` の関数を、そのまま取り出して走らせる。**書き写さない。** */
+  function shellFunction(name: string): string {
+    const runner = readFileSync(join(REPO_ROOT, "task"), "utf8");
+    const from = runner.indexOf(`${name}() {`);
+    expect(from, `${name} が ./task にありません`).toBeGreaterThanOrEqual(0);
+    return `${runner.slice(from).split("\n}\n")[0] ?? ""}\n}\n`;
+  }
+
+  function shown(dir: string): string {
+    const done = spawnSync(
+      "bash",
+      ["-c", `${shellFunction("show_missing_lease")}\nshow_missing_lease`],
+      { cwd: dir, encoding: "utf8" },
+    );
+    expect(done.status, done.stderr).toBe(0);
+    return done.stdout;
+  }
+
+  it("静かな作業場が、うるさい作業場に隠れない", () => {
+    // **これが本体**である——**残っていても、見えなければ同じ**
+    const dir = workspace();
+    const noisy = "/home/loop/valence-worker-b";
+    const quiet = "/home/loop/valence-worker-c";
+    writeFileSync(
+      join(dir, ".git", RECORD),
+      `${[line(1, quiet), ...Array.from({ length: 8 }, (_, at) => line(at + 2, noisy))].join("\n")}\n`,
+    );
+
+    const out = shown(dir);
+
+    expect(out, "静かな作業場が画面に出ていない").toContain(quiet);
+    expect(out, "うるさい作業場が出ていない").toContain(noisy);
+  });
+
+  it("件数は、作業場ごとに出す", () => {
+    // **「全部で 20 件」では、どこが飛ばしているのか分からない**
+    const dir = workspace();
+    const noisy = "/home/loop/valence-worker-b";
+    writeFileSync(
+      join(dir, ".git", RECORD),
+      `${Array.from({ length: 4 }, (_, at) => line(at + 1, noisy)).join("\n")}\n`,
+    );
+
+    expect(shown(dir), "作業場ごとの件数が出ていない").toMatch(/4 件[\s\S]*valence-worker-b/);
+  });
+
+  it("1 件も無ければ、何も言わない", () => {
+    // **静かな日に、読むものを増やさない**
+    const dir = workspace();
+    writeFileSync(join(dir, ".git", RECORD), "");
+
+    expect(shown(dir).trim()).toBe("");
+  });
+});
+
+/**
+ * **記録全体にも、有限の方針がある**（#403 のレビュー）。
+ *
+ * **作業場ごとに上限を持たせただけでは、作業場が増えたぶん増え続ける**
+ * ——**`./task loop:worker:add` は名前を自由に付けられる**ので、
+ * **消した作業場の行も永久に残る。**
+ *
+ * **「いま実在する作業場だけ残す」では消せない**——**`./task loop:worker:paths` は
+ * worker のぶんしか並べない**（master の作業場は意図して除外。#381）ので、
+ * **それで判定すると master の記録が毎回消える。**
+ * **見るのは「最近その作業場から記録があったか」**である。
+ */
+describe("記録は、全体としても増え続けない", () => {
+  it("古い作業場から落ちる", () => {
+    const dir = workspace();
+    const rows: string[] = [];
+    // **上限の作業場数より多く並べる**（1 つあたり 1 行）
+    for (let at = 0; at < 15; at++) {
+      rows.push(line(at + 1, `/home/loop/valence-worker-${at}`));
+    }
+    writeFileSync(join(dir, ".git", RECORD), `${rows.join("\n")}\n`);
+
+    check(dir);
+
+    const left = recordOf(dir);
+    expect(left.length, "作業場が増えたぶん、増え続けている").toBeLessThan(rows.length + 1);
+    expect(
+      left.some((row) => row.endsWith("/valence-worker-0")),
+      "いちばん古い作業場が残っている",
+    ).toBe(false);
+    expect(
+      left.some((row) => row.endsWith("/valence-worker-14")),
+      "新しい作業場が落ちている",
+    ).toBe(true);
+  });
+
+  it("いま書いた作業場は、必ず残る", () => {
+    // **自分の記録が、他所の数で押し出されない**
+    const dir = workspace();
+    const rows: string[] = [];
+    for (let at = 0; at < 15; at++) {
+      rows.push(line(at + 1, `/home/loop/valence-worker-${at}`));
+    }
+    writeFileSync(join(dir, ".git", RECORD), `${rows.join("\n")}\n`);
+
+    check(dir);
+
+    expect(
+      recordOf(dir).some((row) => row.endsWith(dir)),
+      "いま書いたぶんが落ちている",
+    ).toBe(true);
+  });
+});
