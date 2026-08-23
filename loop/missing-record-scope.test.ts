@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { holdLock } from "../test/held-lock";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const RECORD = "valence-loop-lease-missing";
@@ -376,5 +377,90 @@ describe("古い版の書き手に、切り詰められない", () => {
     expect(shown.status, shown.stderr).toBe(0);
     expect(shown.stdout, "古い版のぶんが出ていない").toContain(old);
     expect(shown.stdout, "こちらのぶんが出ていない").toContain(dir);
+  });
+});
+
+/**
+ * **畳む側が、相手のロックを取らずに消していた**（#407）。
+ *
+ * **記録には `.lock` があり、書き込みはそれで直列化している**——**にもかかわらず、
+ * 他所のぶんを落とす側は取らずに `rm` していた。** **当たるのは 2 つ。**
+ *
+ * - **持ち主が積んだばかりの証拠が、そのまま消える**
+ * - **握られているロックファイルを unlink すると、別のプロセスが同じ名前で新しい
+ *   inode を作れる**——**`flock` は inode に付く**ので、**残っている側と新しい側が、
+ *   同じ記録へ同時に書ける。** **2 つ目のほうが根が深い**（**ロックの契約そのものが
+ *   成り立たなくなる**）
+ *
+ * **取れなければ畳まない。待たない**——**自分のロックを持ったまま相手のを待つと、
+ * 向かい合わせで止まる**。**畳むのは次の周回でよい。**
+ */
+describe("畳む前に、相手のロックを取る", () => {
+  /** 他所の作業場のファイルを、古い順に置く（**落ちる側から並ぶ**）。 */
+  function foreignRecords(dir: string, count: number): string[] {
+    const made: string[] = [];
+    for (let at = 0; at < count; at++) {
+      const path = join(dir, ".git", `${RECORD}-worker-${String(at).padStart(2, "0")}`);
+      writeFileSync(path, `${line(at + 1, `/home/loop/valence-worker-${at}`)}\n`);
+      const when = new Date(Date.now() - (count - at) * 60_000);
+      utimesSync(path, when, when);
+      made.push(path);
+    }
+    return made;
+  }
+
+  it("持ち主が握っている記録は、消さない", () => {
+    // **これが本体**である——**書いている最中に消されると、積んだばかりの証拠が消える**
+    const dir = workspace();
+    const made = foreignRecords(dir, 15);
+    const held = made[0] ?? "";
+    const holder = holdLock({ dir, lock: `${held}.lock`, limitSeconds: 20 });
+
+    try {
+      check(dir);
+
+      expect(existsSync(held), "握られている記録を消している").toBe(true);
+      expect(readFileSync(held, "utf8"), "握られている記録を空にしている").toContain(
+        "valence-worker-0",
+      );
+      // **他所が握っているからといって、畳むのをやめない**（**次に古いものは落ちる**）
+      expect(existsSync(made[1] ?? ""), "握られていない記録まで残している").toBe(false);
+    } finally {
+      holder.release();
+    }
+  });
+
+  it("握られていても、待たない", () => {
+    // **自分のロックを持ったまま相手のを待つと、向かい合わせで止まる**
+    // ——**畳むのは次の周回でよい**ので、取れなければその場で諦める
+    const dir = workspace();
+    const made = foreignRecords(dir, 15);
+    const holder = holdLock({ dir, lock: `${made[0] ?? ""}.lock`, limitSeconds: 20 });
+
+    try {
+      const began = Date.now();
+      check(dir);
+
+      // **既定の待ち時間は 10 秒**（`LOCK_WAIT_SEC`）——**待っていれば必ず超える**
+      expect(Date.now() - began, "取れるまで待っている").toBeLessThan(9_000);
+    } finally {
+      holder.release();
+    }
+  });
+
+  it("ロックファイルそのものは、消さない", () => {
+    // **unlink すると、別のプロセスが同じ名前で新しい inode を作れる**
+    // ——**`flock` は inode に付く**ので、**2 人が同じ記録へ同時に書ける**
+    const dir = workspace();
+    const made = foreignRecords(dir, 15);
+    for (const path of made) {
+      writeFileSync(`${path}.lock`, "");
+    }
+
+    check(dir);
+
+    const dropped = made[1] ?? "";
+    expect(existsSync(dropped), "記録が畳まれていない").toBe(false);
+    expect(existsSync(`${dropped}.lock`), "ロックファイルを unlink している").toBe(true);
   });
 });
