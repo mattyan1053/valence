@@ -73,17 +73,45 @@ function fastPathOf(task: string): Set<string> {
  * **落とすのは中身だけ**（**終わりの行までで戻る**）——**終わりを読み違えると、
  * その先が丸ごと見えなくなる**（**空振りする側**）。
  *
- * **見ていないもの**（#429 のレビュー。**どれも「実行されない行を数える」＝赤が出る側**
- * なので、**踏んだ人には見える**）:
+ * **見ていないもの**（#429 のレビュー）。**向きごと書く**——**「赤が出る側」だけを
+ * 並べると、黙る側の入口を見落としたことに気づけない**（**実際に見落とした**）:
  *
- *   - **字下げされた終わりの行を、終わりとして扱う。** **bash が字下げを許すのは
- *     `<<-`（しかもタブだけ）**である——**こちらは早く閉じるので、その先の中身を数える**
- *   - **1 行に 2 つ開く形**（`cat <<'A' <<'B'`）——**最初の 1 つしか見ない**
- *   - **引用符の中や、逃がした `<<`**——**始まりとして読む**
+ *   - **赤が出る側**（**実行されない行を数える**。**踏んだ人には見える**）
+ *     - **字下げされた終わりの行を、終わりとして扱う。** **bash が字下げを許すのは
+ *       `<<-`（しかもタブだけ）**——**こちらは早く閉じるので、その先の中身を数える**
+ *     - **1 行に 2 つ開く形**（`cat <<'A' <<'B'`）——**最初の 1 つしか見ない**
+ *   - **黙る側**（**その先の実コードが消える**。**見えない**）
+ *     - **逃がした `<<`**（`\<<'EOF'`）——**始まりとして読む**
+ *
+ * **黙る側は、出たら直す**（#429 の線引き）——**コメントの中・文字列の中・`<<<` は、
+ * どれもこの一覧から降りている**（**入力を置いて塞いだ**）。
  *
  * **bash の規則を全部写さない。** **この見張りの目的は「fast path への入れ忘れを
  * 見つける」**であって、**shell を読むことではない**（#429 のレビュー）。
  */
+/**
+ * その行が開くヒアドキュメント。**開かないなら `null`。**
+ *
+ * **`<<` そのものは、引用符の外に無ければならない** (#429 のレビュー 2 周目)
+ * ——**`echo "cat <<'EOF'"` は案内であって、開かない。** **区切り語のほうは
+ * 引用符の中にある**（それが「展開しない」の印である）ので、
+ * **伏字の上では位置だけを見て、語は元の行から読む。**
+ *
+ * **`<<<`（ヒアストリング）は別物**なので、**当てない**——**`<<<'文字列'` は
+ * 2 文字目から `<<'文字列'` として一致する**（**書いてあったが、できていなかった**）。
+ */
+function heredocOpenedBy(line: string): { ending: string; dropping: boolean } | null {
+  const at = /(?<!<)<<-?(?!<)/.exec(maskQuoted(line));
+  if (at === null) {
+    return null;
+  }
+  const opened = /^<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1/.exec(line.slice(at.index));
+  if (opened === null) {
+    return null;
+  }
+  return { ending: opened[2] ?? "", dropping: (opened[1] ?? "") !== "" };
+}
+
 type Heredoc = { ending: string; dropping: boolean };
 
 /** ヒアドキュメントの中に居るときの 1 行。**中身は文字列**（コメントとして落とさない）。 */
@@ -103,11 +131,10 @@ function runnableLines(text: string): string[] {
       return insideHeredoc(line, state);
     }
     const code = withoutComment(line);
-    // **`<<<`（ヒアストリング）は別物**なので、**当てない。**
-    const opened = /<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1/.exec(code);
+    const opened = heredocOpenedBy(code);
     if (opened !== null) {
-      state.ending = opened[2] ?? "";
-      state.dropping = (opened[1] ?? "") !== "";
+      state.ending = opened.ending;
+      state.dropping = opened.dropping;
     }
     return code;
   });
@@ -127,12 +154,16 @@ function runnableLines(text: string): string[] {
  * **`#` がコメントを始めるのは、語の頭にあるときだけ**である（`x=a#b` は違う）。
  */
 function withoutComment(line: string): string {
-  // **引用符の中を、同じ長さの伏字にする**——**位置が動かない**ので、
-  // **見つけた `#` の位置で、元の行を切れる。**
-  const masked = line.replaceAll(/'[^']*'|"[^"]*"/g, (quoted) => "x".repeat(quoted.length));
-  // **`#` がコメントを始めるのは、語の頭にあるときだけ**である（`x=a#b` は違う）。
-  const found = /(?:^|\s)#/.exec(masked);
+  const found = /(?:^|\s)#/.exec(maskQuoted(line));
   return found === null ? line : line.slice(0, found.index + found[0].length - 1);
+}
+
+/**
+ * 引用符の中を、同じ長さの伏字にする。**位置が動かない**ので、
+ * **見つけた位置で元の行を読める。**
+ */
+function maskQuoted(line: string): string {
+  return line.replaceAll(/'[^']*'|"[^"]*"/g, (quoted) => "x".repeat(quoted.length));
 }
 
 /**
@@ -289,6 +320,27 @@ describe("見落とす形を、入力に置く", () => {
     const text = ["cat <<USAGE", "# いま: $(./task doctor)", "USAGE", ""].join("\n");
 
     expect(queriesIn(text, commands), "中身をコメントとして落としている").toContain("doctor");
+  });
+
+  it("文字列の中の記法では、始まらない", () => {
+    // **黙る側である**（コメントの中の記法と同じ形）——**案内としてコマンドの例を
+    // 文字列で出す行がある**（`bin/lint-shell` / `bin/loop-lease`）ので、
+    // **そこで始まったことにすると、その先の実コードが丸ごと消える。**
+    const text = ["echo \"使い方: cat <<'USAGE'\"", 'port="$(./task doctor)"', ""].join("\n");
+
+    expect(queriesIn(text, commands), "文字列の中で始まったことにしている").toContain("doctor");
+  });
+
+  it("ヒアストリング（`<<<`）では、始まらない", () => {
+    // **黙る側である**（#429 のレビュー 2 周目）——**`<<<'文字列'` の 2 文字目から
+    // `<<'文字列'` として一致し**、**単独の終わりの行は来ない**ので、
+    // **その先の実コードが丸ごと消える。**
+    //
+    // **「当てていない」と書いてあった**（前の周回のこの試験の説明）——**書いたことと
+    // できることが食い違うと、読む側の確認をすり抜ける。** **当ててみる。**
+    const text = ["grep -q . <<<'USAGE'", 'port="$(./task doctor)"', ""].join("\n");
+
+    expect(queriesIn(text, commands), "ヒアストリングで始まったことにしている").toContain("doctor");
   });
 
   it("区切りにハイフンが入っていても、始まりと読む", () => {
