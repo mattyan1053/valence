@@ -1069,6 +1069,23 @@ main() {
     exit 1
   fi
 
+  # **問い合わせは、前置きより先に返す** (#416 のレビュー。`bin/loop-gate
+  # --required-checks` や `bin/loop-procedure-changed --list` と同じ形)。
+  #
+  # **前置きは標準出力へ出す**（`warn_stale_containers`）ので、**`$( )` で読む口では、
+  # 警告の文が答えに混ざる**——**壊れるのはいちばん困るとき**である（**設定が古い、
+  # まさに「開かない理由を調べている」瞬間**）。**#381 で 1 度踏んでいる**
+  # （あのときは `./task loop:worker:paths` で、**警告の文が作業場の名前として読まれた**）。
+  #
+  # **ここに並べるのは「読むだけの口」だけ**である——**何かを起こす口は、
+  # これまでどおり前置きを通す**（**古いまま動いていることに、そこで気づく**）。
+  case "$raw" in
+    port | loop:stop:paths | loop:worker:paths)
+      "$fn" "$@"
+      return
+      ;;
+  esac
+
   heartbeat
   ensure_commit_guard
   warn_stale_containers
