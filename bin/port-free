@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# **その番号で listen できるか**を、実際に試して答える (#432)。
+#
+#   bin/port-free <番号> [<番号>...]
+#
+#   exit 0 = 全部 bind できる
+#   exit 1 = bind できないものがある（**番号を名指しする**）
+#   exit 2 = 使い方の誤り / 判定できない
+#
+# **「その番号を持つ socket があるか」では決めない。** **CI の見張りはそれで
+# 落としていた**（#253 / #256）が、**外向きの接続（ESTABLISHED）は docker の
+# publish を妨げない**——**runner 自身が GitHub へ張っている接続の送信元ポートに
+# 543xx を掴んでいるだけで、DB を触っていない PR が赤くなった**（#431 / #432）。
+#
+# **実測**（2026-08-24）:
+#
+#   外向きの ESTABLISHED（`10.x:P` → `…:443`）… `docker run -p P:80` は**通る**
+#   `0.0.0.0:P` で listen ……………………………… `docker run -p P:80` は**落ちる**
+#
+# **`node` で試すのは、docker と同じ結果になるからである**（**両方向とも実測で
+# 一致した**）。**libuv は TCP の listen に `SO_REUSEADDR` を付ける**ので、
+# **docker の port publish と同じ側の意味論になる。**
+#
+# **見張りを外す話ではない。** **塞がっているなら、これまでどおり落ちる**
+# ——**変えたのは「何をもって塞がっているとするか」**である。
+#
+# -e は使わない。全部見てから 1 度で答える。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/port-free <番号> [<番号>...]" >&2
+  echo "        exit 0 空いている / exit 1 塞がっている / exit 2 使い方の誤り" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+for port in "$@"; do
+  [[ $port =~ ^[0-9]+$ ]] || usage
+  ((port > 0 && port < 65536)) || usage
+done
+
+command -v node >/dev/null 2>&1 || {
+  echo "[FAIL] node がありません。bind できるかを確かめられません" >&2
+  exit 2
+}
+
+# **全部試してから答える**——**1 つ目で止めると、残りが読めない。**
+# **落ちた番号だけを出す**（**読む側は、それを名指しに使う**）。
+# **JS の中の `${…}` は node が読む**（shell では展開しない）
+# shellcheck disable=SC2016
+node -e '
+const { createServer } = require("node:net");
+const ports = process.argv.slice(1).map(Number);
+const blocked = [];
+const probe = (port) =>
+  new Promise((resolve) => {
+    const server = createServer();
+    server.once("error", (error) => {
+      blocked.push(`${port} (${error.code})`);
+      resolve();
+    });
+    server.listen({ port, host: "0.0.0.0" }, () => server.close(() => resolve()));
+  });
+(async () => {
+  for (const port of ports) {
+    await probe(port);
+  }
+  if (blocked.length > 0) {
+    console.error(`bind できません: ${blocked.join(", ")}`);
+    process.exit(1);
+  }
+})();
+' "$@"
