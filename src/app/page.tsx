@@ -45,6 +45,57 @@ export function boardPath(repository: { readonly owner: string; readonly name: s
   return `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
 }
 
+/**
+ * 見えたものを並べる（#415）。
+ *
+ * **`Home` から切り出してある。** **`Home` は非同期のサーバコンポーネントで、
+ * 描いて確かめる手立てが無い**——**倒し分けをここへ置くと、描いた本文で判定できる**
+ * （**#410 では、判定が見出し（`<h2>`）に当たったまま緑になっていた**）。
+ *
+ * **1 件も無いときに、何が無いのか・次に何をすればよいのかを出す。**
+ * **#213 が倒し分けたのは 3 つ**（**ログインしていない / 入り直してもらう / 出す**）で、
+ * **「並べたが 0 件」はそのどれでもない**——**「出す」に入っていて、出すものが無い。**
+ *
+ * **「無い」と「読めなかった」を同じ静けさにしない**（`AGENTS.md` §5。
+ * **盤面の側と同じ倒し方**である）——**読めなかったせいで 0 件なら、
+ * 「インストールしてください」とは言わない**（**インストール済みでも起きる**）。
+ */
+export function RepositoryListing({
+  repositories,
+  unreadable,
+}: {
+  readonly repositories: readonly { readonly owner: string; readonly name: string }[];
+  readonly unreadable: number;
+}) {
+  if (repositories.length === 0) {
+    return (
+      <p className="text-sm">
+        {unreadable > 0
+          ? // **件数は下の注記が出す**ので、ここでは何が起きたかだけを言う
+            "読めたリポジトリが 1 件もありません。"
+          : "見られるリポジトリが 1 件もありません。GitHub App をリポジトリにインストールすると、ここに並びます。"}{" "}
+        {invalidNote(unreadable)}
+      </p>
+    );
+  }
+  return (
+    <>
+      <ul className="flex flex-col gap-1 text-sm">
+        {repositories.map((repository) => (
+          <li key={`${repository.owner}/${repository.name}`}>
+            {/* **並べるだけでは、盤面へ行けない** (#314)。**名前を入力させない** */}
+            <a className="underline" href={boardPath(repository)}>
+              {repository.owner}/{repository.name}
+            </a>
+          </li>
+        ))}
+      </ul>
+      {/* **黙って捨てない。** **消すと「読めなかった」が「見えなかった」に化ける** */}
+      {unreadable > 0 ? <p className="text-sm opacity-70">{invalidNote(unreadable)}</p> : undefined}
+    </>
+  );
+}
+
 export default async function Home() {
   const result = await visibleRepositoriesForCurrentUser();
 
@@ -53,22 +104,10 @@ export default async function Home() {
       <h1 className="font-mono text-3xl font-bold tracking-tight">Valence</h1>
       <p className="text-lg">AI 時代の PR コントロールセンター</p>
       {result.kind === "listed" ? (
-        <>
-          <ul className="flex flex-col gap-1 text-sm">
-            {result.listing.repositories.map((repository) => (
-              <li key={`${repository.owner}/${repository.name}`}>
-                {/* **並べるだけでは、盤面へ行けない** (#314)。**名前を入力させない** */}
-                <a className="underline" href={boardPath(repository)}>
-                  {repository.owner}/{repository.name}
-                </a>
-              </li>
-            ))}
-          </ul>
-          {/* **黙って捨てない。** **消すと「読めなかった」が「見えなかった」に化ける** */}
-          {result.listing.invalid.length > 0 ? (
-            <p className="text-sm opacity-70">{invalidNote(result.listing.invalid.length)}</p>
-          ) : undefined}
-        </>
+        <RepositoryListing
+          repositories={result.listing.repositories}
+          unreadable={result.listing.invalid.length}
+        />
       ) : (
         <p className="text-sm">
           {result.kind === "signed-out"
