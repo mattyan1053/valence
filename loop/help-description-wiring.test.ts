@@ -78,26 +78,21 @@ function commandsOf(text: string): string[] {
 }
 
 /**
- * 説明が、段落の続きになっている口。
+ * 説明の行に、理由が書かれている口。
  *
  * **`cmd_help` が拾うのは、直前の連続したコメントの最後の 1 行**である
- * ——**理由を最後に置くと、理由の途中の 1 行が説明として並ぶ**（#423 で踏んだ）。
- * **説明は段落の頭に置く**（**直前が `#` だけの行か、コメントでない行**）。
+ * ——**理由を最後に置くと、理由が説明として並ぶ**（#423 で 3 件踏んだ）。
+ *
+ * **「直前の何行がコメントか」では決まらない** (#428 のレビュー)——**区切りの `#` を
+ * 挟んだ 1 行の理由**（説明・空のコメント行・理由 1 行）**も、この書き方をよくする**ので、
+ * **段落の長さごとに条件が要る**ことになる。
+ *
+ * **見るのは、拾われた行そのもの**である。**理由は太字で書く**（このリポジトリの書き方）
+ * ——**説明は 1 行の一覧に並ぶ文**なので、**太字の印を持たない。**
  */
-function continuations(text: string): string[] {
-  const lines = text.split("\n");
-  const found: string[] = [];
-  for (const [at, line] of lines.entries()) {
-    const defined = /^cmd_([a-z0-9_]+)\(\)/.exec(line);
-    if (defined === null) {
-      continue;
-    }
-    // **直前がコメントで、その 1 つ前もコメント**なら、説明は段落の続きである
-    if (/^# \S/.test(lines[at - 1] ?? "") && /^# \S/.test(lines[at - 2] ?? "")) {
-      found.push((defined[1] ?? "").replaceAll("_", ":"));
-    }
-  }
-  return found;
+function reasonAsDescription(text: string): string[] {
+  const listed = helpOf(text);
+  return [...listed].filter(([, desc]) => desc.includes("**")).map(([name]) => name);
 }
 
 describe("足した口の説明が、`./task help` に並ぶ", () => {
@@ -111,9 +106,11 @@ describe("足した口の説明が、`./task help` に並ぶ", () => {
     ).toEqual([]);
   });
 
-  it("説明が、段落の続きになっている口が無い", () => {
-    // **理由を最後に置くと、理由の途中の 1 行が説明として並ぶ**（#423）
-    expect(continuations(TASK), "説明を段落の頭に置くこと（直前に # だけの行を置く）").toEqual([]);
+  it("説明の行に、理由が書かれている口が無い", () => {
+    // **理由を最後に置くと、理由が説明として並ぶ**（#423 で 3 件踏んだ）
+    expect(reasonAsDescription(TASK), "説明を段落の最後に置くこと（理由は、その前に書く）").toEqual(
+      [],
+    );
   });
 
   it("空振りしていない（実物の口と説明を、実際に読めている）", () => {
@@ -140,14 +137,23 @@ describe("見落とす形を、入力に置く", () => {
     const text = "# 何かをする\n# **なぜなら、こうだから**\ncmd_thing() { :; }\n";
 
     expect(helpOf(text).get("thing"), "理由が説明として並んでいない").toMatch(/なぜなら/);
-    expect(continuations(text), "段落の続きだと言っていない").toContain("thing");
+    expect(reasonAsDescription(text), "理由が説明になっていると言っていない").toContain("thing");
   });
 
-  it("段落の頭に置いてあれば、続きとは言わない", () => {
-    // **理由を書いてはいけない、ではない**——**説明を段落の頭に置けばよい**
+  it("1 行だけの理由でも、拾う", () => {
+    // **区切りの `#` を挟んだ、いちばん短い形**（#428 のレビュー）
+    // ——**このリポジトリは、この書き方をよくする**（説明・空のコメント行・理由 1 行）。
+    const text = "# 何かをする\n#\n# **なぜなら、こうだから**\ncmd_thing() { :; }\n";
+
+    expect(helpOf(text).get("thing"), "理由が説明として並んでいない").toMatch(/なぜなら/);
+    expect(reasonAsDescription(text), "1 行だけの理由を見逃している").toContain("thing");
+  });
+
+  it("説明を最後に置いてあれば、理由とは言わない", () => {
+    // **理由を書いてはいけない、ではない**——**説明を段落の最後に置けばよい**
     const text = "# **なぜなら、こうだから**\n#\n# 何かをする\ncmd_thing() { :; }\n";
 
     expect(helpOf(text).get("thing"), "説明が並んでいない").toBe("何かをする");
-    expect(continuations(text), "段落の頭なのに、続きだと言っている").toEqual([]);
+    expect(reasonAsDescription(text), "説明なのに、理由だと言っている").toEqual([]);
   });
 });
