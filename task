@@ -229,6 +229,23 @@ cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
 #
 # **印は走り終えた証拠でもある。** 途中で殺されればここまで来ないので出ない。
 # **印だけで緑と読ませない**ため、**印に合否そのものを入れる**。
+# **「入口を飛ばした実行」の記録の行数** (#397)。**置き場所は git の共通ディレクトリ**
+# （`bin/loop-lease` が決める）。**読めなければ非ゼロ**——**「読めなかった」を
+# 「増えていない」にしない。**
+lease_record_lines() {
+  local common record
+  common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ -n $common ]] || return 1
+  record="$common/valence-loop-lease-missing"
+  # **無いのは正常**（**1 度も飛ばしていない**）。**0 と数える。**
+  [[ -e $record ]] || {
+    echo 0
+    return 0
+  }
+  [[ -f $record ]] || return 1
+  wc -l <"$record" | tr -d ' '
+}
+
 cmd_check() {
   # **走っていることを、走る前に記録する** (#375)。**印は終わったときにしか出ない**
   # ——**足りなかったのは、読む側を強いるもの**である（**2 つの作業場が、別々の日に
@@ -250,9 +267,34 @@ cmd_check() {
     echo "[FAIL] check の記録を残せません。合否を記録できない check は使えません" >&2
     return 2
   fi
+  # **試験の一式が、共有の記録を汚していないかを測る** (#397)。
+  #
+  # **本文の走査では別名を追い切れない**（#390 / #393 / #394 で 3 度足した）——
+  # **記録そのものを見れば、別名は関係ない。** **増えたのがどの試験かは分からなくて
+  # よい**（**増えたことが分かれば、探せる**）。
+  #
+  # **読めなければ、この check は使えない**——**「読めなかった」を「増えていない」に
+  # しない**（**黙って通ると、この見張りが何も見ていない状態で緑になる**）。
+  local record_before
+  if ! record_before="$(lease_record_lines)"; then
+    echo "[FAIL] 入口を飛ばした実行の記録を読めません。汚していないことを確かめられません" >&2
+    return 2
+  fi
   ensure_up
   local status=0
   exec_app pnpm check || status=$?
+  local record_after
+  if ! record_after="$(lease_record_lines)"; then
+    echo "[FAIL] 記録を読めません（試験のあと）。汚していないことを確かめられません" >&2
+    status=2
+  elif [[ $record_before != "$record_after" ]]; then
+    # **減った側も咎める**——**保つのは 20 件**なので、**溢れると減る**
+    # （**溢れるほど積まれた、が見えなくなる**）。
+    echo "[FAIL] 試験が、共有の記録を動かしました（${record_before} → ${record_after} 行）" >&2
+    echo "       実物のリポジトリに対して実物のスクリプトを走らせた試験があります" >&2
+    echo "       砂場（cwd）を渡すこと。記録は cwd の git から決まります" >&2
+    status=1
+  fi
   # **記録してから印を出す。** **印は「走り終えた」を意味する**ので、
   # **記録できないまま出すと、読む側は「終わった」と読む**——**記録は
   # 「走っている」のまま残る**ので、**commit の側でも止まる。**
