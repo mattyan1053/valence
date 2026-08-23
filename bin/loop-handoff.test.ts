@@ -2224,7 +2224,7 @@ describe("bin/loop-handoff", () => {
       // **前の版**——**印を知らない**（その枝だけを外す）
       const source = readFileSync(SCRIPT, "utf8");
       const changed = source.replace(
-        /  if \[\[ \$sent_to == "\$NO_DESTINATION" \]\]; then[\s\S]*?\n  fi\n/,
+        / {2}if \[\[ \$sent_to == "\$NO_DESTINATION" \]\]; then[\s\S]*?\n {2}fi\n/,
         "",
       );
       expect(changed, "前の版を作れていない").not.toBe(source);

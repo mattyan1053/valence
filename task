@@ -241,26 +241,35 @@ lease_record_snapshot() {
   local common record
   common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
   [[ -n $common ]] || return 1
-  # **記録は作業場ごとに分かれている** (#403 のレビュー)。**古い版が書いた共有の 1 つも見る。**
-  local found=0
-  for record in "$common"/valence-loop-lease-missing*; do
-    [[ -f $record ]] || continue
-    [[ $record != *.lock ]] || continue
-    found=1
-    cat "$record" || return 1
-  done
+  # **読むのは、この作業場のぶんだけ** (#403 のレビュー 2 周目)。
+  #
+  # **他人のファイルまで読むと、`glob → cat` の間に別の作業場が古いファイルを畳んだ
+  # 瞬間に落ちる**——**`cmd_check` は、成功済みの検査を「読めない」で上書きする。**
+  # **合否が他人の持ち物で決まる**（`AGENTS.md` §5 / #186）——**#398 で 1 度直した形が、
+  # 別の入口から戻ってきていた。**
+  #
+  # **この見張りが要るのは、自分の作業場が汚したかどうか**である。**名前の作り方は
+  # `bin/loop-lease` が持つ**ので、そこへ訊く。
+  local scope
+  scope="$(./bin/loop-lease scope worker 2>/dev/null)" || return 1
+  [[ -n $scope ]] || return 1
+  record="$common/valence-loop-lease-missing-$scope"
   # **無いのは正常**（**1 度も飛ばしていない**）
-  ((found == 1)) || return 0
+  [[ -e $record ]] || return 0
+  [[ -f $record ]] || return 1
+  cat "$record"
 }
 
-# **前後を比べて、この作業場が新しく書いた行を出す。** **1 行でもあれば exit 0。**
+# **前後を比べて、新しく書かれた行を出す。** **1 行でもあれば exit 0。**
+#
+# **読んでいるのはこの作業場のファイルだけ**（`lease_record_snapshot`）なので、
+# **3 列目で絞る必要はない**——**絞る側を減らしたぶん、他人の整理と競らない。**
 lease_record_intruders() {
-  local before="$1" after="$2" mine="$3" added
+  local before="$1" after="$2" added
   # **増えた行だけを見る**（**畳まれて消えた行は関係ない**）
   added="$(grep -Fxv -f "$before" "$after" 2>/dev/null || true)"
   [[ -n $added ]] || return 1
-  printf '%s\n' "$added" | awk -F'\t' -v mine="$mine" 'NF >= 3 && $3 == mine' | grep -q . || return 1
-  printf '%s\n' "$added" | awk -F'\t' -v mine="$mine" 'NF >= 3 && $3 == mine'
+  printf '%s\n' "$added"
 }
 
 cmd_check() {
@@ -311,7 +320,7 @@ cmd_check() {
   if ! lease_record_snapshot >"$after_file"; then
     echo "[FAIL] 記録を読めません（試験のあと）。汚していないことを確かめられません" >&2
     status=2
-  elif intruders="$(lease_record_intruders "$before_file" "$after_file" "$PWD")"; then
+  elif intruders="$(lease_record_intruders "$before_file" "$after_file")"; then
     echo "[FAIL] 試験が、この作業場の入口を飛ばした実行を記録しました" >&2
     printf '%s\n' "$intruders" | sed 's/^/       /' >&2
     echo "       実物のリポジトリに対して実物のスクリプトを走らせた試験があります" >&2

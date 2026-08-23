@@ -270,6 +270,31 @@ describe("記録は、全体としても増え続けない", () => {
     expect(existsSync(made[14] ?? ""), "新しい作業場が落ちている").toBe(true);
   });
 
+  it("同じ秒に並んでも、いま書いた作業場は残る", () => {
+    // **`stat %Y` は秒**なので**同値になり、`sort` はパス名（digest の辞書順）に落ちる**
+    // ——**「必ず残る」を順序に頼って書くと、たったいま積んだ 1 行が消える**
+    // （#403 のレビュー）。**消える先が悪い。**
+    const dir = workspace();
+    // **名前で負ける形を作る**——**`sort` の最後の拠り所は行そのもの**なので、
+    // **digest（16 進）より後ろに並ぶ名前**を置くと、**同じ秒ではこちらが先に落ちる。**
+    const made = Array.from({ length: 15 }, (_, at) => {
+      const path = join(dir, ".git", `${RECORD}-worker-zz${String(at).padStart(2, "0")}`);
+      writeFileSync(path, `${line(at + 1, `/home/loop/valence-worker-zz${at}`)}\n`);
+      return path;
+    });
+    check(dir);
+    const mine = recordPathOf(dir);
+    // **全部を同じ秒に揃える**（**いま書いたぶんも含めて**）
+    const when = new Date(1_800_000_000_000);
+    for (const path of [...made.filter(existsSync), mine]) {
+      utimesSync(path, when, when);
+    }
+
+    check(dir);
+
+    expect(existsSync(mine), "同じ秒に並ぶと、いま書いたぶんが消える").toBe(true);
+  });
+
   it("いま書いた作業場は、必ず残る", () => {
     // **自分の記録が、他所の数で押し出されない**
     const dir = workspace();

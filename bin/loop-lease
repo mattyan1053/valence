@@ -609,16 +609,21 @@ record_missing() {
   for candidate in "$common_dir"/valence-loop-lease-missing-*; do
     [[ -f $candidate ]] || continue
     [[ $candidate != *.lock ]] || continue
+    # **いま書いたぶんは、落とす候補に入れない** (#403 のレビュー)。**`stat` の秒は
+    # 同値になり、そのとき `sort` はパス名（digest の辞書順）に落ちる**——
+    # **「必ず残る」を順序に頼って書くと、たったいま積んだ 1 行が消える。**
+    [[ $candidate != "$record" ]] || continue
     scope_records+=("$candidate")
   done
-  if ((${#scope_records[@]} > MISSING_SCOPES)); then
+  # **自分のぶんを外したので、残せるのは 1 つ少ない。**
+  if ((${#scope_records[@]} > MISSING_SCOPES - 1)); then
     local stale
     while IFS= read -r stale; do
       [[ -n $stale ]] || continue
       rm -f "$stale" "$stale.lock" 2>/dev/null || true
       # **`ls` を使わない**（`shellcheck` SC2012）。**時刻はファイルから読む。**
     done < <(stat -c '%Y %n' "${scope_records[@]}" | sort -rn |
-      tail -n +$((MISSING_SCOPES + 1)) | cut -d' ' -f2-)
+      tail -n +"$MISSING_SCOPES" | cut -d' ' -f2-)
   fi
   exec 8>&-
 }
