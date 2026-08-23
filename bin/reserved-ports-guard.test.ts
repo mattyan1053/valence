@@ -20,7 +20,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,13 +36,15 @@ function guardScript(): string {
     throw new Error("ci.yml から見張りを取り出せません (書式が変わった?)");
   }
   const rest = lines.slice(from);
-  const to = rest.findIndex((line) => /^\s+fi\s*$/.test(line));
+  // **step の終わりまで取る** (#432)。**`fi` で切ると、下の判定（`bin/port-free`）が
+  // 落ちる**——**取り出す範囲が、見張りの一部しか含まなくなる。**
+  const to = rest.findIndex((line, at) => at > 0 && line.trim() !== "" && !/^ {10}/.test(line));
   if (to === -1) {
     throw new Error("見張りの終わりが見つかりません");
   }
   // YAML の字下げを落とす。**中身は 1 行も変えない。**
   return rest
-    .slice(0, to + 1)
+    .slice(0, to)
     .map((line) => line.replace(/^ {10}/, ""))
     .join("\n");
 }
@@ -105,12 +107,44 @@ function withStubSs({
   return { dir, argv };
 }
 
-function runGuard(options?: { listening?: string[]; connected?: string[]; fails?: boolean }) {
+/**
+ * `bin/port-free` の身代わり。**bind できるかどうかを演じる。**
+ *
+ * **本物を呼ぶと、この機械で走っている Supabase が合否を決める**（`AGENTS.md` §5 /
+ * #186）——**判定そのものは `bin/port-free.test.ts` が、本物の socket で見ている。**
+ */
+function withStubPortFree(dir: string, blocked: string[]): void {
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  const stub = join(dir, "bin", "port-free");
+  writeFileSync(
+    stub,
+    [
+      "#!/usr/bin/env bash",
+      `blocked="${blocked.join(" ")}"`,
+      "[[ -n $blocked ]] || exit 0",
+      'echo "bind できません: $blocked" >&2',
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(stub, 0o755);
+}
+
+function runGuard(options?: {
+  listening?: string[];
+  connected?: string[];
+  fails?: boolean;
+  blocked?: string[];
+}) {
   const { dir, argv } = withStubSs(options);
+  // **判定は `bin/port-free` が持つ** (#432)。**既定は「bind できる」**
+  // ——**`ss` に何が出ていても、それだけでは落ちない。**
+  withStubPortFree(dir, options?.blocked ?? []);
   // **`-e` を付けて走らせる。** **GitHub Actions の既定が `bash -e`** なので、
   // **付けずに試すと、実物と違う条件で確かめたことになる。**
   const result = spawnSync("bash", ["-e", "-c", `ports="54321\n54322"\n${guardScript()}`], {
     encoding: "utf8",
+    cwd: dir,
     env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
   });
   return { ...result, argv: readFileSync(argv, "utf8") };
@@ -124,9 +158,10 @@ describe("予約したポートの見張り", () => {
     expect(result.status, `落ちている: ${result.stderr}`).toBe(0);
   });
 
-  it("本当に listen している者が居たら、落ちる", () => {
+  it("bind できないなら、落ちる", () => {
     // **見張りを外さない。** **先に掴まれている状態は実際に起きる**
-    const result = runGuard({ listening: ["54322"] });
+    // ——**変わったのは「何をもって塞がっているとするか」だけ**である (#432)
+    const result = runGuard({ listening: ["54322"], blocked: ["54322"] });
 
     expect(result.status).toBe(1);
     expect(result.stderr, "何が握っていたか読めない").toContain("54322");
@@ -144,15 +179,25 @@ describe("予約したポートの見張り", () => {
     );
   });
 
-  it("接続中の socket は拾う", () => {
-    // **#256 のレビュー。** **listen だけに絞ると、これを落とす**——
-    // **この step が入った経緯そのものが、外向き接続による送信元ポートの占有**
-    // である（workflow の 76〜79 行）。**落とすと `supabase start` が
-    // 診断なしで bind に失敗する。**
+  it("接続中の socket は、出すが、それだけでは落とさない", () => {
+    // **#256 では「拾う」と決めていた**——**外向きの接続が bind を妨げる**と
+    // 見立てていたためである。**実測では妨げない**（`bin/port-free.test.ts`）ので、
+    // **runner 自身の外向き接続で、DB を触っていない PR が赤くなっていた**（#431 / #432）。
+    //
+    // **出力からは落とさない。** **次に落ちたときに読めるのはここだけ**である
+    // ——**判定から降りただけで、診断には残る。**
     const result = runGuard({ connected: ["54322"] });
 
-    expect(result.status, "妨げになる socket を通している").toBe(1);
-    expect(result.stderr).toContain("54322");
+    expect(result.status, "妨げにならない相手で落としている").toBe(0);
+    expect(result.stderr, "何が居たのか読めない").toContain("54322");
+  });
+
+  it("bind できないときは、全ての socket を出す", () => {
+    // **落ちたときに読むのはこの出力だけ**である（TIME-WAIT も含めて出す）
+    const result = runGuard({ connected: ["54322"], blocked: ["54322"] });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr, "参考の一覧が出ていない").toContain("TIME-WAIT");
   });
 
   it("`ss` が落ちたら、見張りも落ちる", () => {
