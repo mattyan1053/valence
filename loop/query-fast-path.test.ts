@@ -55,6 +55,28 @@ function fastPathOf(task: string): Set<string> {
 }
 
 /**
+ * その行から、コメントを落とす。**引用符の中は落とさない。**
+ *
+ * **行頭だけでは足りない** (#425 のレビュー)——**このリポジトリはコメントに例を書く**
+ * ので、**`true # 例: x="$(./task doctor)"` と書いた人に、理由の分からない赤が出る。**
+ * **当てる側だけを強めると、当ててはいけないものに当たる**（#394）。
+ *
+ * **`#` から行末までを素朴に落とすと、引用符の中の `#` まで切る**——
+ * **`bin/` には `--format '{{.ID}}|{{.Label "…"}}'` のような行がある**ので、
+ * **その行の呼び出しが丸ごと見えなくなる**（**空振りする側**）。
+ *
+ * **`#` がコメントを始めるのは、語の頭にあるときだけ**である（`x=a#b` は違う）。
+ */
+function withoutComment(line: string): string {
+  // **引用符の中を、同じ長さの伏字にする**——**位置が動かない**ので、
+  // **見つけた `#` の位置で、元の行を切れる。**
+  const masked = line.replaceAll(/'[^']*'|"[^"]*"/g, (quoted) => "x".repeat(quoted.length));
+  // **`#` がコメントを始めるのは、語の頭にあるときだけ**である（`x=a#b` は違う）。
+  const found = /(?:^|\s)#/.exec(masked);
+  return found === null ? line : line.slice(0, found.index + found[0].length - 1);
+}
+
+/**
  * その本文が `$( )` の中で呼んでいる `./task` の口。
  *
  * **`./task` の書かれ方は 1 つではない**——**`./task` / `"$TASK"` /
@@ -64,10 +86,7 @@ function fastPathOf(task: string): Set<string> {
  */
 function queriesIn(text: string, commands: Set<string>): string[] {
   // **コメントは外す**——**説明の中の `./task db:up` は、呼んでいない。**
-  const code = text
-    .split("\n")
-    .filter((line) => !/^\s*#/.test(line))
-    .join("\n");
+  const code = text.split("\n").map(withoutComment).join("\n");
   const found: string[] = [];
   for (const substitution of code.matchAll(/\$\((?:[^()]|\([^()]*\))*\)/g)) {
     // **入れ子の `$( )` だけを潰す**（**外側の `$( )` は剥がしてから**）
@@ -150,6 +169,25 @@ describe("見落とす形を、入力に置く", () => {
   it("説明の中の口は、数えない", () => {
     // **コメントには `./task db:up` が何度も出てくる**
     expect(queriesIn('# 直し方: x="$(./task db:up)"\n', commands)).toEqual([]);
+  });
+
+  it("行末のコメントの中の口も、数えない", () => {
+    // **当てる側だけを強めると、当ててはいけないものに当たる** (#394。#425 のレビュー)
+    // ——**このリポジトリはコメントに例を書く**ので、**実行されない口を拾うと、
+    // 書いた人には理由の分からない赤が出る。**
+    expect(queriesIn('true # 例: x="$(./task doctor)"\n', commands)).toEqual([]);
+  });
+
+  it("引用符の中の `#` は、コメントとして落とさない", () => {
+    // **`#` から行末までを素朴に落とすと、引用符の中の `#` まで切る**
+    // ——**`bin/` には `--format '{{.ID}}|{{.Label "…"}}'` のような行がある**（#425 のレビュー）。
+    // **落とすと、その行の呼び出しが丸ごと見えなくなる**（**空振りする側**）。
+    // **語の頭に見える `#` を、引用符の中に置く**（**空白のあと**）
+    // ——**そうでないと、伏字にしなくても切られない**（**当たらない入力になる**）。
+    expect(
+      queriesIn(`note='メモ #1'; paths="$("$TASK" loop:stop:paths)"\n`, commands),
+      "引用符の中の # で切っている",
+    ).toContain("loop:stop:paths");
   });
 
   it("口でない語は、数えない", () => {
