@@ -122,10 +122,48 @@ show_workspace() {
   echo "  workspace=$1"
 }
 
+# **記録から、周期を測る** (#438)。**間隔が渡されなかったときの物差し。**
+#
+# **間隔はリポジトリへ固定しない**（#378 / `AGENTS.md` §1。**起動した人が決めるもの**）
+# ——**しかし、実物では誰も渡していなかった**（**渡すのは試験だけ**）ので、
+# **足した案内が鳴る場面に到達しない**（**cron が 1 本も無いときを除いて、いつも
+# `unknown`**）。
+#
+# **いちばん短い間を採る。ただし下限を置く。**
+#
+# **上を採ってはいけない** (#439 のレビュー)——**過去に 1 度落ちていると、その欠落が
+# そのまま物差しになる**（**3 時間空いた記録があれば、次の停止は 6 時間 `ok`**）。
+# **記録から押し出されるまで続く**ので、**止めるために足したものが、止めなくなる。**
+#
+# **下限が要る** ——**実測の記録には数十秒の間がある**（`35 49 …`）。**あれは
+# 「捨てて呼び直した周回」**で、**同じ cron の中で 2 回 `acquire` している。**
+# **周期として読むと窓が数十秒になり、正常な周回で鳴り続ける。**
+# **cron の刻みは 1 分より細かくならない**ので、**それより短い間は周期ではない。**
+#
+# **落とした回は、上へずれるだけ**である——**最小は周期のほうに残る。**
+#
+# **2 本要る。** **1 本では間が測れない**ので、**そこは「分からない」のまま**である。
+readonly SHORTEST_TICK=60
+
+measured_interval() {
+  local previous="" at gap shortest=""
+  for at in "$@"; do
+    if [[ -n $previous ]]; then
+      gap=$((at - previous))
+      if ((gap >= SHORTEST_TICK)) && { [[ -z $shortest ]] || ((gap < shortest)); }; then
+        shortest="$gap"
+      fi
+    fi
+    previous="$at"
+  done
+  [[ -n $shortest ]] || return 1
+  printf '%s' "$shortest"
+}
+
 evaluate_scope() {
   local scope="$1" workspace="${2-}"
   local starts last_cron last_poke last_unknown age verdict window longest
-  local at trigger _where
+  local at trigger _where interval interval_shown cron_at=()
   starts="$common_dir/valence-loop-starts-$scope"
   if [[ ! -f $starts ]]; then
     # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
@@ -143,7 +181,10 @@ evaluate_scope() {
   while IFS=$'\t' read -r at trigger _where; do
     [[ $at =~ ^[0-9]+$ ]] || continue
     case "$trigger" in
-      cron) last_cron="$at" ;;
+      cron)
+        last_cron="$at"
+        cron_at+=("$at")
+        ;;
       poke) last_poke="$at" ;;
       # **知らない印は「不明」へ入れる**——**cron へ倒さない**（渡し忘れた日から
       # 何も見なくなる）。**綴りが変わったときも、こちらへ落ちる。**
@@ -163,7 +204,16 @@ evaluate_scope() {
   else
     age=$((NOW - last_cron))
     ((age < 0)) && age=0
-    if [[ -z $INTERVAL ]]; then
+    # **渡されたものが正である** (#378)。**測った値で上書きしない**
+    # ——**起動した人が決めたもの**が、いちばん確かである。
+    interval="$INTERVAL"
+    interval_shown="interval=${INTERVAL:-unknown}"
+    if [[ -z $interval ]] && interval="$(measured_interval "${cron_at[@]}")"; then
+      # **測ったものだと分かる形で出す**——**渡された値と混ぜない**
+      # （**読む人が、どちらで判定したか分かるように**）。
+      interval_shown="interval=~$interval"
+    fi
+    if [[ -z $interval ]]; then
       verdict="unknown"
     else
       # **窓は、実測があれば広げる** (#381 のレビュー 4 周目)。
@@ -181,16 +231,16 @@ evaluate_scope() {
       # のは、前のが終わってから**で、**そこから次の cron までは最大で間隔 1 つ**——
       # **それ以上待っても始まらないなら、鳴っていない。**
       # **「長いかもしれない」で全部を黙らせない。**
-      window=$((INTERVAL * MISSED_TICKS))
+      window=$((interval * MISSED_TICKS))
       if [[ -f "$common_dir/valence-loop-roundlen-$scope" ]] &&
         read -r longest <"$common_dir/valence-loop-roundlen-$scope" 2>/dev/null &&
         [[ $longest =~ ^[0-9]+$ ]]; then
-        ((longest + INTERVAL <= window)) || window=$((longest + INTERVAL))
+        ((longest + interval <= window)) || window=$((longest + interval))
       fi
       ((age > window)) && verdict="stale"
     fi
   fi
-  echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age interval=${INTERVAL:-unknown} $verdict"
+  echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"
   [[ $verdict != "stale" ]] || show_workspace "$workspace"
   case "$verdict" in
     stale) stale=1 ;;
@@ -268,6 +318,7 @@ if ((stale == 1)); then
   echo "[WARN] まず予定表を引くこと——stale と出た役のセッションで CronList を見る" >&2
   echo "       呼んだ役が健全でも、別の役が stale なら、空なのはそちらの予定表である" >&2
   echo "       どの作業場かは、その行の下の workspace= を見る" >&2
+  echo "       interval=~ の行は、記録から測った周期を物差しにしている" >&2
   echo "       （この道具は他のセッションを引けない。入れ直すのもセッション自身）" >&2
   echo "       recurring の予定は 7 日で期限切れになるので、消えていることがある" >&2
   echo "       ここから言えるのは「直近の記録に、cron の周回が無い」まで" >&2
