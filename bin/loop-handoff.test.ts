@@ -2160,6 +2160,66 @@ describe("bin/loop-handoff", () => {
       expect(handoff.stdout).toBe("");
     });
 
+    it("宛先がいなくても、出口の 2 手が両方通る", () => {
+      // **契約は「exit 3 の出力は exit 0 と同じ」**だが、**宛先が自分だと出口は黙る**
+      // （#92）——**矛盾の WARN だけが出て、`<役>\t<理由>` の行が無い。**
+      // **そのあとの `--sent` は「送ると決めた記録がありません」で必ず落ちる**
+      // （#399。**master の周回で 2 度踏んだ**）。
+      //
+      // **「失敗したが問題ない」を毎回読む形は、読まなくなる側**である。
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      const handoff = run("master");
+      expect(handoff.status, "矛盾を知らせていない").toBe(3);
+      expect(handoff.stdout, "宛先がいないのに行が出ている").toBe("");
+
+      expect(sent("master").status, "出口の 2 手目が落ちる").toBe(0);
+    });
+
+    it("宛先がいない周回の --sent は、送信済みを作らない", () => {
+      // **通ることと、記録を作ることは別**である（#125 の本体）——**誰にも
+      // 配っていない**ので、**その状態を「届いた」と数えてはいけない。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      expect(run("master").status).toBe(3);
+      expect(sent("master").status).toBe(0);
+
+      // **同じ状態で、worker の周回は master へ送れる**（**抑止されていない**）
+      expect(run("worker").stdout, "配っていない状態を送信済みにしている").toMatch(/^master\t/);
+    });
+
+    it("前の版が、その印を黙って読み違えない", () => {
+      // **新しい書き手 → 古い読み手**（`AGENTS.md` §5）。**送信待ちの記録は、
+      // 周回の途中で版が入れ替わりうる**（**判断は新しい版、`--sent` は
+      // 同期前の古い版**）——**印が役の名前だと、古い版はそれを宛先として読む。**
+      //
+      // **役ではない値を置いてある**ので、**古い版はこれまでどおり exit 2 で落ちる**
+      // （**いまと同じ答え**であって、**新しい壊れ方ではない**）。
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      expect(run("master").status, "印が置かれていない").toBe(3);
+      // **隣のスクリプトを引くので、`bin/` ごと写す**（#310 と同じ形）
+      const bin = join(repo, "older-bin");
+      cpSync(BIN_DIR, bin, { recursive: true });
+      const older = join(bin, "loop-handoff");
+      // **前の版**——**印を知らない**（その枝だけを外す）
+      const source = readFileSync(SCRIPT, "utf8");
+      const changed = source.replace(
+        /  if \[\[ \$sent_to == "\$NO_DESTINATION" \]\]; then[\s\S]*?\n  fi\n/,
+        "",
+      );
+      expect(changed, "前の版を作れていない").not.toBe(source);
+      writeFileSync(older, changed, { mode: 0o755 });
+      const token = acquireLease("master");
+
+      const read = spawnSync(older, ["master", `--sent=${token}`], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      releaseLease("master", token);
+
+      expect(read.status, "前の版が、印を宛先として読んでいる").toBe(2);
+      expect(read.stderr, "何が読めなかったのかが出ていない").toMatch(/宛先/);
+    });
+
     it("label が付いていれば矛盾ではない", () => {
       withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
 
