@@ -132,6 +132,40 @@ describe("作業場ごとに、compose project とポートを分ける", () => 
     expect(asked.stdout, "前置きの警告が、答えに混ざっている").toMatch(/^\d+\n$/);
   });
 
+  it("master の場所も、前置き無しで答える", () => {
+    // **機械が読む口を `./task` に足すたびに、同じところに当たる** (#416 のレビュー)
+    // ——**#381（`loop:worker:paths`）、#416（`port`）に続いて 3 度目**である（#422）。
+    //
+    // **当たり方が違う。** **`bin/loop-cadence` は絶対パスで実在するものだけを見る**ので、
+    // **警告混じりの行は弾かれ**、**記録も無い master では戻る先も無い**——
+    // **結果は「何も言わない」**で、**master の cron が来ていなくても正常に終わる。**
+    const { dir } = workspace("valence-worker-a");
+    noisyPreamble(dir);
+    // **master が居る形を作る**——**登録されていなければ答えは空**で、
+    // **混ざったかどうかが見えない。**
+    expect(spawnSync("git", ["init", "--quiet", "-b", "main", dir]).status).toBe(0);
+    expect(
+      spawnSync("git", ["-C", dir, "commit", "--quiet", "--allow-empty", "-m", "init"], {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@t",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@t",
+        },
+      }).status,
+    ).toBe(0);
+    const master = `${dir}-master`;
+    expect(
+      spawnSync("git", ["-C", dir, "worktree", "add", "--detach", "--quiet", master]).status,
+    ).toBe(0);
+
+    const asked = spawnSync("./task", ["loop:master:path"], { cwd: dir, encoding: "utf8" });
+
+    expect(asked.status, asked.stderr).toBe(0);
+    expect(asked.stdout, "前置きの警告が、答えに混ざっている").toBe(`${master}\n`);
+  });
+
   it("その作業場のポートを、訊けば答える", () => {
     // **手引きが書き写さないために要る口** (#412)。**決めているのは `./task`** なので、
     // **人も機械も、そこへ訊く**——**`127.0.0.1:3000` と書くと、worker の作業場では

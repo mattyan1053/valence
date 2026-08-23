@@ -1105,7 +1105,7 @@ main() {
   # **ここに並べるのは「読むだけの口」だけ**である——**何かを起こす口は、
   # これまでどおり前置きを通す**（**古いまま動いていることに、そこで気づく**）。
   case "$raw" in
-    port | loop:stop:paths | loop:worker:paths)
+    port | loop:stop:paths | loop:worker:paths | loop:master:path)
       "$fn" "$@"
       return
       ;;
