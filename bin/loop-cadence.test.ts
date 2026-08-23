@@ -364,6 +364,27 @@ describe("周回が始まったことを、どう始まったかごと残す", (
       expect(done.stdout, "止まっていると言っていない").toMatch(/stale/);
     });
 
+    it("過去に長く空いた記録があっても、窓を広げない", () => {
+      // **いちばん長い間を物差しにすると、過去の欠落がそのまま窓になる**
+      // （#439 のレビュー）——**1 度 3 時間空いた記録があると、次の停止は 6 時間
+      // 経つまで `ok`** で、**その記録が押し出されるまで最大 20 回続く。**
+      //
+      // **止めるために足したものが、止めなくなる**——**いちばん短い間を採る**
+      // （**ただし、呼び直しの数十秒は周期ではない**ので、下限で外す）。
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+        [13_600, "cron"], // **過去に 3 時間空いた**（落ちていた）
+        [15_400, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "20800" });
+
+      expect(done.status, "過去の欠落で、窓が広がっている").toBe(1);
+      expect(done.stdout, "止まっていると言っていない").toMatch(/stale/);
+    });
+
     it("物差しが実測だと分かる形で出す", () => {
       // **渡された間隔と混ぜない**——**読む人が、どちらで判定したか分かるように。**
       // **「間隔」とは呼ばない**（**測ったのは、これまで空いた最長の間**である）
@@ -375,7 +396,7 @@ describe("周回が始まったことを、どう始まったかごと残す", (
 
       const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
 
-      expect(done.stdout, "実測の物差しだと分からない").toMatch(/interval=unknown widest=1800/);
+      expect(done.stdout, "実測の物差しだと分からない").toMatch(/interval=~1800/);
     });
 
     it("捨てて呼び直した周回で、窓が縮まない", () => {
@@ -385,15 +406,15 @@ describe("周回が始まったことを、どう始まったかごと残す", (
       const { dir } = workspace();
       records(dir, [
         [1_000, "cron"],
-        [1_035, "cron"],
-        [2_800, "cron"],
-        [4_600, "cron"],
+        [1_035, "cron"], // **同じ cron の中の 2 回目**（捨てて呼び直した）
+        [2_835, "cron"],
+        [4_635, "cron"],
       ]);
 
       const done = cadence(dir, { LOOP_CADENCE_NOW: "6000" });
 
       expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
-      expect(done.stdout, "呼び直しの間で窓を作っている").toMatch(/widest=1800/);
+      expect(done.stdout, "呼び直しの間で窓を作っている").toMatch(/interval=~1800/);
     });
 
     it("来ているうちは、測った間隔でも言わない", () => {
