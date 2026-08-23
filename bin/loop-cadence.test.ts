@@ -56,15 +56,35 @@ function workspace(): { dir: string; stamp: string } {
   );
   // **どこに作業場が居るかを答える口**（本物は `./task loop:worker:paths`）。
   // **既定はこの作業場 1 つ**——**居るはずのものから並べる**ので、置かないと何も見えない。
-  writeFileSync(join(dir, "task"), `#!/usr/bin/env bash\nprintf '%s\\n' ${JSON.stringify(dir)}\n`, {
-    mode: 0o755,
-  });
+  // **本物は下位コマンドで答えを変える**——**`loop:master:path` は、master の作業場が
+  // 登録されていなければ exit 1**（`./task`）。**既定は「master は居ない」。**
+  taskAnswers(dir, { workerPaths: [dir] });
   const stamped = spawnSync(join(dir, "bin/loop-procedure-stamp"), ["worker"], {
     cwd: dir,
     encoding: "utf8",
   });
   expect(stamped.status, stamped.stderr).toBe(0);
   return { dir, stamp: stamped.stdout.trim() };
+}
+
+/**
+ * **どこに作業場が居るかを答える口**（本物は `./task`）。
+ *
+ * **`loop:worker:paths` は worker のぶんだけ**を並べ、**`loop:master:path` は master の
+ * 作業場**を出す（**登録されていなければ exit 1**）——**master を除いているのは
+ * あちら**なので、**この試験でも 2 つの口に分けて答える。**
+ */
+function taskAnswers(dir: string, answers: { workerPaths?: string[]; masterPath?: string }): void {
+  const workers = (answers.workerPaths ?? []).map((path) => JSON.stringify(path)).join(" ");
+  const master =
+    answers.masterPath === undefined
+      ? "exit 1"
+      : `printf '%s\\n' ${JSON.stringify(answers.masterPath)}`;
+  writeFileSync(
+    join(dir, "task"),
+    `#!/usr/bin/env bash\ncase "$1" in\n  loop:worker:paths) printf '%s\\n' ${workers} ;;\n  loop:master:path) ${master} ;;\nesac\n`,
+    { mode: 0o755 },
+  );
 }
 
 /** 1 周ぶん（取って、返す）。**どう始まったかを渡す。** */
@@ -302,16 +322,18 @@ describe("手順と表示が、この記録につながっている", () => {
  * **`./task loop:worker:remove` で消しても記録は残る。**
  */
 describe("読む先を、この仕組みが届く範囲に限る", () => {
-  it("master の記録では、止まっていると言わない", () => {
-    // **master の入口は `--trigger` を渡さない**（この PR は worker の入口だけを直した）
+  it("master の記録も読む", () => {
+    // **#381 では読まなかった**——**master の入口が `--trigger` を渡していなかった**
+    // ので、**読むと `unknown` になり、worker の cron が正常でも `stale` が立った。**
+    // **渡すようになったので、読む**（#422）——**判定は worker と同じもの。**
     const { dir } = workspace();
     records(dir, [[9_900, "cron"]]);
-    records(dir, [[1_000, "unknown"]], dir, "master");
+    records(dir, [[9_900, "cron"]], dir, "master");
 
     const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
 
-    expect(done.status, "master のぶんで誤報している").toBe(0);
-    expect(done.stdout, "master の記録まで読んでいる").not.toMatch(/master/);
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    expect(done.stdout, "master の記録を読んでいない").toMatch(/scope=master/);
   });
 
   it("消えた作業場の記録では、止まっていると言わない", () => {
@@ -413,11 +435,7 @@ function addedWorkspace(dir: string): string {
 
 /** **どこに作業場が居るかを答える口**を差し替える（本物は `./task` が持つ）。 */
 function withWorkspaceList(dir: string, paths: string[]): void {
-  writeFileSync(
-    join(dir, "task"),
-    `#!/usr/bin/env bash\nprintf '%s\\n' ${paths.map((path) => JSON.stringify(path)).join(" ")}\n`,
-    { mode: 0o755 },
-  );
+  taskAnswers(dir, { workerPaths: paths });
 }
 
 describe("居るはずの作業場を、記録が無くても数える", () => {
@@ -593,5 +611,87 @@ describe("長い周回を、来ていないと言わない", () => {
     const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
 
     expect(done.status, "実測が無いのに広げている").toBe(1);
+  });
+});
+
+/**
+ * **master の周回が来ているかを、誰も測れなかった**（#422）。
+ *
+ * **入口が `--trigger` を渡さないので、記録はすべて `unknown`** だった
+ * ——**22:22 から 00:06 まで master の周回が 1 つも無く、その間、持ち手が master の
+ * PR が「ゲートを回せる」状態で止まっていた**（2026-08-23。**人が気づいて突いた**）。
+ * **そして、なぜ空いたのかが分からない**（**鳴らなかった / `acquire` が exit 1 で
+ * 終わった / 届かなかった**）。
+ *
+ * **#378 が worker に対して直したのと同じ形**である。**判定は 1 つ**で、
+ * **見る先が 1 つ増えるだけ。**
+ */
+describe("master の周回も見る", () => {
+  it("master が cron で回っていれば、何も言わない", () => {
+    const { dir } = workspace();
+    records(dir, [[9_800, "cron"]]);
+    records(dir, [[9_800, "cron"]], dir, "master");
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    expect(done.stdout, "master を見ていない").toMatch(/scope=master/);
+  });
+
+  it("master が突かれただけなら、止まっていると言う", () => {
+    // **これが実測の形である**——**人が突けば周回は回るので、外からは健全に見える**
+    const { dir } = workspace();
+    records(dir, [[9_800, "cron"]]);
+    records(
+      dir,
+      [
+        [1_000, "cron"],
+        [9_900, "poke"],
+      ],
+      dir,
+      "master",
+    );
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "master が止まっているのに黙っている").toBe(1);
+    expect(done.stdout, "master が止まっていると言っていない").toMatch(/scope=master.*stale/);
+  });
+
+  it("どう始まったかを渡していない master の周回は、cron と数えない", () => {
+    // **いまがその状態である**（**記録はすべて `unknown`**）——**渡すようになるまでは
+    // 「分からない」ではなく「来ていない」側**である（#378 と同じ倒し方）
+    const { dir } = workspace();
+    records(dir, [[9_800, "cron"]]);
+    records(dir, [[9_900, "unknown"]], dir, "master");
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "unknown を cron と数えている").toBe(1);
+    expect(done.stdout, "不明が見えない").toMatch(/scope=master.*last_unknown=9900/);
+  });
+
+  it("master の作業場があって記録が無ければ、始まっていない側に数える", () => {
+    // **足したばかりの master が永久に見えない**のを防ぐ（worker と同じ）
+    const { dir } = workspace();
+    records(dir, [[9_800, "cron"]]);
+    taskAnswers(dir, { workerPaths: [dir], masterPath: dir });
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "始まっていないのに黙っている").toBe(1);
+    expect(done.stdout, "master が never だと言っていない").toMatch(/scope=master.*never/);
+  });
+
+  it("master が居ないループでは、master のことを言わない", () => {
+    // **作業場も記録も無いなら、この loop に master は居ない**
+    // ——**居ないものを「止まっている」と言うと、読む人が探しに行く**
+    const { dir } = workspace();
+    records(dir, [[9_800, "cron"]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    expect(done.stdout, "居ない master のことを言っている").not.toMatch(/scope=master/);
   });
 });

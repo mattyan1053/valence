@@ -693,16 +693,32 @@ cmd_loop_stop_paths() {
 #
 # **master の作業場は worker に数えない**——**あちらの入口は `--trigger` を渡さない**
 # ので、**混ぜると、worker の cron が正常でも「止まっている」と言うことになる。**
+# master の worktree。**登録されていれば、そのパスを出す。**
+#
+#   exit 0 = 登録されている / exit 1 = 登録されていない / exit 2 = 一覧を読めない
+#
+# **「どこに居るか」を決めているのはここ**である（`loop:worker:paths` が除くのも同じ値）
+# ——**読む側（`bin/loop-cadence`）へ書き写させない** (#422)。
+master_worktree_path() {
+  local listed main
+  listed="$(git worktree list --porcelain)" || return 2
+  main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
+  [[ -n $main ]] || return 2
+  printf '%s\n' "$listed" | grep -qxF "worktree ${main}-master" || return 1
+  printf '%s' "${main}-master"
+}
+
+# master の作業場の場所を出す (bin/loop-cadence が読む。無ければ exit 1)
+cmd_loop_master_path() { master_worktree_path; echo; }
+
 cmd_loop_worker_paths() {
-  local main master
+  local master="" status=0
   # **登録されているものが正**である（`loop_stop_paths` と同じ口）。
-  # **最初の 1 つが主の worktree**で、**master はその隣に `-master` で作られる。**
-  main="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
-  if [[ -z $main ]]; then
+  master="$(master_worktree_path)" || status=$?
+  if ((status == 2)); then
     echo "==> worktree の一覧を読めません" >&2
     return 1
   fi
-  master="${main}-master"
   git worktree list --porcelain |
     awk -v skip="$master" '/^worktree /{ if ($2 != skip) print $2 }'
 }
