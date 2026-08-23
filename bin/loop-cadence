@@ -89,36 +89,21 @@ stale=0
 undecidable=0
 workspace_path=""
 scope=""
-starts=""
-window=0
-longest=""
-# **読むのは worker のぶんだけ** (#381 のレビュー)。**master の入口は `--trigger` を
-# 渡さない**ので、**そのまま読むと `unknown` になり、worker の cron が正常でも `stale` が
-# 立つ**——**見えるようにするために足した行が、嘘を言うことになる。**
-# **master 側も見たくなったら、あちらの入口が渡すようになってからである。**
-while IFS= read -r workspace_path; do
-  # **絶対パスで、いま在るものだけを見る。** **`./task` は前置きの警告を stdout へ
-  # 出すことがある**ので、**行をそのまま作業場として扱わない**（`bin/loop-stall` も
-  # 同じ形で「実在するものだけ」を見ている）。**消された作業場もここで落ちる**
-  # ——**一覧に残っていても、回っていないのが正しい。**
-  [[ $workspace_path == /* && -d $workspace_path ]] || continue
-  # **名前の作り方は `bin/loop-lease` が持つ**（`scope`）——**ここでは訊くだけ。**
-  # **中で呼ぶものに標準入力を渡さない**——**`while read` が読むはずの残りを食われると、
-  # 2 つ目以降の作業場が黙って落ちる。**
-  if ! scope="$(cd "$workspace_path" 2>/dev/null &&
-    "${BASH_SOURCE[0]%/*}/loop-lease" scope worker 2>/dev/null </dev/null)" || [[ -z $scope ]]; then
-    echo "[WARN] 作業場の名前を作れません: $workspace_path" >&2
-    undecidable=1
-    continue
-  fi
+
+# その scope の周回が来ているか。**1 行出して、判定を足す。**
+#
+# **役ごとに 2 通り持たない** (#422)。**master も worker も、見ているのは
+# 「最後に cron で始まったのはいつか」**である——**違うのは記録の名前だけ。**
+evaluate_scope() {
+  local scope="$1" starts last_cron last_poke last_unknown age verdict window longest
+  local at trigger _where
   starts="$common_dir/valence-loop-starts-$scope"
-  found=1
   if [[ ! -f $starts ]]; then
     # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
     # ——**足したばかりの worker が、永久に見えなくなる。**
     echo "scope=${scope:0:12} last_cron=- last_poke=- last_unknown=- age=- interval=${INTERVAL:-unknown} never"
     stale=1
-    continue
+    return 0
   fi
   last_cron="-"
   last_poke="-"
@@ -180,7 +165,47 @@ while IFS= read -r workspace_path; do
     stale) stale=1 ;;
     unknown) undecidable=1 ;;
   esac
+}
+
+# **worker の作業場を並べる。** **master はここに出てこない**（`./task` が除いている）
+# ——**あちらは 1 つしかないので、下で別に見る** (#422)。
+while IFS= read -r workspace_path; do
+  # **絶対パスで、いま在るものだけを見る。** **`./task` は前置きの警告を stdout へ
+  # 出すことがある**ので、**行をそのまま作業場として扱わない**（`bin/loop-stall` も
+  # 同じ形で「実在するものだけ」を見ている）。**消された作業場もここで落ちる**
+  # ——**一覧に残っていても、回っていないのが正しい。**
+  [[ $workspace_path == /* && -d $workspace_path ]] || continue
+  # **名前の作り方は `bin/loop-lease` が持つ**（`scope`）——**ここでは訊くだけ。**
+  # **中で呼ぶものに標準入力を渡さない**——**`while read` が読むはずの残りを食われると、
+  # 2 つ目以降の作業場が黙って落ちる。**
+  if ! scope="$(cd "$workspace_path" 2>/dev/null &&
+    "${BASH_SOURCE[0]%/*}/loop-lease" scope worker 2>/dev/null </dev/null)" || [[ -z $scope ]]; then
+    echo "[WARN] 作業場の名前を作れません: $workspace_path" >&2
+    undecidable=1
+    continue
+  fi
+  found=1
+  evaluate_scope "$scope"
 done <<<"$workspaces"
+
+# **master も見る** (#422)。**judge 役が止まると、worker は PR を出せても先へ進めない**
+# ——**#421 は「ゲートを回せる」まで揃った状態で 1 時間 44 分止まっていた。**
+#
+# **居るかどうかは 2 つで見る。** **`./task` が場所を答えれば居る**（**足したばかりで、
+# まだ 1 度も回していない master もここで見える**）。**答えなくても記録があれば、
+# 回っていた**——**作業場を消したあとも、止まったことは言う。**
+#
+# **どちらも無いなら、この loop に master は居ない。** **何も言わない**
+# ——**居ないものを「止まっている」と言うと、読む人が探しに行く。**
+master_path=""
+if master_path="$("$(git rev-parse --show-toplevel)/task" loop:master:path 2>/dev/null </dev/null)" &&
+  [[ $master_path == /* && -d $master_path ]]; then
+  found=1
+  evaluate_scope master
+elif [[ -f "$common_dir/valence-loop-starts-master" ]]; then
+  found=1
+  evaluate_scope master
+fi
 
 if ((found == 0)); then
   # **記録が無いことと、始まっていないことは同じではない** ——**混ぜない。**
