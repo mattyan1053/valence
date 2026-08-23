@@ -197,6 +197,15 @@ cmd_up() { ensure_network; compose up -d app; }
 # この作業場のアプリのポートを出す 例: curl "http://127.0.0.1:$(./task port)/"
 cmd_port() { workspace_port; echo; }
 
+# **「使えない理由」を、まとめて言う** (#413)。**判定は `bin/doctor` が持つ**——
+# **ここへ写すと、片方だけ直して食い違う**（`show_cadence` などと同じ）。
+#
+# **コンテナへ入れない。** **見るのはホスト側の `.env` と、ホストから見えるポート**
+# である——**中から見ると、外から繋がらない状態が「見える」と出る。**
+#
+# 足りないもの (.env / Supabase / 開発サーバ) をまとめて言う
+cmd_doctor() { ./bin/doctor "$@"; }
+
 # 開発コンテナを停止する
 cmd_down() { compose down; }
 

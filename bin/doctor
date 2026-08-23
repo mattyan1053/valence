@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# **「使えない理由」を、まとめて言う** (#413)。
+#
+#   bin/doctor        （`./task doctor` から呼ばれる）
+#
+#   exit 0 = 足りないものは無い（**分からないものはあってよい**）
+#   exit 1 = 足りないものがある
+#
+# **これまでは別々に 4 つ見るしかなかった**——**`.env` を目で見る / Supabase へ curl /
+# 作業場ごとの port を調べる（#412）/ installation はここからは見られない。**
+# **「開けない」と分かったときに、どれが欠けているのかが即答できない。**
+#
+# **確かめられないものは、「無い」ではなく「分からない」と言う。**
+# **このリポジトリで何度も出ている形**（**「読めなかった」を「無かった」に化けさせない**）
+# ——**ここでいちばん効くのは installation** である（**App の JWT が要る**）。
+#
+# **分からないものを、足りない側に数えない。** **数えると、この口は毎回「使えない」と
+# 言い続ける**ことになり、**言っていないのと同じ**になる。
+#
+# **秘密の値を出さない** (`AGENTS.md` §6)。**キーが埋まっているかだけ**を言う。
+#
+# **止めない。** **1 つ目で止まると「まとめて言う口」にならない**ので、
+# **-e は使わない**（**全部見てから、最後に判定を返す**）。
+set -uo pipefail
+
+missing=0
+
+ok() { printf '[OK]     %s\n' "$1"; }
+# **足りない**（**直せば使えるようになる**）。**判定を 1 段悪くする。**
+lack() {
+  printf '[足りない] %s\n' "$1"
+  missing=1
+}
+# **分からない**（**この口からは確かめられない**）。**足りない側に数えない。**
+unknown() { printf '[分かりません] %s\n' "$1"; }
+
+# ---------------------------------------------------------------- .env
+
+# `.env.example` に並んだキー名。**値は読まない**（**ダミーしか入っていない**）。
+example_keys() {
+  local file="$1"
+  [[ -f $file ]] || return 1
+  sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$file"
+}
+
+# そのキーの値。**無ければ空**（**呼ぶ側は「空＝足りない」と読む**）。
+value_of() {
+  local file="$1" key="$2" line
+  [[ -f $file ]] || return 1
+  # **最後に書かれたものを採る**（**同じキーが 2 度あるなら、後が勝つ**）
+  line="$(grep -E "^[[:space:]]*${key}=" "$file" | tail -n 1)" || return 1
+  line="${line#*=}"
+  # **囲みだけを外す。** **中身は出さない**ので、これ以上は解釈しない
+  line="${line#\"}"
+  line="${line%\"}"
+  line="${line#\'}"
+  line="${line%\'}"
+  # **前後の空白を落とす** (#419 のレビュー)。**読む側は `trim()` してからはねる**
+  # ——**`KEY=   ` を「埋まっている」と読むと、アプリは起動しないのに正常と言う**
+  # （**診断が間違えると、直しに行く先が変わる**）。
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  printf '%s' "$line"
+}
+
+check_env() {
+  local example=".env.example" env=".env" keys empty=() key value
+  if ! keys="$(example_keys "$example")"; then
+    unknown ".env: 何が要るのか分かりません（$example がありません）"
+    return 0
+  fi
+  if [[ ! -f $env ]]; then
+    lack ".env: ありません（cp $example $env して、値を入れる）"
+    return 0
+  fi
+  while IFS= read -r key; do
+    [[ -n $key ]] || continue
+    value="$(value_of "$env" "$key")"
+    [[ -z $value ]] && empty+=("$key")
+  done <<<"$keys"
+  if ((${#empty[@]} > 0)); then
+    # **名前だけを出す** (`AGENTS.md` §6)。**埋まっている値は、1 つも画面へ出さない**
+    lack ".env: 空のキーがあります: ${empty[*]}"
+    return 0
+  fi
+  ok ".env: 必要なキーは埋まっています"
+}
+
+# ---------------------------------------------------------------- 応答
+
+# その URL が応答するか。**印を標準出力へ出す**（`http:<コード>` / `tcp-open`）。
+#
+#   exit 0 = 応答があった（HTTP 2xx / 3xx）
+#   exit 1 = 繋がらない
+#   exit 3 = 繋がったが、HTTP がエラー（**起動はしている**）
+#   exit 4 = 繋がるが、応答までは確かめられない（**curl が無い**）
+#   exit 2 = 確かめる手立てが無い（URL を読めない）
+#
+# **「繋がらない」と「HTTP がエラー」を混ぜない** (#419 のレビュー)。**`curl -f` は
+# 4xx / 5xx で非ゼロ**なので、**混ぜると「応答がありません（`./task up`）」と出て、
+# 打っても直らない**——**起動しているのだから。**
+#
+# **`curl` はホストに要求していない**（`./task` が要求するのは bash / docker / git /
+# flock だけ）ので、**無ければ bash の `/dev/tcp` で「開いているか」だけを見る。**
+# **そこで `[OK]` と言わない**——**同じ状態に、機械によって違う答えを出さない**
+# （**500 を返しているサーバが、curl の無い機械でだけ「応答があります」になる**）。
+responds() {
+  local url="$1" host port rest code
+  if command -v curl >/dev/null 2>&1; then
+    # **`-f` を使わない** (#419 のレビュー)。**HTTP のエラーを「繋がらない」に化かす**
+    # ——**欲しいのは、繋がったかどうかと、返ってきたコードの両方**である。
+    # **curl の生の文言は出さない**（**人が読むのは、この口が並べる 1 行**）。
+    code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)" || return 1
+    [[ $code =~ ^[0-9]+$ ]] || return 1
+    ((code > 0)) || return 1
+    printf 'http:%s' "$code"
+    ((code >= 400)) && return 3
+    return 0
+  fi
+  rest="${url#*://}"
+  rest="${rest%%/*}"
+  host="${rest%%:*}"
+  port="${rest##*:}"
+  [[ $host != "$port" ]] || return 2
+  if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+    printf 'tcp-open'
+    return 4
+  fi
+  return 1
+}
+
+check_supabase() {
+  local url
+  # **ブラウザが行く先を見る**（`NEXT_PUBLIC_SUPABASE_URL`）——**人が開くのと同じ先**
+  # である。**`SUPABASE_URL` はコンテナの中の名前**（`http://kong:8000`）なので、
+  # **ここから引いても届かない**（`.env.example` の説明のとおり）。
+  url="$(value_of ".env" "NEXT_PUBLIC_SUPABASE_URL")"
+  if [[ -z $url ]]; then
+    # **行き先が無い。** **「見えない」と言うと、起動していないのだと読める**
+    unknown "Supabase: 見に行く先が分かりません（.env の NEXT_PUBLIC_SUPABASE_URL が空）"
+    return 0
+  fi
+  local seen status=0
+  seen="$(responds "$url/auth/v1/health")" || status=$?
+  case "$status" in
+    0) ok "Supabase: 応答があります" ;;
+    1) lack "Supabase: 繋がりません（./task db:up で起動する）" ;;
+    3) lack "Supabase: HTTP が ${seen#http:} を返します（起動はしています。./task db:status で見る）" ;;
+    4) unknown "Supabase: ポートは開いていますが、応答までは確かめられません（curl がありません）" ;;
+    *) unknown "Supabase: 見に行く先を読めません（.env の NEXT_PUBLIC_SUPABASE_URL）" ;;
+  esac
+}
+
+# このポートを publish しているコンテナ。**stdout: `<id>|<compose の working_dir>`**
+#
+#   exit 0 = 見つかった / exit 1 = 無い / exit 2 = 読めない（docker が無い等）
+#
+# **中は覗かない** (`AGENTS.md` §6。`bin/db-config-drift` と同じ判断)——
+# **`docker inspect` は環境変数を平文で吐く**ので、**要る印だけを名指しで取る。**
+container_on_port() {
+  local port="$1" row
+  command -v docker >/dev/null 2>&1 || return 2
+  row="$(docker ps --filter "publish=$port" \
+    --format '{{.ID}}|{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null)" || return 2
+  row="$(printf '%s\n' "$row" | head -n 1)"
+  [[ -n $row ]] || return 1
+  printf '%s' "$row"
+}
+
+# 応答したのが、この作業場のものか (#419 のレビュー)。
+#
+# **同じポートに、別の clone / worktree が上がっていれば普通に応答する**
+# ——**エラーにならないので、見ているものが自分のものだと思い込んだまま進む**
+# （`.claude/skills/dev-environment/`。#412 / #416）。
+# **「動いています」と言われた人は、そこで調べるのをやめる。**
+#
+# **compose が付ける印で見る**（`working_dir`）——**作業場のパスそのもの**なので、
+# **名前の付け方を書き写さずに済む**（**`./task` が決めているものを 2 つ持たない**）。
+confirm_owner() {
+  local port="$1" row status=0 id dir here
+  row="$(container_on_port "$port")" || status=$?
+  case "$status" in
+    0) ;;
+    1)
+      unknown "開発サーバ: 応答した相手が、この作業場のものか分かりません（このポートを publish しているコンテナがありません）"
+      return 0
+      ;;
+    *)
+      unknown "開発サーバ: 応答した相手が、この作業場のものか分かりません（docker に訊けません）"
+      return 0
+      ;;
+  esac
+  id="${row%%|*}"
+  dir="${row#*|}"
+  if [[ -z $dir ]]; then
+    unknown "開発サーバ: 応答した相手が、この作業場のものか分かりません（compose の印がありません）"
+    return 0
+  fi
+  here="$(pwd -P)"
+  if [[ $dir != "$here" ]]; then
+    # **他人のアプリが応答している。** **この作業場のものは見えていない**
+    lack "開発サーバ: このポートに居るのは別の作業場のアプリです（$dir）"
+    return 0
+  fi
+  ok "開発サーバ: 応答があります（http://127.0.0.1:$port/。この作業場のコンテナです）"
+  check_env_applied "$id"
+}
+
+# **`.env` を書き換えたあと、コンテナを作り直したか** (#419 のレビュー)。
+#
+# **`env_file` はコンテナの作成時にしか読まれない**（`.claude/skills/dev-environment/`）
+# ——**`./task restart` でも読み直さない。** **`/` は設定を使わないので応答は返る**ので、
+# **ホストの `.env` だけを見ると、ログインが壊れている状態を `[OK]` と言う。**
+#
+# **手引きに書いてあるのに、道具が使っていなかった**（`AGENTS.md` §5 の形）。
+check_env_applied() {
+  local id="$1" created env_at container_at
+  [[ -f .env ]] || return 0
+  if ! env_at="$(stat -c %Y .env 2>/dev/null)" || [[ -z $env_at ]]; then
+    unknown ".env の反映: .env の更新時刻を読めません"
+    return 0
+  fi
+  # **要るのは作成時刻だけ**（**環境変数は取らない**）
+  if ! created="$(docker inspect -f '{{.Created}}' "$id" 2>/dev/null)" || [[ -z $created ]]; then
+    unknown ".env の反映: コンテナの作成時刻を読めません"
+    return 0
+  fi
+  if ! container_at="$(date -d "$created" +%s 2>/dev/null)" || [[ -z $container_at ]]; then
+    unknown ".env の反映: コンテナの作成時刻を読めません（読めない書式です: date -d）"
+    return 0
+  fi
+  if ((container_at < env_at)); then
+    lack ".env の反映: .env を書き換えたあと、コンテナを作り直していません（./task up。restart では読み直しません）"
+    return 0
+  fi
+  ok ".env の反映: コンテナは いまの .env より後に作られています"
+}
+
+check_dev_server() {
+  local port
+  # **ポートの決め方は `./task` が持つ** (#82 / #412)。**ここへ書き写さない**
+  # ——**作業場ごとに違う**ので、**2 つの決め方を持つと、別の作業場のアプリを見て
+  # 「動いている」と言う**（**エラーにならないぶん、気づけない**）。
+  if ! port="$(./task port 2>/dev/null)" || [[ -z $port ]]; then
+    unknown "開発サーバ: この作業場のポートが分かりません（./task port が答えません）"
+    return 0
+  fi
+  local seen status=0
+  seen="$(responds "http://127.0.0.1:$port/")" || status=$?
+  case "$status" in
+    0) confirm_owner "$port" ;;
+    1) lack "開発サーバ: 繋がりません（./task up で起動する。ログは ./task dev）" ;;
+    3) lack "開発サーバ: HTTP が ${seen#http:} を返します（起動はしています。ログは ./task dev）" ;;
+    4) unknown "開発サーバ: ポートは開いていますが、応答までは確かめられません（curl がありません）" ;;
+    *) unknown "開発サーバ: 見に行く先を作れません" ;;
+  esac
+}
+
+check_installation() {
+  # **この口からは確かめられない。** **installation の一覧には App の JWT が要る**
+  # （**秘密鍵で署名する**）——**この口は秘密を触らない**と決めてある（#413 の範囲外）。
+  #
+  # **「無い」と言わない。** **入っているのに「無い」と言うと、入れ直しに行かせる**
+  # ——**分からないことは、分からないと言う。**
+  # **installation はアカウント（org / ユーザー）ごとにある** (`AGENTS.md` §1。
+  # #419 のレビュー)。**個人の固定 URL だけを案内すると、org のぶんは映らない**
+  # ——**「分からない」と言った直後に、確かめられない先へ送ることになる。**
+  unknown "installation: この口からは確かめられません（App の JWT が要る）"
+  printf '           installation はアカウント（org / ユーザー）ごとにあります。%s\n' \
+    "対象アカウントの Settings → Integrations（org は Settings → GitHub Apps）で見る"
+}
+
+check_env
+check_supabase
+check_dev_server
+check_installation
+
+((missing == 0)) || exit 1
