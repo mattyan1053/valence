@@ -66,6 +66,12 @@ readonly DURATIONS="$git_dir/valence-check-durations"
 # **直近のぶんだけ残す**（`bin/loop-lease` の周回の長さと同じ形）。**際限なく足すと、
 # 読むたびに重くなる**——**振れ幅を見るには、直近の何十回かで足りる。**
 readonly RECENT_RUNS=10
+# ロックを待つ秒数。**試験で短くできるようにしてある**（`bin/loop-lease` と同じ形）
+readonly LOCK_WAIT_SEC="${LOOP_CHECK_STATE_LOCK_WAIT_SEC:-10}"
+if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_CHECK_STATE_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
 
 now_epoch() { date +%s; }
 
@@ -77,7 +83,7 @@ append_duration() {
   local started="$1" ended="$2" result="$3" kept=()
   [[ $started =~ ^[0-9]+$ ]] || return 1
   exec 8>"$DURATIONS.lock" 2>/dev/null || return 1
-  flock -w 10 8 || {
+  flock -w "$LOCK_WAIT_SEC" 8 || {
     exec 8>&-
     return 1
   }
@@ -129,6 +135,19 @@ case "$1" in
     # そう渡す）——**生きていない PID の記録は、走っている周回のものではありえない。**
     # **数字でない id は、そう決められない**ので**残す**（**消すほうへ倒さない**）。
     started="$(now_epoch)"
+    # **判定・取得・削除を、1 つのロックの中でやる** (#392 のレビュー。`record_missing`
+    # と同じ形)。**「死んでいると判った」から「消した」までの間にもう 1 本が同じ記録を
+    # 見ると、両方が `killed` を積む**——**水増しされるのは「切られやすさ」**で、
+    # **測るために作った数そのもの**である。
+    #
+    # **追記の口（`$DURATIONS.lock`）とは別の口を使う**——**同じ口だと、
+    # `append_duration` が自分の待ちに入る。**
+    #
+    # **取り損ねても、片付けは進む** (#184)。**握れなかったときは積まない**
+    # ——**握っている側が積む**ので、**落ちるのは「二重に数える」側ではない。**
+    measure_killed=1
+    exec 7>"$STATE_DIR.lock" 2>/dev/null || measure_killed=0
+    ((measure_killed == 0)) || flock -w "$LOCK_WAIT_SEC" 7 || measure_killed=0
     for old in "$STATE_DIR"/*; do
       [[ -f $old ]] || continue
       read -r kind _ <"$old" 2>/dev/null || continue
@@ -144,10 +163,13 @@ case "$1" in
       # **終わりの時刻は「片付けた時刻」**なので、**合否の代わりに `killed` と書く**
       # ——**所要時間として読ませない。**
       old_started="$(started_at_of "$old")"
-      [[ -z $old_started ]] || append_duration "$old_started" "$started" killed ||
-        echo "[WARN] 殺された走りの所要時間を積めません: $DURATIONS" >&2
+      if ((measure_killed == 1)) && [[ -n $old_started ]]; then
+        append_duration "$old_started" "$started" killed ||
+          echo "[WARN] 殺された走りの所要時間を積めません: $DURATIONS" >&2
+      fi
       rm -f "$old"
     done
+    exec 7>&-
     # **2 行目に始めた時刻**（**1 行目は前の版が読む**ので動かさない）
     printf 'running\n%s\n' "$started" >"$STATE_DIR/$2" || {
       echo "[FAIL] check の記録を書き込めません: $STATE_DIR/$2" >&2

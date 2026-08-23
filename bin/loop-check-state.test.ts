@@ -10,12 +10,14 @@
  * ——**別の作業場の check は、こちらの commit の可否と関係が無い。**
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { holdLock, sleepSync, waitUntil } from "../test/held-lock";
+import { budgetFor } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-check-state", import.meta.url));
 
@@ -31,8 +33,11 @@ describe("bin/loop-check-state", () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  function run(args: string[]): { status: number; stdout: string; stderr: string } {
-    const result = spawnSync(SCRIPT, args, { cwd: repo, encoding: "utf8" });
+  function run(
+    args: string[],
+    env: NodeJS.ProcessEnv = process.env,
+  ): { status: number; stdout: string; stderr: string } {
+    const result = spawnSync(SCRIPT, args, { cwd: repo, encoding: "utf8", env });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
@@ -137,6 +142,20 @@ describe("bin/loop-check-state", () => {
   });
 
   describe("所要時間を残す（#391）", () => {
+    /** 起こした側を、グループごと落とす。**試験がどう終わっても残さない**（#153）。 */
+    function killAll(racers: ReturnType<typeof spawn>[]): void {
+      for (const racer of racers) {
+        if (racer.pid === undefined) {
+          continue;
+        }
+        try {
+          process.kill(-racer.pid, "SIGKILL");
+        } catch {
+          // もう居ない
+        }
+      }
+    }
+
     /** その走りの記録の行。 */
     function recordLines(id: string): string[] {
       return readFileSync(join(statePath(), id), "utf8").split("\n");
@@ -221,6 +240,88 @@ describe("bin/loop-check-state", () => {
       expect(rows.length, "殺された走りが積まれていない").toBe(1);
       expect(rows[0]?.[2], "殺されたことが読み取れない").toBe("killed");
     });
+
+    it(
+      "2 本が同じ死んだ記録を見ても、1 回しか積まない",
+      () => {
+        // **`flock` が守っていたのは追記だけ** (#392 のレビュー)。**「死んでいると
+        // 判った」から「消した」までの間に、もう 1 本が同じ記録を見る**——**両方が
+        // `killed` を積む。** **水増しされるのは「切られやすさ」**で、
+        // **それはこの PR が測るために作った数**である（**測る道具が、測りたいものを
+        // 膨らませる**）。**同じ隙間を `record_missing` で踏んで直してある。**
+        //
+        // **踏む形を入力に置く。** **追記の口を握らせておく**と、**取り損ねた側は
+        // 記録がまだ在るうちに読む**——**直す前は、必ず 2 行積まれる。**
+        mkdirSync(statePath(), { recursive: true });
+        writeFileSync(
+          join(statePath(), "999999"), // **死んだ PID**（殺された走りの跡）
+          `running\n${Math.floor(Date.now() / 1000) - 600}\n`,
+        );
+        const held = holdLock({
+          dir: repo,
+          lock: join(repo, ".git", "valence-check-durations.lock"),
+        });
+        const racers = ["A", "B"].map((id) =>
+          spawn(SCRIPT, ["running", id], { cwd: repo, detached: true, stdio: "ignore" }),
+        );
+        try {
+          // **2 本とも、追記の口の前まで進ませる**（**この機械は 1 回の起動に最大 1 秒**）
+          sleepSync(3_000);
+        } finally {
+          held.release();
+        }
+        // **書き上がりで待つ**（**イベントループを止めて待つので、`exit` は拾えない**）
+        const finished = waitUntil(
+          () => ["A", "B"].every((id) => existsSync(join(statePath(), id))),
+          30_000,
+        );
+        killAll(racers);
+        expect(finished, "2 本とも書き終えていない（この試験は成立していない）").toBe(true);
+
+        expect(
+          durations().filter((row) => row[2] === "killed").length,
+          "同じ走りを 2 回積んでいる",
+        ).toBe(1);
+      },
+      budgetFor(6),
+    );
+
+    it(
+      "片付けの口を取り損ねても、片付けは進む",
+      () => {
+        // **ここで止まると出られない** (#184)。**握れないからと片付けを飛ばすと、
+        // 殺された記録が残ったまま**——**何度走らせても「走っている」のままで、
+        // commit が永久に止まる。** **落とすのは測るほうだけ**である
+        // （**握っている側が積む**ので、**二重に数える側へは倒さない**）。
+        mkdirSync(statePath(), { recursive: true });
+        writeFileSync(
+          join(statePath(), "999999"),
+          `running\n${Math.floor(Date.now() / 1000) - 600}\n`,
+        );
+        const held = holdLock({
+          dir: repo,
+          lock: join(repo, ".git", "valence-check-state.d.lock"),
+        });
+
+        try {
+          const started = run(["running", "A"], {
+            ...process.env,
+            LOOP_CHECK_STATE_LOCK_WAIT_SEC: "1",
+          });
+
+          expect(started.status, started.stderr).toBe(0);
+        } finally {
+          held.release();
+        }
+
+        expect(
+          existsSync(join(statePath(), "999999")),
+          "殺された記録が残っている（出られなくなる）",
+        ).toBe(false);
+        expect(run(["--durations"]).status, "取り損ねた側が積んでいる").toBe(4);
+      },
+      budgetFor(4),
+    );
 
     it("記録が伸び続けない", () => {
       // **直近の分だけを残す**（`bin/loop-lease` の周回の長さと同じ形）
