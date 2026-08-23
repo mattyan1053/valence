@@ -283,7 +283,13 @@ describe("周回が始まったことを、どう始まったかごと残す", (
     const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
 
     expect(done.status, "master が止まっていると言っていない").toBe(1);
-    expect(done.stdout, "master の行に道が無い").toMatch(/scope=master[\s\S]*workspace=/);
+    // **master の段だけを見る**（#441 の置き手紙）——**`[\s\S]*` だと後ろ全部を跨ぐ**ので、
+    // **別の作業場が出した `workspace=` を拾って緑になりうる**（`AGENTS.md` §4。
+    // **判定の範囲を本文より狭くする**）。**並び順にも寄りかからない。**
+    const masterSection =
+      done.stdout.split(/^scope=/m).find((section) => section.startsWith("master")) ?? "";
+
+    expect(masterSection, "master の行に道が無い").toContain("workspace=");
     expect(done.stdout, "引けなかったことを言っていない").toMatch(/workspace=不明/);
   });
 
@@ -429,6 +435,63 @@ describe("周回が始まったことを、どう始まったかごと残す", (
 
       expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
       expect(done.stdout, "来ているのに止まったと言っている").not.toMatch(/stale/);
+    });
+
+    it("間隔を長いほうへ変えたら、待っている間は言わない", () => {
+      // **#441 そのもの**——**5 分 → 30 分に変えると、前の周期の 300 秒が記録に残る。**
+      // **窓は 600 秒**なので、**次の cron を正しく待っている途中で `stale`** になり、
+      // **古い記録が押し出されるまで最大 20 回続く。**
+      //
+      // **記録からは、周期が伸びたのか、鳴り損ねたのかを見分けられない**
+      // ——**同じ形に見える。** **だから、直前の間が長かったなら、その 1 回ぶんは待つ。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [1_300, "cron"],
+        [1_600, "cron"],
+        [1_900, "cron"], // ここまで 5 分周期
+        [3_700, "cron"], // 30 分へ変えた（最初の 1 本）
+      ]);
+
+      // **正しく待っている途中**（次の cron は 5_500 に来る）
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "5400" });
+
+      expect(done.status, `止まっていないのに言っている: ${done.stdout}`).toBe(0);
+      expect(done.stdout, "止まっていないのに言っている").not.toMatch(/stale/);
+    });
+
+    it("長いほうへ変えても、そのまま止まれば言う", () => {
+      // **待つのは 1 回ぶんだけ**である——**「変わったかもしれない」で、いつまでも黙らない。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [1_300, "cron"],
+        [1_600, "cron"],
+        [1_900, "cron"],
+        [3_700, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "9000" });
+
+      expect(done.status, "止まったのに黙っている").toBe(1);
+      expect(done.stdout, "止まったのに黙っている").toMatch(/stale/);
+    });
+
+    it("間隔を短いほうへ変えたら、黙らない", () => {
+      // **逆向きも開けない**（#441 の注意）——**長いほうから短いほうへ変えたときに
+      // 物差しが大きいままだと、止まっても黙る。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"], // 30 分周期
+        [3_100, "cron"], // 5 分へ変えた
+        [3_400, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "4200" });
+
+      expect(done.status, "短くしたのに、古い物差しで黙っている").toBe(1);
+      expect(done.stdout, "止まったと言っていない").toMatch(/stale/);
     });
 
     it("渡された間隔があれば、そちらを使う", () => {

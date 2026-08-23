@@ -160,10 +160,37 @@ measured_interval() {
   printf '%s' "$shortest"
 }
 
+# **直前の間**（周期の下限より短いものは、周期ではないので飛ばす）。
+#
+# **周期が伸びたのか、鳴り損ねたのかは、記録からは見分けられない** (#441)——**どちらも
+# 「前より長い間が 1 つ空いた」**である。**予定表を 5 分から 30 分へ変えると、前の周期の
+# 300 秒が記録に残り**、**窓は 600 秒のまま**——**正しく待っている途中で `stale` になる**
+# （**古い記録が押し出されるまで最大 20 回**）。
+#
+# **鳴りすぎる見張りは読まれなくなる**（#440 / #441）ので、**直前の間が長かったときは、
+# その 1 回ぶんを待つ。** **待つのは 1 回ぶんだけ**である——**そのまま止まれば、
+# これまでどおり言う。**
+#
+# **「いちばん短い間を採る」は変えない** (#439 のレビュー)——**過去の欠落で窓が広がる
+# のは、こちらが `max` を採らないから防げている。** **短いほうへ変えたときは、最小が
+# すぐ追いつく**ので、**黙る側にも倒れない。**
+last_gap() {
+  local previous="" at gap last=""
+  for at in "$@"; do
+    if [[ -n $previous ]]; then
+      gap=$((at - previous))
+      ((gap >= SHORTEST_TICK)) && last="$gap"
+    fi
+    previous="$at"
+  done
+  [[ -n $last ]] || return 1
+  printf '%s' "$last"
+}
+
 evaluate_scope() {
   local scope="$1" workspace="${2-}"
   local starts last_cron last_poke last_unknown age verdict window longest
-  local at trigger _where interval interval_shown cron_at=()
+  local at trigger _where interval interval_shown gap cron_at=()
   starts="$common_dir/valence-loop-starts-$scope"
   if [[ ! -f $starts ]]; then
     # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
@@ -232,6 +259,11 @@ evaluate_scope() {
       # **それ以上待っても始まらないなら、鳴っていない。**
       # **「長いかもしれない」で全部を黙らせない。**
       window=$((interval * MISSED_TICKS))
+      # **直前の間が長かったなら、その 1 回ぶんは待つ** (#441)。**周期が伸びたのと、
+      # 鳴り損ねたのは、記録からは同じ形に見える**——**待つのは 1 回ぶんだけ**である。
+      if gap="$(last_gap "${cron_at[@]}")" && ((gap + interval > window)); then
+        window=$((gap + interval))
+      fi
       if [[ -f "$common_dir/valence-loop-roundlen-$scope" ]] &&
         read -r longest <"$common_dir/valence-loop-roundlen-$scope" 2>/dev/null &&
         [[ $longest =~ ^[0-9]+$ ]]; then
