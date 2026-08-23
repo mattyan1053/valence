@@ -55,6 +55,39 @@ function fastPathOf(task: string): Set<string> {
 }
 
 /**
+ * 引用符付きのヒアドキュメントの中を落とす（#427）。
+ *
+ * **`<<'区切り'` の中は展開されない**ので、**実行されない**——**案内としてコマンドの
+ * 例を出すときに使う形**である。**拾うと、書いた人には理由の分からない赤が出る**
+ * （**行末コメント・逃がした `$(` と同じ家族**。#425）。
+ *
+ * **区切りを引用符で囲まない形は落とさない**——**`$( )` が展開される**ので、
+ * **実行される側**である。
+ *
+ * **落とすのは中身だけ**（**終わりの行までで戻る**）——**終わりを読み違えると、
+ * その先が丸ごと見えなくなる**（**空振りする側**）。
+ */
+function withoutQuotedHeredocs(text: string): string[] {
+  const kept: string[] = [];
+  let ending = "";
+  for (const line of text.split("\n")) {
+    if (ending !== "") {
+      if (line.trim() === ending) {
+        ending = "";
+      }
+      continue;
+    }
+    // **`<<<`（ヒアストリング）は別物**なので、**当てない。**
+    const opened = /<<-?\s*(['"])([A-Za-z_]\w*)\1/.exec(line);
+    if (opened !== null) {
+      ending = opened[2] ?? "";
+    }
+    kept.push(line);
+  }
+  return kept;
+}
+
+/**
  * その行から、コメントを落とす。**引用符の中は落とさない。**
  *
  * **行頭だけでは足りない** (#425 のレビュー)——**このリポジトリはコメントに例を書く**
@@ -85,8 +118,9 @@ function withoutComment(line: string): string {
  * 並べない**（#394。**並べる限り終わらない**）。
  */
 function queriesIn(text: string, commands: Set<string>): string[] {
-  // **コメントは外す**——**説明の中の `./task db:up` は、呼んでいない。**
-  const code = text.split("\n").map(withoutComment).join("\n");
+  // **引用符付きのヒアドキュメントの中と、コメントは外す**
+  // ——**どちらも「実行されない行」**である。
+  const code = withoutQuotedHeredocs(text).map(withoutComment).join("\n");
   const found: string[] = [];
   // **逃がした `$(` は、実行されない** (#425 のレビュー)——**案内としてコマンドの例を
   // 文字列で出す行がある**（`bin/lint-shell` / `bin/loop-lease`）。
@@ -197,6 +231,28 @@ describe("見落とす形を、入力に置く", () => {
       queriesIn(`note='メモ #1'; paths="$("$TASK" loop:stop:paths)"\n`, commands),
       "引用符の中の # で切っている",
     ).toContain("loop:stop:paths");
+  });
+
+  it("引用符付きのヒアドキュメントの中は、数えない", () => {
+    // **`<<'区切り'` の中は展開されない**ので、**実行されない**（#427）。
+    // **案内としてコマンドの例を出す**ときに使う形である。
+    const text = ["cat <<'USAGE'", '使い方: x="$(./task doctor)"', "USAGE", ""].join("\n");
+
+    expect(queriesIn(text, commands)).toEqual([]);
+  });
+
+  it("展開されるヒアドキュメントの中は、数える", () => {
+    // **区切りを引用符で囲まない形は `$( )` が展開される**ので、**実行される側**である
+    const text = ["cat <<USAGE", "いま: $(./task doctor)", "USAGE", ""].join("\n");
+
+    expect(queriesIn(text, commands), "展開される中身を数えていない").toContain("doctor");
+  });
+
+  it("ヒアドキュメントが終われば、また数える", () => {
+    // **落とすのは中身だけ**——**終わりを読み違えると、その先が丸ごと見えなくなる**
+    const text = ["cat <<'USAGE'", "使い方", "USAGE", 'port="$(./task doctor)"', ""].join("\n");
+
+    expect(queriesIn(text, commands), "終わったあとを数えていない").toContain("doctor");
   });
 
   it("口でない語は、数えない", () => {
