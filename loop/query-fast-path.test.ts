@@ -55,7 +55,7 @@ function fastPathOf(task: string): Set<string> {
 }
 
 /**
- * 引用符付きのヒアドキュメントの中を落とす（#427）。
+ * 実行されない行を落とす——**コメントと、引用符付きのヒアドキュメントの中**（#427）。
  *
  * **`<<'区切り'` の中は展開されない**ので、**実行されない**——**案内としてコマンドの
  * 例を出すときに使う形**である。**拾うと、書いた人には理由の分からない赤が出る**
@@ -64,27 +64,53 @@ function fastPathOf(task: string): Set<string> {
  * **区切りを引用符で囲まない形は落とさない**——**`$( )` が展開される**ので、
  * **実行される側**である。
  *
+ * **1 度で回すのは、順序がどちらでも黙るから**である (#429 のレビュー)。
+ * **ヒアドキュメントを先に見ると、`# 例: cat <<'EOF'` が始まりとして読まれ**、
+ * **終わりが無ければ、その先の実コードが丸ごと消える**（**この見張りが黙る**）。
+ * **コメントを先に落とすと、ヒアドキュメントの中の `#` まで切る**（**中身は文字列**）。
+ * **中に居るかどうかで、掛けるものを変える。**
+ *
  * **落とすのは中身だけ**（**終わりの行までで戻る**）——**終わりを読み違えると、
  * その先が丸ごと見えなくなる**（**空振りする側**）。
+ *
+ * **見ていないもの**（#429 のレビュー。**どれも「実行されない行を数える」＝赤が出る側**
+ * なので、**踏んだ人には見える**）:
+ *
+ *   - **字下げされた終わりの行を、終わりとして扱う。** **bash が字下げを許すのは
+ *     `<<-`（しかもタブだけ）**である——**こちらは早く閉じるので、その先の中身を数える**
+ *   - **1 行に 2 つ開く形**（`cat <<'A' <<'B'`）——**最初の 1 つしか見ない**
+ *   - **引用符の中や、逃がした `<<`**——**始まりとして読む**
+ *
+ * **bash の規則を全部写さない。** **この見張りの目的は「fast path への入れ忘れを
+ * 見つける」**であって、**shell を読むことではない**（#429 のレビュー）。
  */
-function withoutQuotedHeredocs(text: string): string[] {
-  const kept: string[] = [];
-  let ending = "";
-  for (const line of text.split("\n")) {
-    if (ending !== "") {
-      if (line.trim() === ending) {
-        ending = "";
-      }
-      continue;
-    }
-    // **`<<<`（ヒアストリング）は別物**なので、**当てない。**
-    const opened = /<<-?\s*(['"])([A-Za-z_]\w*)\1/.exec(line);
-    if (opened !== null) {
-      ending = opened[2] ?? "";
-    }
-    kept.push(line);
+type Heredoc = { ending: string; dropping: boolean };
+
+/** ヒアドキュメントの中に居るときの 1 行。**中身は文字列**（コメントとして落とさない）。 */
+function insideHeredoc(line: string, state: Heredoc): string {
+  if (line.trim() === state.ending) {
+    state.ending = "";
+    return line;
   }
-  return kept;
+  // **引用符付きの中身だけを落とす**（**展開される側は、そのまま数える**）
+  return state.dropping ? "" : line;
+}
+
+function runnableLines(text: string): string[] {
+  const state: Heredoc = { ending: "", dropping: false };
+  return text.split("\n").map((line) => {
+    if (state.ending !== "") {
+      return insideHeredoc(line, state);
+    }
+    const code = withoutComment(line);
+    // **`<<<`（ヒアストリング）は別物**なので、**当てない。**
+    const opened = /<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1/.exec(code);
+    if (opened !== null) {
+      state.ending = opened[2] ?? "";
+      state.dropping = (opened[1] ?? "") !== "";
+    }
+    return code;
+  });
 }
 
 /**
@@ -118,9 +144,8 @@ function withoutComment(line: string): string {
  * 並べない**（#394。**並べる限り終わらない**）。
  */
 function queriesIn(text: string, commands: Set<string>): string[] {
-  // **引用符付きのヒアドキュメントの中と、コメントは外す**
-  // ——**どちらも「実行されない行」**である。
-  const code = withoutQuotedHeredocs(text).map(withoutComment).join("\n");
+  // **実行されない行を外す**——**コメントと、引用符付きのヒアドキュメントの中。**
+  const code = runnableLines(text).join("\n");
   const found: string[] = [];
   // **逃がした `$(` は、実行されない** (#425 のレビュー)——**案内としてコマンドの例を
   // 文字列で出す行がある**（`bin/lint-shell` / `bin/loop-lease`）。
@@ -246,6 +271,31 @@ describe("見落とす形を、入力に置く", () => {
     const text = ["cat <<USAGE", "いま: $(./task doctor)", "USAGE", ""].join("\n");
 
     expect(queriesIn(text, commands), "展開される中身を数えていない").toContain("doctor");
+  });
+
+  it("コメントの中の記法では、ヒアドキュメントは始まらない", () => {
+    // **黙る側である**（#429 のレビュー）——**終わりの行が無ければ、そこから先の
+    // 実コードが丸ごと消える**。**新しい口が並びに無くても緑**になり、
+    // **#424 が消しに来た状態そのもの**になる。
+    const text = ["# 例: cat <<'USAGE'", 'port="$(./task doctor)"', ""].join("\n");
+
+    expect(queriesIn(text, commands), "コメントで始まったことにして、その先を捨てている").toContain(
+      "doctor",
+    );
+  });
+
+  it("ヒアドキュメントの中の `#` は、コメントではない", () => {
+    // **中身は文字列**である——**コメントとして落とすと、展開される口が消える**
+    const text = ["cat <<USAGE", "# いま: $(./task doctor)", "USAGE", ""].join("\n");
+
+    expect(queriesIn(text, commands), "中身をコメントとして落としている").toContain("doctor");
+  });
+
+  it("区切りにハイフンが入っていても、始まりと読む", () => {
+    // **`<<'END-USAGE'` は実在する書き方**である（#429 のレビュー）
+    const text = ["cat <<'END-USAGE'", '使い方: x="$(./task doctor)"', "END-USAGE", ""].join("\n");
+
+    expect(queriesIn(text, commands)).toEqual([]);
   });
 
   it("ヒアドキュメントが終われば、また数える", () => {
