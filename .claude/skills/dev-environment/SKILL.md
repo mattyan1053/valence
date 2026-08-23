@@ -14,12 +14,28 @@ description: Valence の開発環境（コンテナ、./task、Supabase ロー�
 
 | サービス | ネットワーク | docker socket | 生存期間 |
 | --- | --- | --- | --- |
-| `app` | bridge（`127.0.0.1:3000` のみ publish）＋ Supabase の network | **持たない** | 常駐 |
+| `app` | bridge（`127.0.0.1:<この作業場のポート>` のみ publish）＋ Supabase の network | **持たない** | 常駐 |
 | `supabase-cli` | host | 持つ | コマンド実行中のみ |
 | `smee` | bridge | 持たない | `./task smee` の間（フォアグラウンド） |
 
 `app` の `CMD` は `pnpm dev`。**コンテナが起動していればアプリは動いている。**
 依存の導入は entrypoint が面倒を見るので、clone 直後でも `./task up` だけでよい。
+
+### どのポートで開くか
+
+**作業場ごとに違う**（#82）。**書き写さないこと**——**決めているのは `./task`** である。
+
+```bash
+# ここは、作業場のある機械で打つ（コンテナが動いている側）
+port="$(./task port)"                                      # この作業場のポート
+curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$port/"
+docker ps --filter "publish=$port" --format '{{.Names}}'   # 誰のものか確かめる
+```
+
+**最後の 1 行が要る。** **別の作業場のポートを開いても、エラーにならない**
+——**アプリが普通に開く**ので、**見ているものが自分のものだと思い込んだまま進む。**
+**出てくる名前は compose project（作業場のディレクトリ名）で始まる**ので、
+**そこが自分の作業場でなければ、見ているのは他人のアプリである。**
 
 ## よくある詰まり
 
@@ -30,7 +46,8 @@ compose のポート公開（docker-proxy）はホスト側で listen し続け�
 「空応答」ならこれを疑う。
 
 ```bash
-ss -tlnp | grep :3000                       # ホスト側は listen している
+# ここは、作業場のある機械で打つ
+ss -tlnp | grep ":$(./task port)"           # ホスト側は listen している
 docker compose exec -T app pgrep -a node    # コンテナ内に next がいるか
 ./task restart                              # 動いていなければ再起動
 ```
@@ -123,7 +140,13 @@ DB を覗くときは `./task db:psql`（studio は無効）。
 ## リモート VM から使う
 
 ```bash
-ssh -L 3000:localhost:3000 <user>@<remote-vm>
+# ここは手元（ブラウザのある機械）で打つ
+#
+# **ポートを訊く先は、向こう**である——**手元で `./task port` を打つと、手元の
+# ディレクトリ名から別の port が出る**（`valence` という名前の clone が手元にあれば、
+# **転送は通り、画面も開く**。**開いたのは別の作業場のアプリ**である）
+port="$(ssh <user>@<remote-vm> 'cd <作業場のパス> && ./task port')"
+ssh -L "$port:localhost:$port" <user>@<remote-vm>
 ```
 
 ブラウザから Supabase を直接叩くようになったら `-L 54321:localhost:54321` も足す。

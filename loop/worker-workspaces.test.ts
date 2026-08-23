@@ -99,6 +99,65 @@ describe("作業場ごとに、compose project とポートを分ける", () => 
     expect(new Set(seen.map((one) => one.port)).size, "ポートが重なっている").toBe(names.length);
   });
 
+  /**
+   * **前置きが、標準出力へ何か出す状態**（#416 のレビュー）。
+   *
+   * **`./task` は打つたびに前置きを通す**（`warn_stale_containers`）——**あれは
+   * 標準出力へ出す**ので、**`$( )` で読む口では、警告の文が答えに混ざる**。
+   * **#381 で 1 度踏んでいる形**である（あのときは `./task loop:worker:paths`）。
+   *
+   * **踏む形を入力に置く**——**`bin/` を置かない作業場では、前置きそのものが動かない。**
+   */
+  function noisyPreamble(dir: string): void {
+    const bin = join(dir, "bin");
+    mkdirSync(bin, { recursive: true });
+    for (const name of ["db-config-drift", "image-drift", "loop-lease"]) {
+      writeFileSync(
+        join(bin, name),
+        `#!/usr/bin/env bash\necho "[WARN] ${name}: 走っているものが古いかもしれません"\nexit 0\n`,
+        { mode: 0o755 },
+      );
+    }
+  }
+
+  it("問い合わせの答えに、前置きの警告が混ざらない", () => {
+    // **壊れるのはいちばん困るとき** (#416 のレビュー)——**コンテナや Supabase の
+    // 設定が古い、まさに「開かない理由を調べている」瞬間**に、**手引きが使えなくなる。**
+    const { dir } = workspace("valence-worker-a");
+    noisyPreamble(dir);
+
+    const asked = spawnSync("./task", ["port"], { cwd: dir, encoding: "utf8" });
+
+    expect(asked.status, asked.stderr).toBe(0);
+    expect(asked.stdout, "前置きの警告が、答えに混ざっている").toMatch(/^\d+\n$/);
+  });
+
+  it("その作業場のポートを、訊けば答える", () => {
+    // **手引きが書き写さないために要る口** (#412)。**決めているのは `./task`** なので、
+    // **人も機械も、そこへ訊く**——**`127.0.0.1:3000` と書くと、worker の作業場では
+    // 別の作業場のアプリが普通に開く**（**エラーにならないので、気づけない**）。
+    const { dir, log } = workspace("valence-worker-a");
+    up(dir);
+
+    const asked = spawnSync("./task", ["port"], { cwd: dir, encoding: "utf8" });
+
+    expect(asked.status, asked.stderr).toBe(0);
+    // **compose に渡している値と、同じもの**（**2 つの決め方を持たない**）
+    expect(asked.stdout.trim(), "compose に渡す値と食い違っている").toBe(portIn(log));
+    expect(asked.stdout.trim(), "ポートに見えない").toMatch(/^\d+$/);
+  });
+
+  it("既定の作業場でも、同じ口で答える", () => {
+    // **既定だけ別の道にしない**——**手引きは 1 つ**である
+    const { dir, log } = workspace("valence");
+    up(dir);
+
+    const asked = spawnSync("./task", ["port"], { cwd: dir, encoding: "utf8" });
+
+    expect(asked.status, asked.stderr).toBe(0);
+    expect(asked.stdout.trim(), "既定の作業場で食い違っている").toBe(portIn(log));
+  });
+
   it("同じ作業場なら、いつ動かしても同じ値になる", () => {
     // **空きを探して割り当てない**（起動のたびに変わると人が繋ぎ直せない）
     const { dir, log } = workspace("valence-worker-a");

@@ -188,6 +188,15 @@ ensure_up() {
 # 開発コンテナを起動する = アプリが起動する (冪等)
 cmd_up() { ensure_network; compose up -d app; }
 
+# **決めているのはここ** (#82) なので、**手引きや人が書き写さないための口**である
+# ——**`127.0.0.1:3000` と書くと、worker の作業場では別の作業場のアプリが普通に開く**
+# （**エラーにならないので、見ているものが自分のものだと思い込んだまま進む**）。
+#
+# **compose に渡すのと同じ値**を出す（`workspace_port`）。**2 つの決め方を持たない。**
+#
+# この作業場のアプリのポートを出す 例: curl "http://127.0.0.1:$(./task port)/"
+cmd_port() { workspace_port; echo; }
+
 # 開発コンテナを停止する
 cmd_down() { compose down; }
 
@@ -1059,6 +1068,23 @@ main() {
     cmd_help >&2
     exit 1
   fi
+
+  # **問い合わせは、前置きより先に返す** (#416 のレビュー。`bin/loop-gate
+  # --required-checks` や `bin/loop-procedure-changed --list` と同じ形)。
+  #
+  # **前置きは標準出力へ出す**（`warn_stale_containers`）ので、**`$( )` で読む口では、
+  # 警告の文が答えに混ざる**——**壊れるのはいちばん困るとき**である（**設定が古い、
+  # まさに「開かない理由を調べている」瞬間**）。**#381 で 1 度踏んでいる**
+  # （あのときは `./task loop:worker:paths` で、**警告の文が作業場の名前として読まれた**）。
+  #
+  # **ここに並べるのは「読むだけの口」だけ**である——**何かを起こす口は、
+  # これまでどおり前置きを通す**（**古いまま動いていることに、そこで気づく**）。
+  case "$raw" in
+    port | loop:stop:paths | loop:worker:paths)
+      "$fn" "$@"
+      return
+      ;;
+  esac
 
   heartbeat
   ensure_commit_guard
