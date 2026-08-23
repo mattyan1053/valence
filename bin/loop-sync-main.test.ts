@@ -80,6 +80,15 @@ describe("bin/loop-sync-main", () => {
         `  printf '%s\\n' ${JSON.stringify(HEAD)}`,
         "  exit 0",
         "fi",
+        // **同期した先を控える口** (#406 のレビュー)。**出口はここへ戻る**
+        'if [[ $args == "rev-parse --git-dir"* ]]; then',
+        `  printf '%s\\n' ${JSON.stringify(join(sandbox, "cwd", ".git"))}`,
+        "  exit 0",
+        "fi",
+        'if [[ $args == *"origin/main^{commit}"* ]]; then',
+        `  printf '%s\\n' ${JSON.stringify(HEAD)}`,
+        "  exit 0",
+        "fi",
         'echo "スタブ: 想定外の呼び出し: $args" >&2',
         "exit 1",
         "",
@@ -174,6 +183,48 @@ describe("bin/loop-sync-main", () => {
 
     expect(result.status).toBe(1);
     expect(result.fetches, "恒久的な失敗で投げ直している").toBe(1);
+  });
+
+  describe("同期した先を控える（#406 のレビュー）", () => {
+    // **`origin/main` は ref なので、この周回の途中でも動く**（**master は毎周回
+    // fetch し、`refs/remotes` は作業場どうしで共有**）——**出口が ref で戻ると、
+    // 検査していない版の上で残りを打つ**（**`bin/loop-lease release` もそこで走る**）。
+
+    beforeEach(() => {
+      // **身代わりの `git` が答える置き場**（**本物なら既にある**）
+      mkdirSync(join(sandbox, "cwd", ".git"), { recursive: true });
+    });
+
+    /** 控えた先。**作業場ごと**（`git rev-parse --git-dir`）。 */
+    function recorded(): string {
+      const path = join(sandbox, "cwd", ".git", "valence-loop-synced-main");
+      return existsSync(path) ? readFileSync(path, "utf8").trim() : "";
+    }
+
+    it("切り替えた周回は、その先を控える", () => {
+      expect(run({ fetches: [""] }).status).toBe(0);
+
+      expect(recorded(), "戻る先を控えていない").toBe(HEAD);
+    });
+
+    it("--fetch-only でも控える", () => {
+      // **PR の枝に居る周回はこちらを通る**（1.0 / rebase）——**そこで控えないと、
+      // いちばん戻したい周回だけが戻れない**
+      expect(run({ fetches: [""], args: ["--fetch-only"] }).status).toBe(0);
+
+      expect(recorded(), "取ってくるだけの周回が控えていない").toBe(HEAD);
+    });
+
+    it("控えられなくても、同期は成功する", () => {
+      // **#270 の向き**——**控えるのは出口のためで、同期そのものではない。**
+      // **置き場所を書けない形にする**（**ディレクトリで塞ぐ**）
+      mkdirSync(join(sandbox, "cwd", ".git", "valence-loop-synced-main"), { recursive: true });
+
+      const result = run({ fetches: [""] });
+
+      expect(result.status, "控えられないことで、同期が落ちている").toBe(0);
+      expect(result.stderr, "控えられなかったことを黙っている").toMatch(/\[WARN\] 同期した先/);
+    });
   });
 
   it("知らない引数は受けない", () => {

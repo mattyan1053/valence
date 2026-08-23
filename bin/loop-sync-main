@@ -106,6 +106,26 @@ while true; do
   fi
 done
 
+# **この周回が同期した先を控える** (#406 のレビュー)。**出口はここへ戻る**
+# ——**`origin/main` は ref なので、この周回の途中でも動く**（**master は毎周回
+# fetch し、`refs/remotes` は作業場どうしで共有**）。**ref で戻ると、検査していない版の
+# 上で出口の残りを打つことになる**（**`bin/loop-lease release` もそこで走る**）。
+#
+# **記録は作業場ごと**（`git rev-parse --git-dir`。**worktree ごとに分かれる**）
+# ——**別の作業場が同期した先は、こちらの戻り先ではない。**
+#
+# **控えられなくても、同期は成功している** (#270)。**言うだけにして、判定は返す**
+# ——**戻れないことは出口の側で分かる**（**そちらが「判定できない」と答える**）。
+record_synced() {
+  local git_dir target
+  git_dir="$(git rev-parse --git-dir 2>/dev/null)" || return 1
+  [[ -n $git_dir ]] || return 1
+  target="$(git rev-parse --verify --quiet "origin/main^{commit}")" || return 1
+  [[ -n $target ]] || return 1
+  printf '%s\n' "$target" >"$git_dir/valence-loop-synced-main" || return 1
+}
+record_synced || echo "[WARN] 同期した先を控えられません（出口で戻れなくなります）" >&2
+
 # **取ってくるだけなら、ここで終わり。** **いまいる場所を離れない。**
 if ((FETCH_ONLY == 1)); then
   exit 0

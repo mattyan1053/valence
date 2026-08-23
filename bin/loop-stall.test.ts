@@ -2315,6 +2315,18 @@ describe("作業場ごとに数える", () => {
     ).toContain("[STOP]");
   });
 
+  it("出口で戻せなかったことは、その作業場だけで数える", () => {
+    // **dirty も切り替えの失敗も、その作業ツリー固有**である (#406 のレビュー)
+    // ——**共有のままだと、別々の作業場が 1 回ずつ失敗しただけで上限に近づく。**
+    // **隣の `dirty` / `main-sync-failed` と同じ理由**である。
+    expect(stall(repo, ["return-main-failed"]).stdout).toContain("count=1");
+
+    // **別の作業場でも 1 回起きた**（**足し算にしない**）
+    expect(stall(other, ["return-main-failed"]).stdout, "他人のぶんまで数えている").toContain(
+      "count=1",
+    );
+  });
+
   it("ループ全体の状態は、誰が進んでも数え直す", () => {
     // **`no-work` は「作業が尽きた」**——**誰かが進めば、それは解決している**
     expect(stall(repo, ["no-work"]).stdout).toContain("count=1");
