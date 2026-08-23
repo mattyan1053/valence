@@ -241,11 +241,16 @@ lease_record_snapshot() {
   local common record
   common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
   [[ -n $common ]] || return 1
-  record="$common/valence-loop-lease-missing"
+  # **記録は作業場ごとに分かれている** (#403 のレビュー)。**古い版が書いた共有の 1 つも見る。**
+  local found=0
+  for record in "$common"/valence-loop-lease-missing*; do
+    [[ -f $record ]] || continue
+    [[ $record != *.lock ]] || continue
+    found=1
+    cat "$record" || return 1
+  done
   # **無いのは正常**（**1 度も飛ばしていない**）
-  [[ -e $record ]] || return 0
-  [[ -f $record ]] || return 1
-  cat "$record"
+  ((found == 1)) || return 0
 }
 
 # **前後を比べて、この作業場が新しく書いた行を出す。** **1 行でもあれば exit 0。**
@@ -767,15 +772,24 @@ show_missing_lease() {
   local common record count
   common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0
   [[ -n $common ]] || return 0
-  record="$common/valence-loop-lease-missing"
-  [[ -f $record ]] || return 0
+  # **記録は作業場ごとに分かれている** (#403 のレビュー)。**古い版が書いた共有の 1 つ**
+  # （`valence-loop-lease-missing`）**も、そのまま読む**——**移行中はあちらが書く。**
+  local -a records=()
+  local candidate
+  for candidate in "$common"/valence-loop-lease-missing*; do
+    [[ -f $candidate ]] || continue
+    [[ $candidate != *.lock ]] || continue
+    records+=("$candidate")
+  done
+  ((${#records[@]} > 0)) || return 0
+  record="${records[0]}"
   # **「1 度も飛ばしていない」と「読めない」を同じ静けさにしない。**
   #
   # **書けなかった場合は、ここでは分からない**——**分かるのは書こうとした瞬間だけ**
   # なので、そこで言う（`bin/loop-lease check`）。**2 箇所で同じことを見張らない。**
   # ここで分かるのは**「ファイルはあるのに読めない」**までである。
-  if ! count="$(wc -l <"$record" 2>/dev/null)"; then
-    echo "lease 無しの実行の記録を読めません: $record"
+  if ! count="$(cat "${records[@]}" 2>/dev/null | wc -l)"; then
+    echo "lease 無しの実行の記録を読めません: $common/valence-loop-lease-missing*"
     return 0
   fi
   ((count > 0)) || return 0
@@ -803,7 +817,7 @@ show_missing_lease() {
         printf "%s\t%s\t%d\t%s\n", order[where], where, count[where], last[where]
       }
     }
-  ' "$record" | sort -n | while IFS=$'\t' read -r _at where seen newest; do
+  ' "${records[@]}" | sort -n | while IFS=$'\t' read -r _at where seen newest; do
     echo "  ${where}: ${seen} 件"
     echo "    ${newest}"
   done

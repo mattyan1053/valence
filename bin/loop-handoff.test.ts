@@ -387,8 +387,14 @@ describe("bin/loop-handoff", () => {
 
   /** 入口を飛ばした記録。**git の共通ディレクトリに置く**（作業場をまたいで 1 つ）。 */
   function peekMissingRecord(): string {
-    const record = join(repo, ".git", "valence-loop-lease-missing");
-    return existsSync(record) ? readFileSync(record, "utf8") : "";
+    // **記録は作業場ごとに分かれている** (#403 のレビュー)——**古い版が書いた
+    // 共有の 1 つも、そのまま残る。** **どちらも読む。**
+    const dir = join(repo, ".git");
+    return readdirSync(dir)
+      .filter((name) => name.startsWith("valence-loop-lease-missing"))
+      .filter((name) => !name.endsWith(".lock"))
+      .map((name) => readFileSync(join(dir, name), "utf8"))
+      .join("");
   }
 
   /** **`--who` のあとに `--sent` を打つ。** 送信待ちを書いていないことを見る (#360)。 */
@@ -632,10 +638,19 @@ describe("bin/loop-handoff", () => {
     // **「必ず呼ばれる」が保証されているわけではない。** 保証できるのは
     // **通ったときに分かる**ことまでで、そこは正直に扱う。
 
-    /** 飛ばした記録。**git の共通ディレクトリに置く**（作業場をまたいで 1 つ）。 */
+    /**
+     * 飛ばした記録。**git の共通ディレクトリに置く。**
+     *
+     * **作業場ごとに分かれている** (#403 のレビュー)——**古い版が書いた共有の 1 つも
+     * そのまま残る**ので、**どちらも読む。**
+     */
     function missingRecord(): string {
-      const record = join(repo, ".git", "valence-loop-lease-missing");
-      return existsSync(record) ? readFileSync(record, "utf8") : "";
+      const dir = join(repo, ".git");
+      return readdirSync(dir)
+        .filter((name) => name.startsWith("valence-loop-lease-missing"))
+        .filter((name) => !name.endsWith(".lock"))
+        .map((name) => readFileSync(join(dir, name), "utf8"))
+        .join("");
     }
 
     it("lease を持っていなければ、警告して記録する", () => {
@@ -714,7 +729,14 @@ describe("bin/loop-handoff", () => {
       // **`|| true` は「失敗してよい」ではなく「失敗しても続ける」の意味**だった。
       // **続けることと黙ることは別**なので、**続けたまま言う**
       withState({ prs: [{ number: 12, labels: ["changes-requested"] }] });
-      const record = join(repo, ".git", "valence-loop-lease-missing");
+      // **書けなくする先は、この作業場のぶん** (#403 のレビュー)——**記録は作業場ごと**
+      // である（**名前の作り方は `bin/loop-lease` が持つ**ので、そこから引く）。
+      const scope = spawnSync(LEASE, ["scope", "worker"], {
+        cwd: repo,
+        encoding: "utf8",
+      });
+      expect(scope.status, scope.stderr).toBe(0);
+      const record = join(repo, ".git", `valence-loop-lease-missing-${scope.stdout.trim()}`);
       writeFileSync(record, "");
       chmodSync(record, 0o444);
 

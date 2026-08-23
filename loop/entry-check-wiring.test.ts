@@ -72,9 +72,23 @@ describe("入口を飛ばした周回", () => {
     return run(script("loop-lease"), args);
   }
 
+  /** **記録は作業場ごとに分かれている** (#403 のレビュー)。**全部を並べる。** */
   function record(): string {
-    const path = join(repo, ".git", "valence-loop-lease-missing");
-    return existsSync(path) ? readFileSync(path, "utf8") : "";
+    const dir = join(repo, ".git");
+    return readdirSync(dir)
+      .filter((name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"))
+      .map((name) => readFileSync(join(dir, name), "utf8"))
+      .join("");
+  }
+
+  /** この作業場の記録（名前の作り方は `bin/loop-lease` が持つ）。 */
+  function recordPath(): string {
+    const scope = spawnSync(script("loop-lease"), ["scope", "worker"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    expect(scope.status, scope.stderr).toBe(0);
+    return join(repo, ".git", `valence-loop-lease-missing-${scope.stdout.trim()}`);
   }
 
   /** `gh` を呼ばせない。**見たいのは入口の確認だけ**で、GitHub の中身ではない。 */
@@ -295,7 +309,7 @@ describe("入口を飛ばした周回", () => {
     // 記録が読めないのかが分からない**。**直せるのは理由を見た人だけ**である。
     //
     // **追記はできるが読めない**状態を作る（書き込みだけ許す）
-    const path = join(repo, ".git", "valence-loop-lease-missing");
+    const path = recordPath();
     writeFileSync(path, "");
     chmodSync(path, 0o200);
     try {
@@ -337,7 +351,8 @@ describe("入口を飛ばした周回", () => {
     // **「飛ばしていない」と同じ**になる
     const held = holdLock({
       dir: repo,
-      lock: join(repo, ".git", "valence-loop-lease-missing.lock"),
+      // **ロックも作業場ごと** (#403 のレビュー)——**記録の隣に置く。**
+      lock: `${recordPath()}.lock`,
       limitSeconds: 20,
     });
     try {

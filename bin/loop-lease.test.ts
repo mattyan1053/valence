@@ -2028,7 +2028,10 @@ describe("bin/loop-lease", () => {
       expect(checked.status, checked.stderr).toBe(0);
       expect(checked.stderr, "持っているのに飛ばしたと言っている").not.toContain("飛ばした");
       expect(
-        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        // **記録は作業場ごとに分かれている** (#403 のレビュー)
+        readdirSync(join(sandbox, ".git")).some(
+          (name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"),
+        ),
         "健全な周回を、飛ばしとして記録している",
       ).toBe(false);
     });
@@ -2053,7 +2056,10 @@ describe("bin/loop-lease", () => {
 
       expect(checked.stderr, "隣の lease を自分のものとして読んでいる").toContain("飛ばした");
       expect(
-        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        // **記録は作業場ごとに分かれている** (#403 のレビュー)
+        readdirSync(join(sandbox, ".git")).some(
+          (name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"),
+        ),
         "飛ばした周回が、記録されていない",
       ).toBe(true);
     });
@@ -2074,7 +2080,10 @@ describe("bin/loop-lease", () => {
 
       expect(checked.stderr, "期限切れの記録を、まだ持っていると読んでいる").toContain("飛ばした");
       expect(
-        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        // **記録は作業場ごとに分かれている** (#403 のレビュー)
+        readdirSync(join(sandbox, ".git")).some(
+          (name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"),
+        ),
         "飛ばした周回が、記録されていない",
       ).toBe(true);
     });
@@ -2099,7 +2108,10 @@ describe("bin/loop-lease", () => {
 
       expect(checked.stderr, "master の版ずれの受け口が働いていない").not.toContain("飛ばした");
       expect(
-        existsSync(join(sandbox, ".git", "valence-loop-lease-missing")),
+        // **記録は作業場ごとに分かれている** (#403 のレビュー)
+        readdirSync(join(sandbox, ".git")).some(
+          (name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"),
+        ),
         "健全な master の周回を、飛ばしとして記録している",
       ).toBe(false);
     });

@@ -16,10 +16,13 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -56,12 +59,24 @@ function workspace(): string {
   return dir;
 }
 
+/** この作業場の記録（名前の作り方は `bin/loop-lease` が持つ）。 */
+function recordPathOf(dir: string): string {
+  const scope = spawnSync(join(dir, "bin", "loop-lease"), ["scope", "worker"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  expect(scope.status, scope.stderr).toBe(0);
+  return join(dir, ".git", `${RECORD}-${scope.stdout.trim()}`);
+}
+
 const line = (at: number, where: string) =>
   `2026-08-23T00:00:${String(at).padStart(2, "0")}Z\tどの役も誰も持っていない\t${where}`;
 
+/** **記録は作業場ごとに分かれている**（#403 のレビュー 3 件目）。**全部を並べる。** */
 function recordOf(dir: string): string[] {
-  return readFileSync(join(dir, ".git", RECORD), "utf8")
-    .split("\n")
+  return readdirSync(join(dir, ".git"))
+    .filter((name) => name.startsWith(RECORD) && !name.endsWith(".lock"))
+    .flatMap((name) => readFileSync(join(dir, ".git", name), "utf8").split("\n"))
     .filter(Boolean);
 }
 
@@ -98,32 +113,30 @@ describe("記録の上限は、作業場ごとに数える", () => {
   it("上限は残る（作業場ごとに）", () => {
     // **際限なく積む記録は、読む気を失わせるぶん、無いのと同じ**である
     const dir = workspace();
-    const noisy = "/home/loop/valence-worker-b";
     writeFileSync(
-      join(dir, ".git", RECORD),
-      `${Array.from({ length: KEEP * 3 }, (_, at) => line(at + 1, noisy)).join("\n")}\n`,
+      recordPathOf(dir),
+      `${Array.from({ length: KEEP * 3 }, (_, at) => line(at + 1, dir)).join("\n")}\n`,
     );
 
     check(dir);
 
     expect(
-      recordOf(dir).filter((row) => row.endsWith(noisy)),
+      recordOf(dir).filter((row) => row.endsWith(dir)),
       "上限を超えて積んでいる",
     ).toHaveLength(KEEP);
   });
 
   it("残るのは新しいほうである", () => {
     const dir = workspace();
-    const noisy = "/home/loop/valence-worker-b";
     writeFileSync(
-      join(dir, ".git", RECORD),
-      `${Array.from({ length: KEEP * 2 }, (_, at) => line(at + 1, noisy)).join("\n")}\n`,
+      recordPathOf(dir),
+      `${Array.from({ length: KEEP * 2 }, (_, at) => line(at + 1, dir)).join("\n")}\n`,
     );
 
     check(dir);
 
-    const left = recordOf(dir).filter((row) => row.endsWith(noisy));
-    expect(left[0], "古いほうを残している").toContain(`:${String(KEEP + 1).padStart(2, "0")}Z`);
+    const left = recordOf(dir).filter((row) => row.endsWith(dir));
+    expect(left[0], "古いほうを残している").toContain(`:${String(KEEP + 2).padStart(2, "0")}Z`);
   });
 
   it("自分のぶんも、上限まで積める", () => {
@@ -233,37 +246,34 @@ describe("読む口が、作業場ごとに見せる", () => {
  * **見るのは「最近その作業場から記録があったか」**である。
  */
 describe("記録は、全体としても増え続けない", () => {
-  it("古い作業場から落ちる", () => {
-    const dir = workspace();
-    const rows: string[] = [];
-    // **上限の作業場数より多く並べる**（1 つあたり 1 行）
-    for (let at = 0; at < 15; at++) {
-      rows.push(line(at + 1, `/home/loop/valence-worker-${at}`));
+  /** 作業場ごとのファイルを、古い順に並べて置く。 */
+  function otherWorkspaces(dir: string, count: number): string[] {
+    const made: string[] = [];
+    for (let at = 0; at < count; at++) {
+      const path = join(dir, ".git", `${RECORD}-worker-${String(at).padStart(2, "0")}`);
+      writeFileSync(path, `${line(at + 1, `/home/loop/valence-worker-${at}`)}\n`);
+      // **落とす順は「最後に書いた時刻」**なので、**古い順に見えるようにする**
+      const when = new Date(Date.now() - (count - at) * 60_000);
+      utimesSync(path, when, when);
+      made.push(path);
     }
-    writeFileSync(join(dir, ".git", RECORD), `${rows.join("\n")}\n`);
+    return made;
+  }
+
+  it("古い作業場のファイルから落ちる", () => {
+    const dir = workspace();
+    const made = otherWorkspaces(dir, 15);
 
     check(dir);
 
-    const left = recordOf(dir);
-    expect(left.length, "作業場が増えたぶん、増え続けている").toBeLessThan(rows.length + 1);
-    expect(
-      left.some((row) => row.endsWith("/valence-worker-0")),
-      "いちばん古い作業場が残っている",
-    ).toBe(false);
-    expect(
-      left.some((row) => row.endsWith("/valence-worker-14")),
-      "新しい作業場が落ちている",
-    ).toBe(true);
+    expect(existsSync(made[0] ?? ""), "いちばん古い作業場が残っている").toBe(false);
+    expect(existsSync(made[14] ?? ""), "新しい作業場が落ちている").toBe(true);
   });
 
   it("いま書いた作業場は、必ず残る", () => {
     // **自分の記録が、他所の数で押し出されない**
     const dir = workspace();
-    const rows: string[] = [];
-    for (let at = 0; at < 15; at++) {
-      rows.push(line(at + 1, `/home/loop/valence-worker-${at}`));
-    }
-    writeFileSync(join(dir, ".git", RECORD), `${rows.join("\n")}\n`);
+    otherWorkspaces(dir, 15);
 
     check(dir);
 
@@ -271,5 +281,75 @@ describe("記録は、全体としても増え続けない", () => {
       recordOf(dir).some((row) => row.endsWith(dir)),
       "いま書いたぶんが落ちている",
     ).toBe(true);
+  });
+});
+
+/**
+ * **古い版の書き手が、作業場ごとの履歴を切り詰める**（#403 のレビュー 3 件目）。
+ *
+ * **移行中は、master と worker の worktree が違う版を実行する。** **親版の
+ * `record_missing` は同じ共有ファイルを全体上限で書き戻す**ので、
+ * **こちらが作業場ごとに残しても、あちらが 1 度書いた瞬間に消える。**
+ *
+ * **`AGENTS.md` §5 の「版をまたいで読まれるもの」**である——**足す側に逃げ道があるのは、
+ * 古い読み手が「決まった場所だけ」を読むと確かめたとき**。**あちらが読み書きするのは
+ * `valence-loop-lease-missing` 1 つ**なので、**こちらは別の名前へ置く。**
+ */
+describe("古い版の書き手に、切り詰められない", () => {
+  it("作業場ごとに、別の置き場所へ書く", () => {
+    const dir = workspace();
+
+    check(dir);
+
+    const files = readdirSync(join(dir, ".git")).filter(
+      (name) => name.startsWith(RECORD) && !name.endsWith(".lock"),
+    );
+    expect(files, "共有の 1 つへ書いている").not.toEqual([RECORD]);
+    expect(files.length, "どこにも書いていない").toBeGreaterThan(0);
+  });
+
+  it("古い版が共有ファイルを畳んでも、こちらの記録は残る", () => {
+    // **親版の `record_missing` を、そのまま真似る**（`tail -n 20` で全体を書き戻す）
+    const dir = workspace();
+    check(dir);
+    const before = recordOf(dir).filter((row) => row.endsWith(dir));
+    expect(before.length, "こちらの記録が無い").toBeGreaterThan(0);
+
+    const shared = join(dir, ".git", RECORD);
+    writeFileSync(
+      shared,
+      `${Array.from({ length: 30 }, (_, at) => line(at + 1, "/home/loop/valence-master")).join("\n")}\n`,
+    );
+    const done = spawnSync(
+      "bash",
+      ["-c", `kept="$(tail -n 20 "${shared}")"; printf '%s\n' "$kept" > "${shared}"`],
+      { encoding: "utf8" },
+    );
+    expect(done.status, done.stderr).toBe(0);
+
+    expect(
+      recordOf(dir).filter((row) => row.endsWith(dir)),
+      "古い版に切り詰められている",
+    ).toEqual(before);
+  });
+
+  it("古い版が書いたぶんも、読む口には出る", () => {
+    // **共有ファイルは残る**（**あちらが書く先**）——**読む側は両方を見る。**
+    const dir = workspace();
+    const old = "/home/loop/valence-master";
+    writeFileSync(join(dir, ".git", RECORD), `${line(1, old)}\n`);
+    check(dir);
+
+    const runner = readFileSync(join(REPO_ROOT, "task"), "utf8");
+    const from = runner.indexOf("show_missing_lease() {");
+    const shown = spawnSync(
+      "bash",
+      ["-c", `${runner.slice(from).split("\n}\n")[0] ?? ""}\n}\nshow_missing_lease`],
+      { cwd: dir, encoding: "utf8" },
+    );
+
+    expect(shown.status, shown.stderr).toBe(0);
+    expect(shown.stdout, "古い版のぶんが出ていない").toContain(old);
+    expect(shown.stdout, "こちらのぶんが出ていない").toContain(dir);
   });
 });
