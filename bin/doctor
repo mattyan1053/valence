@@ -55,6 +55,11 @@ value_of() {
   line="${line%\"}"
   line="${line#\'}"
   line="${line%\'}"
+  # **前後の空白を落とす** (#419 のレビュー)。**読む側は `trim()` してからはねる**
+  # ——**`KEY=   ` を「埋まっている」と読むと、アプリは起動しないのに正常と言う**
+  # （**診断が間違えると、直しに行く先が変わる**）。
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
   printf '%s' "$line"
 }
 
@@ -83,26 +88,44 @@ check_env() {
 
 # ---------------------------------------------------------------- 応答
 
-# その URL が応答するか。
+# その URL が応答するか。**印を標準出力へ出す**（`http:<コード>` / `tcp-open`）。
 #
-#   exit 0 = 応答した / exit 1 = 応答しない / exit 2 = 確かめられない
+#   exit 0 = 応答があった（HTTP 2xx / 3xx）
+#   exit 1 = 繋がらない
+#   exit 3 = 繋がったが、HTTP がエラー（**起動はしている**）
+#   exit 4 = 繋がるが、応答までは確かめられない（**curl が無い**）
+#   exit 2 = 確かめる手立てが無い（URL を読めない）
+#
+# **「繋がらない」と「HTTP がエラー」を混ぜない** (#419 のレビュー)。**`curl -f` は
+# 4xx / 5xx で非ゼロ**なので、**混ぜると「応答がありません（`./task up`）」と出て、
+# 打っても直らない**——**起動しているのだから。**
 #
 # **`curl` はホストに要求していない**（`./task` が要求するのは bash / docker / git /
-# flock だけ）ので、**無ければ bash の `/dev/tcp` で「開いているか」だけを見る**
-# ——**手が無いときは、無いと言う**（**exit 2**）。
+# flock だけ）ので、**無ければ bash の `/dev/tcp` で「開いているか」だけを見る。**
+# **そこで `[OK]` と言わない**——**同じ状態に、機械によって違う答えを出さない**
+# （**500 を返しているサーバが、curl の無い機械でだけ「応答があります」になる**）。
 responds() {
-  local url="$1" host port rest
+  local url="$1" host port rest code
   if command -v curl >/dev/null 2>&1; then
-    # **curl の生の文言を出さない**——**人が読むのは、この口が並べる 1 行である**
-    curl -fs -m 3 -o /dev/null "$url" 2>/dev/null && return 0
-    return 1
+    # **`-f` を使わない** (#419 のレビュー)。**HTTP のエラーを「繋がらない」に化かす**
+    # ——**欲しいのは、繋がったかどうかと、返ってきたコードの両方**である。
+    # **curl の生の文言は出さない**（**人が読むのは、この口が並べる 1 行**）。
+    code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)" || return 1
+    [[ $code =~ ^[0-9]+$ ]] || return 1
+    ((code > 0)) || return 1
+    printf 'http:%s' "$code"
+    ((code >= 400)) && return 3
+    return 0
   fi
   rest="${url#*://}"
   rest="${rest%%/*}"
   host="${rest%%:*}"
   port="${rest##*:}"
   [[ $host != "$port" ]] || return 2
-  (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null && return 0
+  if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+    printf 'tcp-open'
+    return 4
+  fi
   return 1
 }
 
@@ -117,11 +140,14 @@ check_supabase() {
     unknown "Supabase: 見に行く先が分かりません（.env の NEXT_PUBLIC_SUPABASE_URL が空）"
     return 0
   fi
-  responds "$url/auth/v1/health"
-  case "$?" in
+  local seen status=0
+  seen="$(responds "$url/auth/v1/health")" || status=$?
+  case "$status" in
     0) ok "Supabase: 応答があります" ;;
-    1) lack "Supabase: 応答がありません（./task db:up で起動する）" ;;
-    *) unknown "Supabase: 確かめる手立てがありません（curl がありません）" ;;
+    1) lack "Supabase: 繋がりません（./task db:up で起動する）" ;;
+    3) lack "Supabase: HTTP が ${seen#http:} を返します（起動はしています。./task db:status で見る）" ;;
+    4) unknown "Supabase: ポートは開いていますが、応答までは確かめられません（curl がありません）" ;;
+    *) unknown "Supabase: 見に行く先を読めません（.env の NEXT_PUBLIC_SUPABASE_URL）" ;;
   esac
 }
 
@@ -134,11 +160,14 @@ check_dev_server() {
     unknown "開発サーバ: この作業場のポートが分かりません（./task port が答えません）"
     return 0
   fi
-  responds "http://127.0.0.1:$port/"
-  case "$?" in
+  local seen status=0
+  seen="$(responds "http://127.0.0.1:$port/")" || status=$?
+  case "$status" in
     0) ok "開発サーバ: 応答があります（http://127.0.0.1:$port/）" ;;
-    1) lack "開発サーバ: 応答がありません（./task up で起動する。ログは ./task dev）" ;;
-    *) unknown "開発サーバ: 確かめる手立てがありません（curl がありません）" ;;
+    1) lack "開発サーバ: 繋がりません（./task up で起動する。ログは ./task dev）" ;;
+    3) lack "開発サーバ: HTTP が ${seen#http:} を返します（起動はしています。ログは ./task dev）" ;;
+    4) unknown "開発サーバ: ポートは開いていますが、応答までは確かめられません（curl がありません）" ;;
+    *) unknown "開発サーバ: 見に行く先を作れません" ;;
   esac
 }
 
@@ -148,7 +177,12 @@ check_installation() {
   #
   # **「無い」と言わない。** **入っているのに「無い」と言うと、入れ直しに行かせる**
   # ——**分からないことは、分からないと言う。**
-  unknown "installation: この口からは確かめられません（App の JWT が要る。https://github.com/settings/installations で見る）"
+  # **installation はアカウント（org / ユーザー）ごとにある** (`AGENTS.md` §1。
+  # #419 のレビュー)。**個人の固定 URL だけを案内すると、org のぶんは映らない**
+  # ——**「分からない」と言った直後に、確かめられない先へ送ることになる。**
+  unknown "installation: この口からは確かめられません（App の JWT が要る）"
+  printf '           installation はアカウント（org / ユーザー）ごとにあります。%s\n' \
+    "対象アカウントの Settings → Integrations（org は Settings → GitHub Apps）で見る"
 }
 
 check_env

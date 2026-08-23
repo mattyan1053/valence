@@ -11,7 +11,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,10 +39,17 @@ describe("bin/doctor", () => {
   });
 
   /** **200 を返すだけの相手**。**「見える」側を、自分の砂場で作る**（§5 / #186）。 */
-  function listening(): Promise<string> {
+  function listening(status = 200): Promise<string> {
     const server = createServer((socket) => {
-      socket.end("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+      // **相手は読まずに閉じることがある**（**`/dev/tcp` は開いたら閉じるだけ**）
+      // ——**書いた先が消えると `ECONNRESET`** で、**拾わないと vitest が
+      // 「unhandled error」で走り全体を赤にする**（**試験の側の穴**）。
+      socket.on("error", () => {});
+      socket.end(
+        `HTTP/1.1 ${status} ${status === 200 ? "OK" : "Internal Server Error"}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`,
+      );
     });
+    server.on("error", () => {});
     servers.push(server);
     return new Promise((resolve) => {
       server.listen(0, "127.0.0.1", () => {
@@ -74,9 +81,9 @@ describe("bin/doctor", () => {
    * 相手は、接続を受け付けられない**——**待っているのは自分自身**で、
    * **curl は 3 秒で諦める。** **「応答がありません」に見えるが、原因は試験の側にある。**
    */
-  function runWhileListening(): Promise<{ status: number; stdout: string }> {
+  function runWhileListening(env?: NodeJS.ProcessEnv): Promise<{ status: number; stdout: string }> {
     return new Promise((resolve) => {
-      const child = spawn(SCRIPT, [], { cwd: dir });
+      const child = spawn(SCRIPT, [], { cwd: dir, env: env ?? process.env });
       let out = "";
       child.stdout.on("data", (chunk) => {
         out += String(chunk);
@@ -158,6 +165,69 @@ describe("bin/doctor", () => {
     expect(stdout, "空のキーで止まっている").toMatch(/SUPABASE_URL/);
     expect(stdout, "その先を見ていない").toMatch(/Supabase/);
     expect(stdout, "最後まで行っていない").toMatch(/installation/i);
+  });
+
+  /** **curl の無い機械**。**PATH を差し替える**（**この口は curl を要求していない**）。 */
+  function withoutCurl(): NodeJS.ProcessEnv {
+    const bin = join(dir, "bin");
+    mkdirSync(bin, { recursive: true });
+    for (const tool of ["bash", "sed", "grep", "tail"]) {
+      const from = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" });
+      symlinkSync(from.stdout.trim(), join(bin, tool));
+    }
+    return { ...process.env, PATH: bin };
+  }
+
+  it("空白だけの値は、埋まっているとは読まない", () => {
+    // **実際に読む側は `trim()` してからはねる**——**アプリは起動しないのに
+    // 「正常」と言うと、直しに行く先が変わる**（#419 のレビュー）
+    example("TOKEN_ENCRYPTION_KEY");
+    env("TOKEN_ENCRYPTION_KEY=   \n");
+
+    const done = run();
+
+    expect(done.stdout, "空白だけの値を埋まっていると読んでいる").toContain("TOKEN_ENCRYPTION_KEY");
+    expect(done.status, "足りないのに 0 で返している").toBe(1);
+  });
+
+  it("HTTP がエラーなら、繋がらないとは言わない", async () => {
+    // **`curl -f` は 4xx / 5xx で非ゼロ**——**「応答がありません（./task up）」と言うと、
+    // 打っても直らない**（#419 のレビュー）
+    const url = await listening(500);
+    example("NEXT_PUBLIC_SUPABASE_URL");
+    env(`NEXT_PUBLIC_SUPABASE_URL=${url}\n`);
+
+    const done = await runWhileListening();
+
+    expect(done.stdout, "HTTP のエラーだと言っていない").toMatch(/500/);
+    expect(done.stdout, "繋がらないと誤診している").not.toMatch(/繋がりません/);
+    expect(done.status, "使えない状態なのに 0 で返している").toBe(1);
+  });
+
+  it("curl が無ければ、応答があるとは言わない", async () => {
+    // **`/dev/tcp` で分かるのは「開いている」ことだけ**——**同じ状態に、機械によって
+    // 違う答えを出さない**（#419 のレビュー）。**500 を返すサーバを `[OK]` にしない。**
+    const url = await listening(500);
+    example("NEXT_PUBLIC_SUPABASE_URL");
+    env(`NEXT_PUBLIC_SUPABASE_URL=${url}\n`);
+
+    const done = await runWhileListening(withoutCurl());
+
+    expect(done.stdout, "curl が無いのに応答を見たと言っている").not.toMatch(/応答があります/);
+    expect(done.stdout, "開いていることを言っていない").toMatch(/開いています/);
+    expect(done.status, "分からないものを足りない側に数えている").toBe(0);
+  });
+
+  it("installation は、アカウントごとにあると言う", () => {
+    // **`AGENTS.md` §1**——**org / ユーザーごとにある**。**個人の固定 URL だけを
+    // 案内すると、org の installation は映らない**——**「分からない」と言った意味が消える**
+    example("SUPABASE_URL");
+    env("SUPABASE_URL=http://kong:8000\n");
+
+    const stdout = run().stdout;
+
+    expect(stdout, "org の設定を案内していない").toMatch(/org/i);
+    expect(stdout, "アカウントごとだと言っていない").toMatch(/アカウント/);
   });
 
   it("./task から呼べる", () => {
