@@ -62,30 +62,86 @@ function countIn(dir: string): { status: number; stdout: string } {
   return { status: done.status ?? -1, stdout: done.stdout.trim() };
 }
 
-describe("記録の増減を、`./task check` が見る", () => {
-  it("記録が無ければ 0 と数える", () => {
-    // **1 度も飛ばしていないのは正常な状態**である——**そこで落とさない**
-    expect(countIn(sandbox())).toEqual({ status: 0, stdout: "0" });
+describe("共有の記録のうち、この作業場のぶんだけを見る", () => {
+  /** 前後 2 つの記録を置いて、`lease_record_intruders` に判定させる。 */
+  function intruders(before: string, after: string, mine: string) {
+    const dir = sandbox();
+    const beforeFile = join(dir, "before");
+    const afterFile = join(dir, "after");
+    writeFileSync(beforeFile, before);
+    writeFileSync(afterFile, after);
+    const done = spawnSync(
+      "bash",
+      [
+        "-c",
+        `${shellFunction("lease_record_intruders")}\nlease_record_intruders "${beforeFile}" "${afterFile}" "${mine}"`,
+      ],
+      { cwd: dir, encoding: "utf8" },
+    );
+    return { status: done.status ?? -1, stdout: done.stdout.trim() };
+  }
+
+  const mine = "/home/loop/valence";
+  const line = (at: string, where: string) =>
+    `2026-08-23T00:00:${at}Z\tどの役も誰も持っていない\t${where}\n`;
+
+  it("この作業場のぶんが増えていたら、その行を出す", () => {
+    const done = intruders(line("01", mine), line("01", mine) + line("02", mine), mine);
+
+    expect(done.status, "増えたのに黙っている").toBe(0);
+    expect(done.stdout, "増えた行を出していない").toContain("00:02");
   });
 
-  it("行を数える", () => {
-    expect(countIn(sandbox("1 行目\n2 行目\n"))).toEqual({ status: 0, stdout: "2" });
+  it("増えていなければ、黙る", () => {
+    expect(intruders(line("01", mine), line("01", mine), mine).status).toBe(1);
   });
 
-  it("読めなければ、0 と言わない", () => {
-    // **「読めなかった」を「増えていない」にしない**——**黙って通ると、この見張りが
-    // 何も見ていない状態で緑になる**
+  it("別の作業場が書いても、黙る", () => {
+    // **`./task check` は 5 分走る**——**その間に別の作業場が 1 行書いただけで
+    // 赤くなると、合否が他人の持ち物で決まる**（`AGENTS.md` §5 / #186）
+    const other = "/home/loop/valence-worker-b";
+    const done = intruders(line("01", mine), line("01", mine) + line("02", other), mine);
+
+    expect(done.status, "他人のぶんで赤くしている").toBe(1);
+  });
+
+  it("上限に達していても、増えたと分かる", () => {
+    // **保つのは 20 件**——**満杯だと、増えても行数は変わらない**
+    // （**いちばん効かせたい場面**である）
+    const before = Array.from({ length: 20 }, (_, at) =>
+      line(String(at).padStart(2, "0"), mine),
+    ).join("");
+    const after = `${before.split("\n").slice(1).join("\n")}${line("99", mine)}`;
+
+    const done = intruders(before, after, mine);
+
+    expect(done.status, "満杯だと黙っている").toBe(0);
+    expect(done.stdout, "増えた行を出していない").toContain("00:99");
+  });
+
+  it("記録が読めなければ、黙って通さない", () => {
+    const dir = sandbox();
+    const done = spawnSync(
+      "bash",
+      ["-c", `${shellFunction("lease_record_snapshot")}\nlease_record_snapshot`],
+      { cwd: dir, encoding: "utf8" },
+    );
+
+    // **git はある（無いほうは下の試験）**ので、**記録が無い＝正常**で 0
+    expect(done.status).toBe(0);
+    expect(done.stdout).toBe("");
+  });
+
+  it("git が無ければ、読めたことにしない", () => {
     const dir = sandbox();
     rmSync(join(dir, ".git"), { recursive: true, force: true });
+    const done = spawnSync(
+      "bash",
+      ["-c", `${shellFunction("lease_record_snapshot")}\nlease_record_snapshot`],
+      { cwd: dir, encoding: "utf8" },
+    );
 
-    expect(countIn(dir).status, "git が無いのに数えている").not.toBe(0);
-  });
-
-  it("記録がファイルでなければ、0 と言わない", () => {
-    const dir = sandbox();
-    spawnSync("mkdir", ["-p", join(dir, ".git", RECORD)]);
-
-    expect(countIn(dir).status, "ディレクトリを数えている").not.toBe(0);
+    expect(done.status, "git が無いのに読めたことにしている").not.toBe(0);
   });
 });
 
@@ -93,20 +149,26 @@ describe("`./task check` が、前後を突き合わせている", () => {
   const runner = readFileSync(join(REPO_ROOT, "task"), "utf8");
   const check = runner.slice(runner.indexOf("cmd_check() {")).split("\n}\n")[0] ?? "";
 
-  it("試験の前と後で数える", () => {
-    // **前だけ・後だけでは、増えたかどうかは出ない**
-    expect(check, "前を数えていない").toMatch(/record_before=.*lease_record_lines/s);
-    expect(check, "後を数えていない").toMatch(/record_after=.*lease_record_lines/s);
+  it("試験の前と後で、記録を取る", () => {
+    expect(check, "前を取っていない").toMatch(/lease_record_snapshot >"\$before_file"/);
+    expect(check, "後を取っていない").toMatch(/lease_record_snapshot >"\$after_file"/);
   });
 
-  it("動いていたら、落とす", () => {
-    // **言うだけにしない**——**`./task check` は「押してよいか」を答える口**である
-    const moved = check.slice(check.indexOf("record_before != "));
+  it("この作業場のぶんだけを見る", () => {
+    // **他の作業場が書いても、こちらの合否は変わらない**
+    expect(check, "作業場を渡していない").toContain(
+      'lease_record_intruders "$before_file" "$after_file" "$PWD"',
+    );
+  });
 
-    expect(moved, "落としていない").toMatch(/status=1/);
+  it("書かれていたら、落とす", () => {
+    // **言うだけにしない**——**`./task check` は「押してよいか」を答える口**である
+    const written = check.slice(check.indexOf("lease_record_intruders"));
+
+    expect(written, "落としていない").toMatch(/status=1/);
   });
 
   it("読めなければ、通さない", () => {
-    expect(check, "読めなくても通している").toMatch(/汚していないことを確かめられません/);
+    expect(check, "読めなくても通している").toMatch(/確かめられません/);
   });
 });

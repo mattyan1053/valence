@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -73,7 +74,9 @@ describe("着手の取り合い", () => {
       "bash",
       ["-c", `"${join(REPO_ROOT, "bin/loop-claim")}" 2>&1 || true`],
       {
-        cwd: REPO_ROOT,
+        // **砂場で引く** (#398 のレビュー)。**使い方は cwd に依らない**が、
+        // **`bin/loop-lease check` は cwd の git へ書く。**
+        cwd: mkdtempSync(join(tmpdir(), "claim-usage-")),
         encoding: "utf8",
       },
     );
