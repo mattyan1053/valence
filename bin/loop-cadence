@@ -94,14 +94,44 @@ scope=""
 #
 # **役ごとに 2 通り持たない** (#422)。**master も worker も、見ているのは
 # 「最後に cron で始まったのはいつか」**である——**違うのは記録の名前だけ。**
+# **止まっている行には、どの作業場かを添える** (#433)。**worker は 2 人いる**ので、
+# **役名は 2 つとも `worker`**、**出るのは digest だけ**——**読んだ人は、セッションを
+# 順に当たることになる**（**#430 が消したかったのは、まさにその探索**）。
+#
+# **digest の作り方は変えない**（#433 の範囲外）——**`bin/loop-lease` が同じものを
+# 使っている**ので、**読みやすい名前にすると、そちらの記録の置き場所が変わる。**
+#
+# **行を足す形にする。** **この出力を読むのは `./task loop:status` の `show_cadence`
+# だけ**で、**あちらは列を解釈しない**（字下げして出すだけ）——**それでも、
+# 既にある行の形は動かさない。**
+#
+# **止まっている行だけに出す**（**毎回全部の道を出さない**）。
+#
+# **引けなかったときは、引けないと言う** (#435 のレビュー。`bin/doctor` と同じ形)。
+# **行が出ないだけだと「この役には作業場が無い」に見える**——**「読めなかった」が
+# 「無かった」に化ける。**
+#
+# **そこがいちばん要る場面**である——**`./task loop:master:path` が答えないのは、
+# worktree が消えた・動いたとき**で、**まさに「どこにあるのか」を知りたい。**
+# **案内は「その行の下の workspace= を見る」と言う**ので、**無い行を探させない。**
+show_workspace() {
+  if [[ -z ${1-} ]]; then
+    echo "  workspace=不明（場所を引けません。記録だけが残っています）"
+    return 0
+  fi
+  echo "  workspace=$1"
+}
+
 evaluate_scope() {
-  local scope="$1" starts last_cron last_poke last_unknown age verdict window longest
+  local scope="$1" workspace="${2-}"
+  local starts last_cron last_poke last_unknown age verdict window longest
   local at trigger _where
   starts="$common_dir/valence-loop-starts-$scope"
   if [[ ! -f $starts ]]; then
     # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
     # ——**足したばかりの worker が、永久に見えなくなる。**
     echo "scope=${scope:0:12} last_cron=- last_poke=- last_unknown=- age=- interval=${INTERVAL:-unknown} never"
+    show_workspace "$workspace"
     stale=1
     return 0
   fi
@@ -161,6 +191,7 @@ evaluate_scope() {
     fi
   fi
   echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age interval=${INTERVAL:-unknown} $verdict"
+  [[ $verdict != "stale" ]] || show_workspace "$workspace"
   case "$verdict" in
     stale) stale=1 ;;
     unknown) undecidable=1 ;;
@@ -185,7 +216,7 @@ while IFS= read -r workspace_path; do
     continue
   fi
   found=1
-  evaluate_scope "$scope"
+  evaluate_scope "$scope" "$workspace_path"
 done <<<"$workspaces"
 
 # **master も見る** (#422)。**judge 役が止まると、worker は PR を出せても先へ進めない**
@@ -201,7 +232,7 @@ master_path=""
 if master_path="$("$(git rev-parse --show-toplevel)/task" loop:master:path 2>/dev/null </dev/null)" &&
   [[ $master_path == /* && -d $master_path ]]; then
   found=1
-  evaluate_scope master
+  evaluate_scope master "$master_path"
 elif [[ -f "$common_dir/valence-loop-starts-master" ]]; then
   found=1
   evaluate_scope master
@@ -236,6 +267,7 @@ fi
 if ((stale == 1)); then
   echo "[WARN] まず予定表を引くこと——stale と出た役のセッションで CronList を見る" >&2
   echo "       呼んだ役が健全でも、別の役が stale なら、空なのはそちらの予定表である" >&2
+  echo "       どの作業場かは、その行の下の workspace= を見る" >&2
   echo "       （この道具は他のセッションを引けない。入れ直すのもセッション自身）" >&2
   echo "       recurring の予定は 7 日で期限切れになるので、消えていることがある" >&2
   echo "       ここから言えるのは「直近の記録に、cron の周回が無い」まで" >&2

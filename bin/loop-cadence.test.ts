@@ -217,6 +217,76 @@ describe("周回が始まったことを、どう始まったかごと残す", (
     expect(done.stderr, "止まっている役のセッションを指していない").toMatch(/stale と出た役/);
   });
 
+  it("止まっている行から、どの作業場かが分かる", () => {
+    // **worker は 2 人いる** (#433)。**役名は 2 つとも `worker`** で、**出るのは
+    // `worker-f3f2c` のような digest だけ**——**読んだ人は、セッションを順に当たる**
+    // ことになる（**#430 が消したかったのは、まさにその探索**）。
+    //
+    // **digest から手で戻すことはできる**（`./task loop:worker:paths` を回して同じ
+    // 計算をする）が、**できることと、その場で分かることは違う。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_500, "poke"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "止まっていると言っていない").toBe(1);
+    expect(done.stdout, "どの作業場かが出ていない").toContain(`workspace=${dir}`);
+  });
+
+  it("止まっていない行には、作業場を出さない", () => {
+    // **毎回全部の道を出さない** (#433 の条件)——**読むのは止まっている行だけ**である
+    const { dir } = workspace();
+    records(dir, [
+      [8_000, "cron"],
+      [9_800, "cron"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    expect(done.stdout, "止まっていない行にも道を出している").not.toContain("workspace=");
+  });
+
+  it("1 度も始まっていない作業場でも、どこかが分かる", () => {
+    // **`never` も止まっている側**である（**足したばかりの worker がここへ来る**）
+    // ——**そこが「どの作業場か」を、いちばん知りたい。**
+    const { dir } = workspace();
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "始まっていないと言っていない").toBe(1);
+    expect(done.stdout, "never の行に道が無い").toContain(`workspace=${dir}`);
+  });
+
+  it("作業場を引けなかったときは、引けないと言う", () => {
+    // **いちばん要るところで出ない** (#435 のレビュー)。**`./task loop:master:path` が
+    // 答えない＝worktree が消えた・動いた**という状況で、**まさに「どこにあるのか」を
+    // 知りたい場面**である——**そこで行が出ないと、案内が無い行を探させる。**
+    //
+    // **「読めなかった」を「無かった」に化けさせない**（`bin/doctor` と同じ形）。
+    const { dir } = workspace();
+    records(dir, [[9_900, "cron"]]);
+    // **記録は在るのに、場所を答えない**（**`taskAnswers` は master を出さない**）
+    records(
+      dir,
+      [
+        [1_000, "cron"],
+        [9_500, "poke"],
+      ],
+      dir,
+      "master",
+    );
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "master が止まっていると言っていない").toBe(1);
+    expect(done.stdout, "master の行に道が無い").toMatch(/scope=master[\s\S]*workspace=/);
+    expect(done.stdout, "引けなかったことを言っていない").toMatch(/workspace=不明/);
+  });
+
   it("止まっていなければ、次の一手も言わない", () => {
     // **毎回鳴る案内は、読まれなくなる**（`warn_stale_containers` と同じ判断）
     const { dir } = workspace();
