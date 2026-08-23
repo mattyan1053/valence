@@ -162,6 +162,41 @@ describe("周回が始まったことを、どう始まったかごと残す", (
     expect(done.stdout, "止まっていると言っていない").toMatch(/stale/);
   });
 
+  it("止まっていると言うときは、次にどこを見るかも言う", () => {
+    // **判定を持つところに、次の一手を置く** (#430)。**2026-08-24、3 つの役すべてが
+    // `stale` になり、3 つのセッションが別々に同じところを探した**——**原因は
+    // 予定表が空だったこと**（**recurring は 7 日で期限切れになる**）。
+    //
+    // **master は「cron が 1 度も来ていない」と読み違えて、人へ渡しかけている。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_500, "poke"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "止まっていると言っていない").toBe(1);
+    expect(done.stderr, "まず予定表を引く、が無い").toMatch(/CronList/);
+    // **限界も同じところに**——**言えるのは「記録に無い」まで**である
+    expect(done.stderr, "この記録から言えることの限界が無い").toMatch(/直近/);
+    expect(done.stderr, "走っている最中の cron が記録に残らないことが無い").toMatch(/acquire/);
+  });
+
+  it("止まっていなければ、次の一手も言わない", () => {
+    // **毎回鳴る案内は、読まれなくなる**（`warn_stale_containers` と同じ判断）
+    const { dir } = workspace();
+    records(dir, [
+      [8_000, "cron"],
+      [9_800, "cron"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    expect(done.stderr, "止まっていないのに案内している").not.toMatch(/CronList/);
+  });
+
   it("cron が続いているうちは、何も言わない", () => {
     // **上の 1 件が「突かれただけ」で赤いことを、ここが支えている**
     const { dir } = workspace();
@@ -287,6 +322,15 @@ describe("手順と表示が、この記録につながっている", () => {
     expect(runner.split("cmd_loop_status() {")[1] ?? "", "status から呼んでいない").toContain(
       "show_cadence",
     );
+  });
+
+  it("次の一手が、人が見るところまで届く", () => {
+    // **案内は stderr へ出す**（#430）——**`./task loop:status` が捨てていると、
+    // そこから読む人には届かない。** **判定を持つところに置いた意味が消える。**
+    const runner = readFileSync(join(REPO_ROOT, "task"), "utf8");
+    const shown = runner.slice(runner.indexOf("show_cadence() {")).split("\n}")[0] ?? "";
+
+    expect(shown, "cadence の stderr を捨てている").toContain("2>&1");
   });
 
   it("判定できなくても、その先の表示を止めない", () => {
