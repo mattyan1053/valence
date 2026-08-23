@@ -13,7 +13,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -237,7 +245,10 @@ describe("bin/loop-unlisted-issues", () => {
 
     expect(listed.status).toBe(1);
     expect(
-      existsSync(join(listed.workspace, ".git", "valence-loop-lease-missing")),
+      // **記録は作業場ごとに分かれている** (#403 のレビュー)
+      readdirSync(join(listed.workspace, ".git")).some(
+        (name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"),
+      ),
       "入口確認の記録が砂場に無い（実物の共通 .git へ書いている）",
     ).toBe(true);
   });

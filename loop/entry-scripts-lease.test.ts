@@ -74,8 +74,13 @@ function workspace(): { dir: string; stamp: string } {
 
 /** 入口を飛ばした実行の記録（**作業場をまたいで 1 つ**）。 */
 function missingCount(dir: string): number {
-  const record = join(dir, ".git", "valence-loop-lease-missing");
-  return existsSync(record) ? readFileSync(record, "utf8").split("\n").filter(Boolean).length : 0;
+  // **記録は作業場ごとに分かれている** (#403 のレビュー)——**古い版が書いた共有の 1 つも
+  // そのまま残る**ので、**どちらも数える。**
+  const at = join(dir, ".git");
+  return readdirSync(at)
+    .filter((name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"))
+    .flatMap((name) => readFileSync(join(at, name), "utf8").split("\n"))
+    .filter(Boolean).length;
 }
 
 function run(dir: string, script: string, args: string[]) {

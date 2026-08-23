@@ -20,11 +20,8 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { procedureText } from "./procedure-doc";
-
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /** 手順書の bash ブロックを全部取り出す。**書き写さない**（写すと、直さなくても緑になる）。 */
 function bashBlocks(): string[] {

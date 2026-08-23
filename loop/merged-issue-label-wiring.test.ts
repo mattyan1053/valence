@@ -16,6 +16,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -186,7 +187,9 @@ describe("マージしたのに閉じない Issue の行き先", () => {
     detectorStatus(place);
 
     expect(
-      existsSync(join(place.repo, ".git", "valence-loop-lease-missing")),
+      readdirSync(join(place.repo, ".git")).some(
+        (name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"),
+      ),
       "入口確認の記録が砂場に無い（実物の共通 .git へ書いている）",
     ).toBe(true);
   });

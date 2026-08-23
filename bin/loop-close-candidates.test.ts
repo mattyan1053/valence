@@ -18,6 +18,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -364,7 +365,10 @@ describe("bin/loop-close-candidates", () => {
     });
 
     expect(
-      existsSync(join(verdict.cwd, ".git", "valence-loop-lease-missing")),
+      // **記録は作業場ごとに分かれている** (#403 のレビュー)
+      readdirSync(join(verdict.cwd, ".git")).some(
+        (name) => name.startsWith("valence-loop-lease-missing") && !name.endsWith(".lock"),
+      ),
       "lease の記録が砂場に無い（実物へ書いている）",
     ).toBe(true);
   });

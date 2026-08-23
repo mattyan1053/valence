@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,10 +7,6 @@ import { describe, expect, it } from "vitest";
 import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-
-function read(path: string): string {
-  return readFileSync(join(REPO_ROOT, path), "utf8");
-}
 
 /** 着手を決めている節。**文書全体で見ない**——別の節の同じ言い回しで満たされる。 */
 function claimSection(): string {

@@ -117,8 +117,12 @@ describe("./task check の終わりの印", () => {
       mkdirSync(join(sandbox, "bin"), { recursive: true });
       copyFileSync(TASK, join(sandbox, "task"));
       copyFileSync(join(REPO_ROOT, "bin/loop-check-state"), join(sandbox, "bin/loop-check-state"));
+      // **`cmd_check` は、記録の名前を `bin/loop-lease` に訊く** (#403 のレビュー)
+      // ——**この砂場にも実物を置く**（**無いと「読めない」で落ちる**）
+      copyFileSync(join(REPO_ROOT, "bin/loop-lease"), join(sandbox, "bin/loop-lease"));
       chmodSync(join(sandbox, "task"), 0o755);
       chmodSync(join(sandbox, "bin/loop-check-state"), 0o755);
+      chmodSync(join(sandbox, "bin/loop-lease"), 0o755);
       if (options.seed !== undefined) {
         // **前の走りの記録**（**「前の緑が残る」を入力に置く**）
         const dir = join(sandbox, ".git", "valence-check-state.d");
