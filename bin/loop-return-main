@@ -52,7 +52,14 @@ if ! git_dir="$(git rev-parse --git-dir 2>/dev/null)" || [[ -z $git_dir ]]; then
   exit 2
 fi
 readonly SYNCED="$git_dir/valence-loop-synced-main"
-if ! read -r target <"$SYNCED" 2>/dev/null || [[ -z $target ]]; then
+# **読めないときの生のエラーを出さない。** **入力のリダイレクトが失敗したときの
+# メッセージは `read` の stderr ではない**ので、**`2>/dev/null` では消えない**
+# ——**[FAIL] の隣に生のシェルのエラーが並ぶと、どちらが本題か読めない。**
+target=""
+if [[ -r $SYNCED ]]; then
+  read -r target <"$SYNCED" || target=""
+fi
+if [[ -z $target ]]; then
   echo "[FAIL] この周回が同期した先の記録がありません: $SYNCED" >&2
   echo "       戻る先が分かりません（bin/loop-sync-main を通した周回だけが戻れます）" >&2
   exit 2
