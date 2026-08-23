@@ -10,12 +10,14 @@
  * ——**別の作業場の check は、こちらの commit の可否と関係が無い。**
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { holdLock, sleepSync, waitUntil } from "../test/held-lock";
+import { budgetFor } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-check-state", import.meta.url));
 
@@ -31,8 +33,11 @@ describe("bin/loop-check-state", () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  function run(args: string[]): { status: number; stdout: string; stderr: string } {
-    const result = spawnSync(SCRIPT, args, { cwd: repo, encoding: "utf8" });
+  function run(
+    args: string[],
+    env: NodeJS.ProcessEnv = process.env,
+  ): { status: number; stdout: string; stderr: string } {
+    const result = spawnSync(SCRIPT, args, { cwd: repo, encoding: "utf8", env });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
@@ -134,6 +139,263 @@ describe("bin/loop-check-state", () => {
     expect(run(["finished", "A"]).status).toBe(2);
     expect(run(["finished", "A", "合否"]).status).toBe(2);
     expect(run(["walking"]).status).toBe(2);
+  });
+
+  describe("所要時間を残す（#391）", () => {
+    /** 起こした側を、グループごと落とす。**試験がどう終わっても残さない**（#153）。 */
+    function killAll(racers: ReturnType<typeof spawn>[]): void {
+      for (const racer of racers) {
+        if (racer.pid === undefined) {
+          continue;
+        }
+        try {
+          process.kill(-racer.pid, "SIGKILL");
+        } catch {
+          // もう居ない
+        }
+      }
+    }
+
+    /** その走りの記録の行。 */
+    function recordLines(id: string): string[] {
+      return readFileSync(join(statePath(), id), "utf8").split("\n");
+    }
+
+    /** 積まれた所要時間の記録（`<始め>\t<終わり>\t<結果>`）。 */
+    function durations(): string[][] {
+      const listed = run(["--durations"]);
+      expect(listed.status, listed.stderr).toBe(0);
+      return listed.stdout
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => line.split("\t"));
+    }
+
+    function near(value: string | undefined): boolean {
+      const epoch = Number(value);
+      return Number.isInteger(epoch) && Math.abs(epoch - Math.floor(Date.now() / 1000)) <= 120;
+    }
+
+    it("走り始めた時刻が、記録に残る", () => {
+      // **始めた時刻は、いままでどこにも残っていなかった**——**終わりは mtime に
+      // 残るが、始めは `running` の上書きで消える**（**1 回の所要時間すら出せない**）
+      run(["running", "A"]);
+
+      expect(near(recordLines("A")[1]), "始めた時刻が残っていない").toBe(true);
+    });
+
+    it("走り終えた記録に、始めと終わりの両方が残る", () => {
+      run(["running", "A"]);
+
+      run(["finished", "A", "0"]);
+
+      const lines = recordLines("A");
+      expect(near(lines[1]), "始めた時刻を引き継いでいない").toBe(true);
+      expect(near(lines[2]), "終わった時刻が残っていない").toBe(true);
+    });
+
+    it("古い読み手が読む 1 行目は、変えない", () => {
+      // **`AGENTS.md` §5: 新しい書き手 → 古い読み手。** **前の版の `--verdict` は
+      // `read -r kind value <記録` で 1 行目しか読まない**（`running` の片付けも同じ）
+      // ——**行を足すのは安全だが、1 行目に列を足すと `finished 0 1700000000` が
+      // 「合否を読めません」で止まる**（#281 と同じ形）。
+      run(["running", "A"]);
+      expect(recordLines("A")[0], "走っている記録の 1 行目が変わっている").toBe("running");
+
+      run(["finished", "A", "0"]);
+
+      expect(recordLines("A")[0], "終わった記録の 1 行目が変わっている").toBe("finished 0");
+    });
+
+    it("走りごとに、所要時間が積まれる", () => {
+      // **走りの記録は次の走りが片付ける**（**そういう設計**）ので、**そこに残しても
+      // 消える**——**あとから突き合わせるには、積む先が要る。**
+      run(["running", "A"]);
+      run(["finished", "A", "0"]);
+      run(["running", "B"]);
+      run(["finished", "B", "1"]);
+
+      const rows = durations();
+      expect(rows.length, "走りごとに積まれていない").toBe(2);
+      expect(near(rows[0]?.[0]), "始めた時刻が積まれていない").toBe(true);
+      expect(near(rows[0]?.[1]), "終わった時刻が積まれていない").toBe(true);
+      expect(
+        rows.map((row) => row[2]),
+        "合否が積まれていない",
+      ).toEqual(["0", "1"]);
+    });
+
+    it("殺された走りも、殺されたと分かる形で積む", () => {
+      // **実害はこちら側で出ている**（**道具の 10 分制限で 3 回切られた**）——
+      // **切られた走りが記録に残らないと、「切られやすさ」を測れない。**
+      mkdirSync(statePath(), { recursive: true });
+      writeFileSync(
+        join(statePath(), "999999"), // **死んだ PID**（殺された走りの跡）
+        `running\n${Math.floor(Date.now() / 1000) - 600}\n`,
+      );
+
+      run(["running", "A"]); // 次の走りが片付ける
+
+      const rows = durations();
+      expect(rows.length, "殺された走りが積まれていない").toBe(1);
+      expect(rows[0]?.[2], "殺されたことが読み取れない").toBe("killed");
+    });
+
+    it(
+      "2 本が同じ死んだ記録を見ても、1 回しか積まない",
+      () => {
+        // **`flock` が守っていたのは追記だけ** (#392 のレビュー)。**「死んでいると
+        // 判った」から「消した」までの間に、もう 1 本が同じ記録を見る**——**両方が
+        // `killed` を積む。** **水増しされるのは「切られやすさ」**で、
+        // **それはこの PR が測るために作った数**である（**測る道具が、測りたいものを
+        // 膨らませる**）。**同じ隙間を `record_missing` で踏んで直してある。**
+        //
+        // **踏む形を入力に置く。** **追記の口を握らせておく**と、**取り損ねた側は
+        // 記録がまだ在るうちに読む**——**直す前は、必ず 2 行積まれる。**
+        mkdirSync(statePath(), { recursive: true });
+        writeFileSync(
+          join(statePath(), "999999"), // **死んだ PID**（殺された走りの跡）
+          `running\n${Math.floor(Date.now() / 1000) - 600}\n`,
+        );
+        const held = holdLock({
+          dir: repo,
+          lock: join(repo, ".git", "valence-check-durations.lock"),
+        });
+        const racers = ["A", "B"].map((id) =>
+          spawn(SCRIPT, ["running", id], { cwd: repo, detached: true, stdio: "ignore" }),
+        );
+        try {
+          // **2 本とも、追記の口の前まで進ませる**（**この機械は 1 回の起動に最大 1 秒**）
+          sleepSync(3_000);
+        } finally {
+          held.release();
+        }
+        // **書き上がりで待つ**（**イベントループを止めて待つので、`exit` は拾えない**）
+        const finished = waitUntil(
+          () => ["A", "B"].every((id) => existsSync(join(statePath(), id))),
+          30_000,
+        );
+        killAll(racers);
+        expect(finished, "2 本とも書き終えていない（この試験は成立していない）").toBe(true);
+
+        expect(
+          durations().filter((row) => row[2] === "killed").length,
+          "同じ走りを 2 回積んでいる",
+        ).toBe(1);
+      },
+      budgetFor(6),
+    );
+
+    it(
+      "片付けの口を取り損ねても、片付けは進む",
+      () => {
+        // **ここで止まると出られない** (#184)。**握れないからと片付けを飛ばすと、
+        // 殺された記録が残ったまま**——**何度走らせても「走っている」のままで、
+        // commit が永久に止まる。** **落とすのは測るほうだけ**である
+        // （**握っている側が積む**ので、**二重に数える側へは倒さない**）。
+        mkdirSync(statePath(), { recursive: true });
+        writeFileSync(
+          join(statePath(), "999999"),
+          `running\n${Math.floor(Date.now() / 1000) - 600}\n`,
+        );
+        const held = holdLock({
+          dir: repo,
+          lock: join(repo, ".git", "valence-check-state.d.lock"),
+        });
+
+        try {
+          const started = run(["running", "A"], {
+            ...process.env,
+            LOOP_CHECK_STATE_LOCK_WAIT_SEC: "1",
+          });
+
+          expect(started.status, started.stderr).toBe(0);
+        } finally {
+          held.release();
+        }
+
+        expect(
+          existsSync(join(statePath(), "999999")),
+          "殺された記録が残っている（出られなくなる）",
+        ).toBe(false);
+        expect(run(["--durations"]).status, "取り損ねた側が積んでいる").toBe(4);
+      },
+      budgetFor(4),
+    );
+
+    it("記録が伸び続けない", () => {
+      // **直近の分だけを残す**（`bin/loop-lease` の周回の長さと同じ形）
+      for (let index = 0; index < 12; index += 1) {
+        run(["running", `run${index}`]);
+        run(["finished", `run${index}`, "0"]);
+      }
+
+      expect(durations().length, "走りのたびに伸びている").toBeLessThanOrEqual(10);
+    });
+
+    describe("前の版が書いた記録を、いまの版が読む", () => {
+      // **書式は両方向に壊れる**（`AGENTS.md` §5）。**新しい書き手 → 古い読み手**は
+      // 上の「1 行目は変えない」で押さえたが、**古い入力 → 新しい読み手**（#200 の向き）
+      // **が残っていた**——**マージした瞬間、どの作業場の `.git` にも
+      // 「前の版が書いた記録」しか無い。**
+      //
+      // **入力は書式そのもの**である（**前の版を持ってこなくても、`running\n` と
+      // `finished 0\n` を置けば同じ**）。
+
+      /** 前の版が書いた記録（**時刻の行が無い**）。 */
+      function oldRecord(id: string, body: string): void {
+        mkdirSync(statePath(), { recursive: true });
+        writeFileSync(join(statePath(), id), body);
+      }
+
+      it("走っている記録を、これまでどおり読む", () => {
+        oldRecord("A", "running\n");
+
+        expect(run(["--verdict"]).status, "前の版の記録で止まっている").toBe(3);
+      });
+
+      it("終わった記録の合否を、これまでどおり読む", () => {
+        oldRecord("A", "finished 0\n");
+        expect(run(["--verdict"]).status, "前の版の緑を読めていない").toBe(0);
+
+        oldRecord("A", "finished 1\n");
+
+        expect(run(["--verdict"]).status, "前の版の赤を読めていない").toBe(1);
+      });
+
+      it("前の版の記録から、終わりへ進める", () => {
+        // **走っている最中に版が入れ替わる**——**`running` を書いたのは前の版、
+        // `finished` を書くのはいまの版**である。**始めた時刻は残っていない**ので、
+        // **積まない**（**いまの時刻で埋めると、所要時間が 0 秒に化ける**）。
+        oldRecord("A", "running\n");
+
+        expect(run(["finished", "A", "0"]).status, "終われなくなっている").toBe(0);
+
+        expect(run(["--verdict"]).status, "合否を残せていない").toBe(0);
+        expect(recordLines("A")[0], "1 行目が変わっている").toBe("finished 0");
+        expect(run(["--durations"]).status, "始めた時刻の無い走りを積んでいる").toBe(4);
+      });
+
+      it("前の版が残した、殺された記録を片付けられる", () => {
+        // **ここで止まると出られない**（#184 の形）——**片付かない記録があると、
+        // 何度走らせても「走っている」のまま**で、**commit が永久に止まる。**
+        oldRecord("999999", "running\n"); // **死んだ PID**（前の版が残した跡）
+
+        run(["running", "A"]);
+        run(["finished", "A", "0"]);
+
+        expect(run(["--verdict"]).status, "前の版の跡で、出られなくなっている").toBe(0);
+        expect(
+          durations().map((row) => row[2]),
+          "始めた時刻の無い走りを、殺されたぶんとして積んでいる",
+        ).toEqual(["0"]);
+      });
+    });
+
+    it("積む先が無ければ、記録が無いと答える", () => {
+      // **「無い」と「読めない」を混ぜない**（`--verdict` と同じ語彙）
+      expect(run(["--durations"]).status).toBe(4);
+    });
   });
 
   it("記録は作業場ごとに置く", () => {
