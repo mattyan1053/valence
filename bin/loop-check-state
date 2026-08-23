@@ -50,7 +50,7 @@ usage() {
   echo "        bin/loop-check-state --verdict                    いまの記録を読む" >&2
   echo "        bin/loop-check-state --durations                  積んだ所要時間を読む" >&2
   echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
-  echo "        --durations: <始め>\\t<終わり>\\t<合否 または killed>（4 記録が無い）" >&2
+  printf '        --durations: <始め>\\t<終わり>\\t<合否 または killed>（4 記録が無い）\n' >&2
   exit 2
 }
 
@@ -99,8 +99,9 @@ append_duration() {
 
 # その走りの記録に残っている「始めた時刻」。**無ければ空**（**作り話で埋めない**）。
 started_at_of() {
-  local record="$1" first second
-  { read -r first; read -r second; } <"$record" 2>/dev/null
+  local record="$1" second
+  # **1 行目は読み飛ばす**（`_` で受ける。**名前を付けると「使うつもりだった」に見える**）
+  { read -r _; read -r second; } <"$record" 2>/dev/null
   [[ $second =~ ^[0-9]+$ ]] || second=""
   printf '%s' "$second"
 }

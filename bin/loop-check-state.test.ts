@@ -232,6 +232,65 @@ describe("bin/loop-check-state", () => {
       expect(durations().length, "走りのたびに伸びている").toBeLessThanOrEqual(10);
     });
 
+    describe("前の版が書いた記録を、いまの版が読む", () => {
+      // **書式は両方向に壊れる**（`AGENTS.md` §5）。**新しい書き手 → 古い読み手**は
+      // 上の「1 行目は変えない」で押さえたが、**古い入力 → 新しい読み手**（#200 の向き）
+      // **が残っていた**——**マージした瞬間、どの作業場の `.git` にも
+      // 「前の版が書いた記録」しか無い。**
+      //
+      // **入力は書式そのもの**である（**前の版を持ってこなくても、`running\n` と
+      // `finished 0\n` を置けば同じ**）。
+
+      /** 前の版が書いた記録（**時刻の行が無い**）。 */
+      function oldRecord(id: string, body: string): void {
+        mkdirSync(statePath(), { recursive: true });
+        writeFileSync(join(statePath(), id), body);
+      }
+
+      it("走っている記録を、これまでどおり読む", () => {
+        oldRecord("A", "running\n");
+
+        expect(run(["--verdict"]).status, "前の版の記録で止まっている").toBe(3);
+      });
+
+      it("終わった記録の合否を、これまでどおり読む", () => {
+        oldRecord("A", "finished 0\n");
+        expect(run(["--verdict"]).status, "前の版の緑を読めていない").toBe(0);
+
+        oldRecord("A", "finished 1\n");
+
+        expect(run(["--verdict"]).status, "前の版の赤を読めていない").toBe(1);
+      });
+
+      it("前の版の記録から、終わりへ進める", () => {
+        // **走っている最中に版が入れ替わる**——**`running` を書いたのは前の版、
+        // `finished` を書くのはいまの版**である。**始めた時刻は残っていない**ので、
+        // **積まない**（**いまの時刻で埋めると、所要時間が 0 秒に化ける**）。
+        oldRecord("A", "running\n");
+
+        expect(run(["finished", "A", "0"]).status, "終われなくなっている").toBe(0);
+
+        expect(run(["--verdict"]).status, "合否を残せていない").toBe(0);
+        expect(recordLines("A")[0], "1 行目が変わっている").toBe("finished 0");
+        expect(run(["--durations"]).status, "始めた時刻の無い走りを積んでいる").toBe(4);
+      });
+
+      it("前の版が残した、殺された記録を片付けられる", () => {
+        // **ここで止まると出られない**（#184 の形）——**片付かない記録があると、
+        // 何度走らせても「走っている」のまま**で、**commit が永久に止まる。**
+        oldRecord("999999", "running\n"); // **死んだ PID**（前の版が残した跡）
+
+        run(["running", "A"]);
+        run(["finished", "A", "0"]);
+
+        expect(run(["--verdict"]).status, "前の版の跡で、出られなくなっている").toBe(0);
+        expect(
+          durations().map((row) => row[2]),
+          "始めた時刻の無い走りを、殺されたぶんとして積んでいる",
+        ).toEqual(["0"]);
+      });
+    });
+
     it("積む先が無ければ、記録が無いと答える", () => {
       // **「無い」と「読めない」を混ぜない**（`--verdict` と同じ語彙）
       expect(run(["--durations"]).status).toBe(4);
