@@ -8,6 +8,7 @@
  */
 
 import { visibleRepositoriesForCurrentUser } from "../composition/auth";
+import { RepositoryList } from "../ui/repository-list/repository-list";
 
 /**
  * **要求ごとに描く。静的に生成させない** (#213 のレビュー)。
@@ -25,16 +26,6 @@ import { visibleRepositoriesForCurrentUser } from "../composition/auth";
 export const dynamic = "force-dynamic";
 
 /**
- * 読めなかったものの注記。**件数だけを出す** (#213 のレビュー)。
- *
- * **理由は画面へ出さない**——**Zod のメッセージには値が入りうる**
- * （`app-credentials.ts` が「Zod のエラーを持ち上げない」としているのと同じ理由）。
- */
-export function invalidNote(count: number): string | undefined {
-  return count === 0 ? undefined : `${count} 件は読めませんでした。`;
-}
-
-/**
  * 盤面への行き先 (#314)。
  *
  * **名前をそのまま繋がない。** **owner / name は GitHub から来た値**で、
@@ -45,57 +36,6 @@ export function boardPath(repository: { readonly owner: string; readonly name: s
   return `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
 }
 
-/**
- * 見えたものを並べる（#415）。
- *
- * **`Home` から切り出してある。** **`Home` は非同期のサーバコンポーネントで、
- * 描いて確かめる手立てが無い**——**倒し分けをここへ置くと、描いた本文で判定できる**
- * （**#410 では、判定が見出し（`<h2>`）に当たったまま緑になっていた**）。
- *
- * **1 件も無いときに、何が無いのか・次に何をすればよいのかを出す。**
- * **#213 が倒し分けたのは 3 つ**（**ログインしていない / 入り直してもらう / 出す**）で、
- * **「並べたが 0 件」はそのどれでもない**——**「出す」に入っていて、出すものが無い。**
- *
- * **「無い」と「読めなかった」を同じ静けさにしない**（`AGENTS.md` §5。
- * **盤面の側と同じ倒し方**である）——**読めなかったせいで 0 件なら、
- * 「インストールしてください」とは言わない**（**インストール済みでも起きる**）。
- */
-export function RepositoryListing({
-  repositories,
-  unreadable,
-}: {
-  readonly repositories: readonly { readonly owner: string; readonly name: string }[];
-  readonly unreadable: number;
-}) {
-  if (repositories.length === 0) {
-    return (
-      <p className="text-sm">
-        {unreadable > 0
-          ? // **件数は下の注記が出す**ので、ここでは何が起きたかだけを言う
-            "読めたリポジトリが 1 件もありません。"
-          : "見られるリポジトリが 1 件もありません。GitHub App をリポジトリにインストールすると、ここに並びます。"}{" "}
-        {invalidNote(unreadable)}
-      </p>
-    );
-  }
-  return (
-    <>
-      <ul className="flex flex-col gap-1 text-sm">
-        {repositories.map((repository) => (
-          <li key={`${repository.owner}/${repository.name}`}>
-            {/* **並べるだけでは、盤面へ行けない** (#314)。**名前を入力させない** */}
-            <a className="underline" href={boardPath(repository)}>
-              {repository.owner}/{repository.name}
-            </a>
-          </li>
-        ))}
-      </ul>
-      {/* **黙って捨てない。** **消すと「読めなかった」が「見えなかった」に化ける** */}
-      {unreadable > 0 ? <p className="text-sm opacity-70">{invalidNote(unreadable)}</p> : undefined}
-    </>
-  );
-}
-
 export default async function Home() {
   const result = await visibleRepositoriesForCurrentUser();
 
@@ -104,8 +44,13 @@ export default async function Home() {
       <h1 className="font-mono text-3xl font-bold tracking-tight">Valence</h1>
       <p className="text-lg">AI 時代の PR コントロールセンター</p>
       {result.kind === "listed" ? (
-        <RepositoryListing
-          repositories={result.listing.repositories}
+        <RepositoryList
+          // **行き先はここで組む** (#417 のレビュー)。**経路は `app` の話**で、
+          // **表示の部品は `app` を import できない**（`AGENTS.md` §3 の表）
+          repositories={result.listing.repositories.map((repository) => ({
+            ...repository,
+            href: boardPath(repository),
+          }))}
           unreadable={result.listing.invalid.length}
         />
       ) : (
