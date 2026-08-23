@@ -302,7 +302,11 @@ describe("入口を飛ばした周回", () => {
       const checked = lease("check");
 
       expect(checked.stderr, "畳めなかったことを言っていない").toMatch(/畳めません/);
-      expect(checked.stderr, "落ちた当のものが何も言っていない").toContain("tail");
+      // **落ちた当のものが、そのまま出ていること**を見る（**道具の名前は変わりうる**
+      // ——#401 で `tail` から `awk` へ移した）。**読めなかった理由が残っていればよい。**
+      expect(checked.stderr, "落ちた当のものが何も言っていない").toMatch(
+        /can't open|cannot open|Permission denied|許可がありません|開けません/i,
+      );
     } finally {
       chmodSync(path, 0o644);
     }
