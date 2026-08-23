@@ -377,18 +377,23 @@ describe("いま信じていることの側に、写しに無い行を置かな�
       .filter((line) => !BELIEVED.includes(line));
   }
 
-  /** **前の見出しの、外した見立てそのもの。** **人工の文にしない**（#437 のレビュー）。 */
-  function discardedForReal(): string[] {
-    // **`git show` で取る。** **その commit は main に居る**（#371 のマージ）。
-    const shown = spawnSync("git", ["show", "426e3145:bin/db-start"], {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-    });
-    expect(shown.status, `前の版を取れません: ${shown.stderr}`).toBe(0);
-    const lines = shown.stdout.split("\n").filter((line) => line.includes("外向き接続"));
-    expect(lines.length, "前の版に、外した見立ての文がありません").toBeGreaterThan(0);
-    return lines;
-  }
+  /**
+   * **前の見出しの、外した見立てそのもの**（#437 のレビュー）。**人工の文にしない。**
+   *
+   * **写しである**——**`git show 426e3145:bin/db-start` から写した**
+   * （`426e3145` は #371 のマージ。**その 1 行が、#436 まで見出しに在ったもの**）。
+   *
+   * **引きに行かない**（#437 のレビュー 3 周目）。**CI の clone は浅い**
+   * （`actions/checkout` の既定は `fetch-depth: 1`）ので、**履歴を持っている側だけが
+   * 引ける**——**手元は緑、CI は赤**になった（**実測**）。**合否を、自分の持ち物でない
+   * もので決めない**（`AGENTS.md` §5 / #186。**ここでの他人の持ち物は履歴の深さ**で、
+   * **決めるのは CI の設定**である）。
+   *
+   * **写しなので、古くなりうる**——**そこは `BELIEVED` と同じ**（**人が読んで直す**）。
+   */
+  const DISCARDED = [
+    "# **`supabase start` 自身が張る外向き接続の 1 本がその番号を掴んだまま bind へ進むと落ちる**",
+  ];
 
   it("いまの見出しは、そのまま通る", () => {
     // **外した見立てを名指しで残しているのが、いまの見出しの良いところ**である
@@ -401,7 +406,7 @@ describe("いま信じていることの側に、写しに無い行を置かな�
     // **その文には「原因」の語が無い**ので、**語で拾う形では通り抜けていた。**
     const pasted = header().replace(
       "# **原因は分かっていない。**",
-      ["# **原因は分かっていない。**", ...discardedForReal()].join("\n"),
+      ["# **原因は分かっていない。**", ...DISCARDED].join("\n"),
     );
 
     expect(unpinned(pasted), "戻ってきた断定を見逃している").not.toEqual([]);
@@ -419,20 +424,16 @@ describe("いま信じていることの側に、写しに無い行を置かな�
 
   it("外した見立ての中でなら、そのまま残せる", () => {
     // **区画の中は「いま信じていること」ではない**——**引き写しは残せる。**
-    const quoted = [
-      "#!/usr/bin/env bash",
-      `# ${MARK.from}`,
-      ...discardedForReal(),
-      `# ${MARK.to}`,
-      "",
-    ].join("\n");
+    const quoted = ["#!/usr/bin/env bash", `# ${MARK.from}`, ...DISCARDED, `# ${MARK.to}`, ""].join(
+      "\n",
+    );
 
     expect(unpinned(quoted), "外した見立ての引き写しで鳴っている").toEqual([]);
   });
 
   it("区画が無ければ、外した見立ても拾う", () => {
     // **囲い忘れを、通してしまわない**——**区画は書式であって、書けば効く。**
-    const quoted = ["#!/usr/bin/env bash", ...discardedForReal(), ""].join("\n");
+    const quoted = ["#!/usr/bin/env bash", ...DISCARDED, ""].join("\n");
 
     expect(unpinned(quoted), "囲っていないのに通している").not.toEqual([]);
   });
