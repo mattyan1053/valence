@@ -26,6 +26,7 @@ description: Valence の開発環境（コンテナ、./task、Supabase ロー�
 **作業場ごとに違う**（#82）。**書き写さないこと**——**決めているのは `./task`** である。
 
 ```bash
+# ここは、作業場のある機械で打つ（コンテナが動いている側）
 port="$(./task port)"                                      # この作業場のポート
 curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$port/"
 docker ps --filter "publish=$port" --format '{{.Names}}'   # 誰のものか確かめる
@@ -45,6 +46,7 @@ compose のポート公開（docker-proxy）はホスト側で listen し続け�
 「空応答」ならこれを疑う。
 
 ```bash
+# ここは、作業場のある機械で打つ
 ss -tlnp | grep ":$(./task port)"           # ホスト側は listen している
 docker compose exec -T app pgrep -a node    # コンテナ内に next がいるか
 ./task restart                              # 動いていなければ再起動
@@ -138,7 +140,12 @@ DB を覗くときは `./task db:psql`（studio は無効）。
 ## リモート VM から使う
 
 ```bash
-port="$(./task port)"                       # 転送する先も、作業場ごとに違う
+# ここは手元（ブラウザのある機械）で打つ
+#
+# **ポートを訊く先は、向こう**である——**手元で `./task port` を打つと、手元の
+# ディレクトリ名から別の port が出る**（`valence` という名前の clone が手元にあれば、
+# **転送は通り、画面も開く**。**開いたのは別の作業場のアプリ**である）
+port="$(ssh <user>@<remote-vm> 'cd <作業場のパス> && ./task port')"
 ssh -L "$port:localhost:$port" <user>@<remote-vm>
 ```
 
