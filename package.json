@@ -12,6 +12,7 @@
     "build": "next build",
     "start": "next start --hostname 0.0.0.0",
     "lint": "biome check .",
+    "lint:shell": "bin/lint-shell",
     "fix": "biome check --write .",
     "typecheck": "next typegen && tsc --noEmit",
     "depcruise": "depcruise src",
@@ -19,7 +20,7 @@
     "test:watch": "vitest --project '!db'",
     "test:coverage": "vitest run --coverage --project '!db'",
     "test:db": "vitest run --project db",
-    "check": "pnpm lint && pnpm typecheck && pnpm depcruise && pnpm test"
+    "check": "pnpm lint && pnpm lint:shell && pnpm typecheck && pnpm depcruise && pnpm test"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",

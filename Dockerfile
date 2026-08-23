@@ -24,6 +24,10 @@ ENV PNPM_HOME=/home/node/.local/share/pnpm \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     NEXT_TELEMETRY_DISABLED=1
 
+# **shellcheck もここで入れる** (#395)。**`./task check` が bash を見る**ためで、
+# **入っていないと `bin/lint-shell` は「走らせられない」で止まる**（#210 の向き
+# ——**skip して緑にはしない**）。**`bin/` を触った変更が、push するまで指摘を
+# 出さないと、構造的に 1 往復増える**（実測: #392）。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -31,6 +35,7 @@ RUN apt-get update \
         git \
         openssh-client \
         procps \
+        shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
