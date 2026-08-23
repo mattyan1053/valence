@@ -183,6 +183,40 @@ describe("周回が始まったことを、どう始まったかごと残す", (
     expect(done.stderr, "走っている最中の cron が記録に残らないことが無い").toMatch(/acquire/);
   });
 
+  it("別の役だけが止まっていても、その役の予定表へ案内する", () => {
+    // **案内が指す先が、証拠の出どころより広かった** (#431 のレビュー)。
+    // **`./task loop:status` は全部の役を見る**ので、**worker から呼んで master だけが
+    // `stale` のとき**、**読んだ人は自分の予定表を引き、そこは正常なので「何ともない」で
+    // 終わる**——**空だったのは master 側**である。
+    //
+    // **2026-08-24 の実測がまさにその形**だった（**3 つとも stale だったので隠れていた**）。
+    //
+    // **入力に踏む形を置く**——**呼んだ役は健全・別の役が `stale`。**
+    const { dir } = workspace();
+    records(dir, [
+      [8_000, "cron"],
+      [9_800, "cron"],
+    ]);
+    taskAnswers(dir, { workerPaths: [dir], masterPath: dir });
+    records(
+      dir,
+      [
+        [1_000, "cron"],
+        [9_500, "poke"],
+      ],
+      dir,
+      "master",
+    );
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(1);
+    expect(done.stdout, "master が止まっていると言っていない").toMatch(/scope=master.*stale/);
+    // **呼んだ側の予定表を指さない**（**そこは正常なので、そこで止まる**）
+    expect(done.stderr, "呼んだ役の予定表を指している").not.toMatch(/このセッション/);
+    expect(done.stderr, "止まっている役のセッションを指していない").toMatch(/stale と出た役/);
+  });
+
   it("止まっていなければ、次の一手も言わない", () => {
     // **毎回鳴る案内は、読まれなくなる**（`warn_stale_containers` と同じ判断）
     const { dir } = workspace();
