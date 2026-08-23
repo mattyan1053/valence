@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# 周回の出口で、**作業ツリーを `origin/main` の先端へ戻す** (#405)。
+#
+#   bin/loop-return-main
+#
+#   exit 0 = 戻した（もともとそこに居た場合も含む）
+#   exit 1 = 戻していない（dirty / 切り替えに失敗。理由は標準エラーへ）
+#   exit 2 = 判定できない（git の外 / origin/main が無い）
+#
+# **枝の上で周回を終えると、次の周回は必ず捨てられる。** **1.1 は「いまの HEAD」と
+# 「`origin/main`」を比べる**ので、**枝に居たまま終えると、枝分かれの跡から `main` に
+# 入ったぶんが毎回差分に出る**——**`before` が動かない**ので、**その枝で作業を
+# 続ける限り、毎周回そうなる**（実測: 2026-08-23、worker-1 が 2 周続けて捨てた）。
+#
+# **1.1 の判定は間違っていない。** **枝の上では、配られた手順とディスクの手順が
+# 実際に食い違っている**——**問題は、その状態で周回を終えること**である。
+#
+# **戻すのは lease を握っている間**（出口の中）。**返したあとに動かすと、次の周回の
+# 足元から木を抜く**（#68 の形）。
+#
+# **fetch はしない。** **この周回が同期した先は、いまの `origin/main`** である
+# ——**取り直すと、この周回が一度も実行していない版の上で終わることになる。**
+#
+# **dirty なら動かさない**（1.0 と同じ判断）。**持ったまま移ると、どの枝の作業か消える。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+[[ $# -eq 0 ]] || {
+  echo "使い方: bin/loop-return-main   作業ツリーを origin/main の先端へ戻す" >&2
+  echo "        exit 0 = 戻した / exit 1 = 戻していない / exit 2 = 判定できない" >&2
+  exit 2
+}
+
+# **入口を飛ばしていないか、ここでも確かめる** (#386)。**止めない**（`|| true`）
+"${BASH_SOURCE[0]%/*}/loop-lease" check || true
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "[FAIL] git の作業ツリーの中に居るかどうかを読み取れません" >&2
+  exit 2
+fi
+
+if ! target="$(git rev-parse --verify --quiet "origin/main^{commit}")" || [[ -z $target ]]; then
+  echo "[FAIL] origin/main を特定できません（戻る先が分かりません）" >&2
+  exit 2
+fi
+
+if ! here="$(git rev-parse --verify --quiet "HEAD^{commit}")" || [[ -z $here ]]; then
+  echo "[FAIL] いまの HEAD を特定できません" >&2
+  exit 2
+fi
+
+# **もともとそこに居るなら、何もしない。** **master は枝へ移らない**ので、
+# **こちらは毎周回この経路を通る**——**手順は 1 つ**である。
+#
+# **枝として `main` を掴んでいる場合は、ここで終わらせない** (#196)。**detached で
+# 同じ commit に居るのと、掴んでいるのは別**である——**掴んだままだと、別の作業場の
+# `git switch` が exit 128 で落ちる。**
+if [[ $here == "$target" ]] && [[ -z "$(git symbolic-ref --quiet HEAD 2>/dev/null || true)" ]]; then
+  exit 0
+fi
+
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+  echo "[FAIL] 作業ツリーに commit していない変更があります。木を動かしません" >&2
+  echo "       残っているものを片付けてから戻すこと（持ったまま移ると、どの枝の作業か消えます）" >&2
+  exit 1
+fi
+
+if ! git switch --detach origin/main >/dev/null 2>&1; then
+  echo "[FAIL] origin/main へ戻せません（切り替えに失敗しました）" >&2
+  exit 1
+fi
+exit 0
