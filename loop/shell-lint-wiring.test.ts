@@ -29,6 +29,21 @@ function read(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf8");
 }
 
+/**
+ * **実行される行だけ**（行だけのコメントを落とす）。
+ *
+ * **書いてあることではなく、実行される場所を読む** (#396 のレビュー)。**理由として
+ * 書いた語に当たると、`apt-get install` の並びから消しても、`run:` を消しても緑**
+ * ——**この試験が防ぎたい退行が、まさにそれ**である（`loop/image-drift-wiring.test.ts`
+ * と同じ形）。**`Dockerfile` も YAML も、行頭の `#` がコメント**である。
+ */
+function executed(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
 /** `package.json` の scripts。 */
 function scripts(): Record<string, string> {
   const parsed: unknown = JSON.parse(read("package.json"));
@@ -82,7 +97,7 @@ describe("bash の lint", () => {
     const fallback = /LOOP_SHELLCHECK:-([\w.-]+)/.exec(read("bin/lint-shell"));
     expect(fallback?.[1], "既定の道具を読み取れない").toBeDefined();
 
-    expect(read("Dockerfile"), "開発イメージが、その道具を入れていない").toContain(
+    expect(executed(read("Dockerfile")), "開発イメージが、その道具を入れていない").toContain(
       fallback?.[1] ?? "",
     );
   });
@@ -90,21 +105,22 @@ describe("bash の lint", () => {
   it("CI の job は、そのまま残す", () => {
     // **手元で走ることと、CI で必ず走ることは別**である——**手元を飛ばせる経路は
     // いつでもある**（押し直し、別の機械、`./task` を通さない commit）。
-    expect(read(".github/workflows/audit.yml"), "CI から bash の lint が消えている").toContain(
-      "bin/lint-shell",
-    );
+    expect(
+      executed(read(".github/workflows/audit.yml")),
+      "CI から bash の lint が消えている",
+    ).toContain("bin/lint-shell");
   });
 
   it("CI に一覧を書き写さない", () => {
     // **2 箇所に持つと、片方だけ古くなる**（§5）——**対象は bin/lint-shell が持つ**
-    const workflow = read(".github/workflows/audit.yml");
+    const workflow = executed(read(".github/workflows/audit.yml"));
 
     expect(workflow, "一覧が CI にも書いてある").not.toMatch(/shellcheck .*task docker-entrypoint/);
   });
 
   it("CI が止める側である", () => {
     // **`|| true` を付けると、指摘が出ても緑になる**——**見ているだけになる**
-    const shellJob = read(".github/workflows/audit.yml").split("shell:")[1] ?? "";
+    const shellJob = executed(read(".github/workflows/audit.yml")).split("shell:")[1] ?? "";
 
     expect(shellJob, "落ちない形で打っている").not.toMatch(/bin\/lint-shell.*\|\|/);
   });
