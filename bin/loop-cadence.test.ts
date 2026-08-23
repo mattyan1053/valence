@@ -341,6 +341,91 @@ describe("周回が始まったことを、どう始まったかごと残す", (
     expect(done.stderr + done.stdout, "分からないと言っていない").toMatch(/interval=unknown/);
   });
 
+  describe("間隔が渡されていなくても、止まったことに気づく（#438）", () => {
+    // **足した案内は `stale` のときだけ出る**（#430 / #433 / #435）——**その `stale` に、
+    // 実物では到達していなかった。** **間隔（`LOOP_CRON_INTERVAL_SEC`）を渡すのは
+    // 試験だけ**で、**実物は 3 つとも `unknown`** だった。
+    //
+    // **間隔はリポジトリへ固定しない**（#378 / `AGENTS.md` §1）——**記録から測る。**
+    // **測るのは、いちばん短い間**である（**落とした回は間が広がるだけ**なので、
+    // **最小が周期にいちばん近い**）。
+
+    it("記録から測った間隔で、止まったと言える", () => {
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+        [4_600, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+      expect(done.status, "止まっていると言っていない").toBe(1);
+      expect(done.stdout, "止まっていると言っていない").toMatch(/stale/);
+    });
+
+    it("物差しが実測だと分かる形で出す", () => {
+      // **渡された間隔と混ぜない**——**読む人が、どちらで判定したか分かるように。**
+      // **「間隔」とは呼ばない**（**測ったのは、これまで空いた最長の間**である）
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+      expect(done.stdout, "実測の物差しだと分からない").toMatch(/interval=unknown widest=1800/);
+    });
+
+    it("捨てて呼び直した周回で、窓が縮まない", () => {
+      // **同じ cron の中で 2 回 `acquire` する**（**入口が入れ替わると捨てて呼び直す**）
+      // ——**その間は数十秒**である。**いちばん短い間を周期と読むと、窓が数十秒になり、
+      // 正常な周回で鳴り続ける**（**実測の `35 49` がそれ**）。
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [1_035, "cron"],
+        [2_800, "cron"],
+        [4_600, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "6000" });
+
+      expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+      expect(done.stdout, "呼び直しの間で窓を作っている").toMatch(/widest=1800/);
+    });
+
+    it("来ているうちは、測った間隔でも言わない", () => {
+      const { dir } = workspace();
+      records(dir, [
+        [6_400, "cron"],
+        [8_200, "cron"],
+        [9_800, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+      expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+      expect(done.stdout, "来ているのに止まったと言っている").not.toMatch(/stale/);
+    });
+
+    it("渡された間隔があれば、そちらを使う", () => {
+      // **測った値で上書きしない**——**起動した人が決めたものが正**である（#378）
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+        [4_600, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "100000" });
+
+      expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+      expect(done.stdout, "渡された間隔を使っていない").toMatch(/interval=100000/);
+    });
+  });
+
   it("記録が無い作業場は、始まっていない側に数える", () => {
     // **居るはずの作業場に記録が無いのは「1 度も始まっていない」**である
     // ——**「まだ分からない」へ倒すと、足したばかりの worker が永久に見えない**
