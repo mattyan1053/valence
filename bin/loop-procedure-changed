@@ -62,7 +62,8 @@ readonly COMMON=(
 usage() {
   echo "使い方: bin/loop-procedure-changed --role master|worker <前の SHA> [<後の SHA>]" >&2
   echo "       後の SHA を省くと HEAD と比べる" >&2
-  echo "       bin/loop-procedure-changed --role … --list   対象の一覧を出す" >&2
+  echo "       bin/loop-procedure-changed --role … --list        対象の一覧を出す" >&2
+  echo "       bin/loop-procedure-changed --role … --churn-log   捨てた周回を読む（4 記録が無い）" >&2
   exit 2
 }
 
@@ -104,6 +105,71 @@ resolve() {
   fi
   printf '%s' "$resolved"
 }
+
+# **置き場は git が分けている**（`bin/loop-handoff` と同じ理由——**自前で作業場の
+# 識別子を作らない**）。**共通ディレクトリは作業場をまたいで 1 つ**、
+# **作業ツリーの git ディレクトリは作業場ごと**である。
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+readonly common_dir
+# **どの作業場が捨てたか**（**役だけでは worker が何人いても見分けられない**）。
+# **読めなければ空**——**記録のために判定を止めない。**
+workspace_dir="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+readonly workspace_dir
+
+# **捨てた周回を積む先** (#400)。**作業場をまたいで 1 つ**——**知りたいのは
+# 「このループ全体で、どの入れ替わりが何周ぶん捨てさせたか」**であって、
+# **作業場ごとの話ではない**（**役と作業場は行の中に書く**）。
+#
+# **直近のぶんだけ残す**（`bin/loop-lease` の周回の長さ、`bin/loop-check-state` の
+# 所要時間と同じ形）。**際限なく足すと、読むたびに重くなる。**
+readonly CHURN_LOG="$common_dir/valence-loop-churn"
+readonly RECENT_CHURNS=10
+
+# 捨てた周回を 1 行積む。**落ちても、判定は返す**（#270）。
+#
+# **読んで、足して、書き戻す**ので、**2 つの作業場が同時に捨てると 1 行落ちうる**
+# ——**`flock` で直列にする**（**測るための記録なので、待たせても誰も止まらない**）。
+record_churn() {
+  local files="$1" kept=() line
+  line="$(date +%s)"$'\t'"$ROLE"$'\t'"$workspace_dir"$'\t'"$BEFORE..$AFTER"$'\t'"$(printf '%s' "$files" | tr '\n' ',')"
+  exec 8>"$CHURN_LOG.lock" 2>/dev/null || return 1
+  flock -w 10 8 || {
+    exec 8>&-
+    return 1
+  }
+  if [[ -f $CHURN_LOG ]]; then
+    mapfile -t kept <"$CHURN_LOG" 2>/dev/null || kept=()
+  fi
+  kept+=("$line")
+  # **数より短いときに切り出さない**（**要素数を超える負の開始位置は空になる**）
+  ((${#kept[@]} <= RECENT_CHURNS)) || kept=("${kept[@]: -RECENT_CHURNS}")
+  if ! { printf '%s\n' "${kept[@]}" >"$CHURN_LOG.tmp" 2>/dev/null \
+    && mv -f "$CHURN_LOG.tmp" "$CHURN_LOG" 2>/dev/null; }; then
+    rm -f "$CHURN_LOG.tmp" 2>/dev/null
+    exec 8>&-
+    return 1
+  fi
+  exec 8>&-
+}
+
+# **読むだけの口は、判定より先に返す** (#390 のレビュー。`--list` と同じ)。
+if [[ ${1-} == "--churn-log" ]]; then
+  [[ $# -eq 1 ]] || usage
+  # **「無い」と「読めない」を混ぜない**（`--verdict` / `--durations` と同じ語彙）
+  [[ -s $CHURN_LOG ]] || exit 4
+  cat "$CHURN_LOG" || {
+    echo "[FAIL] 捨てた周回の記録を読めません: $CHURN_LOG" >&2
+    exit 2
+  }
+  exit 0
+fi
 
 # **一覧は問い合わせである** (#390 のレビュー)。**lease の確認より先に返す**
 # ——**後ろに置くと、尋ねるたびに偽の「入口を飛ばした」が積まれる**
@@ -166,6 +232,15 @@ fi
 if [[ -n $changed ]]; then
   # 何が入れ替わったかを出す。**捨てた理由が後から分かるようにする。**
   printf '%s\n' "$changed"
+  # **後から数えられるように、積んでもおく** (#400)。**出力は流れて消える**
+  # ——**捨てた周回は 3 人ぶん**（master と worker がそれぞれ 1 周）で、
+  # **`procedure-churn` は「捨てた」という事実だけを数える**ので、
+  # **他人が入れ替えたものと、自分が撒いた種が同じ名前で混ざる。**
+  #
+  # **書けなくても、判定は返す** (#270)。**測るための記録**であって、
+  # **捨てる判断そのものではない。**
+  record_churn "$changed" ||
+    echo "[WARN] 捨てた周回を記録できません: $CHURN_LOG（判定は返します）" >&2
   exit 0
 fi
 exit 1
