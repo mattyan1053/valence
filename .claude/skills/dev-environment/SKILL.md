@@ -39,6 +39,17 @@ docker ps --filter "publish=$port" --format '{{.Names}}'   # 誰のものか確�
 
 ## よくある詰まり
 
+### まず、足りないものをまとめて訊く
+
+```bash
+./task doctor      # .env の空のキー / Supabase / この作業場の開発サーバ
+```
+
+**確かめられないものは「分かりません」と出る**——**installation は App の JWT が
+要る**ので、**この口からは見ない**（**「無い」とは言わない**）。
+**秘密の値は出ない**（**キーが埋まっているかだけ**）。
+
+
 ### アプリが「空応答」を返す（`ERR_EMPTY_RESPONSE` / `curl: (52)`）
 
 compose のポート公開（docker-proxy）はホスト側で listen し続けるため、

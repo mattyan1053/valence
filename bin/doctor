@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# **「使えない理由」を、まとめて言う** (#413)。
+#
+#   bin/doctor        （`./task doctor` から呼ばれる）
+#
+#   exit 0 = 足りないものは無い（**分からないものはあってよい**）
+#   exit 1 = 足りないものがある
+#
+# **これまでは別々に 4 つ見るしかなかった**——**`.env` を目で見る / Supabase へ curl /
+# 作業場ごとの port を調べる（#412）/ installation はここからは見られない。**
+# **「開けない」と分かったときに、どれが欠けているのかが即答できない。**
+#
+# **確かめられないものは、「無い」ではなく「分からない」と言う。**
+# **このリポジトリで何度も出ている形**（**「読めなかった」を「無かった」に化けさせない**）
+# ——**ここでいちばん効くのは installation** である（**App の JWT が要る**）。
+#
+# **分からないものを、足りない側に数えない。** **数えると、この口は毎回「使えない」と
+# 言い続ける**ことになり、**言っていないのと同じ**になる。
+#
+# **秘密の値を出さない** (`AGENTS.md` §6)。**キーが埋まっているかだけ**を言う。
+#
+# **止めない。** **1 つ目で止まると「まとめて言う口」にならない**ので、
+# **-e は使わない**（**全部見てから、最後に判定を返す**）。
+set -uo pipefail
+
+missing=0
+
+ok() { printf '[OK]     %s\n' "$1"; }
+# **足りない**（**直せば使えるようになる**）。**判定を 1 段悪くする。**
+lack() {
+  printf '[足りない] %s\n' "$1"
+  missing=1
+}
+# **分からない**（**この口からは確かめられない**）。**足りない側に数えない。**
+unknown() { printf '[分かりません] %s\n' "$1"; }
+
+# ---------------------------------------------------------------- .env
+
+# `.env.example` に並んだキー名。**値は読まない**（**ダミーしか入っていない**）。
+example_keys() {
+  local file="$1"
+  [[ -f $file ]] || return 1
+  sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$file"
+}
+
+# そのキーの値。**無ければ空**（**呼ぶ側は「空＝足りない」と読む**）。
+value_of() {
+  local file="$1" key="$2" line
+  [[ -f $file ]] || return 1
+  # **最後に書かれたものを採る**（**同じキーが 2 度あるなら、後が勝つ**）
+  line="$(grep -E "^[[:space:]]*${key}=" "$file" | tail -n 1)" || return 1
+  line="${line#*=}"
+  # **囲みだけを外す。** **中身は出さない**ので、これ以上は解釈しない
+  line="${line#\"}"
+  line="${line%\"}"
+  line="${line#\'}"
+  line="${line%\'}"
+  printf '%s' "$line"
+}
+
+check_env() {
+  local example=".env.example" env=".env" keys empty=() key value
+  if ! keys="$(example_keys "$example")"; then
+    unknown ".env: 何が要るのか分かりません（$example がありません）"
+    return 0
+  fi
+  if [[ ! -f $env ]]; then
+    lack ".env: ありません（cp $example $env して、値を入れる）"
+    return 0
+  fi
+  while IFS= read -r key; do
+    [[ -n $key ]] || continue
+    value="$(value_of "$env" "$key")"
+    [[ -z $value ]] && empty+=("$key")
+  done <<<"$keys"
+  if ((${#empty[@]} > 0)); then
+    # **名前だけを出す** (`AGENTS.md` §6)。**埋まっている値は、1 つも画面へ出さない**
+    lack ".env: 空のキーがあります: ${empty[*]}"
+    return 0
+  fi
+  ok ".env: 必要なキーは埋まっています"
+}
+
+# ---------------------------------------------------------------- 応答
+
+# その URL が応答するか。
+#
+#   exit 0 = 応答した / exit 1 = 応答しない / exit 2 = 確かめられない
+#
+# **`curl` はホストに要求していない**（`./task` が要求するのは bash / docker / git /
+# flock だけ）ので、**無ければ bash の `/dev/tcp` で「開いているか」だけを見る**
+# ——**手が無いときは、無いと言う**（**exit 2**）。
+responds() {
+  local url="$1" host port rest
+  if command -v curl >/dev/null 2>&1; then
+    # **curl の生の文言を出さない**——**人が読むのは、この口が並べる 1 行である**
+    curl -fs -m 3 -o /dev/null "$url" 2>/dev/null && return 0
+    return 1
+  fi
+  rest="${url#*://}"
+  rest="${rest%%/*}"
+  host="${rest%%:*}"
+  port="${rest##*:}"
+  [[ $host != "$port" ]] || return 2
+  (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null && return 0
+  return 1
+}
+
+check_supabase() {
+  local url
+  # **ブラウザが行く先を見る**（`NEXT_PUBLIC_SUPABASE_URL`）——**人が開くのと同じ先**
+  # である。**`SUPABASE_URL` はコンテナの中の名前**（`http://kong:8000`）なので、
+  # **ここから引いても届かない**（`.env.example` の説明のとおり）。
+  url="$(value_of ".env" "NEXT_PUBLIC_SUPABASE_URL")"
+  if [[ -z $url ]]; then
+    # **行き先が無い。** **「見えない」と言うと、起動していないのだと読める**
+    unknown "Supabase: 見に行く先が分かりません（.env の NEXT_PUBLIC_SUPABASE_URL が空）"
+    return 0
+  fi
+  responds "$url/auth/v1/health"
+  case "$?" in
+    0) ok "Supabase: 応答があります" ;;
+    1) lack "Supabase: 応答がありません（./task db:up で起動する）" ;;
+    *) unknown "Supabase: 確かめる手立てがありません（curl がありません）" ;;
+  esac
+}
+
+check_dev_server() {
+  local port
+  # **ポートの決め方は `./task` が持つ** (#82 / #412)。**ここへ書き写さない**
+  # ——**作業場ごとに違う**ので、**2 つの決め方を持つと、別の作業場のアプリを見て
+  # 「動いている」と言う**（**エラーにならないぶん、気づけない**）。
+  if ! port="$(./task port 2>/dev/null)" || [[ -z $port ]]; then
+    unknown "開発サーバ: この作業場のポートが分かりません（./task port が答えません）"
+    return 0
+  fi
+  responds "http://127.0.0.1:$port/"
+  case "$?" in
+    0) ok "開発サーバ: 応答があります（http://127.0.0.1:$port/）" ;;
+    1) lack "開発サーバ: 応答がありません（./task up で起動する。ログは ./task dev）" ;;
+    *) unknown "開発サーバ: 確かめる手立てがありません（curl がありません）" ;;
+  esac
+}
+
+check_installation() {
+  # **この口からは確かめられない。** **installation の一覧には App の JWT が要る**
+  # （**秘密鍵で署名する**）——**この口は秘密を触らない**と決めてある（#413 の範囲外）。
+  #
+  # **「無い」と言わない。** **入っているのに「無い」と言うと、入れ直しに行かせる**
+  # ——**分からないことは、分からないと言う。**
+  unknown "installation: この口からは確かめられません（App の JWT が要る。https://github.com/settings/installations で見る）"
+}
+
+check_env
+check_supabase
+check_dev_server
+check_installation
+
+((missing == 0)) || exit 1
