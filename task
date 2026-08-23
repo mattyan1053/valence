@@ -685,14 +685,6 @@ cmd_loop_stop_paths() {
   loop_stop_paths
 }
 
-# **worker の作業場を 1 行ずつ出す** (#378。`bin/loop-cadence` が読む。読むだけ)。
-#
-# **名前の規則を、数える側へ書き写さない** (#381 のレビュー)——**足しているのはここ**
-# （`cmd_loop_worker_add` は `${PWD}-worker-<名前>`、master は `${PWD}-master`）なので、
-# **どこに居るかを答えるのもここ**である。**写すと、足す側と数える側で食い違う。**
-#
-# **master の作業場は worker に数えない**——**あちらの入口は `--trigger` を渡さない**
-# ので、**混ぜると、worker の cron が正常でも「止まっている」と言うことになる。**
 # master の worktree。**登録されていれば、そのパスを出す。**
 #
 #   exit 0 = 登録されている / exit 1 = 登録されていない / exit 2 = 一覧を読めない
@@ -711,6 +703,18 @@ master_worktree_path() {
 # master の作業場の場所を出す (bin/loop-cadence が読む。無ければ exit 1)
 cmd_loop_master_path() { master_worktree_path; echo; }
 
+# **名前の規則を、数える側へ書き写さない** (#381 のレビュー)——**足しているのはここ**
+# （`cmd_loop_worker_add` は `${PWD}-worker-<名前>`、master は `${PWD}-master`）なので、
+# **どこに居るかを答えるのもここ**である。**写すと、足す側と数える側で食い違う。**
+#
+# **master の作業場は、ここには出さない**——**読む側は master を別の段で見る**
+# ので（#422。場所は `loop:master:path` が答える）、**混ぜると 2 度数える。**
+#
+# **説明は定義の直前の 1 行**である（`cmd_help` がそこを拾う）——**間に関数を挟むと
+# 一覧から消え**、**理由を最後に置くと理由が説明として並ぶ**（#155 の家族。
+# **口そのものは動くので、出力を見ないと気づけない**）。
+#
+# worker の作業場を 1 行ずつ出す (#378。bin/loop-cadence が読む。読むだけ)
 cmd_loop_worker_paths() {
   local master="" status=0
   # **登録されているものが正**である（`loop_stop_paths` と同じ口）。
