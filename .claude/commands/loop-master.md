@@ -1,4 +1,4 @@
-<!-- 版: f984c4dd5686 -->
+<!-- 版: d9c230a9a4f8 -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -35,7 +35,7 @@ master ループを **1 周だけ** 実行する。`/loop` が本コマンドを
 **冒頭で決着させる。** ゲートを回してから気づく形にしない。
 
 ```bash
-bin/loop-lease acquire master "<冒頭の `版:` の値>" --trigger <cron|poke>   # 呼び直しは poke (#444)
+bin/loop-lease acquire master "<冒頭の `版:` の値>" --trigger <cron|poke>   # token を控える。呼び直しは poke (#422 / #444)
 ```
 
 - **exit 0** → 続ける。**この周回を終えるとき（何もせず終わる場合も含めて）必ず返す**
