@@ -385,6 +385,36 @@ describe("bin/loop-handoff", () => {
     return runWith(role === "" ? [...extra] : [role, ...extra], env);
   }
 
+  /**
+   * **master の周回を、記録へ足す**（#440）。
+   *
+   * **食い違いは「master が見送った」ときだけ数える**ようになったので、
+   * **master の周回が進んだこと**を作らないと、そこへ到達しない。
+   */
+  let masterRoundAt = 1_000;
+  function masterRounds(count: number): void {
+    const starts = join(repo, ".git", "valence-loop-starts-master");
+    let lines = existsSync(starts) ? readFileSync(starts, "utf8") : "";
+    for (let index = 0; index < count; index += 1) {
+      masterRoundAt += 100;
+      lines += `${masterRoundAt}\tcron\t/master\n`;
+    }
+    writeFileSync(starts, lines);
+  }
+
+  /**
+   * **master が見送ったところまで進める**（#440）。
+   *
+   * **1 度目は起点を置くだけ**（**まだ見ていないかもしれない**）——**そのあと
+   * master の周回が 2 つ進んで、はじめて食い違いとして数える。**
+   */
+  function overlooked(role: string, env: Record<string, string> = {}): Run {
+    masterRounds(1);
+    run(role, env);
+    masterRounds(2);
+    return run(role, env);
+  }
+
   /** 入口を飛ばした記録。**git の共通ディレクトリに置く**（作業場をまたいで 1 つ）。 */
   function peekMissingRecord(): string {
     // **記録は作業場ごとに分かれている** (#403 のレビュー)——**古い版が書いた
@@ -1625,7 +1655,9 @@ describe("bin/loop-handoff", () => {
 
     it("状態が矛盾した周回でも、送れたら 2 通目は出さない", () => {
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      masterRounds(1);
       expect(cycle("worker").stdout).toMatch(/^master\t/);
+      masterRounds(2);
 
       const second = run("worker");
 
@@ -2152,12 +2184,56 @@ describe("bin/loop-handoff", () => {
       expect(run("worker").stdout).toMatch(/^master\t/);
     });
 
-    it("label と実態が食い違っていたら、別の終了コードで知らせる", () => {
+    it("master が見送ったら、別の終了コードで知らせる", () => {
       // **「送るものが無い」と「状態が矛盾している」を混ぜない**（#105）。
       // 未解決があるのに `changes-requested` が無いのは、運用が壊れている
+      //
+      // **ただし、master がまだ見ていないだけの状態は数えない**（#440）
+      // ——**master の周回が 2 つ進んでも直っていなければ、見送りである。**
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
-      expect(run("master").status).toBe(3);
+      expect(overlooked("master").status).toBe(3);
+    });
+
+    it("master がまだ見ていないだけなら、数えない", () => {
+      // **これが本題** (#440)。**レビューが着いた PR は、master が判定するまで
+      // 「未解決があるのに `changes-requested` が無い」に見える**——**master は
+      // 1 周に 1 本しか見ない**ので、**PR が 2 本並べば必ず片方がこの形**になる。
+      //
+      // **2026-08-24 の 1 日で 3 回出て、3 回とも master が手で `--reset` した**
+      // ——**消し忘れれば「異常なし」で人が呼ばれる。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      masterRounds(1);
+
+      const handoff = run("master");
+
+      expect(handoff.status, "見ていないだけの状態を、食い違いとして数えている").not.toBe(3);
+      // **黙らない**——**WARN は出す**（**消えるのではなく、数えないだけ**）
+      expect(handoff.stderr, "何が起きているかを言っていない").toMatch(/changes-requested/);
+    });
+
+    it("状態が変われば、数え直す", () => {
+      // **witness が動けば、それは別の食い違い**である——**新しい指摘が届いた PR を、
+      // 前の状態の猶予で数えない。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      masterRounds(1);
+      run("master");
+      masterRounds(2);
+      // **指摘が 1 件増えた**（未解決の数が動く）
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot", "bot"] }] });
+
+      expect(run("master").status, "前の状態の猶予で数えている").not.toBe(3);
+    });
+
+    it("master の周回を読めなければ、数えない", () => {
+      // **「見送った」と言える根拠が無い**——**倒す先は「数えない」**である
+      // （**WARN は出るので、黙って消えるのではない**）。
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+
+      const handoff = run("master");
+
+      expect(handoff.status, "根拠が無いのに数えている").not.toBe(3);
+      expect(handoff.stderr, "何が起きているかを言っていない").toMatch(/changes-requested/);
     });
 
     it("同じ状態が続く間も、毎周知らせる", () => {
@@ -2166,7 +2242,7 @@ describe("bin/loop-handoff", () => {
       // 「送るかどうか」と「記録するかどうか」は別の判断である
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
-      expect(run("master").status).toBe(3);
+      expect(overlooked("master").status).toBe(3);
       expect(run("master").status).toBe(3);
     });
 
@@ -2176,7 +2252,7 @@ describe("bin/loop-handoff", () => {
       // **master から呼んだ周回が自己宛て**になる
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
 
-      const handoff = run("master");
+      const handoff = overlooked("master");
 
       expect(handoff.status).toBe(3);
       expect(handoff.stdout).toBe("");
@@ -2190,7 +2266,7 @@ describe("bin/loop-handoff", () => {
       //
       // **「失敗したが問題ない」を毎回読む形は、読まなくなる側**である。
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
-      const handoff = run("master");
+      const handoff = overlooked("master");
       expect(handoff.status, "矛盾を知らせていない").toBe(3);
       expect(handoff.stdout, "宛先がいないのに行が出ている").toBe("");
 
@@ -2201,7 +2277,7 @@ describe("bin/loop-handoff", () => {
       // **通ることと、記録を作ることは別**である（#125 の本体）——**誰にも
       // 配っていない**ので、**その状態を「届いた」と数えてはいけない。**
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
-      expect(run("master").status).toBe(3);
+      expect(overlooked("master").status).toBe(3);
       expect(sent("master").status).toBe(0);
 
       // **同じ状態で、worker の周回は master へ送れる**（**抑止されていない**）
@@ -2216,7 +2292,7 @@ describe("bin/loop-handoff", () => {
       // **役ではない値を置いてある**ので、**古い版はこれまでどおり exit 2 で落ちる**
       // （**いまと同じ答え**であって、**新しい壊れ方ではない**）。
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
-      expect(run("master").status, "印が置かれていない").toBe(3);
+      expect(overlooked("master").status, "印が置かれていない").toBe(3);
       // **隣のスクリプトを引くので、`bin/` ごと写す**（#310 と同じ形）
       const bin = join(repo, "older-bin");
       cpSync(BIN_DIR, bin, { recursive: true });
@@ -2343,7 +2419,7 @@ describe("bin/loop-handoff", () => {
       // **どちらの記録が本当かを人が突き合わせる**ことになる
       withState(untriaged);
 
-      expect(run(role).status).toBe(3);
+      expect(overlooked(role).status).toBe(3);
     });
 
     it("別のスレッドへ返信しても、答えの無い指摘は隠れない", () => {
@@ -2352,7 +2428,7 @@ describe("bin/loop-handoff", () => {
       // 判断しないまま resolve の確認へ進む**——**指摘が 1 つ、誰にも拾われずに消える**
       withState({ prs: [{ number: 12, unresolvedBy: ["bot", "us"] }] });
 
-      const handoff = run("worker");
+      const handoff = overlooked("worker");
 
       expect(handoff.stdout).toMatch(/^master\t/);
       expect(handoff.status).toBe(3);
@@ -2419,7 +2495,7 @@ describe("bin/loop-handoff", () => {
         ],
       });
 
-      const handoff = run("worker");
+      const handoff = overlooked("worker");
 
       expect(handoff.stdout).toMatch(/^master\t/);
       // label が 1 つも無いまま答えの無い指摘が残る形は、これまでどおり記録される

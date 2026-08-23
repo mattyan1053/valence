@@ -1135,10 +1135,77 @@ done
 # **渡す相手がいない周回より先に見る** (#359)。**食い違いは、渡す相手の有無とは
 # 別のこと**である——**後ろに置くと、自分の番しか無い盤面で黙る**（**そこがまさに
 # `untriaged`＝master の番**なので、**いちばん出したい場面で出なくなる**）。
+# **master がまだ見ていないだけの状態を、食い違いとして数えない** (#440)。
+#
+# **レビューが着いた PR は、master が判定するまで「未解決があるのに
+# `changes-requested` が無い」に見える**——**master は 1 周に 1 本しか見ない**ので、
+# **PR が 2 本並べば、必ず片方がこの形になる。** **2026-08-24 の 1 日で 3 回出て、
+# 3 回とも master が手で `--reset` している**（**消し忘れれば、異常なしで人が呼ばれる**）。
+#
+# **時刻では切らない**（#129。**遅い周回と落ちた周回は、経過時間では分けられない**）
+# ——**master の周回が進んだかで見る**（`bin/loop-cadence` と同じ物差し）。
+#
+# **同じ状態のまま、master の周回が 2 つ進んだら数える。** **2 つなのは、
+# 「1 周に 1 本」で PR が 2 本並びうるから**である（**1 人 1 本・全体で 2 本**）
+# ——**1 つだと、master が正しくもう一方を見ている周回で鳴る。**
+#
+# **状態が変われば、数え直す。** **witness（head・未解決の数・最後の発言）が動けば、
+# それは別の食い違い**である。
+#
+# **master の周回を読めないときは数えない**——**「見送った」と言える根拠が無い。**
+# **WARN は出す**ので、黙って消えるのではない。
+readonly MISMATCH_GRACE_ROUNDS=2
+
+master_starts_after() {
+  local since="$1" starts at _rest seen=0
+  starts="$common_dir/valence-loop-starts-master"
+  [[ -f $starts ]] || return 1
+  while IFS=$'\t' read -r at _rest; do
+    [[ $at =~ ^[0-9]+$ ]] || continue
+    ((at > since)) && ((seen++))
+  done <"$starts"
+  printf '%s' "$seen"
+}
+
+# master の最後の周回（**いつを起点にするか**）。**読めなければ空。**
+master_last_start() {
+  local starts at _rest last=""
+  starts="$common_dir/valence-loop-starts-master"
+  [[ -f $starts ]] || return 1
+  while IFS=$'\t' read -r at _rest; do
+    [[ $at =~ ^[0-9]+$ ]] || continue
+    [[ -n $last ]] && ((at <= last)) || last="$at"
+  done <"$starts"
+  [[ -n $last ]] || return 1
+  printf '%s' "$last"
+}
+
+# **この食い違いを、master が見送ったと言えるか。**
+mismatch_is_overlooked() {
+  local number="$1" witness record stored_witness stored_at seen now_last
+  witness="$(pr_witness "$number")"
+  record="$common_dir/valence-loop-mismatch-$number"
+  now_last="$(master_last_start)" || return 1
+  if [[ -f $record ]] && IFS=$'\t' read -r stored_witness stored_at <"$record" 2>/dev/null &&
+    [[ $stored_witness == "$witness" && $stored_at =~ ^[0-9]+$ ]]; then
+    seen="$(master_starts_after "$stored_at")" || return 1
+    ((seen >= MISMATCH_GRACE_ROUNDS)) && return 0
+    return 1
+  fi
+  # **初めて見た状態**（あるいは状態が変わった）。**起点を置いて、今回は数えない。**
+  printf '%s\t%s\n' "$witness" "$now_last" >"$record" ||
+    echo "[WARN] 食い違いの起点を記録できません: $record" >&2
+  return 1
+}
+
 mismatch_exit=0
 if [[ -n $mismatched ]]; then
   echo "[WARN] PR #${mismatched}: 未解決スレッドがあるのに changes-requested がありません" >&2
-  mismatch_exit=3
+  if mismatch_is_overlooked "$mismatched"; then
+    mismatch_exit=3
+  else
+    echo "       master がまだ判定していないだけかもしれません（$MISMATCH_GRACE_ROUNDS 周ぶん待ちます）" >&2
+  fi
 fi
 
 # **渡す相手がいなければ、ここで終わる**（記録は上で通してある）。
