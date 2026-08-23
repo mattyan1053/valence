@@ -151,6 +151,91 @@ check_supabase() {
   esac
 }
 
+# このポートを publish しているコンテナ。**stdout: `<id>|<compose の working_dir>`**
+#
+#   exit 0 = 見つかった / exit 1 = 無い / exit 2 = 読めない（docker が無い等）
+#
+# **中は覗かない** (`AGENTS.md` §6。`bin/db-config-drift` と同じ判断)——
+# **`docker inspect` は環境変数を平文で吐く**ので、**要る印だけを名指しで取る。**
+container_on_port() {
+  local port="$1" row
+  command -v docker >/dev/null 2>&1 || return 2
+  row="$(docker ps --filter "publish=$port" \
+    --format '{{.ID}}|{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null)" || return 2
+  row="$(printf '%s\n' "$row" | head -n 1)"
+  [[ -n $row ]] || return 1
+  printf '%s' "$row"
+}
+
+# 応答したのが、この作業場のものか (#419 のレビュー)。
+#
+# **同じポートに、別の clone / worktree が上がっていれば普通に応答する**
+# ——**エラーにならないので、見ているものが自分のものだと思い込んだまま進む**
+# （`.claude/skills/dev-environment/`。#412 / #416）。
+# **「動いています」と言われた人は、そこで調べるのをやめる。**
+#
+# **compose が付ける印で見る**（`working_dir`）——**作業場のパスそのもの**なので、
+# **名前の付け方を書き写さずに済む**（**`./task` が決めているものを 2 つ持たない**）。
+confirm_owner() {
+  local port="$1" row status=0 id dir here
+  row="$(container_on_port "$port")" || status=$?
+  case "$status" in
+    0) ;;
+    1)
+      unknown "開発サーバ: 応答した相手が、この作業場のものか分かりません（このポートを publish しているコンテナがありません）"
+      return 0
+      ;;
+    *)
+      unknown "開発サーバ: 応答した相手が、この作業場のものか分かりません（docker に訊けません）"
+      return 0
+      ;;
+  esac
+  id="${row%%|*}"
+  dir="${row#*|}"
+  if [[ -z $dir ]]; then
+    unknown "開発サーバ: 応答した相手が、この作業場のものか分かりません（compose の印がありません）"
+    return 0
+  fi
+  here="$(pwd -P)"
+  if [[ $dir != "$here" ]]; then
+    # **他人のアプリが応答している。** **この作業場のものは見えていない**
+    lack "開発サーバ: このポートに居るのは別の作業場のアプリです（$dir）"
+    return 0
+  fi
+  ok "開発サーバ: 応答があります（http://127.0.0.1:$port/。この作業場のコンテナです）"
+  check_env_applied "$id"
+}
+
+# **`.env` を書き換えたあと、コンテナを作り直したか** (#419 のレビュー)。
+#
+# **`env_file` はコンテナの作成時にしか読まれない**（`.claude/skills/dev-environment/`）
+# ——**`./task restart` でも読み直さない。** **`/` は設定を使わないので応答は返る**ので、
+# **ホストの `.env` だけを見ると、ログインが壊れている状態を `[OK]` と言う。**
+#
+# **手引きに書いてあるのに、道具が使っていなかった**（`AGENTS.md` §5 の形）。
+check_env_applied() {
+  local id="$1" created env_at container_at
+  [[ -f .env ]] || return 0
+  if ! env_at="$(stat -c %Y .env 2>/dev/null)" || [[ -z $env_at ]]; then
+    unknown ".env の反映: .env の更新時刻を読めません"
+    return 0
+  fi
+  # **要るのは作成時刻だけ**（**環境変数は取らない**）
+  if ! created="$(docker inspect -f '{{.Created}}' "$id" 2>/dev/null)" || [[ -z $created ]]; then
+    unknown ".env の反映: コンテナの作成時刻を読めません"
+    return 0
+  fi
+  if ! container_at="$(date -d "$created" +%s 2>/dev/null)" || [[ -z $container_at ]]; then
+    unknown ".env の反映: コンテナの作成時刻を読めません（読めない書式です: date -d）"
+    return 0
+  fi
+  if ((container_at < env_at)); then
+    lack ".env の反映: .env を書き換えたあと、コンテナを作り直していません（./task up。restart では読み直しません）"
+    return 0
+  fi
+  ok ".env の反映: コンテナは いまの .env より後に作られています"
+}
+
 check_dev_server() {
   local port
   # **ポートの決め方は `./task` が持つ** (#82 / #412)。**ここへ書き写さない**
@@ -163,7 +248,7 @@ check_dev_server() {
   local seen status=0
   seen="$(responds "http://127.0.0.1:$port/")" || status=$?
   case "$status" in
-    0) ok "開発サーバ: 応答があります（http://127.0.0.1:$port/）" ;;
+    0) confirm_owner "$port" ;;
     1) lack "開発サーバ: 繋がりません（./task up で起動する。ログは ./task dev）" ;;
     3) lack "開発サーバ: HTTP が ${seen#http:} を返します（起動はしています。ログは ./task dev）" ;;
     4) unknown "開発サーバ: ポートは開いていますが、応答までは確かめられません（curl がありません）" ;;

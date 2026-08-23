@@ -11,7 +11,15 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -167,6 +175,34 @@ describe("bin/doctor", () => {
     expect(stdout, "最後まで行っていない").toMatch(/installation/i);
   });
 
+  /** **`./task port` が答える作業場**。**doctor はポートの決め方を訊きに行く。** */
+  function taskPort(port: number): void {
+    const runner = join(dir, "task");
+    writeFileSync(runner, `#!/usr/bin/env bash\n[[ $1 == port ]] && echo ${port}\n`);
+    chmodSync(runner, 0o755);
+  }
+
+  /**
+   * **docker の答えを、こちらで決める**（§5 / #186）。
+   *
+   * **本物へ訊くと、走っているコンテナで答えが変わる**——**この機械の状態が、
+   * 試験の合否を決めてしまう。**
+   */
+  function fakeDocker(options: { workingDir?: string; created?: string }): NodeJS.ProcessEnv {
+    const bin = join(dir, "bin");
+    mkdirSync(bin, { recursive: true });
+    const ps =
+      options.workingDir === undefined
+        ? ""
+        : `printf 'abc123|%s\\n' ${JSON.stringify(options.workingDir)}`;
+    writeFileSync(
+      join(bin, "docker"),
+      `#!/usr/bin/env bash\ncase "$1" in\n  ps) ${ps || ":"} ;;\n  inspect) printf '%s\\n' ${JSON.stringify(options.created ?? "")} ;;\nesac\n`,
+    );
+    chmodSync(join(bin, "docker"), 0o755);
+    return { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
+  }
+
   /** **curl の無い機械**。**PATH を差し替える**（**この口は curl を要求していない**）。 */
   function withoutCurl(): NodeJS.ProcessEnv {
     const bin = join(dir, "bin");
@@ -228,6 +264,69 @@ describe("bin/doctor", () => {
 
     expect(stdout, "org の設定を案内していない").toMatch(/org/i);
     expect(stdout, "アカウントごとだと言っていない").toMatch(/アカウント/);
+  });
+
+  it(".env を書き換えたあと作り直していなければ、そう言う", async () => {
+    // **`env_file` はコンテナの作成時にしか読まれない**（`SKILL.md`）——**`/` は設定を
+    // 使わないので応答は返る**。**ログインは壊れているのに exit 0**（#419 のレビュー）
+    const url = await listening();
+    example("SUPABASE_URL");
+    env("SUPABASE_URL=http://kong:8000\n");
+    taskPort(Number(new URL(url).port));
+
+    const done = await runWhileListening(
+      fakeDocker({ workingDir: dir, created: "2020-01-01T00:00:00Z" }),
+    );
+
+    expect(done.stdout, "古いコンテナのままだと言っていない").toMatch(/作り直/);
+    expect(done.stdout, "直し方を言っていない").toMatch(/\.\/task up/);
+    expect(done.status, "使えない状態なのに 0 で返している").toBe(1);
+  });
+
+  it("作り直してあれば、そうは言わない", async () => {
+    const url = await listening();
+    example("SUPABASE_URL");
+    env("SUPABASE_URL=http://kong:8000\n");
+    taskPort(Number(new URL(url).port));
+
+    const done = await runWhileListening(
+      fakeDocker({ workingDir: dir, created: "2099-01-01T00:00:00Z" }),
+    );
+
+    expect(done.stdout, "作り直してあるのに鳴っている").not.toMatch(/作り直/);
+    expect(done.status, "足りないものが無いのに 1 で返している").toBe(0);
+  });
+
+  it("別の作業場のアプリが同じポートに居たら、この作業場のものとは言わない", async () => {
+    // **エラーにならないので、見ているものが自分のものだと思い込んだまま進む**
+    // （`SKILL.md`。#412 / #416）——**「動いています」と言われた人は、そこで調べるのをやめる**
+    const url = await listening();
+    example("SUPABASE_URL");
+    env("SUPABASE_URL=http://kong:8000\n");
+    taskPort(Number(new URL(url).port));
+
+    const done = await runWhileListening(
+      fakeDocker({ workingDir: "/home/loop/valence-worker-b", created: "2099-01-01T00:00:00Z" }),
+    );
+
+    expect(done.stdout, "別の作業場のものだと言っていない").toMatch(/別の作業場/);
+    expect(done.status, "他人のアプリを見て 0 で返している").toBe(1);
+  });
+
+  it("応答元を確かめられなければ、分からないと言う", async () => {
+    // **確かめられないなら `[分かりません]` へ倒す**（この口の作法）
+    const url = await listening();
+    example("SUPABASE_URL");
+    env("SUPABASE_URL=http://kong:8000\n");
+    taskPort(Number(new URL(url).port));
+
+    const done = await runWhileListening(fakeDocker({}));
+
+    expect(done.stdout, "確かめていないのに、この作業場のものだと言っている").not.toMatch(
+      /応答があります/,
+    );
+    expect(done.stdout, "分からないと言っていない").toMatch(/分かりません/);
+    expect(done.status, "分からないものを足りない側に数えている").toBe(0);
   });
 
   it("./task から呼べる", () => {
