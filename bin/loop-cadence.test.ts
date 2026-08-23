@@ -261,6 +261,32 @@ describe("周回が始まったことを、どう始まったかごと残す", (
     expect(done.stdout, "never の行に道が無い").toContain(`workspace=${dir}`);
   });
 
+  it("作業場を引けなかったときは、引けないと言う", () => {
+    // **いちばん要るところで出ない** (#435 のレビュー)。**`./task loop:master:path` が
+    // 答えない＝worktree が消えた・動いた**という状況で、**まさに「どこにあるのか」を
+    // 知りたい場面**である——**そこで行が出ないと、案内が無い行を探させる。**
+    //
+    // **「読めなかった」を「無かった」に化けさせない**（`bin/doctor` と同じ形）。
+    const { dir } = workspace();
+    records(dir, [[9_900, "cron"]]);
+    // **記録は在るのに、場所を答えない**（**`taskAnswers` は master を出さない**）
+    records(
+      dir,
+      [
+        [1_000, "cron"],
+        [9_500, "poke"],
+      ],
+      dir,
+      "master",
+    );
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.status, "master が止まっていると言っていない").toBe(1);
+    expect(done.stdout, "master の行に道が無い").toMatch(/scope=master[\s\S]*workspace=/);
+    expect(done.stdout, "引けなかったことを言っていない").toMatch(/workspace=不明/);
+  });
+
   it("止まっていなければ、次の一手も言わない", () => {
     // **毎回鳴る案内は、読まれなくなる**（`warn_stale_containers` と同じ判断）
     const { dir } = workspace();
