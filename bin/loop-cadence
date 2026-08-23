@@ -261,7 +261,12 @@ evaluate_scope() {
       window=$((interval * MISSED_TICKS))
       # **直前の間が長かったなら、その 1 回ぶんは待つ** (#441)。**周期が伸びたのと、
       # 鳴り損ねたのは、記録からは同じ形に見える**——**待つのは 1 回ぶんだけ**である。
-      if gap="$(last_gap "${cron_at[@]}")" && ((gap + interval > window)); then
+      #
+      # **測ったときだけである** (#443 のレビュー)。**渡されたものが正**（#378）なので、
+      # **渡されているなら、記録の大きな間で窓を広げない**——**広げると、落ちていた
+      # 記録がそのまま「待ってよい時間」になり、止まっても `ok` になる**（**黙る側**）。
+      if [[ -z $INTERVAL ]] && gap="$(last_gap "${cron_at[@]}")" &&
+        ((gap + interval > window)); then
         window=$((gap + interval))
       fi
       if [[ -f "$common_dir/valence-loop-roundlen-$scope" ]] &&
