@@ -2236,6 +2236,24 @@ describe("bin/loop-handoff", () => {
       expect(handoff.stderr, "何が起きているかを言っていない").toMatch(/changes-requested/);
     });
 
+    it("食い違いが解けたら、起点を捨てる", () => {
+      // **残すと、猶予が次に効かない** (#442 のレビュー)——**一度解けたあと、
+      // head も未解決の数も最後の発言も変わらないまま label だけ外れる**と
+      // （**`bin/loop-request-changes` が外して、付け直しに失敗した形**）、
+      // **古い起点がそのまま使われ、既に進んだ master の周回で即座に数える。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      masterRounds(1);
+      run("master"); // 起点を置く
+      masterRounds(2);
+      // **label が付いて、食い違いが解けた**
+      withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
+      run("master");
+      // **同じ状態のまま label だけ外れた**（**witness は動かない**）
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+
+      expect(run("master").status, "解けた食い違いの起点を、使い回している").not.toBe(3);
+    });
+
     it("同じ状態が続く間も、毎周知らせる", () => {
       // **記録が 1 回で止まると、3 周に到達しない。** 食い違いを気づかせるための
       // 仕組みが、**気づかせたい状態でだけ黙る**（#115 のレビュー指摘）。
