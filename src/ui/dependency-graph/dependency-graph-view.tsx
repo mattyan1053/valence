@@ -73,6 +73,25 @@ function PullRequestRow({
   );
 }
 
+/**
+ * 1 件も並ばないときの断り（#410）。
+ *
+ * **空の `<ol>` で終わらせない。** **見出しだけの画面は、壊れているのか、
+ * まだ何も無いのかを区別できない**——**入口の画面が #213 で踏んだのと同じ形**である
+ * （**何も見えない画面で終わらせない**）。
+ *
+ * **「無い」と「読めなかった」を同じ静けさにしない**（`AGENTS.md` §5）。
+ * **読めなかった PR があるなら、0 本ではない**——**それを「PR がありません」と
+ * 出すと、抜けたことが消える。** **件数と理由は下の節が出す**ので、
+ * **ここは「出せなかった」とだけ言う。**
+ */
+function EmptyNotice({ unreadable }: { unreadable: number }) {
+  if (unreadable > 0) {
+    return <p>読めた PR が 1 件もありません。</p>;
+  }
+  return <p>open な PR が 1 件もありません。GitHub で PR を出すと、依存の順にここへ並びます。</p>;
+}
+
 export function DependencyGraphView({
   pullRequests,
   edges,
@@ -104,7 +123,11 @@ export function DependencyGraphView({
   return (
     <section>
       <h2>PR の依存</h2>
-      <ol>{rowsFor([...order.ordered, ...unplaced])}</ol>
+      {pullRequests.length === 0 ? (
+        <EmptyNotice unreadable={invalid.length} />
+      ) : (
+        <ol>{rowsFor([...order.ordered, ...unplaced])}</ol>
+      )}
 
       {order.cyclic.length > 0 && (
         <section>

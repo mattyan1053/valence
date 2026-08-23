@@ -129,3 +129,37 @@ describe("DependencyGraphView", () => {
     expect(markup).toMatch(/PR/);
   });
 });
+
+/**
+ * **1 件も無い盤面を、誰も見ていなかった**（#410）。
+ *
+ * **「壊れない」は確かめてあった**（上の試験）——**が、見出しだけが出る画面でも
+ * 通る。** **判定が「何も見えない画面」に届いていない**（`AGENTS.md` §4）。
+ *
+ * **入口の画面は、この形を既に踏んでいる**（#213: **何も見えない画面で終わらせない**）
+ * ——**盤面の側は確かめられていなかった。**
+ */
+describe("1 件も無いとき", () => {
+  const empty = (overrides: Partial<DependencyGraphViewProps> = {}) =>
+    render(
+      props({ pullRequests: [], edges: [], order: { ordered: [], cyclic: [] }, ...overrides }),
+    );
+
+  it("何が無いのかが出る", () => {
+    expect(empty(), "空の一覧だけを出している").toMatch(/PR が 1 件もありません/);
+  });
+
+  it("次に何をすればよいのかが出る", () => {
+    // **「無い」だけでは、壊れているのか、まだ何も無いのかが分からない**
+    expect(empty(), "次にすることが書かれていない").toMatch(/PR を(出す|作る)/);
+  });
+
+  it("読めなかったせいで 1 件も出せないときは、0 本と言わない", () => {
+    // **0 本と「読めなかった」を同じ静けさにしない**（`AGENTS.md` §5）
+    // ——**「PR がありません」と出すと、読めなかったことが消える**
+    const markup = empty({ invalid: [{ index: 0, reason: "base が読めません" }] });
+
+    expect(markup, "読めなかったのに「無い」と言っている").not.toMatch(/PR を(出す|作る)/);
+    expect(markup, "抜けがあることを言っていない").toMatch(/抜け/);
+  });
+});

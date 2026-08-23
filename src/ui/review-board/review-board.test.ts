@@ -147,3 +147,24 @@ describe("ReviewBoard", () => {
     expect(markup).toContain("番号が数値ではありません");
   });
 });
+
+/**
+ * **盤面の側でも、1 件も無いことが読める**（#410）。
+ *
+ * **人が開くのは盤面**である——**部品が出していても、盤面が別の並べ方をしていれば
+ * 届かない**（`AGENTS.md` §5: **入れたが、実行される場所に届いていない**）。
+ */
+describe("1 件も無いとき", () => {
+  it("盤面にも、何が無いのかが出る", () => {
+    const markup = render(
+      props({
+        pullRequests: [],
+        edges: [],
+        order: { ordered: [], cyclic: [] },
+        changes: new Map(),
+      }),
+    );
+
+    expect(markup, "何も見えない画面になっている").toMatch(/ありません/);
+  });
+});
