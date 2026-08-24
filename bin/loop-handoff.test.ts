@@ -2294,6 +2294,29 @@ describe("bin/loop-handoff", () => {
       expect(handoff.stderr, "何が起きているかを言っていない").toMatch(/changes-requested/);
     });
 
+    it("番号の一部が一致しても、起点は捨てる", () => {
+      // **同じ式を、2 つが読んでいる**（#450）——**`[WARN]` に出すかどうか**と、
+      // **起点を消すかどうか**。**#448 の試験は前者しか見ていなかった**ので、
+      // **空白を外す変異でも警告は同じまま緑**で、**`234` の起点だけが残る。**
+      //
+      // **残ると、次に食い違ったときの猶予が短くなる**（**早く鳴る**）。
+      withState({ prs: [{ number: 234, unresolvedBy: ["bot"] }] });
+      run("master"); // **`234` の起点を置く**
+      const record = join(repo, ".git", "valence-loop-mismatch-234");
+      expect(existsSync(record), "起点が置かれていない").toBe(true);
+
+      // **`234` は label が付いて食い違いではなくなった。** **`1234` が食い違っている**
+      withState({
+        prs: [
+          { number: 1234, unresolvedBy: ["bot"] },
+          { number: 234, labels: ["changes-requested"], unresolvedBy: ["bot"] },
+        ],
+      });
+      run("master");
+
+      expect(existsSync(record), "番号の一部が一致して、起点が残っている").toBe(false);
+    });
+
     it("食い違いが解けたら、起点を捨てる", () => {
       // **残すと、猶予が次に効かない** (#442 のレビュー)——**一度解けたあと、
       // head も未解決の数も最後の発言も変わらないまま label だけ外れる**と
