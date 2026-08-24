@@ -598,6 +598,37 @@ describe("bin/loop-claim", () => {
       expect(second.stderr, "黙って奪っている").toMatch(/PR #42.*引き継ぎます/);
     });
 
+    it("引き継ぐときは、どれだけ無音だったかも読める", () => {
+      // **判定は `bin/loop-lease` が持ち、言うのもそちら**である (#456)——**ここで
+      // 見るのは「その言葉が、引き継ぐ人に届くか」**である（**`alive` の標準エラーを
+      // 捨てると、`[WARN] 引き継ぎます` だけが残る**）。
+      //
+      // **実際に、無音の長さを知らないまま引き継いだ**（2026-08-24。生きている
+      // 持ち主の PR を取り、#454 で同じ直しを 2 人で実装した）。
+      withGh({ labels: [] });
+      startRound(repo); // **返さない**——**期限切れの記録が残る形**にする
+      run(["pr", "42"]);
+      const scope = spawnSync(LEASE, ["scope", "worker"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      }).stdout.trim();
+      const state = join(repo, ".git", `valence-loop-lease-${scope}`);
+      const lines = readFileSync(state, "utf8").split("\n");
+      const quiet = Math.floor(Date.now() / 1000) - 9000;
+      lines[0] = `${(lines[0] ?? "").split("\t")[0] ?? ""}\t${quiet}`;
+      writeFileSync(state, lines.join("\n"));
+      writeFileSync(join(repo, ".git", `valence-loop-activity-${scope}`), `${quiet}\n`);
+      ageRoundOf(repo);
+
+      const second = run(["pr", "42"], { cwd: addWorkspace("quiet") });
+
+      expect(second.status).toBe(0);
+      expect(second.stderr, "無音の長さが、引き継ぐ側に届いていない").toMatch(
+        /最後の活動 9\d{3} 秒前/,
+      );
+    });
+
     it("持ち主の作業場に置かれたものを実行しない", () => {
       // **訊きに行く先が、相手の版になっていた** (#237 のレビュー)。
       // **相手の作業場は `gh pr checkout` で PR の head に入っている**ので、

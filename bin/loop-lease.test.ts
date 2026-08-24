@@ -1689,6 +1689,67 @@ describe("bin/loop-lease", () => {
       expect(answered.status, "実測が窓に効いていない（生きている持ち主を捨てている）").toBe(2);
     });
 
+    it("期限切れで引き継ぐときは、どれだけ無音だったかを言う", () => {
+      // **引き継ぐ側は「走っていません」しか読めなかった** (#456)——**8839 秒の無音と
+      // 100 秒の無音を、読む側が区別できない。** **実際に、こちらは区別しないまま
+      // 生きている持ち主の PR を引き継いだ**（2026-08-24。#454 で重複した）。
+      //
+      // **止めない**（**落ちた周回を拾えなくなる**）。**言うだけ**である。
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: sandbox, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      const now = Math.floor(Date.now() / 1000);
+      expect(acquire().status).toBe(0);
+      const state = join(sandbox, ".git", `valence-loop-lease-${scope.stdout.trim()}`);
+      const lines = readFileSync(state, "utf8").split("\n");
+      lines[0] = `${(lines[0] ?? "").split("\t")[0] ?? ""}\t${now - 9000}`;
+      writeFileSync(state, lines.join("\n"));
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-activity-${scope.stdout.trim()}`),
+        `${now - 9000}\n`,
+      );
+      markRound(sandbox, now - 100_000);
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status, "走っていると答えている").toBe(1);
+      expect(answered.stderr, "無音の長さが出ていない").toMatch(/最後の活動 9\d{3} 秒前/);
+      expect(answered.stderr, "期限をどれだけ超えたかが出ていない").toMatch(/7[0-9]{3} 秒/);
+    });
+
+    it("よその作業場の期限切れを、この作業場の無音として言わない", () => {
+      // **記録は作業場をまたいで 1 つのディレクトリに並ぶ** (#291)——**中身で照らさないと、
+      // 隣の作業場が切らしたぶんを「この作業場は 9000 秒 無音だった」と言う。**
+      // **引き継ぐ側は、その数字を見て「落ちている」と読む**（**倒れる向きが悪い**）。
+      const now = Math.floor(Date.now() / 1000);
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-lease-worker-よその作業場"),
+        `token\t${now - 9000}\nよその印\n/どこか/別の作業場\n`,
+      );
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-activity-worker-よその作業場"),
+        `${now - 9000}\n`,
+      );
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status, "よその記録で「走っている」と答えている").toBe(1);
+      expect(
+        answered.stderr,
+        "よその作業場の無音を、この作業場のものとして言っている",
+      ).not.toContain("期限切れ");
+    });
+
+    it("走っている持ち主には、無音の話をしない", () => {
+      // **「期限切れの記録がある」ことだけを言う口**である——**走っているのに
+      // 期限の話が出ると、読む側は引き継いでよいと読む**（**倒れる向きが逆**）。
+      markRound(sandbox, Math.floor(Date.now() / 1000));
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status).toBe(0);
+      expect(answered.stderr, "走っている持ち主に期限の話をしている").not.toContain("期限切れ");
+    });
+
     it("周回の印が新しければ、走っていると答える", () => {
       markRound(sandbox, Math.floor(Date.now() / 1000));
 
