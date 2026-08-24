@@ -225,7 +225,8 @@ describe("設定の書式が読めないとき", () => {
     const path = configWith(["[auth]", 'additional_redirect_urls = [""]', ""].join("\n"));
 
     expect(allowedRedirectPatterns(path)).toEqual({ kind: "listed", listed: [""] });
-    expect(allowedRedirectOrigins(path)).toEqual({ kind: "listed", listed: [] });
+    // **オリジンにはならない**ので、**そちらの口は「読めない」と言う** (#478)
+    expect(allowedRedirectOrigins(path)).toEqual({ kind: "unreadable", source: path });
   });
 
   it("鍵が無いのは、読めなかったではない", () => {
@@ -254,6 +255,61 @@ describe("設定の書式が読めないとき", () => {
     expect(allowedRedirectPatterns(path)).toEqual({
       kind: "listed",
       listed: ["http://localhost:3000", "http://localhost:3000/**", "http://127.0.0.1:3000/**"],
+    });
+  });
+});
+
+describe("オリジンにならない行があるとき", () => {
+  /**
+   * **一覧が黙って短くなると、その画面からのログインが「許可されていない host」で
+   * 落ちる**（#478）——**設定は書いてあるので、読んだ人は疑わない。**
+   *
+   * **「許す側へ倒さない」は動かさない。** **落とす以外の選択肢は `unreadable`**
+   * であって、**許すことではない。**
+   */
+  it("1 本でもオリジンにならなければ、読めなかったとして返す", () => {
+    const path = configWith(
+      [
+        "[auth]",
+        'additional_redirect_urls = ["http://localhost:3000/**", "htp://localhost:3940/**"]',
+        "",
+      ].join("\n"),
+    );
+
+    expect(allowedRedirectOrigins(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("host に `*` を含む行も、黙って落とさない", () => {
+    // **GoTrue は当てられるが、こちらはオリジンとして言い表せない**——**通せば
+    // 当たる先が広がり**、**落とせば一覧が黙って短くなる。** **どちらでもなく、
+    // 「読めない」と言う。**
+    const path = configWith(
+      ["[auth]", 'additional_redirect_urls = ["https://*.example.com/**"]', ""].join("\n"),
+    );
+
+    expect(allowedRedirectOrigins(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("`site_url` が空でも、読めなかったとして返す", () => {
+    // **形は読めて、オリジンにならない**（#478）
+    const path = configWith(["[auth]", 'site_url = ""', ""].join("\n"));
+
+    expect(allowedRedirectOrigins(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("全部オリジンになるなら、これまでどおり並べる", () => {
+    const path = configWith(
+      [
+        "[auth]",
+        'site_url = "http://localhost:3000"',
+        'additional_redirect_urls = ["http://localhost:3000/**", "http://127.0.0.1:3000/**"]',
+        "",
+      ].join("\n"),
+    );
+
+    expect(allowedRedirectOrigins(path)).toEqual({
+      kind: "listed",
+      listed: ["http://localhost:3000", "http://127.0.0.1:3000"],
     });
   });
 });
