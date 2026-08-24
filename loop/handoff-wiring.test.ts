@@ -99,6 +99,21 @@ describe("状態が矛盾したとき", () => {
     expect(section).toContain("handoff-mismatch");
   });
 
+  it.each(PROCEDURES)("$role は、食い違いを番号ごとに積む", ({ role }) => {
+    // **食い違いは 2 本以上あることがある** (#449)。**`bin/loop-stall` は識別子ごとに
+    // 数える**ので、**1 本ぶんしか打たないと、選ばれなかった PR は一度も積まれない**
+    // ——**先に選ばれたほうが片付くまで、人は呼ばれない。**
+    //
+    // **番号は `bin/loop-handoff` に訊く**（**`[WARN]` の文面から拾わせない**）。
+    const section = procedureText(role).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+
+    expect(section, "番号を訊いていない").toContain(`bin/loop-handoff ${role} --mismatched`);
+    expect(section, "番号ごとに打っていない").toContain(
+      'bin/loop-stall "handoff-mismatch:$number"',
+    );
+    expect(section, "単数のまま残っている").not.toContain("handoff-mismatch:<PR番号>");
+  });
+
   it("停止識別子が用意されている", () => {
     expect(read("bin/loop-stall")).toContain("handoff-mismatch");
   });
@@ -170,7 +185,9 @@ describe("状態が矛盾したとき", () => {
   it.each(PROCEDURES)("$role は exit 3 でも送ると書いてある", ({ role }) => {
     // **記録するために黙ると、#105 が塞ごうとした沈黙をそのまま作る**
     const section = procedureText(role).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
-    const exitThree = section.split("- **exit 3**")[1]?.split("\n\n")[0] ?? "";
+    // **切るのは次の箇条書き**である (#449)。**空行で切ると、ブロックを 1 つ
+    // 足しただけで判定の範囲が縮む**——**中身は変わっていないのに緑になる。**
+    const exitThree = section.split("- **exit 3**")[1]?.split("\n- **exit ")[0] ?? "";
 
     expect(exitThree).toMatch(/送/);
     // **送らない周回でも記録する。** 飛ばすと、同じ状態が続く間ずっと 1 回のままになる

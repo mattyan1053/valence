@@ -756,7 +756,11 @@ describe("ドキュメントに書かれた停止識別子", () => {
       const body = readFileSync(join(REPO_ROOT, file), "utf8");
       return [...body.matchAll(pattern)].map((match) => ({
         file,
-        arg: (match[1] ?? "").replace(/^"|"$/g, ""),
+        // **変数で打つところは、一覧の形へ戻す** (#449)。**番号ごとに打つ節は
+        // `$number` を渡す**（食い違いは 2 本以上あることがある）——**そのままだと
+        // 「一覧に無い識別子」に見える。** **戻すのは書き方だけ**で、**綴りの違いは
+        // これまでどおり赤くなる**（`loop/stall-id-wiring.test.ts` にも同じ手当てがある）。
+        arg: (match[1] ?? "").replace(/^"|"$/g, "").replace(/\$\{?number\}?/g, "<PR番号>"),
       }));
     });
   }
