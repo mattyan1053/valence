@@ -40,6 +40,52 @@ function props(overrides: Partial<DependencyGraphViewProps> = {}): DependencyGra
   };
 }
 
+describe("DependencyGraphView の図", () => {
+  it("依存が図として出る", () => {
+    // **箇条書きだけでは、深さも枝分かれも見えない** (#471)——**関係を目で追える形**が要る
+    const markup = render(props());
+
+    expect(markup, "図が出ていない").toContain("<svg");
+    expect(markup, "土台と積んだものを結ぶ線が無い").toContain("<line");
+  });
+
+  it("深く積むほど、右へ置かれる", () => {
+    // **置き場所は `graph-layout` が決める**（**そこは別に試験がある**）
+    // ——**ここで見るのは「図に渡っているか」**である
+    const deep = [...STACK, pullRequest(3, "feat/b", "feat/c")];
+    const markup = render({
+      ...props(),
+      pullRequests: deep,
+      edges: [...STACK_EDGES, { dependent: 3, dependsOn: 2 }],
+      order: { ordered: [1, 2, 3], cyclic: [] },
+    });
+
+    const columns = [...markup.matchAll(/<rect x="(\d+)"/g)].map((found) => Number(found[1]));
+
+    expect(new Set(columns).size, "3 本とも同じ列に置かれている").toBe(3);
+  });
+
+  it("図に出ていないものがあれば、図の脇で言う", () => {
+    // **欠けた図を、完全な図の顔で出さない**——**循環と読めなかったぶんは図に出ない**
+    const markup = render({
+      ...props(),
+      order: { ordered: [1], cyclic: [2] },
+      invalid: [{ index: 0, reason: "base が読めない" }],
+    });
+
+    expect(markup, "図に抜けがあることが、図の脇に無い").toContain("この図には出ていないもの");
+    expect(markup).toContain("並べられなかった 1 件");
+    expect(markup).toContain("読めなかった 1 件");
+  });
+
+  it("すべて図に出ているなら、断らない", () => {
+    // **毎回出る断りは読まれなくなる**
+    const markup = render(props());
+
+    expect(markup, "出ていないものが無いのに断っている").not.toContain("この図には出ていないもの");
+  });
+});
+
 describe("DependencyGraphView", () => {
   it("土台が先、その上に積まれたものが後に出る", () => {
     // **並びは `order.ordered` が持っている。** ここで並べ替え直さない
