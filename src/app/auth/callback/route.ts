@@ -10,23 +10,22 @@
  */
 
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import { completeGithubLogin } from "../../../composition/auth";
+import { receivedAuthorizationCode } from "../authorization-code";
 import { homeUrl, loginUrl } from "../urls";
 
-/** GitHub が返す認可コード。**空でない 1 語**だけを通す。 */
-const codeSchema = z.string().trim().min(1);
-
 export async function GET(request: Request): Promise<NextResponse> {
-  const code = codeSchema.safeParse(new URL(request.url).searchParams.get("code"));
-  if (!code.success) {
+  // **「届いた」の意味は 1 箇所が持つ** (#461)——**必ず通る境界（`src/middleware.ts`）も
+  // 同じ口を通る**（**前は `has("code")` で見ていて、`/?code=` を「届いた」と数えていた**）。
+  const code = receivedAuthorizationCode(new URL(request.url).searchParams.get("code"));
+  if (code === undefined) {
     // **理由を画面へ書かない。** **戻す先はいつも入口である。**
     return NextResponse.redirect(loginUrl(request));
   }
 
   let result: Awaited<ReturnType<typeof completeGithubLogin>>;
   try {
-    result = await completeGithubLogin(code.data);
+    result = await completeGithubLogin(code);
   } catch {
     // **例外の中身を出さない**（token が入りうる。§6）。**入口へ戻す。**
     return NextResponse.redirect(loginUrl(request));

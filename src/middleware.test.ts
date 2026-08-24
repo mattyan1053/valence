@@ -214,6 +214,32 @@ describe("戻ってこなかったコールバック", () => {
     expect(seen, "code が無いのに鳴っている").toEqual([]);
   });
 
+  it("空の code では鳴らない", async () => {
+    // **`searchParams.has("code")` は `/?code=` にも `true`** (#461)——**交換できる値が
+    // 届いていないのに「戻ってこなかった」が 1 行残る。** **誰でも叩ける**ので、
+    // **本物の症状に混ざると数えられなくなる**（**この行は、ログインが落ちたときに
+    // 読む 1 行**である）。
+    const { seen, report } = reports();
+
+    await refreshedResponse(new NextRequest(new URL("http://localhost/?code=")), idle, report);
+
+    expect(seen, "空の code で鳴っている").toEqual([]);
+  });
+
+  it("空白だけの code でも鳴らない", async () => {
+    // **本物の受け口は `trim()` してから見ている**（`callback/route.ts`）
+    // ——**同じ意味で「届いた」を判定する。**
+    const { seen, report } = reports();
+
+    await refreshedResponse(
+      new NextRequest(new URL("http://localhost/?code=%20%20")),
+      idle,
+      report,
+    );
+
+    expect(seen, "空白だけの code で鳴っている").toEqual([]);
+  });
+
   it("code そのものを渡さない", async () => {
     // **交換できる値を、記録の側へ持ち込まない**（§6）
     const { seen, report } = reports();
