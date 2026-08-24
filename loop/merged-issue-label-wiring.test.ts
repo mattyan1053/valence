@@ -40,19 +40,39 @@ afterEach(() => {
 });
 
 /**
- * **マージ済みの PR を見つけたときに打つブロック。**
+ * 手順書の中の bash ブロック。
  *
  * **名指しの見出しで探さない**（#173 / head-wiring と同じ理由）——**節を割ったり
  * 文言を変えたりしただけで、試験が黙る。** **中身で見つける。**
  */
-function mergedBlock(): string {
-  const blocks = [...procedureText("worker").matchAll(/```bash\n([\s\S]*?)```/g)].map(
-    (match) => match[1] ?? "",
-  );
-  const found = blocks.filter(
+function bashBlocks(text: string): string[] {
+  return [...text.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => match[1] ?? "");
+}
+
+/** ステップ 2.2 で label を付け替えるブロック（`in-progress` を外し、結論をコメントする）。 */
+function labelEditBlocks(): string[] {
+  return bashBlocks(resumeSection()).filter(
     (block) => block.includes("--remove-label in-progress") && block.includes("gh issue comment"),
   );
+}
 
+/** そのブロックが `gh issue edit` で足す label。**分けて打っても拾う**（数は別の試験が見る）。 */
+function addedLabels(block: string): string[] {
+  const edits = block
+    .split("\n")
+    .filter((line) => line.includes("gh issue edit"))
+    .join("\n");
+  return [...edits.matchAll(/--add-label (\S+)/g)].map((match) => match[1] ?? "");
+}
+
+/**
+ * **マージ済みの PR を見つけたときに打つブロック。**
+ *
+ * **畳む側も同じ形になった** (#492 のレビュー 3 周目)ので、**足す label で分ける**
+ * ——**あちらは `backlog` に印を足す**、**こちらは `backlog` だけ**である。
+ */
+function mergedBlock(): string {
+  const found = labelEditBlocks().filter((block) => addedLabels(block).join() === "backlog");
   expect(found, "マージ済みの Issue から label を動かすブロックが 1 つに絞れない").toHaveLength(1);
   return found[0] ?? "";
 }
@@ -98,6 +118,9 @@ function workspace(labels: string[]): { path: string; labelsFile: string; repo: 
       "  exit 0",
       "fi",
       'if [[ $* == *"issue comment"* ]]; then exit 0; fi',
+      // **印を先に用意する行**（#492 のレビュー 2 周目）。**本物は既にあれば非 0 を返すが**、
+      // **手順書の側が `|| true` で受ける**ので、**ここは成功だけを返す。**
+      'if [[ $* == *"label create"* ]]; then exit 0; fi',
       // **番号を指した読み直し**（#487）。**検出器は出す直前にここを読む**
       // ——**索引（`api graphql`）と同じ 1 つの状態から答える**ので、
       // **手順書の 1 行を走らせた結果が、そのまま両方に効く。**
@@ -165,12 +188,10 @@ describe("PR を出さずに終わった Issue", () => {
     // 畳み方が無く**、**worker は毎周回そこへ入る**——**master が閉じるまで
     // `ready` へ進めない。**
     //
-    // **手は 1 つ**である（MERGED の分岐にあるもの）——**写さずに指す**ので、
-    // **ここで見るのは「その道が書いてあるか」だけ。**
-    const section = resumeSection();
-
-    expect(section, "PR が要らなかった道が無い").toContain("変更が要らなかった");
-    expect(section, "畳む手を指していない").toContain("MERGED の分岐と同じ 2 行");
+    // **ここで見るのは「その道が書いてあるか」だけ**で、**打つ手そのものは
+    // `foldBlock()` を通す試験が見る。**
+    expect(resumeSection(), "PR が要らなかった道が無い").toContain("変更が要らなかった");
+    expect(foldMarker(), "畳むときに足す印が無い").not.toBe("");
   });
 
   it("`backlog` に意味が 2 つあることが読める", () => {
@@ -183,24 +204,39 @@ describe("PR を出さずに終わった Issue", () => {
   });
 });
 
-/**
- * **worker が畳むときに足す印**（#492 のレビュー）。**手順書から取り出す**——
- * **写すと、名前を変えた側だけが緑になる。**
- */
-function foldMarker(): string {
-  const found = [...resumeSection().matchAll(/gh issue edit <Issue番号> --add-label (\S+)/g)].map(
-    (match) => match[1] ?? "",
-  );
-
-  expect(found, "畳むときに足す印が 1 つに絞れない").toHaveLength(1);
+/** **PR を出さずに畳むときに打つブロック**（#492 のレビュー）。**`backlog` に印を足す側**である。 */
+function foldBlock(): string {
+  const found = labelEditBlocks().filter((block) => addedLabels(block).length > 1);
+  expect(found, "畳むブロックが 1 つに絞れない").toHaveLength(1);
   return found[0] ?? "";
 }
 
-/** master の手順で、その label を読む行。**両側を突き合わせるために取り出す。** */
-function masterMentions(label: string): string[] {
-  return procedureText("master")
-    .split("\n")
-    .filter((line) => line.includes(label));
+/** **worker が畳むときに足す印。** **手順書から取り出す**——**写すと、名前を変えた側だけが緑になる。** */
+function foldMarker(): string {
+  const added = addedLabels(foldBlock()).filter((label) => label !== "backlog");
+  expect(added, "畳むときに足す印が 1 つに絞れない").toHaveLength(1);
+  return added[0] ?? "";
+}
+
+/**
+ * master が、その印を拾って決める節。**次の見出しまで**（#492 のレビュー 3 周目）。
+ *
+ * **印が入った行を数えない**——**差し戻す行（`--remove-label` のほう）が受けてしまい**、
+ * **閉じる行を消しても緑のまま**だった。**拾う口を特定してから、その節を見る。**
+ */
+function closingSection(): string {
+  const marker = foldMarker();
+  const text = procedureText("master");
+  // **昇格から除く行と混ぜない**——**あちらは同じ印を `| not)` で外している。**
+  const picking = bashBlocks(text).filter(
+    (block) => block.includes(marker) && !block.includes("| not)"),
+  );
+
+  expect(picking, `${marker} が付いた Issue を拾う口が master に無い`).not.toEqual([]);
+  // **先頭から見る**——**印を読む節は 2 つある**（**拾う口と、差し戻す行**）。
+  const rest = text.slice(text.indexOf(picking[0] ?? ""));
+  const end = rest.search(/\n#{2,4} /);
+  return end < 0 ? rest : rest.slice(0, end);
 }
 
 describe("PR を出さずに終わった Issue を、master が閉じられる", () => {
@@ -228,8 +264,7 @@ describe("PR を出さずに終わった Issue を、master が閉じられる",
     //
     // **`awaiting-human` が同じ理由で先に用意されている**（master のステップ 3）。
     const marker = foldMarker();
-    const creating = [...procedureText("worker"), ...procedureText("master")]
-      .join("")
+    const creating = `${procedureText("worker")}\n${procedureText("master")}`
       .split("\n")
       .filter((line) => line.includes(`gh label create ${marker}`));
 
@@ -239,10 +274,10 @@ describe("PR を出さずに終わった Issue を、master が閉じられる",
   it("畳んだ印を、master が閉じる側で読んでいる", () => {
     // **閉じる経路は `bin/loop-close-candidates` だけ**で、**あれは PR 番号を取る**
     // ——**PR の無い完了 Issue を拾う口が要る。**
-    const marker = foldMarker();
-    const closing = masterMentions(marker).filter((line) => line.includes("gh issue"));
-
-    expect(closing, `${marker} を読んで閉じる道が master に無い`).not.toEqual([]);
+    //
+    // **拾う口があるだけでは足りない** (#492 のレビュー 3 周目)——**差し戻す行
+    // （`--remove-label`）が同じ印を持つ**ので、**閉じる行を消しても緑のまま**だった。
+    expect(closingSection(), "拾った Issue を閉じる行が無い").toContain("gh issue close");
   });
 
   it("印を足しても、どの一覧にも出てくる", () => {
@@ -250,13 +285,33 @@ describe("PR を出さずに終わった Issue を、master が閉じられる",
     // `blocked` のどれかを見る）——**印だけにすると、この検出器が鳴る。**
     const place = workspace(["in-progress"]);
 
-    runBlock(mergedBlock(), place);
-    runBlock(`gh issue edit ${ISSUE} --add-label ${foldMarker()}`, place);
+    // **手順書のブロックをそのまま走らせる** (#492 のレビュー 3 周目)——**写した 1 行を
+    // 走らせると、手順書が別の形になっても緑のまま**である。
+    runBlock(foldBlock(), place);
 
     const labels = readFileSync(place.labelsFile, "utf8").split("\n").filter(Boolean);
+    expect(labels, "着手中のまま残っている").not.toContain("in-progress");
     expect(labels, "backlog を外している").toContain("backlog");
     expect(labels, "印が付いていない").toContain(foldMarker());
     expect(detectorStatus(place), "検出器が鳴っている").toBe(0);
+  });
+
+  it("畳む付け替えも 1 回の編集で行う", () => {
+    // **master とこちらの周回は同時に走る** (#492 のレビュー 3 周目。**lease は
+    // 作業場ごと**)——**付け替えと印を分けると、その間に master のステップ 6 が
+    // 「印の無い `backlog`」を `ready` へ昇格させる。** **そのあと印が付くと、
+    // 閉じる側は `backlog` から拾うのでどこからも動かず**、**`ready` にいるので
+    // worker が取る**——**同じ調査がもう一度される。**
+    //
+    // **変異では見つからない**——**同時に走らせないと踏めない。** **見るのは
+    // 「1 回の編集であること」**そのものである。
+    const block = foldBlock();
+
+    expect([...block.matchAll(/gh issue edit/g)], "編集が 2 回に割れている").toHaveLength(1);
+    expect(
+      block.split("\n").find((line) => line.includes("gh issue edit")) ?? "",
+      "同じ編集で in-progress を外していない",
+    ).toContain("--remove-label in-progress");
   });
 });
 

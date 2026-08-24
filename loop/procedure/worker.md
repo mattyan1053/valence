@@ -340,9 +340,9 @@ printf '%s\n' "$head_prs"
   **なら、実装は終わっている**——**`in-progress` のままにすると、次の周回も必ずここへ入り**、
   **master が閉じるまで `ready` へ進めない**（#489 で踏んだ）。
 
-  **畳み方は上と同じ**——**MERGED の分岐と同じ 2 行**（**`in-progress` を `backlog` へ
-  1 回の編集で付け替え、結論を Issue にコメントする**）。**閉じるのは master**である
-  （**完了条件を読むのは master の仕事**）。**写しを置かない**——**手は 1 つ**である。
+  **畳み方は MERGED の分岐とほぼ同じ**——**`in-progress` を `backlog` へ付け替え、
+  結論を Issue にコメントする**（**閉じるのは master**。**完了条件を読むのは master の
+  仕事**）。**違うのは、同じ編集で印を 1 つ足すこと**である。
 
   **`backlog` へ戻すだけでは足りない** (#492 のレビュー)。**`backlog` は昇格の候補**
   なので、**master が `ready` へ戻し**、**同じ調査がもう一度取られる**——**印を足す。**
@@ -355,10 +355,14 @@ printf '%s\n' "$head_prs"
   # （**master のステップ 3 が `awaiting-human` で同じことをしている**）。
   gh label create awaiting-master --description "PR を出さずに終わった。master が閉じる" 2>/dev/null || true
 
-  # **足すだけなので、`in-progress` を外す編集とは分ける** (#492 のレビュー)。
-  # **あちらが 1 回なのは「label 0 件の窓を作らない」ため**で、**ここは足すだけ**
-  # ——**窓はできない。**
-  gh issue edit <Issue番号> --add-label awaiting-master
+  # **1 回の編集で、印まで付ける** (#492 のレビュー 3 周目)。**master とこちらの周回は
+  # 同時に走る**（**lease は作業場ごと**）——**分けると、その間に master のステップ 6 が
+  # 「印の無い `backlog`」を `ready` へ昇格させる。** **そのあと印が付くと、閉じる側は
+  # `backlog` から拾うのでどこからも動かず**、**`ready` にいるので worker が取る**
+  # ——**同じ調査がもう一度される。** **MERGED の分岐が 1 回なのは「label 0 件の窓」を
+  # 作らないためで、窓は別物**だが、**打つ手は同じである。**
+  gh issue edit <Issue番号> --remove-label in-progress --add-label backlog --add-label awaiting-master
+  gh issue comment <Issue番号> --body-file <file>
   ```
 
   **`backlog` は外さない。** **`backlog` / `ready` / `in-progress` / `blocked` の
