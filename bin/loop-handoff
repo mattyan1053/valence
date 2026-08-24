@@ -145,6 +145,14 @@ peek=0
 # ——**そのために番号が要る。** **`[WARN]` の文面から拾わせない**（**人が読む形**で、
 # **変えた日に黙って 0 件になる**）。
 list_mismatched=0
+# **この呼び出しは、周回の一部ではない**（#454 のレビュー 2 周目）。**読むだけの口を
+# 足すたびに、下の条件へ書き足さない**——**「読むだけか」を 1 つ持つ**ので、
+# **次の口は、ここに 1 行足せば揃う。**
+#
+# **足し忘れると、周回の外から打った人の記録が「入口を飛ばした周回」として残る**
+# ——**打った本人には見えない**し、**`./task loop:status` は既に 2 つの原因を
+# 分けられないと断っている**（**3 つ目を足すと、読む人が分ける望みがさらに減る**）。
+reads_only=0
 if [[ $# -eq 2 ]]; then
   case "$2" in
     --sent=*)
@@ -155,12 +163,18 @@ if [[ $# -eq 2 ]]; then
       # **古い手順書が打つ形。** **usage で落とさない**——**何が足りないかを言う**
       confirm_sent=1
       ;;
-    --who) peek=1 ;;
-    --mismatched) list_mismatched=1 ;;
+    --who)
+      peek=1
+      reads_only=1
+      ;;
+    --mismatched)
+      list_mismatched=1
+      reads_only=1
+      ;;
     *) usage ;;
   esac
 fi
-readonly confirm_sent sent_token peek list_mismatched
+readonly confirm_sent sent_token peek list_mismatched reads_only
 
 # **読めなかったら「送らない」に倒さない。** 倒すと、止まっていることに気づけない。
 fail_unknown() {
@@ -384,7 +398,10 @@ fi
 # ——**`--who` は「読むだけ」と決めた口**なのに、**打つと `./task loop:status` へ
 # 偽の運用違反が残る**（**決めた契約と実装が食い違う**）。**周回の中から打つぶんは、
 # 同じ周回の出口（ふつうの呼び出し）がこれまでどおり通る。**
-((peek == 1)) || "${BASH_SOURCE[0]%/*}/loop-lease" check || true
+#
+# **見るのは口の名前ではなく `reads_only`** (#454 のレビュー 2 周目)。**口の名前で
+# 書くと、増えたぶんだけここに条件が並び、足し忘れた口だけが記録を残す。**
+((reads_only == 1)) || "${BASH_SOURCE[0]%/*}/loop-lease" check || true
 
 # **一覧（検索）を信じない。** `gh issue list` / `gh pr list` の label 絞り込みは
 # **検索の索引を経由するので、付け替えた直後は古い値が返る**（実測: `ready` を付けた直後、
