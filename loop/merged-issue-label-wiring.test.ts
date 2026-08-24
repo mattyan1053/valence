@@ -220,6 +220,22 @@ describe("PR を出さずに終わった Issue を、master が閉じられる",
     expect(promotion.join("\n"), `昇格の候補から ${marker} を除いていない`).toContain(marker);
   });
 
+  it("畳んだ印を、用意する行がある", () => {
+    // **`./task loop:setup` は 1 度しか走らない** (#492 のレビュー 2 周目)——
+    // **既に動いている作業場は、マージしても label が増えない。**
+    // **存在しない label は黙って落ち**、**残るのは `backlog` だけ**になる
+    // ——**昇格して、同じ調査がもう一度取られる**（**前の周回で返された P1 そのもの**）。
+    //
+    // **`awaiting-human` が同じ理由で先に用意されている**（master のステップ 3）。
+    const marker = foldMarker();
+    const creating = [...procedureText("worker"), ...procedureText("master")]
+      .join("")
+      .split("\n")
+      .filter((line) => line.includes(`gh label create ${marker}`));
+
+    expect(creating, `${marker} を用意する行が、どちらの手順書にも無い`).not.toEqual([]);
+  });
+
   it("畳んだ印を、master が閉じる側で読んでいる", () => {
     // **閉じる経路は `bin/loop-close-candidates` だけ**で、**あれは PR 番号を取る**
     // ——**PR の無い完了 Issue を拾う口が要る。**
