@@ -92,13 +92,30 @@ describe("各行へ状態を足す", () => {
   });
 });
 
+/**
+ * 一覧（`<ol>`）の中だけ。
+ *
+ * **図にも同じ `#1` / `#2` が出る** (#474 のレビュー 2 周目)——**図は一覧より先に描かれる**
+ * ので、**全体を見る判定は図の並びで満たされ**、**一覧の行順が逆転しても緑のまま**になる。
+ * **Tier・状態・操作が付くのは一覧の行**なので、**そこの並びを見る側は、ここを通す。**
+ *
+ * **狭めた先が空でも黙らない**——**一覧そのものが消えたら、ここで落ちる。**
+ */
+function list(markup: string): string {
+  const from = markup.indexOf("<ol");
+  expect(from, "一覧が出ていない").toBeGreaterThanOrEqual(0);
+  const to = markup.indexOf("</ol>", from);
+  expect(to, "一覧が閉じていない").toBeGreaterThan(from);
+  return markup.slice(from, to);
+}
+
 describe("ReviewBoard", () => {
   it("依存の順に並んだ各行に Tier が出る", () => {
-    const markup = render(props());
+    const rows = list(render(props()));
 
-    expect(markup.indexOf("#1")).toBeLessThan(markup.indexOf("#2"));
+    expect(rows.indexOf("#1")).toBeLessThan(rows.indexOf("#2"));
     // 2 件とも Tier が出ている（#110 の表示をそのまま使う）
-    expect(markup.match(/すぐ通せる/g)).toHaveLength(2);
+    expect(rows.match(/すぐ通せる/g)).toHaveLength(2);
   });
 
   it("Tier で並べ替えない", () => {
@@ -114,8 +131,10 @@ describe("ReviewBoard", () => {
       }),
     );
 
-    expect(markup.indexOf("#1")).toBeLessThan(markup.indexOf("#2"));
-    expect(markup.indexOf("すぐ通せる")).toBeLessThan(markup.indexOf("先に人が見る"));
+    const rows = list(markup);
+
+    expect(rows.indexOf("#1")).toBeLessThan(rows.indexOf("#2"));
+    expect(rows.indexOf("すぐ通せる")).toBeLessThan(rows.indexOf("先に人が見る"));
   });
 
   describe("判定材料が無い PR", () => {
