@@ -110,6 +110,18 @@ readonly DEFAULT_APP_PORT=3000
 # 3001..3999 を作業場に割り当てる（既定の 3000 とぶつからない範囲）。
 readonly WORKSPACE_PORT_BASE=3001
 readonly WORKSPACE_PORT_SPAN=999
+# **人が見る画面は、名前ではなく役割で決まる** (#463 のレビュー)。
+#
+# **名前から導くと、clone 先のディレクトリ名で port が変わる**（作業場の名前は
+# `<clone の名前>-preview`）——**GoTrue の許可一覧には literal しか書けない**ので、
+# **`valence` 以外へ clone した人は、人が見る画面からログインできない**
+# （**一覧に無い戻り先は `site_url` へ落とされる**）。**既定の 3000 と同じ扱いにする。**
+#
+# **値は、これまで `valence-preview` が割り当てられていたもの**である
+# ——**動かすと、いま上がっている画面の URL が変わる。**
+# **割り当ての範囲の中にある**ので、**worker の名前が重なることはこれまでどおりあり、
+# `workspace_with_port` が足す前に弾く**（`loop/preview-workspace.test.ts`）。
+readonly PREVIEW_APP_PORT=3940
 
 # 名前から決まるポート。**同じ名前なら常に同じ値**（人が繋ぎ直せる）。
 # **正規化はここでやる** (#195 のレビュー 3 周目)。**渡す側で正規化すると、
@@ -123,6 +135,12 @@ workspace_port() {
   name="$(normalize_workspace_name "${1:-$(basename -- "$PWD")}")"
   if [[ $name == "$DEFAULT_WORKSPACE" ]]; then
     printf '%s' "$DEFAULT_APP_PORT"
+    return 0
+  fi
+  # **人が見る作業場**（`preview_worktree_path` が `<clone>-preview` を作る）。
+  # **接尾辞で見る** (#463 のレビュー)——**clone の名前に依らせない。**
+  if [[ $name == *-preview ]]; then
+    printf '%s' "$PREVIEW_APP_PORT"
     return 0
   fi
   # **digest は `git` で取る** (#195 のレビュー)。**`sha256sum` はホスト標準ではない**

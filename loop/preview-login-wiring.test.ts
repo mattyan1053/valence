@@ -79,6 +79,22 @@ describe("人が見る画面から、ログインが完了する", () => {
     );
   });
 
+  it("clone した先の名前が変わっても、同じ port である", () => {
+    // **設定に書けるのは literal だけ**である (#463 のレビュー)——**port が clone の
+    // ディレクトリ名で変わると、`valence` 以外へ clone した人は必ず落ちる**
+    // （**GoTrue は一覧に無い戻り先を `site_url` へ落とす**）。
+    //
+    // **人が見る作業場は、名前ではなく役割で決まる**ので、**割り当ても名前に依らない。**
+    const listed = allowlistLine();
+
+    for (const clone of ["valence", "renamed-clone", "z"]) {
+      const port = portOf(`${clone}-preview`);
+      expect(listed, `${clone} へ clone した人が戻れない（port=${port}）`).toContain(
+        `http://localhost:${port}/**`,
+      );
+    }
+  });
+
   it("既定の作業場のぶんは、そのまま残っている", () => {
     // **既定の振る舞いを変えない**（#463 の条件）——**足すだけ**である
     const listed = allowlistLine();
