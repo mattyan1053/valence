@@ -52,9 +52,9 @@ describe("./task loop:preview", () => {
    *
    * **`origin/main` を映すことが主題**なので、**取ってくる先が無いと何も見えない。**
    */
-  function repo(): { dir: string; origin: string; env: NodeJS.ProcessEnv } {
+  function repo(name = "valence"): { dir: string; origin: string; env: NodeJS.ProcessEnv } {
     const parent = mkdtempSync(join(tmpdir(), "preview-workspace-"));
-    const dir = join(parent, "valence");
+    const dir = join(parent, name);
     roots.push({ parent, dir });
     mkdirSync(dir);
     expect(spawnSync("git", ["init", "--quiet", "--initial-branch=main", dir]).status).toBe(0);
@@ -267,6 +267,43 @@ describe("./task loop:preview", () => {
     expect(`${added.stdout}${added.stderr}`, "何と重なるのかが出ていない").toContain(
       "valence-preview",
     );
+  });
+
+  it("`-preview` で終わる名前で clone しても、人が見る画面と重ならない", () => {
+    // **接尾辞で決めていた** (#473)——**`foo-preview` で clone すると、その clone 本体と
+    // その人が見る作業場（`foo-preview-preview`）が、どちらも同じポートになった。**
+    // **`workspace_with_port` は呼んだ側を検査から外す**ので、**`loop:preview:add` は
+    // この衝突を見つけない**——**両方を上げると、あとから上げたほうが落ちる。**
+    const { dir, env } = repo("foo-preview");
+
+    const own = task(dir, env, ["port"]).stdout.trim();
+    const preview = task(dir, env, ["port", "foo-preview-preview"]).stdout.trim();
+
+    expect(own, "clone 本体のポートを読めない").toMatch(/^\d+$/);
+    expect(preview, "人が見る作業場のポートを読めない").toMatch(/^\d+$/);
+    expect(own, "clone 本体と人が見る画面が、同じポートになっている").not.toBe(preview);
+  });
+
+  it("人が見る画面のポートは、clone の名前に依らない", () => {
+    // **#467 で決めたこと**——**設定（許可一覧）には literal しか書けない**ので、
+    // **clone の名前でポートが変わると、`valence` 以外へ clone した人はログインできない。**
+    // **数字は書き写さない**（**割り当てが正**）——**名前を変えても同じ値かどうかだけを見る。**
+    const ports = ["valence", "foo-preview", "z"].map((name) => {
+      const { dir, env } = repo(name);
+      return task(dir, env, ["port", `${name}-preview`]).stdout.trim();
+    });
+
+    expect(new Set(ports).size, `clone の名前で変わっている: ${ports.join(" / ")}`).toBe(1);
+  });
+
+  it("`-preview` で終わる名前でも、人が見る作業場を作れる", () => {
+    // **弾かれてはいけない側**——**衝突しないなら、これまでどおり作れる**
+    const { dir, env } = repo("foo-preview");
+
+    const added = task(dir, env, ["loop:preview:add"]);
+
+    expect(added.status, `${added.stdout}${added.stderr}`).toBe(0);
+    expect(git(dir, ["worktree", "list", "--porcelain"])).toContain(`${dir}-preview`);
   });
 
   it("人が見る画面と同じポートへ落ちる worker 名は、足す前に弾く", () => {
