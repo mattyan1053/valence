@@ -12,6 +12,7 @@
  */
 
 import { type NextRequest, NextResponse } from "next/server";
+import { hasReceivedAuthorizationCode } from "./app/auth/authorization-code";
 import { reportDroppedCallback } from "./composition/auth";
 import { refreshSession } from "./composition/session";
 import { looksLikeDroppedCallback } from "./domain/auth/dropped-callback";
@@ -51,7 +52,9 @@ export async function refreshedResponse(
   if (
     looksLikeDroppedCallback({
       pathname: request.nextUrl.pathname,
-      hasCode: request.nextUrl.searchParams.has("code"),
+      // **`has` では見ない** (#461)——**`/?code=` にも `true`** で、**交換できる値が
+      // 届いていなくても 1 行残る。** **本物の受け口と同じ口を通す。**
+      hasCode: hasReceivedAuthorizationCode(request.nextUrl.searchParams.get("code")),
     })
   ) {
     report(request.nextUrl.pathname);
