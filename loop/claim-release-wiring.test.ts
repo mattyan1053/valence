@@ -51,12 +51,45 @@ function documentedActions(): string[] {
   return [...usage.matchAll(/bin\/loop-claim ([a-z-]+)/g)].map((found) => found[1] ?? "");
 }
 
+/** 2.2 の「別の作業場が PR を持っていた」分岐（`bin/loop-claim pr` の答えで分ける）。 */
+function prOwnershipBranch(): string {
+  const section = resumeSection();
+  const from = section.indexOf("bin/loop-claim pr <PR番号>");
+  expect(from, "2.2 に PR を取る経路がありません").toBeGreaterThanOrEqual(0);
+  const rest = section.slice(from);
+  const to = rest.indexOf("esac");
+  expect(to, "分岐が閉じていません").toBeGreaterThanOrEqual(0);
+  return rest.slice(0, to);
+}
+
 describe("取り違えた Issue を返す道", () => {
   it("手順書の 2.2 が、返す口を名指ししている", () => {
     // **引き継げる経路にだけ、取り違えが起きる**——**戻り道は、そこに書く**
     expect(resumeSection(), "取り違えたときの戻り道が、手順書に無い").toContain(
       "bin/loop-claim release-issue",
     );
+  });
+
+  it("取り違えが確定する分岐で、返してから終わる", () => {
+    // **散文で名前を挙げるだけでは打たれない** (#460 のレビュー 2 周目)。
+    // **`resume` が exit 0 を返した時点で、Issue の記録はこちらのもの**である
+    // ——**そのうえで PR が「別の作業場のもの」だと分かる。** **そこで返さずに
+    // 終わると、本来の持ち主は自分の Issue を取り返せない。**
+    const branch = prOwnershipBranch();
+    const other = branch.slice(branch.indexOf("\n      1)"));
+
+    expect(other, "別の作業場のものと分かった分岐で、返していない").toContain(
+      "bin/loop-claim release-issue",
+    );
+  });
+
+  it("判定できない分岐では、返さない", () => {
+    // **返してよいと分かるのは「別の作業場のもの」と言われたときだけ**である
+    // ——**判定できないときに返すと、本当に自分の作業だった場合に手放す。**
+    const branch = prOwnershipBranch();
+    const unknown = branch.slice(branch.indexOf("\n      *)"));
+
+    expect(unknown, "判定できないのに返している").not.toContain("release-issue");
   });
 
   it("スクリプトが、その口を受ける", () => {
