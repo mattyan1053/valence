@@ -864,7 +864,12 @@ if [[ $ACTION == "alive" ]]; then
         alive_age=$((expired_over + TTL_SEC))
         if [[ -z $alive_quiet_age ]] || ((alive_age < alive_quiet_age)); then
           alive_quiet_age="$alive_age"
-          alive_quiet="$(activity_age)、期限を $expired_over 秒 超過"
+          # **判定に使った長さを言う** (#459 のレビュー 2 周目)。**期限は「取得と
+          # 最後の活動の、新しいほう」から測る**——**生の活動記録を出すと、
+          # 活動の記録が無い周回で「活動の記録なし」、前の世代の記録だけが
+          # 残っていれば「100000 秒前」と出る。** **引き継ぐ判断のために足した数字が、
+          # 実際の判定と食い違う。**
+          alive_quiet="静かになってから $alive_age 秒、期限を $expired_over 秒 超過"
         fi
       fi
       continue

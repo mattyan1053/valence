@@ -1712,8 +1712,36 @@ describe("bin/loop-lease", () => {
       const answered = run(["alive", sandbox]);
 
       expect(answered.status, "走っていると答えている").toBe(1);
-      expect(answered.stderr, "無音の長さが出ていない").toMatch(/最後の活動 9\d{3} 秒前/);
+      expect(answered.stderr, "無音の長さが出ていない").toMatch(/静かになってから 9\d{3} 秒/);
       expect(answered.stderr, "期限をどれだけ超えたかが出ていない").toMatch(/7[0-9]{3} 秒/);
+    });
+
+    it("活動の記録が無くても、取得からの長さで言う", () => {
+      // **判定と、告げる数を揃える** (#459 のレビュー 2 周目)。**期限は「取得と最後の
+      // 活動の、新しいほう」から測る**のに、**告げるほうだけが生の活動記録を見ていた**
+      // ——**活動の記録が無い周回では「活動の記録なし」**、**前の世代の記録だけが
+      // 残っていれば「100000 秒前」**と出る。**引き継ぐ判断のために足した数字が、
+      // 実際の判定と食い違う。**
+      const now = Math.floor(Date.now() / 1000);
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: sandbox, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      expect(acquire().status).toBe(0);
+      const state = join(sandbox, ".git", `valence-loop-lease-${scope.stdout.trim()}`);
+      const lines = readFileSync(state, "utf8").split("\n");
+      lines[0] = `${(lines[0] ?? "").split("\t")[0] ?? ""}\t${now - 9000}`;
+      writeFileSync(state, lines.join("\n"));
+      // **活動の記録は消す**（**取った直後に落ちた周回**である）
+      rmSync(join(sandbox, ".git", `valence-loop-activity-${scope.stdout.trim()}`), {
+        force: true,
+      });
+      markRound(sandbox, now - 100_000);
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status).toBe(1);
+      expect(answered.stderr, "判定に使った長さを言っていない").toMatch(
+        /静かになってから 9\d{3} 秒/,
+      );
     });
 
     it("同じ作業場の記録が複数あれば、いちばん新しいものを言う", () => {
@@ -1748,9 +1776,11 @@ describe("bin/loop-lease", () => {
       const answered = run(["alive", sandbox]);
 
       expect(answered.status).toBe(1);
-      expect(answered.stderr, "いちばん新しい記録を言っていない").toMatch(/最後の活動 9\d{3} 秒前/);
+      expect(answered.stderr, "いちばん新しい記録を言っていない").toMatch(
+        /静かになってから 9\d{3} 秒/,
+      );
       expect(answered.stderr, "前の版の記録を、いまの無音として言っている").not.toMatch(
-        /最後の活動 (99|10)\d{3} 秒前/,
+        /静かになってから (99|10)\d{3} 秒/,
       );
     });
 

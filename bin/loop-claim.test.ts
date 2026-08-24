@@ -625,7 +625,7 @@ describe("bin/loop-claim", () => {
 
       expect(second.status).toBe(0);
       expect(second.stderr, "無音の長さが、引き継ぐ側に届いていない").toMatch(
-        /最後の活動 9\d{3} 秒前/,
+        /静かになってから 9\d{3} 秒/,
       );
     });
 
