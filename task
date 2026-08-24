@@ -209,8 +209,13 @@ cmd_up() { ensure_network; compose up -d app; }
 #
 # **compose に渡すのと同じ値**を出す（`workspace_port`）。**2 つの決め方を持たない。**
 #
-# この作業場のアプリのポートを出す 例: curl "http://127.0.0.1:$(./task port)/"
-cmd_port() { workspace_port; echo; }
+# **名前を渡せる** (#463)。**引数が無ければ、この作業場のぶん**である
+# ——**渡す側は「その名前ならいくつになるか」を、割り当てを写さずに訊ける**
+# （**人が見る作業場の port は `supabase/config.toml` に書いてあり、
+# `loop/preview-login-wiring.test.ts` がここへ訊いて突き合わせる**）。
+#
+# この作業場（または渡した名前）のアプリのポートを出す 例: ./task port valence-preview
+cmd_port() { workspace_port "$@"; echo; }
 
 # **「使えない理由」を、まとめて言う** (#413)。**判定は `bin/doctor` が持つ**——
 # **ここへ写すと、片方だけ直して食い違う**（`show_cadence` などと同じ）。
