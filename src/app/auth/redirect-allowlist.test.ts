@@ -14,21 +14,20 @@
  * **広げすぎて開いた転送になる**——**両方をここで見る。**
  */
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { allowedRedirectPatterns } from "../../infrastructure/supabase/redirect-allowlist";
 import { callbackUrl } from "./urls";
 
-const CONFIG = fileURLToPath(new URL("../../../supabase/config.toml", import.meta.url));
-
-/** `additional_redirect_urls = ["…", "…"]` を読む。**書式が変わったら空になる。** */
+/**
+ * **一覧を 2 箇所で読まない** (#451)。**書式を知っているのは
+ * `src/infrastructure/supabase/redirect-allowlist.ts` だけ**である
+ * ——**ここで読み直すと、片方だけ直したときに食い違う**（`AGENTS.md` §5）。
+ */
 function allowedRedirects(): string[] {
-  const config = readFileSync(CONFIG, "utf8");
-  const line = /^additional_redirect_urls\s*=\s*\[(.*)\]\s*$/m.exec(config);
-  if (line?.[1] === undefined) {
-    return [];
-  }
-  return [...line[1].matchAll(/"([^"]+)"/g)].map((match) => match[1] as string);
+  const patterns = allowedRedirectPatterns();
+  // **読めなければ、そこで落ちる**（**「1 つも許していない」に化けさせない**）
+  expect(patterns.kind, "許可一覧を読めていない").toBe("listed");
+  return patterns.kind === "listed" ? [...patterns.listed] : [];
 }
 
 /**
@@ -61,7 +60,10 @@ describe("コールバックの戻り先", () => {
     // **URL は `urls.ts` から取る。** **ここに書き写すと、片方だけ変わったときに
     // 食い違ったまま緑になる。**
     for (const origin of ["http://localhost:3000", "http://127.0.0.1:3000"]) {
-      const url = callbackUrl(new Request(`${origin}/auth/login`));
+      // **実物が組む形で渡す** (#451)——**`Host` に開いた先、`url` に待ち受けアドレス**
+      const url = callbackUrl(
+        new Request("http://0.0.0.0:3000/auth/login", { headers: { host: new URL(origin).host } }),
+      );
       expect(allows(url), `許可されていない: ${url}`).toBe(true);
     }
   });
