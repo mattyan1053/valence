@@ -392,7 +392,7 @@ describe("bin/loop-handoff", () => {
    * **master の周回が進んだこと**を作らないと、そこへ到達しない。
    */
   let masterRoundAt = 1_000;
-  function masterRounds(count: number): void {
+  function masterAcquires(count: number): void {
     const starts = join(repo, ".git", "valence-loop-starts-master");
     let lines = existsSync(starts) ? readFileSync(starts, "utf8") : "";
     for (let index = 0; index < count; index += 1) {
@@ -403,13 +403,30 @@ describe("bin/loop-handoff", () => {
   }
 
   /**
-   * **master が見送ったところまで進める**（#440）。
+   * **master が出口を通った回数**（#442 のレビュー 2 周目）。
+   *
+   * **`acquire` の数ではない**——**捨てた周回は PR を 1 本も見ていない**ので、
+   * **猶予を消費してはいけない。** **数えるのは、この口が呼ばれたこと自体**である。
+   *
+   * **ここは記録を直に置く**（**出口を通らせると、送信の状態まで動いてしまう**）。
+   * **「出口で数えている」ことは、下の「master が出口を通った回数で数える」が見る。**
+   */
+  function masterRounds(count: number): void {
+    const record = join(repo, ".git", "valence-loop-master-rounds");
+    const seen = existsSync(record) ? Number(readFileSync(record, "utf8").trim()) : 0;
+    writeFileSync(record, `${seen + count}\n`);
+  }
+
+  /**
+   * **master が見送ったところまで進める**（#440 / #442 のレビュー 2 周目）。
    *
    * **1 度目は起点を置くだけ**（**まだ見ていないかもしれない**）——**そのあと
-   * master の周回が 2 つ進んで、はじめて食い違いとして数える。**
+   * master が出口を 2 回通って、はじめて食い違いとして数える。**
+   *
+   * **数えるのは `acquire` ではなく出口**である——**捨てた周回は PR を見ていない。**
+   * **だからここでも「master の出口を呼ぶ」ことで進める。**
    */
   function overlooked(role: string, env: Record<string, string> = {}): Run {
-    masterRounds(1);
     run(role, env);
     masterRounds(2);
     return run(role, env);
@@ -540,6 +557,8 @@ describe("bin/loop-handoff", () => {
       "cat",
       "mkdir",
       "rm",
+      // **master の周回を数えるのに使う**（**置き換えは `mv`**。#442 のレビュー 2 周目）
+      "mv",
       "printf",
       "date",
       // parked な PR の Issue を数えるのに使う
@@ -1655,7 +1674,6 @@ describe("bin/loop-handoff", () => {
 
     it("状態が矛盾した周回でも、送れたら 2 通目は出さない", () => {
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
-      masterRounds(1);
       expect(cycle("worker").stdout).toMatch(/^master\t/);
       masterRounds(2);
 
@@ -2203,7 +2221,6 @@ describe("bin/loop-handoff", () => {
       // **2026-08-24 の 1 日で 3 回出て、3 回とも master が手で `--reset` した**
       // ——**消し忘れれば「異常なし」で人が呼ばれる。**
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
-      masterRounds(1);
 
       const handoff = run("master");
 
@@ -2212,11 +2229,35 @@ describe("bin/loop-handoff", () => {
       expect(handoff.stderr, "何が起きているかを言っていない").toMatch(/changes-requested/);
     });
 
+    it("PR を見ていない周回は、猶予を消費しない", () => {
+      // **`acquire` の数では足りない** (#442 のレビュー 2 周目)。**手順が入れ替わると
+      // 捨てて呼び直す**ので、**同じ cron の中で `acquire` が 2 回記録される**
+      // ——**捨てたほうは PR を 1 本も見ていない。**
+      //
+      // **実測**（master の記録）: **22 秒差・21 秒差の並びがある**。**猶予 2 周が
+      // 22 秒で使い切られ**、**この PR が消そうとした偽陽性がそのまま戻る。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      run("master"); // 起点を置く
+      masterAcquires(5); // **取れた acquire は進むが、出口は通っていない**
+
+      expect(run("master").status, "PR を見ていない周回で、猶予を使い切っている").not.toBe(3);
+    });
+
+    it("master が出口を通った回数で数える", () => {
+      // **記録を試験から書くと、「出口で数える」ところを誰も通らない**
+      // ——**数えるのをやめても緑のまま**になる（**実際に生き残った変異**）。
+      // **ここだけは、master に出口を通らせて数を進める。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      run("master"); // 起点を置く
+      run("master"); // 出口 1 つめ
+
+      expect(run("master").status, "出口を通っても数えていない").toBe(3);
+    });
+
     it("状態が変われば、数え直す", () => {
       // **witness が動けば、それは別の食い違い**である——**新しい指摘が届いた PR を、
       // 前の状態の猶予で数えない。**
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
-      masterRounds(1);
       run("master");
       masterRounds(2);
       // **指摘が 1 件増えた**（未解決の数が動く）
@@ -2242,7 +2283,6 @@ describe("bin/loop-handoff", () => {
       // （**`bin/loop-request-changes` が外して、付け直しに失敗した形**）、
       // **古い起点がそのまま使われ、既に進んだ master の周回で即座に数える。**
       withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
-      masterRounds(1);
       run("master"); // 起点を置く
       masterRounds(2);
       // **label が付いて、食い違いが解けた**

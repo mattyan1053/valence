@@ -721,28 +721,32 @@ pr_witness() {
 # **WARN は出す**ので、黙って消えるのではない。
 readonly MISMATCH_GRACE_ROUNDS=2
 
-master_starts_after() {
-  local since="$1" starts at _rest seen=0
-  starts="$common_dir/valence-loop-starts-master"
-  [[ -f $starts ]] || return 1
-  while IFS=$'\t' read -r at _rest; do
-    [[ $at =~ ^[0-9]+$ ]] || continue
-    ((at > since)) && ((seen++))
-  done <"$starts"
+# **数えるのは「PR を見た周回」である** (#442 のレビュー 2 周目)。**`acquire` の数では
+# 足りない**——**手順が入れ替わって捨てた周回も 1 つと数える**（**実測で 22 秒差の 2 本**）
+# ——**捨てた周回は PR を 1 本も見ていない**（**捨てるのは 1.1、出口は最後**）。
+# **この口は出口でしか呼ばれない**ので、**呼ばれた ＝ その周回は PR を見ている。**
+# **新しい種類の行を、既にある記録へ足さない** (#281)——**別のファイルに、数だけ置く。**
+readonly MASTER_ROUNDS="$common_dir/valence-loop-master-rounds"
+
+master_rounds_now() {
+  local seen
+  [[ -f $MASTER_ROUNDS ]] || return 1
+  read -r seen <"$MASTER_ROUNDS" 2>/dev/null || return 1
+  [[ $seen =~ ^[0-9]+$ ]] || return 1
   printf '%s' "$seen"
 }
 
-# master の最後の周回（**いつを起点にするか**）。**読めなければ空。**
-master_last_start() {
-  local starts at _rest last=""
-  starts="$common_dir/valence-loop-starts-master"
-  [[ -f $starts ]] || return 1
-  while IFS=$'\t' read -r at _rest; do
-    [[ $at =~ ^[0-9]+$ ]] || continue
-    [[ -n $last ]] && ((at <= last)) || last="$at"
-  done <"$starts"
-  [[ -n $last ]] || return 1
-  printf '%s' "$last"
+# **master の出口を 1 つ数える。** **数えられなくても、周回は止めない。**
+# **錠は要らない**——**書くのは master の出口だけ**で、**その周回は lease で直列化
+# されている。** **置き換えは `mv`** で、**半端な値が読まれない。**
+master_round_counted() {
+  local seen
+  seen="$(master_rounds_now)" || seen=0
+  if ! { printf '%s\n' "$((seen + 1))" >"$MASTER_ROUNDS.tmp" 2>/dev/null &&
+    mv -f "$MASTER_ROUNDS.tmp" "$MASTER_ROUNDS" 2>/dev/null; }; then
+    rm -f "$MASTER_ROUNDS.tmp" 2>/dev/null || true
+    echo "[WARN] master の周回を数えられません: $MASTER_ROUNDS" >&2
+  fi
 }
 
 # **起点の記録を、錠の下で触る** (#442 のレビュー)。**共通ディレクトリは 3 つの
@@ -764,15 +768,18 @@ mismatch_is_overlooked() {
   local number="$1" witness record stored_witness stored_at seen now_last verdict=1
   witness="$(pr_witness "$number")"
   record="$common_dir/valence-loop-mismatch-$number"
-  now_last="$(master_last_start)" || return 1
+  # **まだ 1 度も出口を通っていない**なら 0（**「見ていない」であって、判定不能ではない**）
+  now_last="$(master_rounds_now)" || now_last=0
   mismatch_record_locked "$record" || return 1
   if [[ -f $record ]] && IFS=$'\t' read -r stored_witness stored_at <"$record" 2>/dev/null &&
     [[ $stored_witness == "$witness" && $stored_at =~ ^[0-9]+$ ]]; then
-    if seen="$(master_starts_after "$stored_at")" && ((seen >= MISMATCH_GRACE_ROUNDS)); then
-      verdict=0
-    fi
+    # **前の版が置いた起点は時刻**である（**桁が違う**）——**引き算は大きく負になり、
+    # 数えない側へ落ちる**（**猶予が振り出しに戻るだけ**）。
+    seen=$((now_last - stored_at))
+    ((seen >= MISMATCH_GRACE_ROUNDS)) && verdict=0
   else
     # **初めて見た状態**（あるいは状態が変わった）。**起点を置いて、今回は数えない。**
+    # **置くのは「master が PR を見た回数」**である（**時刻ではない**）。
     printf '%s\t%s\n' "$witness" "$now_last" >"$record" ||
       echo "[WARN] 食い違いの起点を記録できません: $record" >&2
   fi
@@ -1204,6 +1211,10 @@ if ((peek == 1)); then
   done
   exit 1
 fi
+
+# **ここへ来たということは、その周回は PR を見ている**（**捨てた周回は 1.1 で終わる**）。
+# **`--who` と `--sent` は上で返っている**ので、**決めに来た周回だけを数える。**
+[[ $ROLE != "master" ]] || master_round_counted
 
 lock_records
 
