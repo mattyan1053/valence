@@ -26,9 +26,23 @@ const API_ORIGIN = "https://api.github.com";
 /** 1 ページの件数。**GitHub の上限**である（**読み切る責務は変わらない**）。 */
 const PER_PAGE = 100;
 
+/**
+ * 1 要求の上限 (ms)。**画面ごと止めない** (#120 / #158 と同じ考え方)。
+ *
+ * **返らない要求を待ち続けると、入り口が開かないまま**である——**上限を過ぎたら
+ * 落とし**、**使う側は「いま取得できませんでした」へ倒す**（`visibleRepositoriesForCurrentUser`）。
+ * **空を返して「1 件も見えない」に化けさせない**、はそのまま。
+ *
+ * **これは速くする手ではない** (#472 のレビュー)。**遅いときにどうなるかを決める**もので、
+ * **引く向きとは関係なく効く**——**#470 の「遅いときの振る舞い」だけを、ここが引き受ける。**
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 export type UserVisibleRepositoriesOptions = {
   /** **差し替えるための引数であって、抽象ではない**（#64 と同じ形）。 */
   readonly fetchImpl?: typeof fetch;
+  /** 1 要求の上限。**試験は本物の時間を回さない**（#131 / #137 と同じ）。 */
+  readonly timeoutMs?: number;
 };
 
 /**
@@ -66,6 +80,7 @@ async function fetchPage(
   fetchImpl: typeof fetch,
   userAccessToken: string,
   url: string,
+  timeoutMs: number,
 ): Promise<{ items: unknown[]; next: string | undefined }> {
   const response = await fetchImpl(url, {
     headers: {
@@ -73,6 +88,9 @@ async function fetchPage(
       accept: "application/vnd.github+json",
       "x-github-api-version": "2022-11-28",
     },
+    // **1 要求ずつ上限を持つ** (#470)。**待ち切らずに落とす**ので、**入り口が
+    // 開かないまま**にはならない。
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!response.ok) {
@@ -119,6 +137,7 @@ function collect(
 
 export function createUserVisibleRepositories({
   fetchImpl = fetch,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 }: UserVisibleRepositoriesOptions = {}): VisibleRepositories {
   return {
     async list(userAccessToken: string): Promise<VisibleRepositoryListing> {
@@ -133,7 +152,7 @@ export function createUserVisibleRepositories({
       // 動いている**）。
       let url: string | undefined = `${API_ORIGIN}/user/repos?per_page=${PER_PAGE}`;
       while (url !== undefined) {
-        const page = await fetchPage(fetchImpl, userAccessToken, url);
+        const page = await fetchPage(fetchImpl, userAccessToken, url, timeoutMs);
         collect(page.items, seen, repositories, invalid);
         seen += page.items.length;
         url = page.next;
