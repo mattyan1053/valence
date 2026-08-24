@@ -78,9 +78,10 @@ workspace_with_port() {
   while read -r p; do
     [[ -n $p && $p != "$PWD" ]] || continue
     name="$(basename -- "$p")"
-    # **自分は数えない** (#457)。**予約は「まだ無いもの」を守るため**なので、
-    # **これから作る本人に当てると、自分の予約で自分が入れなくなる。**
-    [[ $name != "$self" ]] || continue
+    # **実在するものは、常に衝突として扱う** (#462 のレビュー 2 周目)。**`self` を
+    # ここで外すと、別のパスに同じ名前の作業場があっても素通りする**——**ポートも
+    # compose project も basename から決まる**ので、**追加は通り、上げたときに
+    # 相手のコンテナを掴む**（**予約は、まさにそれを防ぐために入れた**）。
     other="$(workspace_port "$name")" || return 2
     [[ $other != "$want" ]] || { printf '%s' "$name"; return 0; }
   done < <(printf '%s\n' "$listed" | awk '/^worktree /{print $2}')
@@ -91,6 +92,10 @@ workspace_with_port() {
   #
   # **人が見る画面も、同じ理由で予約する** (#457)——**`loop:worker:add` を先に打った日に、
   # `loop:preview:add` が入れなくなる。**
+  #
+  # **`self` を外すのは、ここだけ** (#462 のレビュー 2 周目)。**予約は「まだ無いもの」を
+  # 守るため**なので、**これから作る本人に当てると、自分の予約で自分が入れなくなる**
+  # ——**実在するものは上で数えてある。**
   for name in "$(basename -- "${PWD}-master")" "$(basename -- "${PWD}-preview")"; do
     [[ $name != "$self" ]] || continue
     other="$(workspace_port "$name")" || return 2

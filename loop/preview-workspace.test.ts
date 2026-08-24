@@ -252,6 +252,23 @@ describe("./task loop:preview", () => {
     expect(`${shown.stdout}${shown.stderr}`, "汚れていることを言っていない").toMatch(/変更/);
   });
 
+  it("同じ名前の作業場が別の場所にあれば、衝突として扱う", () => {
+    // **`self` の除外は、まだ作られていない作業場の予約にだけ効かせる** (#462 のレビュー
+    // 2 周目)。**ポートも compose project も basename から決まる**ので、**別のパスに
+    // 同じ名前の作業場があれば、それは衝突である**——**外すと、追加は通るのに、
+    // 上げたときに相手のコンテナを掴む**（**予約は、まさにそれを防ぐために入れた**）。
+    const { dir, env } = repo();
+    const elsewhere = join(mkdtempSync(join(tmpdir(), "preview-elsewhere-")), "valence-preview");
+    git(dir, ["worktree", "add", "--detach", "--quiet", elsewhere, "HEAD"]);
+
+    const added = task(dir, env, ["loop:preview:add"]);
+
+    expect(added.status, "同じ名前の作業場があるのに通している").not.toBe(0);
+    expect(`${added.stdout}${added.stderr}`, "何と重なるのかが出ていない").toContain(
+      "valence-preview",
+    );
+  });
+
   it("人が見る画面と同じポートへ落ちる worker 名は、足す前に弾く", () => {
     // **作られていなくても予約する**（#195 のレビュー 2 周目と同じ形）——**順番を
     // 変えただけで踏める**（`add` を先に、`loop:preview:add` を後に打つ）。
