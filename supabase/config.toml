@@ -182,7 +182,23 @@ site_url = "http://localhost:3000"
 # 広げるのはパスだけ。scheme / host / port は固定なので、開いた転送にはならない
 # (この一覧は最後の砦で、そもそもアプリ側は戻り先を外から受け取らない)。
 # 一致することは src/app/auth/redirect-allowlist.test.ts が見る。
-additional_redirect_urls = ["http://localhost:3000/**", "http://127.0.0.1:3000/**"]
+#
+# 3940 は「人が見る作業場」のポートである (#463)。**書き写した数字ではない**——
+# `task` の割り当て (`workspace_port`) が決めており、`./task port <名前>-preview`
+# が同じ値を出す。**突き合わせるのは loop/preview-login-wiring.test.ts** で、
+# **割り当てが変わった日にそこが赤くなる** (AGENTS.md §5)。
+#
+# **clone した先のディレクトリ名に依らない** (#463 のレビュー)。**作業場の名前は
+# `<clone の名前>-preview`** なので、**名前から導くと `valence` 以外へ clone した人は
+# 必ず落ちる**——**ここには literal しか書けない**ため、**割り当ての側を役割で決めている。**
+#
+# **人が見る作業場からもログインを完了させたい** (#447)。**GoTrue はこの一覧に
+# 当たらないと site_url へ落として戻す**ので、**3000 だけだと `/auth/callback` に
+# 着かない**——**既定の作業場の振る舞いは変えず、足すだけ**である。
+#
+# **1 行で書く。** **読み手は 1 行として読む** (`src/infrastructure/supabase/redirect-allowlist.ts`)
+# ——**折り返すと、この一覧は「1 つも許していない」に化ける** (実測)。
+additional_redirect_urls = ["http://localhost:3000/**", "http://127.0.0.1:3000/**", "http://localhost:3940/**", "http://127.0.0.1:3940/**"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
