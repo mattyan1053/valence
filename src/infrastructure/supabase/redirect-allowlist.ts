@@ -143,6 +143,14 @@ function originOf(pattern: string): string | undefined {
     // **`*` を含む host は数えない**——**`http://*.example.com` をオリジンとして
     // 許すと、当たる先が広がる**
     const url = new URL(pattern.trim().replace(/\*+$/, ""));
+    // **http / https だけを、オリジンとして扱う** (#478)。**それ以外の scheme は
+    // `origin` が文字列 `"null"` になる**（`htp://localhost:3940` のような打ち間違い）
+    // ——**そのまま一覧へ入れると、突き合わせる側が `new URL("null")` で落ちる**
+    // （**画面には理由が出ない**）。**戻り先はブラウザが開く先**なので、
+    // **この 2 つ以外は、こちらが言い表せる形ではない。**
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return undefined;
+    }
     return url.host.includes("*") ? undefined : url.origin;
   } catch {
     return undefined;
@@ -185,13 +193,27 @@ export function allowedRedirectOrigins(path = configPath()): AllowedRedirects<st
   if (patterns.kind === "unreadable") {
     return patterns;
   }
+  // **1 本でもオリジンにできなければ、全体を「読めない」とする** (#478)。
+  //
+  // **前は、その 1 本だけ落として続けていた**——**一覧が黙って短くなり**、
+  // **その画面からのログインが「許可されていない host」で落ちる**（**設定は書いて
+  // あるので、読んだ人は疑わない**）。**#469 / #477 が書式の側で消したのと同じ誤診**
+  // である。
+  //
+  // **「許す側へ倒さない」は動かしていない。** **落とす以外の選択肢は `unreadable`**
+  // であって、**許すことではない**——**`*` を含む host も、通さず、黙って落とさず、
+  // 「読めない」と言う**（**GoTrue は当てられるが、こちらはオリジンとして言い表せない**）。
+  //
+  // **`suppliedOrigins`（実行時に渡された一覧）と、同じ方針である**——**設定ファイルには
+  // GoTrue の書式がそのまま並ぶ**が、**この口が答えるのは「戻ってよいオリジン」**なので、
+  // **言い表せない行が混ざった一覧は、短くして返すより読めないと言うほうが正しい。**
   const origins = new Set<string>();
   for (const pattern of patterns.listed) {
-    // **読めない行は数えない**（**許す側へ倒さない**）
     const origin = originOf(pattern);
-    if (origin !== undefined) {
-      origins.add(origin);
+    if (origin === undefined) {
+      return { kind: "unreadable", source: path };
     }
+    origins.add(origin);
   }
   return { kind: "listed", listed: [...origins] };
 }
