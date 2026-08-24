@@ -756,7 +756,10 @@ master_round_counted() {
 # ——**待たない**（**出口は速いほうがよい**）し、**取り損ねて数えるより、取り損ねて
 # 数えないほうが安い**（**WARN は出る**）。
 mismatch_record_locked() {
-  exec 7>"$1.lock" 2>/dev/null || return 1
+  # **`2>/dev/null` は、まとまりの中で掛ける** (#445 で踏んだ)。**`exec` に直接
+  # 付けると、標準エラーそのものが以後ずっと `/dev/null` へ向く**——**この口を
+  # 1 度通ったあとの警告が、丸ごと消える**（**2 本目の食い違いが出ないので気づいた**）。
+  { exec 7>"$1.lock"; } 2>/dev/null || return 1
   flock -n 7 || {
     exec 7>&-
     return 1
@@ -801,6 +804,13 @@ changes_requested=""
 gateable=""
 # **label と実態の食い違い。** 未解決が残っているのに `changes-requested` が無い状態で、
 # 運用が壊れている（付け忘れではなく、**付ける段が無い経路がある**）。
+# **並びで持つ** (#445)。**スカラだと、最後に当たった 1 本しか残らない**
+# ——**読む側は「今回の食い違い全部」だと思って読む**ので、**もう 1 本は、その周回では
+# 無かったことになる**（**失われはしないが、片方が片付くまで遅れる**）。
+#
+# **読む側は、等号ではなく「並びに居るか」で見ること**
+# （`[[ " $mismatched " == *" $number "* ]]`）——**等号で見ると、2 本目が
+# 「今回の食い違いではない」側へ落ちる。**
 mismatched=""
 # **答えを待っている側**の PR（未解決があり、最後に書いたのが自分たちの役）。
 answered=""
@@ -827,7 +837,8 @@ while IFS="$FIELD" read -r number labels _head _labeled_at _pushed_at _body; do
     # **食い違いは「label が 1 つも付いていない」ときだけ**である。
     # 既に付いている PR へ新しい指摘が届いた状態は、**運用が壊れているのではない**——
     # 渡す先が master だというだけなので、ここで記録すると**正常な受け渡しで人を呼ぶ**。
-    [[ ",$labels," == *",changes-requested,"* ]] || mismatched="$number"
+    [[ ",$labels," == *",changes-requested,"* ]] ||
+      mismatched="${mismatched:+$mismatched }$number"
   elif ((requested_here > 0)); then
     # 当否は判断済み（その指摘が見えている時点で label が付いている）。直すのは worker
     changes_requested="${changes_requested:+$changes_requested }$number"
@@ -858,8 +869,14 @@ done <<<"$prs"
 # **消す側を足したので、残る側を見る**（`AGENTS.md` §5）——**閉じた PR の起点も、
 # ここを通らなくなるだけで残る。** **読む者はいない**（**番号ごとの記録で、その番号は
 # 二度と現れない**）が、**残ることは書いておく。**
+#
+# **並びに居るかで見る** (#445)。**`!=` は「1 本しか無い」ことの実装**であって、
+# **意図そのものではない**——**消したいのは「いま食い違っていない PR の起点」**である。
+# **前後に空白を付けて挟む**ので、**番号の部分一致では当たらない**（`1234` の中の `234`）。
+# **`$mismatched` が空なら、どれも居ない**ので、**全部消える**（**食い違いが 1 本も
+# 無いなら、それが正しい**）。
 for number in $examined; do
-  [[ $number != "$mismatched" ]] || continue
+  [[ " $mismatched " != *" $number "* ]] || continue
   mismatch_forget "$number"
 done
 
@@ -1260,12 +1277,19 @@ done
 # `untriaged`＝master の番**なので、**いちばん出したい場面で出なくなる**）。
 mismatch_exit=0
 if [[ -n $mismatched ]]; then
-  echo "[WARN] PR #${mismatched}: 未解決スレッドがあるのに changes-requested がありません" >&2
-  if mismatch_is_overlooked "$mismatched"; then
-    mismatch_exit=3
-  else
-    echo "       master がまだ判定していないだけかもしれません（$MISMATCH_GRACE_ROUNDS 周ぶん待ちます）" >&2
-  fi
+  # **1 本ずつ出す** (#445)。**まとめて 1 行にすると、読む人が「1 件だけ」と読む**
+  # ——**どれを見に行けばよいかは、番号ごとに言う。**
+  #
+  # **猶予も 1 本ずつ数える** (#442)。**PR ごとに起点を置いている**ので、
+  # **1 本が猶予の中でも、もう 1 本は超えていることがある**——**超えたぶんで記録する。**
+  for mismatched_number in $mismatched; do
+    echo "[WARN] PR #${mismatched_number}: 未解決スレッドがあるのに changes-requested がありません" >&2
+    if mismatch_is_overlooked "$mismatched_number"; then
+      mismatch_exit=3
+    else
+      echo "       master がまだ判定していないだけかもしれません（$MISMATCH_GRACE_ROUNDS 周ぶん待ちます）" >&2
+    fi
+  done
 fi
 
 # **渡す相手がいなければ、ここで終わる**（記録は上で通してある）。
