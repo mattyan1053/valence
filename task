@@ -751,11 +751,56 @@ cmd_loop_worker_paths() {
 #
 #   exit 0 = 場所を出す / exit 2 = worktree の一覧を読めない
 preview_worktree_path() {
+  local main
+  main="$(main_worktree_path)" || return 2
+  printf '%s' "${main}-preview"
+}
+
+# clone そのもの（**いちばん最初の worktree**）。**秘密の置き場でもある。**
+#
+#   exit 0 = 場所を出す / exit 2 = worktree の一覧を読めない
+main_worktree_path() {
   local listed main
   listed="$(git worktree list --porcelain)" || return 2
   main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
   [[ -n $main ]] || return 2
-  printf '%s' "${main}-preview"
+  printf '%s' "$main"
+}
+
+# **人が見る作業場から、既定の作業場の `.env` を見えるようにする** (#462 のレビュー)。
+#
+# **秘密は clone 本体にだけ置く**（gitignore 済み）ので、**worktree には無い**
+# ——**`compose.yaml` の `env_file` は作業場ごとに解決される**ため、**そのままでは
+# 接続値が 1 つも渡らず、`src/middleware.ts` が全要求で落ちる**（**画面は出ない**）。
+#
+# **写さずに繋ぐ。** **写すと、書き換えた日から食い違い**、**古い値で動いていることは
+# 画面から分からない**（§6。**秘密を 2 箇所に置かない**）。
+#
+# **無いなら、そう言って進む。** **`add` の時点では用意されていないこともある**ので、
+# **`up` でも通る**（**置いたあとに繋がる**）。
+link_preview_env() {
+  local wt="$1" main
+  [[ ! -e "$wt/.env" ]] || return 0
+  main="$(main_worktree_path)" || return 1
+  if [[ ! -f "$main/.env" ]]; then
+    echo "==> 既定の作業場に .env がありません（$main/.env）。用意してから ./task loop:preview:up" >&2
+    return 0
+  fi
+  if ! ln -s "$main/.env" "$wt/.env"; then
+    echo "==> .env を繋げません: $wt/.env" >&2
+    return 1
+  fi
+  echo "==> .env を繋ぎました: $wt/.env -> $main/.env"
+}
+
+# **人が見る作業場に、手が入っていないか。** **`git switch --detach` は、競合しない
+# 変更をそのまま残す**ので、**「origin/main を映している」と言いながら違うものが映る。**
+#
+#   exit 0 = きれい / exit 1 = 変更がある / exit 2 = 読めない
+preview_is_clean() {
+  local dirty
+  dirty="$(git -C "$1" status --porcelain)" || return 2
+  [[ -z $dirty ]] || return 1
 }
 
 # 人が見る画面の作業場を作る（origin/main を映す） 例: ./task loop:preview:add
@@ -790,6 +835,7 @@ cmd_loop_preview_add() {
   fi
   # **detached で貼る。** **branch を掴むと、他の作業場が main を checkout できない。**
   git worktree add --detach "$wt" origin/main || return 1
+  link_preview_env "$wt" || return 1
   echo "==> 人が見る作業場を作成: $wt (compose project=$(basename -- "$wt") port=$port)"
   echo "    上げるには: ./task loop:preview:up"
 }
@@ -801,6 +847,24 @@ cmd_loop_preview_up() {
     echo "==> 人が見る作業場がありません。先に ./task loop:preview:add" >&2
     return 1
   fi
+  # **手が入っていたら、上げない** (#462 のレビュー)。**`git switch --detach` は競合
+  # しない変更を残す**ので、**そのまま上げると「origin/main を映している」が嘘になる。**
+  local clean=0
+  preview_is_clean "$wt" || clean=$?
+  case $clean in
+    0) ;;
+    1)
+      echo "==> 人が見る作業場に変更が残っています: $wt" >&2
+      echo "    ここは origin/main を映す場所です。直すなら作業場で直し、ここは元へ戻すこと" >&2
+      echo "    （捨ててよいなら: git -C $wt restore . && git -C $wt clean -fd）" >&2
+      return 1
+      ;;
+    *)
+      echo "==> 人が見る作業場の状態を読めません: $wt" >&2
+      return 1
+      ;;
+  esac
+  link_preview_env "$wt" || return 1
   # **取ってから移る。** **移れなければ、上げない**——**古い版を「最新」として見せると、
   # #457 が消しに来た誤読をそのまま作る。**
   if ! git -C "$wt" fetch --quiet origin main; then
@@ -831,6 +895,15 @@ cmd_loop_preview_show() {
   echo "人が見る画面: http://127.0.0.1:${port}/"
   echo "  作業場: $wt"
   echo "  映している commit: $sha $subject"
+  # **黙ると、違うものを `origin/main` として読む** (#462 のレビュー)——**止めるだけでは
+  # 足りない。** **既に上がっている画面は、ここを読んで判断される。**
+  local clean=0
+  preview_is_clean "$wt" || clean=$?
+  case $clean in
+    0) ;;
+    1) echo "  [注意] 変更が残っています——映っているのは origin/main ではありません" ;;
+    *) echo "  [注意] 作業ツリーの状態を読めません——映っているものを確かめられません" ;;
+  esac
 }
 
 # worker の作業場を増やす 例: ./task loop:worker:add b

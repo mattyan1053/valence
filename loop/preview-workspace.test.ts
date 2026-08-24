@@ -14,7 +14,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -170,6 +178,78 @@ describe("./task loop:preview", () => {
       git(`${dir}-preview`, ["rev-parse", "HEAD"]),
       "main が進んでも、古いままになっている",
     ).toBe(merged);
+  });
+
+  it("既定の作業場の .env が、そのまま見える", () => {
+    // **秘密は clone 本体の `.env` にだけ置く**（gitignore 済み）——**worktree には
+    // 無い** (#462 のレビュー)。**`compose.yaml` の `env_file` は作業場ごとに解決される**
+    // ので、**そのままだと接続値が 1 つも渡らず、`src/middleware.ts` が全要求で落ちる。**
+    const { dir, env } = repo();
+    writeFileSync(join(dir, ".env"), "SUPABASE_URL=http://kong:8000\n");
+
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+
+    expect(readFileSync(join(`${dir}-preview`, ".env"), "utf8"), ".env が届いていない").toContain(
+      "SUPABASE_URL",
+    );
+  });
+
+  it(".env を写さない（あとで書き換えても、同じものが見える）", () => {
+    // **写すと、書き換えた日から食い違う**——**しかも「古い値で動いている」ことは
+    // 画面からは分からない。** **秘密を 2 箇所に置かない**（§6）。
+    const { dir, env } = repo();
+    writeFileSync(join(dir, ".env"), "SUPABASE_URL=http://kong:8000\n");
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+
+    writeFileSync(join(dir, ".env"), "SUPABASE_URL=http://kong:8000\nAFTER=1\n");
+
+    expect(
+      readFileSync(join(`${dir}-preview`, ".env"), "utf8"),
+      "写しているので、書き換えが届かない",
+    ).toContain("AFTER=1");
+  });
+
+  it("あとから .env を置いても、上げ直しで繋がる", () => {
+    // **`add` の時点では無いこともある**——**そこで諦めると、人は理由の分からない
+    // 500 を見る。**
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    writeFileSync(join(dir, ".env"), "SUPABASE_URL=http://kong:8000\n");
+
+    expect(task(dir, env, ["loop:preview:up"]).status).toBe(0);
+
+    expect(readFileSync(join(`${dir}-preview`, ".env"), "utf8"), ".env が届いていない").toContain(
+      "SUPABASE_URL",
+    );
+  });
+
+  it("作業ツリーが汚れていたら、上げ直さない", () => {
+    // **`git switch --detach` は、競合しない変更をそのまま残す** (#462 のレビュー)
+    // ——**`origin/main` を映していると言いながら、実際には違うものが映る。**
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    writeFileSync(join(`${dir}-preview`, "task"), "#!/usr/bin/env bash\n# 手で直した\n", {
+      mode: 0o755,
+    });
+
+    const up = task(dir, env, ["loop:preview:up"]);
+
+    expect(up.status, "汚れたまま上げている").not.toBe(0);
+    expect(`${up.stdout}${up.stderr}`, "何が起きているかが出ていない").toMatch(/変更/);
+  });
+
+  it("汚れているなら、映しているものが違うと言う", () => {
+    // **止めるだけでは足りない。** **既に上がっている画面**は、**`show` を読んで
+    // 判断される**——**そこで黙ると、違うものを `origin/main` として読む。**
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    writeFileSync(join(`${dir}-preview`, "task"), "#!/usr/bin/env bash\n# 手で直した\n", {
+      mode: 0o755,
+    });
+
+    const shown = task(dir, env, ["loop:preview:show"]);
+
+    expect(`${shown.stdout}${shown.stderr}`, "汚れていることを言っていない").toMatch(/変更/);
   });
 
   it("人が見る画面と同じポートへ落ちる worker 名は、足す前に弾く", () => {
