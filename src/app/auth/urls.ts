@@ -32,11 +32,11 @@ import { allowedRedirectOrigins } from "../../composition/auth";
 export function originFrom(request: Request, allowed: AllowedRedirects<string>): string {
   const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
   // **読めなかったことを、「1 つも許していない」と言わない** (#453 のレビュー)
-  // ——**この設定は開発のもの**で、**本番の口に置かれる保証が無い。**
-  // **混ぜると、本番で誰もログインできないのに、理由が「許可されていない host」になる。**
+  // ——**渡し忘れ・置き忘れは起きる。** **混ぜると、誰もログインできないのに、
+  // 理由が「許可されていない host」になる。**
   if (allowed.kind === "unreadable") {
     throw new Error(
-      `戻り先の許可一覧を読めません: ${allowed.path}（この設定は開発のもの——本番では、その環境の GoTrue が持つ一覧を渡す口が要る）`,
+      `戻り先の許可一覧を読めません: ${allowed.source}（本番では AUTH_ALLOWED_ORIGINS で渡す。開発では supabase/config.toml を読む）`,
     );
   }
   const matched = allowed.listed.find((origin) => new URL(origin).host === host);

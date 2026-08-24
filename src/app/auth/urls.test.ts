@@ -85,7 +85,7 @@ describe("許可一覧を読めなかったとき", () => {
   it("読めなかった、と言う", () => {
     const unreadable: AllowedRedirects<string> = {
       kind: "unreadable",
-      path: "/どこにも無い/config.toml",
+      source: "/どこにも無い/config.toml",
     };
 
     expect(() => originFrom(request, unreadable)).toThrow(/読めません/);
