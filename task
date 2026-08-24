@@ -69,7 +69,7 @@ worker_name_ok() {
 # 「衝突なし」になり、そのまま足してしまう**——**弾く仕組みを入れたなら、
 # 弾けなかったときに何が起きるかまで見る**（#190 で塞いだのと同じ形）。
 workspace_with_port() {
-  local want="$1" p other listed
+  local want="$1" self="${2:-}" p other listed name
   # **プロセス置換にしない。** **中の終了コードは呼び出し側に伝わらない**ので、
   # **`git worktree list` が落ちるとループが 0 回回り、「無い」と同じ見え方になる**
   if ! listed="$(git worktree list --porcelain)"; then
@@ -77,15 +77,30 @@ workspace_with_port() {
   fi
   while read -r p; do
     [[ -n $p && $p != "$PWD" ]] || continue
-    other="$(workspace_port "$(basename -- "$p")")" || return 2
-    [[ $other != "$want" ]] || { printf '%s' "$(basename -- "$p")"; return 0; }
+    name="$(basename -- "$p")"
+    # **実在するものは、常に衝突として扱う** (#462 のレビュー 2 周目)。**`self` を
+    # ここで外すと、別のパスに同じ名前の作業場があっても素通りする**——**ポートも
+    # compose project も basename から決まる**ので、**追加は通り、上げたときに
+    # 相手のコンテナを掴む**（**予約は、まさにそれを防ぐために入れた**）。
+    other="$(workspace_port "$name")" || return 2
+    [[ $other != "$want" ]] || { printf '%s' "$name"; return 0; }
   done < <(printf '%s\n' "$listed" | awk '/^worktree /{print $2}')
   # **master の作業場は、登録されていなくても予約する** (#195 のレビュー 2 周目)。
   # **`cmd_loop_setup` は検査を持たない**ので、**`add` を先に、`loop:setup` を後に打つと、
   # master が同じポートで作られる**——**1 人で、順番に踏める**。
   # **登録の有無で見ない**ぶん、**setup 以外の経路で作られても効く。**
-  other="$(workspace_port "$(basename -- "${PWD}-master")")" || return 2
-  [[ $other != "$want" ]] || { printf '%s' "$(basename -- "${PWD}-master")"; return 0; }
+  #
+  # **人が見る画面も、同じ理由で予約する** (#457)——**`loop:worker:add` を先に打った日に、
+  # `loop:preview:add` が入れなくなる。**
+  #
+  # **`self` を外すのは、ここだけ** (#462 のレビュー 2 周目)。**予約は「まだ無いもの」を
+  # 守るため**なので、**これから作る本人に当てると、自分の予約で自分が入れなくなる**
+  # ——**実在するものは上で数えてある。**
+  for name in "$(basename -- "${PWD}-master")" "$(basename -- "${PWD}-preview")"; do
+    [[ $name != "$self" ]] || continue
+    other="$(workspace_port "$name")" || return 2
+    [[ $other != "$want" ]] || { printf '%s' "$name"; return 0; }
+  done
   return 1
 }
 
@@ -718,15 +733,182 @@ cmd_loop_master_path() { master_worktree_path; echo; }
 #
 # worker の作業場を 1 行ずつ出す (#378。bin/loop-cadence が読む。読むだけ)
 cmd_loop_worker_paths() {
-  local master="" status=0
+  local master="" preview="" status=0
   # **登録されているものが正**である（`loop_stop_paths` と同じ口）。
   master="$(master_worktree_path)" || status=$?
   if ((status == 2)); then
     echo "==> worktree の一覧を読めません" >&2
     return 1
   fi
+  # **人が見る画面も外す** (#457)。**周回を回さない作業場**なので、**混ぜると
+  # `bin/loop-cadence` が「止まっている worker」として数え続ける**——**人が呼ばれる。**
+  # **読めなければ、外さずに進む**（**worker を数えないより、1 つ多いほうが安い**）。
+  preview="$(preview_worktree_path)" || preview=""
   git worktree list --porcelain |
-    awk -v skip="$master" '/^worktree /{ if ($2 != skip) print $2 }'
+    awk -v skip="$master" -v skip2="$preview" \
+      '/^worktree /{ if ($2 != skip && $2 != skip2) print $2 }'
+}
+
+# **人が見る画面の作業場**（#457）。**登録の有無に関わらず、場所は決まる。**
+#
+# **`${PWD}` から組み立てない。** **worker の作業場から打っても、指す先は 1 つ**である
+# ——**`master_worktree_path` と同じく、いちばん最初の worktree（clone そのもの）を基点にする。**
+#
+#   exit 0 = 場所を出す / exit 2 = worktree の一覧を読めない
+preview_worktree_path() {
+  local main
+  main="$(main_worktree_path)" || return 2
+  printf '%s' "${main}-preview"
+}
+
+# clone そのもの（**いちばん最初の worktree**）。**秘密の置き場でもある。**
+#
+#   exit 0 = 場所を出す / exit 2 = worktree の一覧を読めない
+main_worktree_path() {
+  local listed main
+  listed="$(git worktree list --porcelain)" || return 2
+  main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
+  [[ -n $main ]] || return 2
+  printf '%s' "$main"
+}
+
+# **人が見る作業場から、既定の作業場の `.env` を見えるようにする** (#462 のレビュー)。
+#
+# **秘密は clone 本体にだけ置く**（gitignore 済み）ので、**worktree には無い**
+# ——**`compose.yaml` の `env_file` は作業場ごとに解決される**ため、**そのままでは
+# 接続値が 1 つも渡らず、`src/middleware.ts` が全要求で落ちる**（**画面は出ない**）。
+#
+# **写さずに繋ぐ。** **写すと、書き換えた日から食い違い**、**古い値で動いていることは
+# 画面から分からない**（§6。**秘密を 2 箇所に置かない**）。
+#
+# **無いなら、そう言って進む。** **`add` の時点では用意されていないこともある**ので、
+# **`up` でも通る**（**置いたあとに繋がる**）。
+link_preview_env() {
+  local wt="$1" main
+  [[ ! -e "$wt/.env" ]] || return 0
+  main="$(main_worktree_path)" || return 1
+  if [[ ! -f "$main/.env" ]]; then
+    echo "==> 既定の作業場に .env がありません（$main/.env）。用意してから ./task loop:preview:up" >&2
+    return 0
+  fi
+  if ! ln -s "$main/.env" "$wt/.env"; then
+    echo "==> .env を繋げません: $wt/.env" >&2
+    return 1
+  fi
+  echo "==> .env を繋ぎました: $wt/.env -> $main/.env"
+}
+
+# **人が見る作業場に、手が入っていないか。** **`git switch --detach` は、競合しない
+# 変更をそのまま残す**ので、**「origin/main を映している」と言いながら違うものが映る。**
+#
+#   exit 0 = きれい / exit 1 = 変更がある / exit 2 = 読めない
+preview_is_clean() {
+  local dirty
+  dirty="$(git -C "$1" status --porcelain)" || return 2
+  [[ -z $dirty ]] || return 1
+}
+
+# 人が見る画面の作業場を作る（origin/main を映す） 例: ./task loop:preview:add
+cmd_loop_preview_add() {
+  local wt port existing found=0
+  if ! wt="$(preview_worktree_path)"; then
+    echo "==> worktree の一覧を読めないので、作りません" >&2
+    return 1
+  fi
+  if [[ -e $wt ]]; then
+    echo "==> 既にあります: $wt（上げ直すのは ./task loop:preview:up）" >&2
+    return 1
+  fi
+  port="$(workspace_port "$(basename -- "$wt")")" || return 1
+  # **worker と同じ検査を通す** (#82 / #195)。**先に足された worker と重なることもある**
+  # ——**足したあとに「アドレス使用中」で落ちる形にしない。**
+  existing="$(workspace_with_port "$port" "$(basename -- "$wt")")" || found=$?
+  case $found in
+    0)
+      echo "==> ポート $port が $existing と重なります（先に $existing を消すか、名前を変えること）" >&2
+      return 1
+      ;;
+    1) ;;
+    *)
+      echo "==> 他の作業場のポートを読めないので、作りません（同じポートかもしれません）" >&2
+      return 1
+      ;;
+  esac
+  if ! git fetch --quiet origin main; then
+    echo "==> origin/main を取ってこられないので、作りません" >&2
+    return 1
+  fi
+  # **detached で貼る。** **branch を掴むと、他の作業場が main を checkout できない。**
+  git worktree add --detach "$wt" origin/main || return 1
+  link_preview_env "$wt" || return 1
+  echo "==> 人が見る作業場を作成: $wt (compose project=$(basename -- "$wt") port=$port)"
+  echo "    上げるには: ./task loop:preview:up"
+}
+
+# 人が見る画面を origin/main で上げ直す 例: ./task loop:preview:up
+cmd_loop_preview_up() {
+  local wt
+  if ! wt="$(preview_worktree_path)" || [[ ! -d $wt ]]; then
+    echo "==> 人が見る作業場がありません。先に ./task loop:preview:add" >&2
+    return 1
+  fi
+  # **手が入っていたら、上げない** (#462 のレビュー)。**`git switch --detach` は競合
+  # しない変更を残す**ので、**そのまま上げると「origin/main を映している」が嘘になる。**
+  local clean=0
+  preview_is_clean "$wt" || clean=$?
+  case $clean in
+    0) ;;
+    1)
+      echo "==> 人が見る作業場に変更が残っています: $wt" >&2
+      echo "    ここは origin/main を映す場所です。直すなら作業場で直し、ここは元へ戻すこと" >&2
+      echo "    （捨ててよいなら: git -C $wt restore . && git -C $wt clean -fd）" >&2
+      return 1
+      ;;
+    *)
+      echo "==> 人が見る作業場の状態を読めません: $wt" >&2
+      return 1
+      ;;
+  esac
+  link_preview_env "$wt" || return 1
+  # **取ってから移る。** **移れなければ、上げない**——**古い版を「最新」として見せると、
+  # #457 が消しに来た誤読をそのまま作る。**
+  if ! git -C "$wt" fetch --quiet origin main; then
+    echo "==> origin/main を取ってこられないので、上げ直しません（いまの画面はそのままです）" >&2
+    return 1
+  fi
+  if ! git -C "$wt" switch --detach --quiet origin/main; then
+    echo "==> origin/main へ移れません: $wt（何か残っていないか見ること）" >&2
+    return 1
+  fi
+  (cd "$wt" && ./task up) || return 1
+  cmd_loop_preview_show
+}
+
+# 人が見る画面が、いつの main を映しているか 例: ./task loop:preview:show
+cmd_loop_preview_show() {
+  local wt port sha subject
+  if ! wt="$(preview_worktree_path)" || [[ ! -d $wt ]]; then
+    echo "==> 人が見る作業場がありません。先に ./task loop:preview:add" >&2
+    return 1
+  fi
+  port="$(workspace_port "$(basename -- "$wt")")" || return 1
+  if ! sha="$(git -C "$wt" rev-parse --short HEAD)"; then
+    echo "==> 何を映しているか読めません: $wt" >&2
+    return 1
+  fi
+  subject="$(git -C "$wt" log -1 --format=%s 2>/dev/null || true)"
+  echo "人が見る画面: http://127.0.0.1:${port}/"
+  echo "  作業場: $wt"
+  echo "  映している commit: $sha $subject"
+  # **黙ると、違うものを `origin/main` として読む** (#462 のレビュー)——**止めるだけでは
+  # 足りない。** **既に上がっている画面は、ここを読んで判断される。**
+  local clean=0
+  preview_is_clean "$wt" || clean=$?
+  case $clean in
+    0) ;;
+    1) echo "  [注意] 変更が残っています——映っているのは origin/main ではありません" ;;
+    *) echo "  [注意] 作業ツリーの状態を読めません——映っているものを確かめられません" ;;
+  esac
 }
 
 # worker の作業場を増やす 例: ./task loop:worker:add b
