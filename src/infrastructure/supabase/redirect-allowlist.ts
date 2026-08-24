@@ -45,9 +45,17 @@ function configPath(): string {
   return join(process.cwd(), "supabase", "config.toml");
 }
 
-/** `"…"` の並びから、URL だけを取り出す。 */
+/**
+ * `"…"` の並びから、URL だけを取り出す。
+ *
+ * **「読める」の定義を 1 つにする** (#477 のレビュー)——**中身を確かめる側
+ * （`fullyQuoted`）と、ここで、空文字の扱いが食い違っていた**（**`[""]` は
+ * 「全部読めた」と判定され、ここで落ちる**）。**何にも当たらないパターン**なので
+ * **害は無かった**が、**2 つの正規表現が少しずつ違う「読める」を持つ**のは、
+ * **判定が 2 段あることに気づけなくなる形**である。
+ */
 function quoted(line: string): string[] {
-  return [...line.matchAll(/"([^"]+)"/g)].map((match) => match[1] as string);
+  return [...line.matchAll(/"([^"]*)"/g)].map((match) => match[1] as string);
 }
 
 /**
@@ -63,9 +71,18 @@ function fullyQuoted(body: string): boolean {
   return /^\s*(?:"[^"]*"\s*,\s*)*(?:"[^"]*"\s*)?$/.test(body);
 }
 
-/** その鍵が書かれている行。**無ければ `undefined`**（**書いていない、は読めた側**）。 */
+/**
+ * その鍵が書かれている行。**無ければ `undefined`**（**書いていない、は読めた側**）。
+ *
+ * **探す側はゆるく** (#469 のレビュー 3 周目)——**TOML は鍵の前に空白を置ける**ので、
+ * **行頭に固定すると「書いてあるのに書いていない」になる**（**そこが `listed` 0 件へ
+ * 落ちると、この口が消しに来た誤診がそのまま残る**）。
+ *
+ * **読む側は厳しいまま**（下の 2 つの正規表現）——**知らない書き方は
+ * 「書かれているが読めない」へ落ちる。** **書式が増えても、そこに穴は開かない。**
+ */
 function lineOf(config: string, key: string): string | undefined {
-  return config.split("\n").find((line) => new RegExp(`^${key}\\s*=`).test(line));
+  return config.split("\n").find((line) => new RegExp(`^\\s*${key}\\s*=`).test(line));
 }
 
 /**
@@ -97,11 +114,12 @@ export function allowedRedirectPatterns(path = configPath()): AllowedRedirects<s
   }
   const siteLine = lineOf(config, "site_url");
   const additionalLine = lineOf(config, "additional_redirect_urls");
-  const site = siteLine === undefined ? undefined : /^site_url\s*=\s*"([^"]+)"\s*$/.exec(siteLine);
+  const site =
+    siteLine === undefined ? undefined : /^\s*site_url\s*=\s*"([^"]*)"\s*$/.exec(siteLine);
   const additional =
     additionalLine === undefined
       ? undefined
-      : /^additional_redirect_urls\s*=\s*\[(.*)\]\s*$/.exec(additionalLine);
+      : /^\s*additional_redirect_urls\s*=\s*\[(.*)\]\s*$/.exec(additionalLine);
   const body = additional?.[1];
   if (
     (siteLine !== undefined && site === null) ||

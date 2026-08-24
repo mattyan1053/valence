@@ -191,6 +191,43 @@ describe("設定の書式が読めないとき", () => {
     });
   });
 
+  it("鍵がインデントされていても、書かれている側として読む", () => {
+    // **TOML は鍵の前に空白を置ける** (#469 のレビュー 3 周目)——**探す側が厳しいと、
+    // 書いてあるのに「鍵が無い」へ落ち**、**この PR が足した 3 つ目の状態
+    // （鍵が無い → 読めた側）が嘘になる。**
+    const path = configWith(
+      [
+        "[auth]",
+        '  site_url = "http://localhost:3000"',
+        '\tadditional_redirect_urls = ["http://localhost:3000/**"]',
+        "",
+      ].join("\n"),
+    );
+
+    expect(allowedRedirectPatterns(path)).toEqual({
+      kind: "listed",
+      listed: ["http://localhost:3000", "http://localhost:3000/**"],
+    });
+  });
+
+  it("インデントされていても、値が読めなければ読めなかったとして返す", () => {
+    // **探す側はゆるく、読む側は厳しく**——**知らない書き方は
+    // 「書かれているが読めない」へ落ちる**（**「書かれていない」ではない**）
+    const path = configWith(["[auth]", "  site_url = 'http://localhost:3000'", ""].join("\n"));
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("空文字の要素は、読めた側である", () => {
+    // **「読める」の定義を 1 つにする**——**中身を確かめる側（`fullyQuoted`）と
+    // 取り出す側（`quoted`）で、空文字の扱いが食い違っていた。**
+    // **何にも当たらないパターン**なので、**オリジンとしては数えない。**
+    const path = configWith(["[auth]", 'additional_redirect_urls = [""]', ""].join("\n"));
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "listed", listed: [""] });
+    expect(allowedRedirectOrigins(path)).toEqual({ kind: "listed", listed: [] });
+  });
+
   it("鍵が無いのは、読めなかったではない", () => {
     // **書いていないものは、読めなかったのではない**——**GoTrue の既定に従うだけ**である
     const path = configWith(["[auth]", "enabled = true", ""].join("\n"));
