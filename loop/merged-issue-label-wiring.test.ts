@@ -183,6 +183,67 @@ describe("PR を出さずに終わった Issue", () => {
   });
 });
 
+/**
+ * **worker が畳むときに足す印**（#492 のレビュー）。**手順書から取り出す**——
+ * **写すと、名前を変えた側だけが緑になる。**
+ */
+function foldMarker(): string {
+  const found = [...resumeSection().matchAll(/gh issue edit <Issue番号> --add-label (\S+)/g)].map(
+    (match) => match[1] ?? "",
+  );
+
+  expect(found, "畳むときに足す印が 1 つに絞れない").toHaveLength(1);
+  return found[0] ?? "";
+}
+
+/** master の手順で、その label を読む行。**両側を突き合わせるために取り出す。** */
+function masterMentions(label: string): string[] {
+  return procedureText("master")
+    .split("\n")
+    .filter((line) => line.includes(label));
+}
+
+describe("PR を出さずに終わった Issue を、master が閉じられる", () => {
+  it("畳んだ印を、master の昇格が除いている", () => {
+    // **`backlog` は昇格の候補**である (#492 のレビュー)——**印が無ければ、master は
+    // `ready` へ戻し**、**同じ調査がもう一度取られる。** **書いてあるかではなく、
+    // 除く側に同じ名前が入っているか**を見る。
+    // **`select(` で探さない**（変異が素通りした）——**閉じる側の行も `select(` を
+    // 使う**ので、**除く側を消しても、拾う側の行が当たって緑のまま**だった。
+    // **絞る行そのものの目印**（`waiting-condition` を `| not)` で外している）**で探す。**
+    const marker = foldMarker();
+    const promotion = procedureText("master")
+      .split("\n")
+      .filter((line) => line.includes("waiting-condition") && line.includes("| not)"));
+
+    expect(promotion, "昇格の候補を絞る行が見つからない").not.toEqual([]);
+    expect(promotion.join("\n"), `昇格の候補から ${marker} を除いていない`).toContain(marker);
+  });
+
+  it("畳んだ印を、master が閉じる側で読んでいる", () => {
+    // **閉じる経路は `bin/loop-close-candidates` だけ**で、**あれは PR 番号を取る**
+    // ——**PR の無い完了 Issue を拾う口が要る。**
+    const marker = foldMarker();
+    const closing = masterMentions(marker).filter((line) => line.includes("gh issue"));
+
+    expect(closing, `${marker} を読んで閉じる道が master に無い`).not.toEqual([]);
+  });
+
+  it("印を足しても、どの一覧にも出てくる", () => {
+    // **`backlog` は残す**（#325 の検出器は `backlog` / `ready` / `in-progress` /
+    // `blocked` のどれかを見る）——**印だけにすると、この検出器が鳴る。**
+    const place = workspace(["in-progress"]);
+
+    runBlock(mergedBlock(), place);
+    runBlock(`gh issue edit ${ISSUE} --add-label ${foldMarker()}`, place);
+
+    const labels = readFileSync(place.labelsFile, "utf8").split("\n").filter(Boolean);
+    expect(labels, "backlog を外している").toContain("backlog");
+    expect(labels, "印が付いていない").toContain(foldMarker());
+    expect(detectorStatus(place), "検出器が鳴っている").toBe(0);
+  });
+});
+
 describe("マージしたのに閉じない Issue の行き先", () => {
   it("手順書のとおりに打つと、どの一覧にも出てこない状態にならない", () => {
     // **完了条件そのもの。** **`Closes` の無い PR がマージされたあと、

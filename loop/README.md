@@ -242,6 +242,7 @@ worker は毎周回 `in-progress` と `blocked` の Issue のコメントを読�
 | `waiting-condition` | **`backlog` に付ける。** いまは昇格できない（完了条件が満たせない） | master |
 | `parked` | **PR に付ける。** 待って保留中（先行 PR / 人の判断） | master |
 | `awaiting-human` | **PR に付ける。** 人の判断を待っている（`parked` と一緒に付く） | master |
+| `awaiting-master` | **`backlog` に付ける。** PR を出さずに終わった。master が読んで閉じる | worker |
 | `changes-requested` | **PR に付ける。** master が出した要求が未処理 | master |
 | `deferred-finding` | レビュー上限に達した PR から外出しした指摘 | master |
 
