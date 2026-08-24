@@ -76,7 +76,14 @@ workspace_with_port() {
     return 2
   fi
   while read -r p; do
-    [[ -n $p && $p != "$PWD" ]] || continue
+    # **この作業場も数える** (#473 のレビュー)。**#195 から `$PWD` を外していた**が、
+    # **clone 本体は実在してポートを握っている**——**外すと、そこへ落ちる名前を
+    # 素通しし**、**足したあとに「アドレス使用中」で落ちる**（**この口が消しに来た形**）。
+    # **踏める名前は実在する**（`foo-preview` と `foo-preview-worker-w104`）。
+    #
+    # **これから作る本人を外すのは、下の予約のループだけ**である——**そちらは
+    # 「まだ無いもの」を守る**ので、**自分の予約で自分が弾かれてはいけない。**
+    [[ -n $p ]] || continue
     name="$(basename -- "$p")"
     # **実在するものは、常に衝突として扱う** (#462 のレビュー 2 周目)。**`self` を
     # ここで外すと、別のパスに同じ名前の作業場があっても素通りする**——**ポートも
@@ -138,10 +145,28 @@ workspace_port() {
     return 0
   fi
   # **人が見る作業場**（`preview_worktree_path` が `<clone>-preview` を作る）。
-  # **接尾辞で見る** (#463 のレビュー)——**clone の名前に依らせない。**
+  #
+  # **接尾辞では見ない** (#473)——**`foo-preview` で clone すると、その clone 本体と
+  # その人が見る作業場（`foo-preview-preview`）が、どちらも同じポートになった。**
+  # **`workspace_with_port` は呼んだ側を検査から外す**ので、**`loop:preview:add` は
+  # その衝突を見つけない**——**両方を上げると、あとから上げたほうが落ちる。**
+  #
+  # **実際の人が見る作業場かどうかで見る**（**場所を知っているのは
+  # `preview_worktree_path`**）。**接尾辞で絞ってから訊く**ので、**ふつうの作業場では
+  # git を余分に叩かない。**
+  #
+  # **読めなければ、決めない**——**下の `git hash-object` と同じ倒し方**である
+  # （**この作業場が git の中に無ければ、どちらにせよ決められない**）。
   if [[ $name == *-preview ]]; then
-    printf '%s' "$PREVIEW_APP_PORT"
-    return 0
+    local preview_path
+    if ! preview_path="$(preview_worktree_path)"; then
+      echo "[FAIL] 人が見る作業場の場所を読めません: $name" >&2
+      return 1
+    fi
+    if [[ $name == "$(normalize_workspace_name "$(basename -- "$preview_path")")" ]]; then
+      printf '%s' "$PREVIEW_APP_PORT"
+      return 0
+    fi
   fi
   # **digest は `git` で取る** (#195 のレビュー)。**`sha256sum` はホスト標準ではない**
   # ——**このファイルは 8 行上で「`readlink -f` は GNU 依存なので使わない」と書いている**
