@@ -62,9 +62,23 @@ describe("実行時に渡された許可一覧", () => {
     });
   });
 
-  it("空で渡されたら、読めなかったとして返す", () => {
-    // **「渡したのに 1 つも許されない」を、黙って通さない**
+  it("空で渡されたら、渡されていないものとして扱う", () => {
+    // **`.env.example` を写すと、開発では空のまま渡る** (#453 のレビュー 2 周目)
+    // ——**「空で定義されている」と「定義されていない」は見分けられない**ので、
+    // **見分けられないほうへ倒さない**（**倒すと、写しただけの開発環境で
+    // ログインが落ちる**）
     vi.stubEnv("AUTH_ALLOWED_ORIGINS", "   ");
+
+    const allowed = allowedRedirectOrigins(DEV_CONFIG);
+
+    expect(allowed.kind, "空を「渡された」と読んでいる").toBe("listed");
+    expect(allowed.kind === "listed" ? allowed.listed : []).toContain("http://localhost:3000");
+  });
+
+  it("区切りだけが渡されたら、読めなかったとして返す", () => {
+    // **空とは別である**——**何か書いてあるのに 1 つも取れない**ので、
+    // **黙って設定ファイルへ落ちない**（**渡したつもりが効いていない**）
+    vi.stubEnv("AUTH_ALLOWED_ORIGINS", ",,");
 
     expect(allowedRedirectOrigins(DEV_CONFIG)).toEqual({
       kind: "unreadable",

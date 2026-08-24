@@ -111,8 +111,13 @@ function suppliedOrigins(raw: string): AllowedRedirects<string> {
  * **実行時に渡されていれば、そちらだけを見る**（#453 のレビュー）。
  */
 export function allowedRedirectOrigins(path = configPath()): AllowedRedirects<string> {
-  const supplied = process.env[SUPPLIED];
-  if (supplied !== undefined) {
+  // **空は「渡していない」と同じに扱う** (#453 のレビュー 2 周目)——**`.env.example` を
+  // 写すとここは空で渡る**ので、**「空で定義されている」と「定義されていない」は
+  // 見分けられない。** **渡された側へ倒すと、写しただけの開発環境でログインが落ちる。**
+  // **何か書いてあるのに 1 つも取れないときは、下で「読めない」へ倒す**
+  // （**渡したつもりが効いていない**）。
+  const supplied = process.env[SUPPLIED]?.trim();
+  if (supplied !== undefined && supplied !== "") {
     return suppliedOrigins(supplied);
   }
   const patterns = allowedRedirectPatterns(path);
