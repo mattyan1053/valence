@@ -778,6 +778,103 @@ describe("bin/loop-claim", () => {
     });
   });
 
+  describe("release-issue — 自分が取った Issue の claim を返す", () => {
+    /**
+     * **取る口があって、返す口が無かった**（#460）。
+     *
+     * **`release` は PR 専用**で、**`take` / `resume` で取った Issue の記録は
+     * 取った作業場のまま残る**——**取り違えたときの逃げ道が無い**（#306 が PR に
+     * ついて直したのと同じ形）。**2026-08-24 に実際に踏んだ**（**#454 を引き継いで
+     * 二重に実装し、PR は返せたが Issue の記録は返せなかった**）。
+     */
+    function startRound(cwd: string): string {
+      const result = spawnSync(LEASE, ["acquire", "worker", workerStamp()], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    }
+
+    /** その Issue の claim の記録。**PR のぶんとは置き場が違う。** */
+    function issueRecord(number: number): string {
+      return join(repo, ".git", `valence-loop-claim-${number}`);
+    }
+
+    it("返したら、記録が残らない", () => {
+      withGh({ labels: ["ready"] });
+      startRound(repo);
+      expect(run(["take", "42"]).status, "取れていない").toBe(0);
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(existsSync(issueRecord(42)), "返したのに記録が残っている").toBe(false);
+    });
+
+    it("返せば、別の作業場が続きを取れる", () => {
+      // **周回を回したままでも空く**（`alive` の窓を待たない。`release` と同じ）
+      withGh({ labels: ["ready"] });
+      startRound(repo);
+      run(["take", "42"]);
+
+      run(["release-issue", "42"]);
+
+      const other = run(["resume", "42"], { cwd: addWorkspace("次の作業場") });
+      expect(other.status, "空いていない").toBe(0);
+      expect(other.stderr, "引き継ぎとして扱っている（空いているはず）").not.toContain(
+        "引き継ぎます",
+      );
+    });
+
+    it("別の作業場の claim は返せない", () => {
+      // **返せるのは自分のものだけ**（`release` と同じ扱い）
+      withGh({ labels: ["ready"] });
+      startRound(repo);
+      run(["take", "42"]);
+
+      const other = run(["release-issue", "42"], { cwd: addWorkspace("よその作業場") });
+
+      expect(other.status, "他人の claim を消している").toBe(1);
+      expect(existsSync(issueRecord(42)), "他人の記録を消している").toBe(true);
+    });
+
+    it("記録が無ければ、何もせず終わる", () => {
+      // **返す先が無いのは失敗ではない**（`release` と同じ）
+      withGh({ labels: [] });
+
+      expect(run(["release-issue", "42"]).status).toBe(0);
+    });
+
+    it("同じ番号の PR と Issue を、取り違えない", () => {
+      // **番号だけでは見分けられない**（#460。**同じ番号空間**）——**両方の記録が
+      // 同時に在りうる**ので、**呼ぶ側に言わせている。** **片方を返したときに
+      // もう片方が消えると、返した覚えのない claim が消える。**
+      withGh({ labels: ["ready"] });
+      startRound(repo);
+      run(["take", "42"]);
+      run(["pr", "42"]);
+
+      expect(run(["release-issue", "42"]).status).toBe(0);
+
+      expect(existsSync(issueRecord(42)), "Issue のぶんが返っていない").toBe(false);
+      expect(run(["mine", "42"]).status, "PR のぶんまで返している").toBe(0);
+    });
+
+    it("PR の `release` は、Issue の記録を触らない", () => {
+      // **逆向きも見る**（#460）——**書式の両方向**と同じ形である
+      withGh({ labels: ["ready"] });
+      startRound(repo);
+      run(["take", "42"]);
+      run(["pr", "42"]);
+
+      expect(run(["release", "42"]).status).toBe(0);
+
+      expect(run(["mine", "42"]).status, "PR のぶんが返っていない").toBe(1);
+      expect(existsSync(issueRecord(42)), "Issue のぶんまで返している").toBe(true);
+    });
+  });
+
   describe("mine — その PR を自分の作業場が持っているか", () => {
     it("自分が取った PR は、自分のもの", () => {
       withGh({ labels: [] });
