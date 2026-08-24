@@ -2393,6 +2393,113 @@ describe("bin/loop-handoff", () => {
       expect(read.stderr, "何が読めなかったのかが出ていない").toMatch(/宛先/);
     });
 
+    it("食い違いが 2 本あれば、2 本とも知らせる", () => {
+      // **`mismatched` はスカラだった**（#445）——**最後に当たった 1 本しか残らない。**
+      // **読む側は「今回の食い違い全部」だと思って読む**ので、**もう 1 本は、
+      // その周回では無かったことになる**（**#442 が足す「忘れる側」は、そこで
+      // 猶予を消す**）。
+      //
+      // **失われはしない**（**片方が片付けば、もう 1 本を指す**）が、**遅れる**。
+      withState({
+        prs: [
+          { number: 12, unresolvedBy: ["bot"] },
+          { number: 13, unresolvedBy: ["bot"] },
+        ],
+      });
+
+      const handoff = overlooked("master");
+
+      expect(handoff.status, "矛盾を知らせていない").toBe(3);
+      // **行の形まで見る**（#448 のレビュー）——**`toContain("#12")` は
+      // 「PR #12 と #13 の 1 件」でも通る。** **PR ごとに 1 行**が、この口の契約である。
+      expect(
+        handoff.stderr
+          .split("\n")
+          .filter((line) =>
+            line.includes("未解決スレッドがあるのに changes-requested がありません"),
+          ),
+        "PR ごとに 1 行になっていない",
+      ).toEqual([
+        "[WARN] PR #12: 未解決スレッドがあるのに changes-requested がありません",
+        "[WARN] PR #13: 未解決スレッドがあるのに changes-requested がありません",
+      ]);
+    });
+
+    it("番号の昇順で出す", () => {
+      // **当面、積めるのは 1 本だけ**である（**受け取る側の手順は単数のまま**）
+      // ——**どの 1 本かが周回ごとに変わると、同じ id が積み上がらない。**
+      // **並びを番号で決める**ので、**いちばん上の行はいつも同じ PR** である。
+      withState({
+        prs: [
+          { number: 13, unresolvedBy: ["bot"] },
+          { number: 12, unresolvedBy: ["bot"] },
+        ],
+      });
+
+      const warned = run("master")
+        .stderr.split("\n")
+        .filter((line) => line.includes("changes-requested がありません"))
+        .map((line) => line.replace(/^\[WARN\] PR #(\d+):.*$/, "$1"));
+
+      expect(warned, "並びが番号で決まっていない").toEqual(["12", "13"]);
+    });
+
+    it("1 件目を見たあとも、標準エラーが読める", () => {
+      // **`exec 7>… 2>/dev/null` は、標準エラーそのものを以後ずっと捨てる**
+      // （#445 で踏んだ）——**猶予を見に行った瞬間から、警告が丸ごと消える。**
+      // **消えるのは「読めば分かること」だけ**なので、**緑のまま気づけない。**
+      withState({
+        prs: [
+          { number: 12, unresolvedBy: ["bot"] },
+          { number: 13, unresolvedBy: ["bot"] },
+        ],
+      });
+
+      const handoff = run("master");
+
+      expect(handoff.stderr, "1 件目を見たあとの警告が消えている").toContain("#13");
+    });
+
+    it("食い違いが 2 本あれば、どちらの猶予も溜まる", () => {
+      // **これが #445 の条件そのもの**である。**忘れる側が等号で見ていると、
+      // `mismatched` に入らなかったほうの起点が毎周回消える**——**猶予が溜まらず、
+      // そのぶん報告が遅れる**（**失われはしないが、片方が片付くまで**）。
+      withState({
+        prs: [
+          { number: 12, unresolvedBy: ["bot"] },
+          { number: 13, unresolvedBy: ["bot"] },
+        ],
+      });
+
+      const handoff = overlooked("master");
+
+      // **2 本とも猶予を使い切っている**（**どちらも「見送り」まで来た**）
+      expect(handoff.status, "猶予が溜まっていない").toBe(3);
+      expect(
+        handoff.stderr.match(/周ぶん待ちます/g) ?? [],
+        "まだ待っている側が残っている（起点が消されている）",
+      ).toEqual([]);
+    });
+
+    it("番号の一部が一致しても、食い違い扱いにしない", () => {
+      // **並びを空白で挟んで見る**（#445 / #448 のレビュー）——**`1234` が食い違って
+      // いるときに、`234` を「居る」と読まない。** **成り立つはず、と、踏んで
+      // 確かめた、は別**である。
+      withState({
+        prs: [
+          { number: 1234, unresolvedBy: ["bot"] },
+          { number: 234, labels: ["changes-requested"], unresolvedBy: ["bot"] },
+        ],
+      });
+
+      const handoff = run("master");
+
+      expect(handoff.stderr, "食い違っている番号が出ていない").toContain("#1234");
+      expect(handoff.stderr, "label が付いている番号まで食い違いにしている").not.toMatch(
+        /PR #234:/,
+      );
+    });
+
     it("label が付いていれば矛盾ではない", () => {
       withState({ prs: [{ number: 12, labels: ["changes-requested"], unresolvedBy: ["bot"] }] });
 
