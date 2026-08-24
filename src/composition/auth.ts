@@ -36,6 +36,10 @@ import { createUserRepositoryPermissions } from "../infrastructure/github/user-r
 import { refreshUserTokens } from "../infrastructure/github/user-token";
 import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
 import { reportLoginFailure } from "../infrastructure/observability/login-failure";
+
+// **戻ってこなかったコールバックを残す口** (#455)。**adapter を束ねるのはここ**である
+export { reportDroppedCallback } from "../infrastructure/observability/login-failure";
+
 import type { AllowedRedirects } from "../infrastructure/supabase/redirect-allowlist";
 import { allowedRedirectOrigins as readAllowedRedirectOrigins } from "../infrastructure/supabase/redirect-allowlist";
 import {

@@ -43,3 +43,27 @@ export function reportLoginFailure(
 ): void {
   write(`[auth] login failed stage=${stage} error=${kindOf(error)}`);
 }
+
+/**
+ * **戻ってくるはずのコールバックが来なかったことを、1 行だけ残す** (#455)。
+ *
+ * **`/auth/callback` が呼ばれない**ので、**上の「落ちた段」は出ない**——**残るのは
+ * これだけ**である。**次に見る場所（戻り先の許可一覧）まで書く**：**症状だけ残しても
+ * 人は動けない**（**実際、原因に辿り着くまでに `curl` と `docker exec` が要った**）。
+ *
+ * **こちらが落としたとは書かない。** **落としているのは GoTrue** で、**こちらから
+ * 分かるのは「戻ってこなかった」まで**である。
+ *
+ * **`code` は受けない。** **path しか受け取らない形にしても、問い合わせを付けたまま
+ * 渡す呼び出しは書ける**ので、**この口で落とす**（§6。**交換できる値を残さない**）。
+ */
+export function reportDroppedCallback(
+  pathname: string,
+  write: (line: string) => void = console.error,
+): void {
+  const path = pathname.split("?")[0] ?? "";
+  write(
+    `[auth] callback did not arrive: code came to ${path} instead of /auth/callback` +
+      "（戻り先が許可一覧に当たらないと、site_url へ落とされて戻る。supabase/config.toml の additional_redirect_urls と site_url、本番は AUTH_ALLOWED_ORIGINS を見ること）",
+  );
+}

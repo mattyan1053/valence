@@ -12,7 +12,9 @@
  */
 
 import { type NextRequest, NextResponse } from "next/server";
+import { reportDroppedCallback } from "./composition/auth";
 import { refreshSession } from "./composition/session";
+import { looksLikeDroppedCallback } from "./domain/auth/dropped-callback";
 import type { SessionCookieSinks } from "./infrastructure/supabase/session-cookies";
 
 /**
@@ -28,10 +30,33 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   return await refreshedResponse(request, refreshSession);
 }
 
+/**
+ * 戻ってこなかったコールバックを残す側。**`SessionRefresher` と同じく、差し替える
+ * ための引数**である（**抽象ではない**）。
+ */
+export type DroppedCallbackReport = (pathname: string) => void;
+
 export async function refreshedResponse(
   request: NextRequest,
   refresh: SessionRefresher,
+  report: DroppedCallbackReport = reportDroppedCallback,
 ): Promise<NextResponse> {
+  // **ここで見るのは「必ず通る」から** (#455)。**戻り先が許可一覧に当たらないと、
+  // GoTrue は `site_url` へ落として戻す**——**`/auth/callback` は呼ばれない**ので、
+  // **あちらに置いた記録**（#248）**も出ない。** **画面に置くと、`/` を描く経路が
+  // 変わった日に落ちる。**
+  //
+  // **交換はしない**（#455 の範囲外）。**`/` でも受けられるようにすると、塞ぎたい穴が
+  // 塞がらないまま動く**——**ここは、来たことを残すだけ**である。
+  if (
+    looksLikeDroppedCallback({
+      pathname: request.nextUrl.pathname,
+      hasCode: request.nextUrl.searchParams.has("code"),
+    })
+  ) {
+    report(request.nextUrl.pathname);
+  }
+
   let response = NextResponse.next({ request });
 
   await refresh({
