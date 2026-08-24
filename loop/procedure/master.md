@@ -1067,13 +1067,42 @@ printf '%s\n' "$parked_slots"
 **`waiting-condition` が付いているものは数に入れない** (#312)。**完了条件がまだ
 満たせない Issue** で、**渡しても「まだ足りない」と書いて返ってくるだけ**である。
 
+**`awaiting-master` も数に入れない** (#492 のレビュー)。**worker が「PR を出さずに
+終わった」と畳んだ Issue** で、**渡すと同じ調査がもう一度される**——**閉じるのは
+こちら**である（下）。
+
+```bash
+# **PR を出さずに終わった Issue**（**閉じる候補**）。**`bin/loop-close-candidates` は
+# PR 番号を取る**ので、**PR の無いものはあちらに出てこない**——**拾う口はここだけ。**
+printf '%s' "$backlog" | jq -r '.[] | select(any(.labels[]; .name == "awaiting-master")) | "#\(.number) \(.title)"'
+```
+
+**1 件ずつ、結論のコメントを読んでから決める**（**完了条件を読むのは master の仕事**）。
+
+- **満たされている** → **閉じる**
+
+  ```bash
+  gh issue close <N> --comment "<何が満たされたか / 何を見て「変更が要らない」と決めたか>"
+  ```
+
+- **満たされていない** → **印を外して差し戻す**（**`backlog` に戻り、また昇格の候補になる**）
+
+  ```bash
+  gh issue edit <N> --remove-label awaiting-master
+  gh issue comment <N> --body-file <file>   # 何が足りないか
+  ```
+
+**閉じないまま置かない。** **`awaiting-master` は昇格から外れる**ので、**読まずに残すと
+その Issue はどこからも動かない**——**`waiting-condition` と違い、待っているのは
+外の条件ではなく、こちらの判断**である。
+
 **だから `labels` まで取る** (#313 のレビュー)。**散文で「数に入れない」と書いても、
 取得が `number,title,body` のままでは、どれが条件待ちかを判別する材料が手元に無い**
 ——**出口の判定は正しく配線されていても、ここを実行する側が条件待ちを昇格させられる。**
 
 ```bash
-# 昇格できる候補だけを並べる（**条件待ちを除いた `backlog`**）
-printf '%s' "$backlog" | jq -r '.[] | select(any(.labels[]; .name == "waiting-condition") | not) | "#\(.number) \(.title)"'
+# 昇格できる候補だけを並べる（**条件待ちと、終わったものを除いた `backlog`**）
+printf '%s' "$backlog" | jq -r '.[] | select(any(.labels[]; .name == "waiting-condition" or .name == "awaiting-master") | not) | "#\(.number) \(.title)"'
 ```
 
 **3 人目を先回りしない。** **まず 2 人で成立させ、測ってから考える**（#80）。
