@@ -52,6 +52,16 @@ function run(options: {
   beyondFirstPage?: Issue[];
   fails?: boolean;
   args?: string[];
+  /**
+   * **番号を指して読み直したときに返る label**（#487）。
+   *
+   * **索引（一覧）は label を触った直後に遅れる**（#285。実測 3 回）——**遅れている
+   * あいだ、label のある Issue が「1 つも無い」に見える。** **既定は一覧と同じ**
+   * （**遅れていない**）で、**食い違わせたいときだけ渡す。**
+   */
+  reread?: Record<number, string[]>;
+  /** **読み直しが落ちる。** **「無い」に倒さないこと**を見る */
+  rereadFails?: boolean;
 }): {
   status: number;
   stdout: string[];
@@ -80,6 +90,15 @@ function run(options: {
       .join("\n");
   const head = asLines(options.issues ?? []);
   const tail = asLines(options.beyondFirstPage ?? []);
+  // **読み直しの答え。** **渡されなければ、一覧と同じ**（索引が遅れていない状態）
+  const known = [...(options.issues ?? []), ...(options.beyondFirstPage ?? [])];
+  const reread: Record<number, string[]> = {
+    ...Object.fromEntries(known.map((issue) => [issue.number, issue.labels])),
+    ...(options.reread ?? {}),
+  };
+  const rereadCases = Object.entries(reread).flatMap(([number, labels]) => [
+    `    ${number}) printf '%b' ${JSON.stringify(labels.join("\n"))}; [[ -n ${JSON.stringify(labels.join("\n"))} ]] && echo; exit 0 ;;`,
+  ]);
   writeFileSync(
     join(path, "gh"),
     [
@@ -89,6 +108,15 @@ function run(options: {
       '  echo "owner"',
       '  echo "repo"',
       "  exit 0",
+      "fi",
+      // **番号を指した読み直し**（#487）。**一覧とは別の答えを返せる**
+      'if [[ $* == *"issue view"* ]]; then',
+      ...(options.rereadFails === true ? ["  exit 1"] : []),
+      // **番号は `$3`**（`gh issue view <番号> --json …`）——**`$2` は `view` である**
+      '  case "$3" in',
+      ...rereadCases,
+      "    *) exit 0 ;;",
+      "  esac",
       "fi",
       `printf '%b' ${JSON.stringify(head)}`,
       `[[ -n ${JSON.stringify(head)} ]] && echo`,
@@ -136,6 +164,36 @@ describe("bin/loop-unlisted-issues", () => {
       expect(listed.stdout).toEqual([]);
     },
   );
+
+  it("索引が遅れていても、label があるなら挙げない", () => {
+    // **これが #487 の芯**である。**一覧の索引は label を触った直後に遅れる**
+    // （#285。実測 3 回）——**遅れているあいだ、label のある Issue が「1 つも無い」に
+    // 見える。** **この答えは人を呼ぶ側へ流れる**（`unlisted-issue` → 3 周で `loop/STOP`）
+    // ので、**誤報は「自分で消えた状態のために人が呼ばれる」になる。**
+    //
+    // **番号を指した直接の読み取りは遅れない**（`bin/loop-handoff` の `count_labelled`）。
+    const listed = run({ issues: [{ number: 319, labels: [] }], reread: { 319: ["ready"] } });
+
+    expect(listed.status, "索引の遅れで誤報している").toBe(0);
+    expect(listed.stdout).toEqual([]);
+  });
+
+  it("読み直せなければ、無いに倒さない", () => {
+    // **「読めない」を「ある」とも「無い」とも混ぜない**（`AGENTS.md` §5）
+    // ——**出す直前に確かめられなかったのだから、この周回では分からない。**
+    const listed = run({ issues: [{ number: 319, labels: [] }], rereadFails: true });
+
+    expect(listed.status, "読めないのに「ある」と言っている").toBe(2);
+    expect(listed.stdout, "確かめられていない番号を出している").toEqual([]);
+  });
+
+  it("読み直しても label が無ければ、これまでどおり挙げる", () => {
+    // **鳴らし損ねない側**（#319 が塞いだもの）——**読み直しを足しても、本題は残る**
+    const listed = run({ issues: [{ number: 319, labels: [] }], reread: { 319: [] } });
+
+    expect(listed.status, "本当に label が無い Issue を挙げていない").toBe(1);
+    expect(listed.stdout).toEqual(["319"]);
+  });
 
   it("`waiting-condition` だけの Issue は挙げる", () => {
     // **あれは `backlog` に付ける修飾**である（`loop/README.md` の表）——

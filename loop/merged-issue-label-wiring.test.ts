@@ -98,6 +98,13 @@ function workspace(labels: string[]): { path: string; labelsFile: string; repo: 
       "  exit 0",
       "fi",
       'if [[ $* == *"issue comment"* ]]; then exit 0; fi',
+      // **番号を指した読み直し**（#487）。**検出器は出す直前にここを読む**
+      // ——**索引（`api graphql`）と同じ 1 つの状態から答える**ので、
+      // **手順書の 1 行を走らせた結果が、そのまま両方に効く。**
+      'if [[ $* == *"issue view"* ]]; then',
+      '  cat "$labels_file"',
+      "  exit 0",
+      "fi",
       'if [[ $* == *"repo view"* ]]; then',
       '  echo "owner"',
       '  echo "repo"',
