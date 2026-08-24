@@ -53,19 +53,62 @@ function evidenceRules(): string {
 }
 
 /**
- * テンプレートの「確かめたこと」の欄だけ（`id: evidence` から次の欄まで）。
+ * その id の欄だけ（`id: <名前>` から、次の欄まで）。
+ *
+ * **切るのは「次の欄」であって「次の textarea」ではない** (#486 のレビュー)——
+ * **後ろの欄が `input` や `dropdown` になった日に、そこから先が丸ごと入る**
+ * （**その欄の `required: true` で落ちたり、その欄の文が `toContain` を満たして
+ * 本命の消失を見逃したりする**）。**型を見ずに、次の項目で切る。**
+ */
+function fieldBlock(template: string, id: string): string {
+  const from = template.indexOf(`id: ${id}`);
+  expect(from, `テンプレートに ${id} の欄がありません`).toBeGreaterThanOrEqual(0);
+  const rest = template.slice(from);
+  const to = rest.indexOf("\n  - type:");
+  return to < 0 ? rest : rest.slice(0, to);
+}
+
+/**
+ * テンプレートの「確かめたこと」の欄だけ。
  *
  * **テンプレート全体へ投げない** (#484)——**`確かめていない` はこの欄に 2 度出る**うえ、
  * **欄の外に足された文にも当たりうる。** **切り出してから、その行にしか無い語で見る。**
  */
 function evidenceField(): string {
-  const template = read(".github/ISSUE_TEMPLATE/task.yml");
-  const from = template.indexOf("id: evidence");
-  expect(from, "テンプレートに根拠の欄がありません").toBeGreaterThanOrEqual(0);
-  const rest = template.slice(from);
-  const to = rest.indexOf("  - type: textarea", 1);
-  return to < 0 ? rest : rest.slice(0, to);
+  return fieldBlock(read(".github/ISSUE_TEMPLATE/task.yml"), "evidence");
 }
+
+describe("欄の切り出し", () => {
+  /** **後ろの欄の型を変えた入力**を置く (#486 のレビュー)——**踏む形そのもの。** */
+  const template = [
+    "body:",
+    "  - type: textarea",
+    "    id: evidence",
+    "    attributes:",
+    "      label: 確かめたこと",
+    "  - type: input",
+    "    id: after",
+    "    attributes:",
+    "      label: あとの欄",
+    "    validations:",
+    "      required: true",
+    "",
+  ].join("\n");
+
+  it("次の欄が textarea でなくても、そこで切る", () => {
+    const block = fieldBlock(template, "evidence");
+
+    expect(block, "後ろの欄まで入っている").not.toContain("あとの欄");
+    expect(block, "後ろの欄の必須が入っている").not.toContain("required: true");
+    expect(block, "この欄が入っていない").toContain("確かめたこと");
+  });
+
+  it("最後の欄なら、終わりまで取る", () => {
+    const block = fieldBlock(template, "after");
+
+    expect(block, "この欄が入っていない").toContain("あとの欄");
+  });
+});
 
 describe("起票の根拠を書き分ける", () => {
   it("手順書が、読んだのか走らせたのかを分けろと言っている", () => {
