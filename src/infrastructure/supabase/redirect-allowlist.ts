@@ -45,12 +45,22 @@ function configPath(): string {
   return join(process.cwd(), "supabase", "config.toml");
 }
 
-/** `"…"` の並びから、URL だけを取り出す。**書式が変わったら空になる。** */
-function quoted(line: string | undefined): string[] {
-  if (line === undefined) {
-    return [];
-  }
+/** `"…"` の並びから、URL だけを取り出す。 */
+function quoted(line: string): string[] {
   return [...line.matchAll(/"([^"]+)"/g)].map((match) => match[1] as string);
+}
+
+/**
+ * 配列の中身が、この形で全部読めるか (#469 のレビュー)。
+ *
+ * **外側が当たっても、中身が全部読めるとは限らない**——**`'` で囲んだ要素は
+ * TOML として有効**である。**拾える側だけ返すと、一覧が黙って短くなり**、
+ * **ログインの失敗が「許可されていない host」に化ける**（**この直しが消しに来た形**）。
+ *
+ * **末尾のカンマは書ける形**なので、**読める側に入れる。**
+ */
+function fullyQuoted(body: string): boolean {
+  return /^\s*(?:"[^"]*"\s*,\s*)*(?:"[^"]*"\s*)?$/.test(body);
 }
 
 /** その鍵が書かれている行。**無ければ `undefined`**（**書いていない、は読めた側**）。 */
@@ -92,9 +102,11 @@ export function allowedRedirectPatterns(path = configPath()): AllowedRedirects<s
     additionalLine === undefined
       ? undefined
       : /^additional_redirect_urls\s*=\s*\[(.*)\]\s*$/.exec(additionalLine);
+  const body = additional?.[1];
   if (
     (siteLine !== undefined && site === null) ||
-    (additionalLine !== undefined && additional === null)
+    (additionalLine !== undefined && additional === null) ||
+    (body !== undefined && !fullyQuoted(body))
   ) {
     return { kind: "unreadable", source: path };
   }
@@ -102,7 +114,7 @@ export function allowedRedirectPatterns(path = configPath()): AllowedRedirects<s
     kind: "listed",
     listed: [
       ...(site?.[1] === undefined ? [] : [site[1]]),
-      ...quoted(additional?.[1] ?? undefined),
+      ...(body === undefined ? [] : quoted(body)),
     ],
   };
 }

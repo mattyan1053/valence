@@ -156,6 +156,41 @@ describe("設定の書式が読めないとき", () => {
     expect(allowedRedirectPatterns(path)).toEqual({ kind: "unreadable", source: path });
   });
 
+  it("この形で読めない要素が混じっていたら、読めなかったとして返す", () => {
+    // **外側は当たるが、中身が全部は読めない** (#469 のレビュー)——**`'` で囲んだ要素は
+    // TOML として有効**である。**拾える側だけ返すと、一覧が黙って短くなり**、
+    // **ログインの失敗が「許可されていない host」に化ける**（**この PR が消しに来た形**）。
+    const path = configWith(
+      [
+        "[auth]",
+        `additional_redirect_urls = ["http://localhost:3000/**", 'http://127.0.0.1:3000/**']`,
+        "",
+      ].join("\n"),
+    );
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("この形で読めない要素だけなら、0 件ではなく読めなかったとして返す", () => {
+    const path = configWith(
+      ["[auth]", `additional_redirect_urls = ['http://localhost:3000/**']`, ""].join("\n"),
+    );
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("末尾のカンマは、これまでどおり読める", () => {
+    // **TOML では書ける形**である——**読める書式を、読めない側へ倒さない**
+    const path = configWith(
+      ["[auth]", 'additional_redirect_urls = ["http://localhost:3000/**",]', ""].join("\n"),
+    );
+
+    expect(allowedRedirectPatterns(path)).toEqual({
+      kind: "listed",
+      listed: ["http://localhost:3000/**"],
+    });
+  });
+
   it("鍵が無いのは、読めなかったではない", () => {
     // **書いていないものは、読めなかったのではない**——**GoTrue の既定に従うだけ**である
     const path = configWith(["[auth]", "enabled = true", ""].join("\n"));
