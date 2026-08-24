@@ -124,6 +124,29 @@ function records(dir: string, lines: [number, string][], workspace = dir, role =
   );
 }
 
+/**
+ * **いま周回を回している状態にする**（**返さない**）。**始めた時刻も決める。**
+ *
+ * **`bin/loop-lease` は始まりを `valence-loop-rounds-<scope>` に書く**——**試験は
+ * 決まった時刻から見る**ので、**取ったあとに、その 1 行だけを置き換える。**
+ */
+function running(dir: string, stamp: string, since: number): void {
+  const taken = spawnSync(join(dir, "bin/loop-lease"), ["acquire", "worker", stamp], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  expect(taken.status, taken.stderr).toBe(0);
+  const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  expect(scope.status, scope.stderr).toBe(0);
+  writeFileSync(
+    join(dir, ".git", `valence-loop-rounds-${scope.stdout.trim()}`),
+    `${since}\n${dir}\n`,
+  );
+}
+
 function cadence(dir: string, env: Record<string, string> = {}) {
   return spawnSync(join(dir, "bin/loop-cadence"), [], {
     cwd: dir,
@@ -491,6 +514,57 @@ describe("周回が始まったことを、どう始まったかごと残す", (
       const done = cadence(dir, { LOOP_CADENCE_NOW: "4200" });
 
       expect(done.status, "短くしたのに、古い物差しで黙っている").toBe(1);
+      expect(done.stdout, "止まったと言っていない").toMatch(/stale/);
+    });
+
+    it("長い周回の最中は、その周回のぶんだけ待つ", () => {
+      // **走っている最中に鳴った cron は `acquire` で終わる**ので、**記録が 1 行も
+      // 増えない**（#444）——**その周回の中に入った刻みは、周回が説明する。**
+      const { dir, stamp } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+        [4_600, "cron"],
+      ]);
+      // **4_700 から回している**（**回していなければ、この age は `stale` である**）
+      running(dir, stamp, 4_700);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "9000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.stdout, "周回が説明できるぶんまで言っている").not.toMatch(/stale/);
+      expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
+    });
+
+    it("短い周回の最中でも、それより古い沈黙は言う", () => {
+      // **`bin/loop-cadence` は周回の中から呼ばれる**ので、**呼んだ役は必ず自分の
+      // lease を握っている**（#446 のレビュー）——**「回っている」と「cron が生きて
+      // いる」は別**である。**2 分前に始まった周回は、60 分前からの沈黙を説明しない。**
+      const { dir, stamp } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+        [4_600, "cron"],
+      ]);
+      running(dir, stamp, 8_880); // **2 分前に始めたばかり**
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "9000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "自分の周回で、自分の stale を隠している").toBe(1);
+      expect(done.stdout, "止まったと言っていない").toMatch(/stale/);
+    });
+
+    it("回していないなら、これまでどおり止まったと言う", () => {
+      // **上の 2 件が「周回が説明するから」で緑なことを、ここが支えている**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [2_800, "cron"],
+        [4_600, "cron"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "止まっているのに黙っている").toBe(1);
       expect(done.stdout, "止まったと言っていない").toMatch(/stale/);
     });
 
@@ -1027,4 +1101,25 @@ describe("master の周回も見る", () => {
     expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
     expect(done.stdout, "居ない master のことを言っている").not.toMatch(/scope=master/);
   });
+});
+
+/**
+ * **混ざるものを、元から入れない**（#444）。
+ *
+ * **捨てて呼び直した周回は、同じ cron の刻みの 2 回目**である——**そこで
+ * `--trigger cron` を渡すと、34〜91 秒の間が記録に入り**、**周期として読まれる**
+ * （**実測: `interval=~91`。窓が約 3 分になっていた**）。
+ *
+ * **両方の役に掛ける。** **master は前から `poke` を渡していた**が、**入口の文は
+ * どちらとも読めた**——**同じ 1 文を、2 つの役が違う側に読んでいた。**
+ * **片方だけ直すと、記録の意味が役で違うまま**である。
+ */
+describe("呼び直した周回を、cron として記録しない", () => {
+  for (const role of ["worker", "master"] as const) {
+    it(`${role} の入口が、呼び直しは poke だと書いている`, () => {
+      const entry = readFileSync(join(REPO_ROOT, `.claude/commands/loop-${role}.md`), "utf8");
+
+      expect(entry, "呼び直しの trigger が書いていない").toMatch(/呼び直(し|した).{0,40}poke/);
+    });
+  }
 });

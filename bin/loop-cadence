@@ -83,6 +83,31 @@ if [[ -z $workspaces ]]; then
   exit 2
 fi
 
+# **いま周回を回している作業場** (#444)。**走っている最中に鳴った cron は
+# `acquire` が exit 1 で終わる**ので、**記録が 1 行も増えない**——**外からは古く
+# 見えるが、止まってはいない**（**実測: 60 分ぶん増えていない worker が `stale` に
+# 落ちた**）。
+#
+# **判定は `bin/loop-lease` が持つ**（`running`）——**期限切れの lease は並ばない**
+# ので、**落ちたまま握りっぱなしの周回は、これまでどおり `stale` へ落ちる。**
+#
+# **読めなければ、空にする**（**「回していない」側へ倒す**）——**読めないことで
+# 見張りが黙ると、止まっても言わなくなる。**
+running_scopes=""
+if ! running_scopes="$("${BASH_SOURCE[0]%/*}/loop-lease" running worker 2>/dev/null </dev/null)"; then
+  running_scopes=""
+fi
+if ! master_running="$("${BASH_SOURCE[0]%/*}/loop-lease" running master 2>/dev/null </dev/null)"; then
+  master_running=""
+fi
+running_scopes="$running_scopes"$'\n'"$master_running"
+
+# その作業場が、いま回しているか。
+is_running() {
+  [[ -n $1 ]] || return 1
+  printf '%s\n' "$running_scopes" | grep -qxF "$1"
+}
+
 # **記録は作業場ごと**である（`bin/loop-lease` が書く。名前の作り方はあちらが持つ）。
 found=0
 stale=0
@@ -190,7 +215,7 @@ last_gap() {
 evaluate_scope() {
   local scope="$1" workspace="${2-}"
   local starts last_cron last_poke last_unknown age verdict window longest
-  local at trigger _where interval interval_shown gap cron_at=()
+  local at trigger _where interval interval_shown gap running_since cron_at=()
   starts="$common_dir/valence-loop-starts-$scope"
   if [[ ! -f $starts ]]; then
     # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
@@ -273,6 +298,23 @@ evaluate_scope() {
         read -r longest <"$common_dir/valence-loop-roundlen-$scope" 2>/dev/null &&
         [[ $longest =~ ^[0-9]+$ ]]; then
         ((longest + interval <= window)) || window=$((longest + interval))
+      fi
+      # **いま回している周回のぶんは待つ** (#444。#446 のレビュー)。**走っている最中に
+      # 鳴った cron は `acquire` が exit 1 で終わる**ので、**記録が 1 行も増えない。**
+      #
+      # **待つのは「その周回の中に入った刻み」だけ**である——**`bin/loop-cadence` は
+      # 周回の中から呼ばれる**ので、**呼んだ役は必ず自分の lease を握っている。**
+      # **「回っている」と「cron が生きている」は別**で、**2 分前に始まった周回は、
+      # 60 分前からの沈黙を説明しない**（**実測: 3 つとも cron が死んで、突かれるだけで
+      # 回っていた日がある**）。
+      #
+      # **始まりは `bin/loop-lease` が書いている**（`valence-loop-rounds-`）。
+      # **読めなければ広げない**——**読めないことで黙る見張りにしない。**
+      if is_running "$scope" &&
+        [[ -f "$common_dir/valence-loop-rounds-$scope" ]] &&
+        read -r running_since <"$common_dir/valence-loop-rounds-$scope" 2>/dev/null &&
+        [[ $running_since =~ ^[0-9]+$ ]] && ((NOW > running_since)); then
+        window=$((window + NOW - running_since))
       fi
       ((age > window)) && verdict="stale"
     fi
