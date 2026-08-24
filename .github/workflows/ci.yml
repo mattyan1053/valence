@@ -61,6 +61,37 @@ jobs:
     # **宣言しないと 360 分**になり、詰まった実行を誰も止めない。
     timeout-minutes: 20
     steps:
+      # **Supabase の番号を、一時ポートに割り当てさせない** (#466)。**下の予約だけでは
+      # 足りない**——**あれは checkout と `pnpm install` のあと**で、**そこまでに張られた
+      # 数百本の接続が 543xx を送信元ポートに掴みうる**（**掴まれてからでは、予約しても
+      # 放させられない**）。**2026-08-24 の 1 日で 3 回落ちた**（#431 / #453 / #465。
+      # **どれも PR の中身と無関係**で、人が `rerun` を打って通している）。
+      #
+      # **範囲そのものを外す。** **効き目は予約と同じ**だが、**こちらは checkout より
+      # 前に打てる**——**`supabase/config.toml` を読まないため**である。
+      #
+      # **ここにだけ番号を書く。** **2 箇所目ではない**——**下の step が
+      # 「設定の番号が、この範囲の外にあること」を確かめる**ので、**設定が動いたら
+      # 黙って外れずに落ちる**（`AGENTS.md` §5。**残る側を数える**）。
+      #
+      # **開発機のポートは変えない** (#371)。**変えたのは runner の割り当て方**で、
+      # **Supabase の番号ではない**——**手元と CI が同じ場所を見る、はそのまま。**
+      #
+      # **これで防げるのは、この job が張る接続だけ**である——**job が始まる前から
+      # runner が持っている socket は、どこからも放させられない。** **そこは #434 の
+      # 見張り（実際に bind して決める）が、これまでどおり名指しして落とす。**
+      - name: Keep ephemeral ports away from Supabase
+        run: |
+          sudo sysctl -w "net.ipv4.ip_local_port_range=32768 54319"
+          # **効いたことを読み直す** (#432 と同じ形)。**効かないまま進むと、同じ bind
+          # 失敗が「原因不明」として返る**——**入れた対策が働いているかを、対策自身が
+          # 確かめる。**
+          now="$(sysctl -n net.ipv4.ip_local_port_range | tr -s '[:space:]' ' ' | sed 's/ *$//')"
+          if [ "$now" != "32768 54319" ]; then
+            echo "一時ポート範囲を狭められていません (要求: 32768 54319 / 実際: $now)" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
@@ -95,6 +126,15 @@ jobs:
           low="$(echo "$ports" | head -1)"
           high="$(echo "$ports" | tail -1)"
           echo "一時ポート範囲: $(cat /proc/sys/net/ipv4/ip_local_port_range)"
+          # **上で狭めた範囲の外にあることを確かめる** (#466)。**あちらには番号が
+          # 書いてある**ので、**設定が動くと、黙って範囲の中へ戻りうる**——**戻ったら、
+          # ここで落とす**（**症状は同じ bind 失敗**で、原因は見えないため）。
+          range_high="$(sysctl -n net.ipv4.ip_local_port_range | awk '{print $2}')"
+          if [ "$low" -le "$range_high" ]; then
+            echo "設定のポート (${low}-${high}) が一時ポート範囲 (…-${range_high}) の内側です" >&2
+            echo "  狭める側 (Keep ephemeral ports away from Supabase) の値を直すこと" >&2
+            exit 1
+          fi
           sudo sysctl -w "net.ipv4.ip_local_reserved_ports=${low}-${high}"
           # **効いたことを読み直す。** **効かないまま進むと、同じ bind 失敗が
           # 「原因不明」として返ってくる**——**入れた対策が働いているかを、
