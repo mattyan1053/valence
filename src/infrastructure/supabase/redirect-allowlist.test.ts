@@ -10,11 +10,28 @@
  * 効く**ので、**同じものが 2 箇所にある状態にはならない。**
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { allowedRedirectOrigins } from "./redirect-allowlist";
+import { allowedRedirectOrigins, allowedRedirectPatterns } from "./redirect-allowlist";
+
+const sandboxes: string[] = [];
+
+/** 使い捨ての設定ファイル。**書式そのものを入力に置く。** */
+function configWith(body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "redirect-allowlist-"));
+  sandboxes.push(dir);
+  const path = join(dir, "config.toml");
+  writeFileSync(path, body);
+  return path;
+}
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  for (const dir of sandboxes.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /** 開発の設定（`localhost` だけが入っている）。 */
@@ -97,5 +114,74 @@ describe("実行時に渡された許可一覧", () => {
     const allowed = allowedRedirectOrigins("supabase/存在しない.toml");
 
     expect(allowed).toEqual({ kind: "unreadable", source: "supabase/存在しない.toml" });
+  });
+});
+
+describe("設定の書式が読めないとき", () => {
+  /**
+   * **「読めなかった」を「1 つも許していない」と混ぜない**（#469）。
+   *
+   * **#453 でその 2 つを分けた**のに、**書式の側が漏れていた**——**折り返して書くと
+   * 当たらず、`listed` で 0 件を返す。** **倒れる向きは拒否側**（ログインが落ちる）だが、
+   * **理由が「許可されていない host」に化ける**ので、**読んだ人は設定を疑わない。**
+   */
+  it("折り返した配列は、読めなかったとして返す", () => {
+    const path = configWith(
+      [
+        "[auth]",
+        'site_url = "http://localhost:3000"',
+        "additional_redirect_urls = [",
+        '  "http://localhost:3000/**",',
+        "]",
+        "",
+      ].join("\n"),
+    );
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("`site_url` が読めない書き方でも、読めなかったとして返す", () => {
+    // **片方だけ直さない**（#469 の条件）——**同じ鍵の話**である
+    const path = configWith(["[auth]", "site_url = 'http://localhost:3000'", ""].join("\n"));
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("行の後ろに注釈が付いていても、読めなかったとして返す", () => {
+    // **黙って落とさない**——**前は `\]\s*$` に当たらず、その 1 行がまるごと消えた**
+    const path = configWith(
+      ["[auth]", 'additional_redirect_urls = ["http://localhost:3000/**"] # 開発用', ""].join("\n"),
+    );
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "unreadable", source: path });
+  });
+
+  it("鍵が無いのは、読めなかったではない", () => {
+    // **書いていないものは、読めなかったのではない**——**GoTrue の既定に従うだけ**である
+    const path = configWith(["[auth]", "enabled = true", ""].join("\n"));
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "listed", listed: [] });
+  });
+
+  it("空の配列は、これまでどおり「読めた。1 つも許していない」", () => {
+    const path = configWith(["[auth]", "additional_redirect_urls = []", ""].join("\n"));
+
+    expect(allowedRedirectPatterns(path)).toEqual({ kind: "listed", listed: [] });
+  });
+
+  it("1 行で書いてあれば、これまでどおり読む", () => {
+    const path = configWith(
+      [
+        "[auth]",
+        'site_url = "http://localhost:3000"',
+        'additional_redirect_urls = ["http://localhost:3000/**", "http://127.0.0.1:3000/**"]',
+        "",
+      ].join("\n"),
+    );
+
+    expect(allowedRedirectPatterns(path)).toEqual({
+      kind: "listed",
+      listed: ["http://localhost:3000", "http://localhost:3000/**", "http://127.0.0.1:3000/**"],
+    });
   });
 });

@@ -197,7 +197,9 @@ site_url = "http://localhost:3000"
 # 着かない**——**既定の作業場の振る舞いは変えず、足すだけ**である。
 #
 # **1 行で書く。** **読み手は 1 行として読む** (`src/infrastructure/supabase/redirect-allowlist.ts`)
-# ——**折り返すと、この一覧は「1 つも許していない」に化ける** (実測)。
+# ——**折り返すと「読めない」と言われ、ログインは落ちる** (#469。**前は「1 つも
+# 許していない」に化けて、理由が「許可されていない host」に見えていた**)。
+# **行の後ろに注釈を付けるのも同じ**である。
 additional_redirect_urls = ["http://localhost:3000/**", "http://127.0.0.1:3000/**", "http://localhost:3940/**", "http://127.0.0.1:3940/**"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600

@@ -53,13 +53,30 @@ function quoted(line: string | undefined): string[] {
   return [...line.matchAll(/"([^"]+)"/g)].map((match) => match[1] as string);
 }
 
+/** その鍵が書かれている行。**無ければ `undefined`**（**書いていない、は読めた側**）。 */
+function lineOf(config: string, key: string): string | undefined {
+  return config.split("\n").find((line) => new RegExp(`^${key}\\s*=`).test(line));
+}
+
 /**
  * 設定に書かれているとおりの並び（`site_url` と `additional_redirect_urls`）。
  *
  * **`**` を含んだまま返す**——**GoTrue が突き合わせるのはこの形**である。
  *
- * **書式が変わったら空**（**`listed` で 0 件**）——**「読めた。1 つも許していない」**
- * である。**読めなかったのとは別**である。
+ * **書いていないのと、読めないのを分ける** (#469)。
+ *
+ * - **鍵が無い** → **`listed`**（**GoTrue の既定に従うだけ**。**読めた側**である）
+ * - **鍵はあるが、この形で読めない** → **`unreadable`**（**折り返した配列、
+ *   行の後ろの注釈、`'` で囲んだ値**）
+ * - **形に当たって中身が空** → **`listed` で 0 件**（**「読めた。1 つも許していない」**）
+ *
+ * **途中まで読めた結果を返さない**——**許可一覧が黙って短くなる**と、
+ * **ログインできるホストが減り**、**理由は「許可されていない host」に化ける**
+ * （#453 で分けたのは、まさにこれ）。
+ *
+ * **複数行を読めるようにはしない。** **そこまでやるなら、`#` の注釈・要素の中の `]`・
+ * 行をまたぐ引用符まで面倒を見ることになる**——**この一覧は開発用の 1 ファイル**で、
+ * **本番は `AUTH_ALLOWED_ORIGINS` が正**である（#453）。**読めないと言えば足りる。**
  */
 export function allowedRedirectPatterns(path = configPath()): AllowedRedirects<string> {
   let config: string;
@@ -68,11 +85,25 @@ export function allowedRedirectPatterns(path = configPath()): AllowedRedirects<s
   } catch {
     return { kind: "unreadable", source: path };
   }
-  const site = /^site_url\s*=\s*"([^"]+)"\s*$/m.exec(config);
-  const additional = /^additional_redirect_urls\s*=\s*\[(.*)\]\s*$/m.exec(config);
+  const siteLine = lineOf(config, "site_url");
+  const additionalLine = lineOf(config, "additional_redirect_urls");
+  const site = siteLine === undefined ? undefined : /^site_url\s*=\s*"([^"]+)"\s*$/.exec(siteLine);
+  const additional =
+    additionalLine === undefined
+      ? undefined
+      : /^additional_redirect_urls\s*=\s*\[(.*)\]\s*$/.exec(additionalLine);
+  if (
+    (siteLine !== undefined && site === null) ||
+    (additionalLine !== undefined && additional === null)
+  ) {
+    return { kind: "unreadable", source: path };
+  }
   return {
     kind: "listed",
-    listed: [...(site?.[1] === undefined ? [] : [site[1]]), ...quoted(additional?.[1])],
+    listed: [
+      ...(site?.[1] === undefined ? [] : [site[1]]),
+      ...quoted(additional?.[1] ?? undefined),
+    ],
   };
 }
 
