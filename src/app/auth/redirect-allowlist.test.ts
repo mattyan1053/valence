@@ -24,7 +24,10 @@ import { callbackUrl } from "./urls";
  * ——**ここで読み直すと、片方だけ直したときに食い違う**（`AGENTS.md` §5）。
  */
 function allowedRedirects(): string[] {
-  return allowedRedirectPatterns();
+  const patterns = allowedRedirectPatterns();
+  // **読めなければ、そこで落ちる**（**「1 つも許していない」に化けさせない**）
+  expect(patterns.kind, "許可一覧を読めていない").toBe("listed");
+  return patterns.kind === "listed" ? [...patterns.listed] : [];
 }
 
 /**

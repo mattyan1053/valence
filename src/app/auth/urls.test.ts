@@ -15,7 +15,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { callbackUrl, homeUrl, loginUrl } from "./urls";
+import type { AllowedRedirects } from "../../composition/auth";
+import { callbackUrl, homeUrl, loginUrl, originFrom } from "./urls";
 
 /** **実物が組む形。** **待ち受けアドレスが `url` に入り、開いた先は `Host` にある。** */
 function requestFrom(host: string, listeningOn = "0.0.0.0:3000"): Request {
@@ -66,5 +67,36 @@ describe("この App 自身の URL", () => {
     for (const url of [callbackUrl(request), loginUrl(request), homeUrl(request)]) {
       expect(url.startsWith("http://localhost:3000/"), url).toBe(true);
     }
+  });
+});
+
+/**
+ * **読めなかったことを、「1 つも許していない」と混ぜない**（#453 のレビュー）。
+ *
+ * **この設定は開発のもの**で、**本番の口に置かれる保証が無い**——**混ぜると、
+ * 本番で誰もログインできないのに、理由が「許可されていない host」になる。**
+ * **`bin/doctor` の `[分かりません]` と同じ側**である。
+ */
+describe("許可一覧を読めなかったとき", () => {
+  const request = new Request("http://0.0.0.0:3000/auth/login", {
+    headers: { host: "localhost:3000" },
+  });
+
+  it("読めなかった、と言う", () => {
+    const unreadable: AllowedRedirects<string> = {
+      kind: "unreadable",
+      path: "/どこにも無い/config.toml",
+    };
+
+    expect(() => originFrom(request, unreadable)).toThrow(/読めません/);
+  });
+
+  it("1 つも許していないのとは、別の言い方をする", () => {
+    // **同じ文言だと、読んだ人は `config.toml` の中身を疑う**
+    // ——**実際は、ファイルがそこに無い。**
+    const empty: AllowedRedirects<string> = { kind: "listed", listed: [] };
+
+    expect(() => originFrom(request, empty)).toThrow(/許可されていない host/);
+    expect(() => originFrom(request, empty)).not.toThrow(/読めません/);
   });
 });
