@@ -7,6 +7,7 @@
 #   bin/loop-claim pr     <PR番号>      レビュー対応の前に、その PR を取る
 #   bin/loop-claim mine   <PR番号>      その PR を自分の作業場が持っているか（読むだけ）
 #   bin/loop-claim release <PR番号>     自分が取った PR の claim を返す
+#   bin/loop-claim release-issue <Issue番号>  自分が取った Issue の claim を返す
 #   bin/loop-claim idle                 着手したまま実装が出ていない Issue を並べる
 #
 #   exit 0 = 取れた / 続けてよい
@@ -86,6 +87,7 @@ usage() {
   echo "        bin/loop-claim pr <PR番号>          レビュー対応の前に PR を取る" >&2
   echo "        bin/loop-claim mine <PR番号>        その PR を自分の作業場が持っているか" >&2
   echo "        bin/loop-claim release <PR番号>     自分が取った PR の claim を返す" >&2
+  echo "        bin/loop-claim release-issue <Issue番号>  自分が取った Issue の claim を返す" >&2
   echo "        bin/loop-claim audit                label と実態の食い違いを見つける" >&2
   echo "        bin/loop-claim idle                 着手したまま実装が出ていない Issue を並べる" >&2
   echo "        exit 0 取れた / exit 1 取れなかった（次の Issue へ進む）/ exit 2 判定不能" >&2
@@ -100,7 +102,7 @@ else
   [[ $# -eq 2 ]] || usage
   ISSUE="$2"
   [[ $ACTION == "take" || $ACTION == "resume" || $ACTION == "pr" || $ACTION == "mine" ||
-    $ACTION == "release" ]] || usage
+    $ACTION == "release" || $ACTION == "release-issue" ]] || usage
   [[ $ISSUE =~ ^[0-9]+$ ]] || usage
 fi
 readonly ISSUE
@@ -134,6 +136,13 @@ readonly OWNER="$toplevel"
 # **PR と Issue で置き場を分ける。** **同じ番号の Issue と PR は別のもの**で、
 # **混ぜると、Issue を取った作業場が同じ番号の PR を直せなくなる**（逆も同じ）。
 # **`audit` の走査は `valence-loop-claim-[0-9]*` を見る**ので、こちらは当たらない。
+#
+# **どちらを返すかは、呼ぶ側に言わせる** (#460)。**番号だけでは見分けられない**
+# ——**同じ番号空間**で、**両方の記録が同時に在りうる**（`release-issue` の試験に置いた）。
+# **記録の名前で引くと、両方在るときに黙ってどちらかを選ぶ**——**返した覚えのない
+# claim が消える。** **GitHub に訊くのも採らない**——**読めなかったときに「返せない」へ
+# 倒れる**ので、**この Issue が消しに来た「逃げ道が無い」が、返す口の中に戻る。**
+# **呼ぶ側は自分が何を取ったか知っている**（`take` / `resume` は Issue、`pr` は PR）。
 if [[ $ACTION == "pr" || $ACTION == "mine" || $ACTION == "release" ]]; then
   readonly RECORD="$common_dir/valence-loop-claim-pr-$ISSUE"
 else
@@ -552,23 +561,27 @@ fi
 # 「取り違えたと分かったとき」の 1 箇所**である。
 #
 #   exit 0 = 返した（記録が無いときも 0）/ exit 1 = 別の作業場のもの / exit 2 = 判定できない
-if [[ $ACTION == "release" ]]; then
+if [[ $ACTION == "release" || $ACTION == "release-issue" ]]; then
+  # **どちらを返しているかを、そのまま言う** (#460)。**「PR #42」と出しながら Issue の
+  # 記録を消すと、読んだ人が返した先を取り違える。**
+  what="PR"
+  [[ $ACTION == "release" ]] || what="Issue"
   read_record || {
-    echo "[FAIL] PR #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
+    echo "[FAIL] $what #$ISSUE の持ち主の記録を読めません: $RECORD" >&2
     exit 2
   }
   # **返す先が無いのは失敗ではない。** **取る前に返しても、周回を止めない**
   [[ -n $held_owner ]] || exit 0
   if [[ $held_owner != "$OWNER" ]]; then
     # **返せるのは自分のものだけ。** **他人のものを消せると、排他が意味を失う**
-    echo "[INFO] PR #$ISSUE は別の作業場のものです（$held_owner）。返しません" >&2
+    echo "[INFO] $what #$ISSUE は別の作業場のものです（$held_owner）。返しません" >&2
     exit 1
   fi
   rm -f "$RECORD" || {
-    echo "[FAIL] PR #$ISSUE の記録を消せません: $RECORD" >&2
+    echo "[FAIL] $what #$ISSUE の記録を消せません: $RECORD" >&2
     exit 2
   }
-  echo "[INFO] PR #$ISSUE の claim を返しました" >&2
+  echo "[INFO] $what #$ISSUE の claim を返しました" >&2
   exit 0
 fi
 
