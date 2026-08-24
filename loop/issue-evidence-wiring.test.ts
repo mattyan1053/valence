@@ -1,7 +1,7 @@
 /**
  * **起票の前提が「読んだだけ」なのか「確かめた」なのかを、書き分ける**（#481）。
  *
- * **この窓で 4 回、worker が 1 往復を使って master の前提を覆した**
+ * **4 回続けて、worker が 1 往復を使って master の前提を覆した**
  * （#456 / #460 / #470 / #478）——**4 回とも、間違えたのは「読んで分かる」と思ったところ**
  * である。
  *
@@ -57,6 +57,29 @@ describe("起票の根拠を書き分ける", () => {
 
     expect(template, "テンプレートに根拠の欄が無い").toContain("確かめたこと");
     expect(template, "読んだだけのときの書き方が無い").toContain("確かめていない");
+  });
+
+  it("空欄が何を意味するかが、決めてある", () => {
+    // **必須にはしない** (#483 のレビュー)——**この Issue が防ぎたい相手は
+    // `gh issue create --body-file` で立てるので、フォームの必須は通らない**うえ、
+    // **必須にすると空欄が `n/a` に変わり**、**欲しかった「確かめていない」が消える。**
+    //
+    // **代わりに、空欄の読み方を決める**——**決めていないと、読む人が
+    // 「書き忘れ」と読むか「確かめていない」と読むかで分かれる。**
+    const template = read(".github/ISSUE_TEMPLATE/task.yml");
+
+    expect(template, "空欄でよいと書いていない").toContain("確かめていないなら空欄でよい");
+    expect(template, "空欄の読み方が決まっていない").toContain("空欄は「確かめていない」と読む");
+  });
+
+  it("根拠の欄を必須にしていない", () => {
+    // **「入れなかったこと」を試験する** (#483 のレビュー)——**次に読む人が
+    // `required: true` を足したくなったとき、ここで赤くなる。**
+    const template = read(".github/ISSUE_TEMPLATE/task.yml");
+    const evidence = template.slice(template.indexOf("id: evidence"));
+    const field = evidence.slice(0, evidence.indexOf("  - type: textarea", 1));
+
+    expect(field, "根拠の欄を必須にしている").not.toContain("required: true");
   });
 
   it("手順書が、テンプレートの欄を名指ししている", () => {
