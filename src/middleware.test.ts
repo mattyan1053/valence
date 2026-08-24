@@ -165,6 +165,69 @@ describe("更新された Cookie が、続きと応答の両方へ乗る", () =>
   });
 });
 
+describe("戻ってこなかったコールバック", () => {
+  /** 何もしない更新。**ここで見たいのは Cookie ではない。** */
+  const idle = async () => {};
+
+  /** 残した行を集める。**本物の標準エラーへ流さない。** */
+  function reports() {
+    const seen: string[] = [];
+    return { seen, report: (pathname: string) => seen.push(pathname) };
+  }
+
+  it("`/` に code が来たら、サーバへ残す", () => {
+    // **`/auth/callback` は呼ばれない**ので (#455)、**画面や Route Handler に
+    // 置くと、落ちた要求はどこにも届かない**——**必ず通る境界で見る。**
+    const { seen, report } = reports();
+
+    return refreshedResponse(
+      new NextRequest(new URL("http://localhost/?code=abc")),
+      idle,
+      report,
+    ).then(() => {
+      expect(seen, "落ちたことがどこにも残っていない").toEqual(["/"]);
+    });
+  });
+
+  it("正しく戻ってきた code では鳴らない", async () => {
+    // **毎回出る案内は読まれなくなる**
+    const { seen, report } = reports();
+
+    await refreshedResponse(
+      new NextRequest(new URL("http://localhost/auth/callback?code=abc")),
+      idle,
+      report,
+    );
+
+    expect(seen, "正常な経路で鳴っている").toEqual([]);
+  });
+
+  it("ふつうの要求では鳴らない", async () => {
+    const { seen, report } = reports();
+
+    await refreshedResponse(
+      new NextRequest(new URL("http://localhost/repos/acme/app")),
+      idle,
+      report,
+    );
+
+    expect(seen, "code が無いのに鳴っている").toEqual([]);
+  });
+
+  it("code そのものを渡さない", async () => {
+    // **交換できる値を、記録の側へ持ち込まない**（§6）
+    const { seen, report } = reports();
+
+    await refreshedResponse(
+      new NextRequest(new URL("http://localhost/?code=7405c683-secret")),
+      idle,
+      report,
+    );
+
+    expect(seen.join(""), "code を渡している").not.toContain("7405c683-secret");
+  });
+});
+
 describe("Next.js が呼ぶ入口", () => {
   it("Node.js で走る", () => {
     // **既定の Edge では設定を読めない** (#252 のレビュー)——**`process.env` を

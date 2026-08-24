@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { reportLoginFailure } from "./login-failure";
+import { reportDroppedCallback, reportLoginFailure } from "./login-failure";
 
 /** 書き出し先を受け取って、出た行を集める。**本物の標準エラーへ流さない。** */
 function lines() {
@@ -86,5 +86,90 @@ describe("落ちた段を残す", () => {
     reportLoginFailure("save", LEAKY, write);
 
     expect(written).toHaveLength(1);
+  });
+});
+
+describe("戻ってこなかったコールバックを残す", () => {
+  it("どこへ来たのかが分かる", () => {
+    // **`/auth/callback` が呼ばれない**ので、**落ちた段の記録**（#248）**は出ない**
+    // ——**残るのは、この 1 行だけ**である
+    const { written, write } = lines();
+
+    reportDroppedCallback("/", write);
+
+    expect(written.join("\n"), "どこへ来たのかが出ていない").toContain("/");
+  });
+
+  it("次に見る場所が分かる", () => {
+    // **症状だけ残しても、人は動けない**——**2026-08-24 は、原因に辿り着くまでに
+    // `curl` と `docker exec` が要った**
+    const { written, write } = lines();
+
+    reportDroppedCallback("/", write);
+
+    expect(written.join("\n"), "許可一覧を指していない").toMatch(/許可/);
+  });
+
+  it("本番で見る場所も指す", () => {
+    // **`supabase/config.toml` は開発のもの** (#458 のレビュー)——**本番の GoTrue が
+    // 見ているのは Supabase の Auth 設定**である。**開発の設定だけを指すと、
+    // 本番で踏んだ人がそこを見て、正しいまま調査が止まる。**
+    const { written, write } = lines();
+
+    reportDroppedCallback("/", write);
+
+    expect(written.join("\n"), "本番で見る場所が出ていない").toMatch(/Supabase/);
+  });
+
+  it("完全な URL で確かめさせる", () => {
+    // **許可されるのは戻り先 URL そのもの**である——**オリジンだけ合っていても、
+    // `/auth/callback` を含む URL が許可されていなければ落ちる。**
+    const { written, write } = lines();
+
+    reportDroppedCallback("/", write);
+
+    expect(written.join("\n"), "オリジンだけ見て終わる案内になっている").toMatch(/完全な URL/);
+  });
+
+  it("アプリ側の環境変数を、GoTrue の設定として案内しない", () => {
+    // **`AUTH_ALLOWED_ORIGINS` はアプリが Host を検証するためのもの**で、
+    // **GoTrue は見ない** (#458 のレビュー)——**指すと、正しい変数を確かめた人が
+    // そこで止まる。**
+    const { written, write } = lines();
+
+    reportDroppedCallback("/", write);
+
+    expect(written.join("\n"), "GoTrue が見ない設定を指している").not.toContain(
+      "AUTH_ALLOWED_ORIGINS",
+    );
+  });
+
+  it("こちらが落としたとは言わない", () => {
+    // **落としているのは GoTrue** で、**こちらから分かるのは「戻ってこなかった」まで**
+    // である（`bin/doctor` の `[分かりません]` と同じ側）
+    const { written, write } = lines();
+
+    reportDroppedCallback("/", write);
+
+    expect(written.join("\n"), "断定している").not.toMatch(/失敗しました|落としました/);
+  });
+
+  it("code を出さない", () => {
+    // **`code` は交換できる値**である（§6）——**path しか渡さない**ことを、
+    // **呼ぶ側ではなくこの口の形で担保する**
+    const { written, write } = lines();
+
+    reportDroppedCallback("/?code=7405c683-secret", write);
+
+    expect(written.join("\n"), "code がそのまま出ている").not.toContain("7405c683-secret");
+  });
+
+  it("1 行だけ書く", () => {
+    const { written, write } = lines();
+
+    reportDroppedCallback("/", write);
+
+    expect(written).toHaveLength(1);
+    expect(written[0]).not.toContain("\n");
   });
 });
