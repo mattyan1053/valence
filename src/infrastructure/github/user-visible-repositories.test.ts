@@ -199,6 +199,52 @@ describe("ユーザートークンで見られるリポジトリを解決する"
     );
   });
 
+  it("同時に投げる数に、上限がある", async () => {
+    // **installation の数を「数個」と仮定しない** (#472 のレビュー)——**§1 が言うのは
+    // 「アカウントごとにある」**であって、**「数個しかない」ではない**（**主旨は
+    // 「インストール先は 1 つではない」**）。
+    //
+    // **GitHub の secondary rate limit は同時 100 件**——**超えると 403 / 429 が返り、
+    // この実装は 1 つでも落ちたら投げる**ので、**一覧が丸ごと出なくなる。**
+    let running = 0;
+    let peak = 0;
+    const ids = [1, 2, 3, 4, 5, 6];
+    const fetchImpl = (async (url: string | URL) => {
+      const at = String(url);
+      if (at === INSTALLATIONS) {
+        return new Response(JSON.stringify(installed(...ids)));
+      }
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      running -= 1;
+      return new Response(JSON.stringify({ repositories: [repo("acme", at.slice(-20))] }));
+    }) as unknown as typeof fetch;
+
+    await createUserVisibleRepositories({ fetchImpl, concurrency: 2 }).list("user-token");
+
+    expect(peak, "上限を超えて同時に投げている").toBeLessThanOrEqual(2);
+    expect(peak, "そもそも同時に投げていない（上限の試験になっていない）").toBe(2);
+  });
+
+  it("上限があっても、全部を引く", async () => {
+    // **待ち時間と引き換えにするだけ**であって、**取りこぼしてよいわけではない**
+    const replies: Record<string, Reply> = { [INSTALLATIONS]: { body: installed(1, 2, 3) } };
+    for (const id of [1, 2, 3]) {
+      replies[reposOf(id)] = { body: { repositories: [repo("acme", `r${id}`)] } };
+    }
+
+    const listing = await createUserVisibleRepositories({
+      fetchImpl: fetcher(replies).fetchImpl,
+      concurrency: 1,
+    }).list("user-token");
+
+    expect(
+      listing.repositories.map((r) => r.name),
+      "並びが installation の順ではない",
+    ).toEqual(["r1", "r2", "r3"]);
+  });
+
   it("読めなかった 1 件は、黙って捨てない", async () => {
     // **捨てると「読めなかった」が「見えなかった」に化ける**
     const { fetchImpl } = fetcher({

@@ -41,11 +41,30 @@ const PER_PAGE = 100;
  */
 const REQUEST_TIMEOUT_MS = 10_000;
 
+/**
+ * 同時に投げる installation の数 (#472 のレビュー)。
+ *
+ * **「installation は数個」と仮定しない。** **`AGENTS.md` §1 が言っているのは
+ * 「installation はアカウントごとにある」**であって、**数の話ではない**
+ * ——**節の主旨は「インストール先は 1 つではない」**である。
+ *
+ * **GitHub の secondary rate limit は同時 100 件**。**超えると 403 / 429 が返り、
+ * ここは 1 つでも落ちたら投げる**ので、**一覧が丸ごと出なくなる。**
+ *
+ * **100 には寄せない。** **同じ要求の中で、他の口も GitHub を叩く**（盤面は PR も
+ * 引く）ので、**上限に張り付けると、その相乗りで超える。** **8 にしたのは、
+ * 待ち時間の伸び方が緩いから**である——**installation が 40 あっても 5 波**で、
+ * **1 波は 1 往復ぶん**（**上の 10 秒はその 1 往復に掛かる**）。
+ */
+const CONCURRENCY = 8;
+
 export type UserVisibleRepositoriesOptions = {
   /** **差し替えるための引数であって、抽象ではない**（#64 と同じ形）。 */
   readonly fetchImpl?: typeof fetch;
   /** 1 要求の上限。**試験は本物の時間を回さない**（#131 / #137 と同じ）。 */
   readonly timeoutMs?: number;
+  /** 同時に投げる数の上限。**試験が上限そのものを見る**ため。 */
+  readonly concurrency?: number;
 };
 
 /**
@@ -176,6 +195,47 @@ async function fetchInstallationRepositories(
   return items;
 }
 
+/**
+ * **上限つきで、順に走らせる** (#472 のレビュー)。**返す並びは入力の順。**
+ *
+ * **落ちたら、そこで新しく投げない。** **1 つでも落ちたら投げる**（**半分だけ返すと、
+ * 足りないことに気づけない**）ので、**残りを投げ続けても捨てるだけ**である
+ * ——**403 / 429 を余計に踏むぶん、次の要求まで悪くする。**
+ *
+ * **最初に落ちたものを投げる。** **あとから落ちたものを握り潰さない**ため、
+ * **全部が畳まれてから投げ直す。**
+ */
+async function runWithLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failure: unknown;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (failure === undefined) {
+      const index = next;
+      next += 1;
+      const item = items[index];
+      if (item === undefined) {
+        return;
+      }
+      try {
+        results[index] = await run(item);
+      } catch (error) {
+        failure ??= error;
+        return;
+      }
+    }
+  });
+  await Promise.all(workers);
+  if (failure !== undefined) {
+    throw failure;
+  }
+  return results;
+}
+
 /** 仕分ける。**読めなかったものは黙って捨てない。** */
 function collect(
   items: readonly unknown[],
@@ -199,18 +259,20 @@ function collect(
 export function createUserVisibleRepositories({
   fetchImpl = fetch,
   timeoutMs = REQUEST_TIMEOUT_MS,
+  concurrency = CONCURRENCY,
 }: UserVisibleRepositoriesOptions = {}): VisibleRepositories {
   return {
     async list(userAccessToken: string): Promise<VisibleRepositoryListing> {
       const ids = await fetchInstallationIds(fetchImpl, userAccessToken, timeoutMs);
 
-      // **installation ごとの往復は、同時に投げる。** **数個**（§1）なので、
+      // **installation ごとの往復は、上限つきで同時に投げる**（#472 のレビュー）。
       // **直列にすると、その数だけ待ち時間が積み上がる**——**入り口の話**である。
+      // **上限を置くのは、数を仮定しないため**（`CONCURRENCY` の理由を読むこと）。
       //
       // **1 つでも落ちたら投げる。** **半分だけ返すと、「見えるべきものが返らない」が
       // 正常な顔で出る**——**足りないことに気づけるのは、返らなかったときだけ。**
-      const perInstallation = await Promise.all(
-        ids.map((id) => fetchInstallationRepositories(fetchImpl, userAccessToken, id, timeoutMs)),
+      const perInstallation = await runWithLimit(ids, concurrency, (id) =>
+        fetchInstallationRepositories(fetchImpl, userAccessToken, id, timeoutMs),
       );
 
       const repositories: VisibleRepository[] = [];
