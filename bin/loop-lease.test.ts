@@ -1716,6 +1716,44 @@ describe("bin/loop-lease", () => {
       expect(answered.stderr, "期限をどれだけ超えたかが出ていない").toMatch(/7[0-9]{3} 秒/);
     });
 
+    it("同じ作業場の記録が複数あれば、いちばん新しいものを言う", () => {
+      // **記録は版をまたいで残る** (#459 のレビュー)——**scope の名前が変わると、
+      // 旧名の state はそのまま残り、新しい lease を返しても消えない。**
+      // **走査は全部を見る**ので、**古い世代のほうを採ると、実際より何倍も長い
+      // 無音を告げる**——**この PR が直しに来た「読む側が数字で判断できない」を、
+      // 数字のほうから壊す。**
+      const now = Math.floor(Date.now() / 1000);
+      const scope = spawnSync(SCRIPT, ["scope", "worker"], { cwd: sandbox, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      // **前の版が置いた記録**（**名前は後ろに並ぶもの**にする。**順番で当たらない**）
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-lease-worker-zzz-前の版"),
+        `古い token\t${now - 100_000}\n古い印\n${sandbox}\n`,
+      );
+      writeFileSync(
+        join(sandbox, ".git", "valence-loop-activity-worker-zzz-前の版"),
+        `${now - 100_000}\n`,
+      );
+      expect(acquire().status).toBe(0);
+      const state = join(sandbox, ".git", `valence-loop-lease-${scope.stdout.trim()}`);
+      const lines = readFileSync(state, "utf8").split("\n");
+      lines[0] = `${(lines[0] ?? "").split("\t")[0] ?? ""}\t${now - 9000}`;
+      writeFileSync(state, lines.join("\n"));
+      writeFileSync(
+        join(sandbox, ".git", `valence-loop-activity-${scope.stdout.trim()}`),
+        `${now - 9000}\n`,
+      );
+      markRound(sandbox, now - 100_000);
+
+      const answered = run(["alive", sandbox]);
+
+      expect(answered.status).toBe(1);
+      expect(answered.stderr, "いちばん新しい記録を言っていない").toMatch(/最後の活動 9\d{3} 秒前/);
+      expect(answered.stderr, "前の版の記録を、いまの無音として言っている").not.toMatch(
+        /最後の活動 (99|10)\d{3} 秒前/,
+      );
+    });
+
     it("よその作業場の期限切れを、この作業場の無音として言わない", () => {
       // **記録は作業場をまたいで 1 つのディレクトリに並ぶ** (#291)——**中身で照らさないと、
       // 隣の作業場が切らしたぶんを「この作業場は 9000 秒 無音だった」と言う。**

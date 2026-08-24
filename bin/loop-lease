@@ -832,8 +832,10 @@ if [[ $ACTION == "alive" ]]; then
   # **活動の記録そのものは見ない**（`bin/loop-stall` が避けた理由がそのまま当たる。
   # **人が `./task` を叩いても新しくなる**）——**#283 で heartbeat は持ち主に限られた**
   # ので、**lease を握っているかどうかは信じてよい。**
-  # **期限切れだった記録の、無音の長さ**（#456。**見つからなければ空**）
+  # **期限切れだった記録の、無音の長さ**（#456。**見つからなければ空**）。
+  # **同じ作業場の記録は複数ありうる**ので、**いちばん新しいものを覚える** (#459 のレビュー)
   alive_quiet=""
+  alive_quiet_age=""
   for alive_state in "$common_dir/valence-loop-lease-worker"*; do
     [[ -f $alive_state ]] || continue
     [[ $alive_state != *.lock ]] || continue
@@ -854,7 +856,16 @@ if [[ $ACTION == "alive" ]]; then
       # 区別できない**（**実測。生きている持ち主の PR を、区別しないまま引き継いだ**）。
       # **止めない。言うだけ**である（**判定は変えない**）。
       if [[ -n $expired_token && $held_workspace == "$alive_path" ]]; then
-        alive_quiet="$(activity_age)、期限を $expired_over 秒 超過"
+        # **いちばん新しい記録を採る** (#459 のレビュー)。**scope の名前が変わると
+        # 旧名の state が残り、新しい lease を返しても消えない**——**古い世代を採ると、
+        # 実際より何倍も長い無音を告げる**（**この PR が直しに来た「数字で判断できない」を、
+        # 数字のほうから壊す**）。**無音の測り方は `read_lease` が持っている**ので、
+        # **`expired_over` から引き直す**（**ここで測り方を書き写さない**）。
+        alive_age=$((expired_over + TTL_SEC))
+        if [[ -z $alive_quiet_age ]] || ((alive_age < alive_quiet_age)); then
+          alive_quiet_age="$alive_age"
+          alive_quiet="$(activity_age)、期限を $expired_over 秒 超過"
+        fi
       fi
       continue
     fi
