@@ -33,16 +33,38 @@ function issueStep(): string {
   return to < 0 ? rest : rest.slice(0, to);
 }
 
+/**
+ * 書き分けの箇条書きだけ（`### 「現状はこうなっている」…` から、次の段落まで）。
+ *
+ * **節ぜんぶで見ると、隣の行に当たる** (#483 のレビュー 2 周目)——**`確かめていない`
+ * は 2 行に出る**ので、**芯の 1 行（読んだのか走らせたのか）を消しても、
+ * もう 1 行が受けて緑**だった。**`id: evidence` の節を切り出してから
+ * `required: true` を見たのと同じ形**にする。
+ */
+function evidenceRules(): string {
+  const step = issueStep();
+  const from = step.indexOf("### 「現状はこうなっている」の根拠を、書き分ける");
+  expect(from, "書き分けの節がありません").toBeGreaterThanOrEqual(0);
+  const rest = step.slice(from);
+  const bullets = rest.indexOf("\n- ");
+  expect(bullets, "箇条書きがありません").toBeGreaterThanOrEqual(0);
+  const to = rest.indexOf("\n\n", bullets);
+  return to < 0 ? rest.slice(bullets) : rest.slice(bullets, to);
+}
+
 describe("起票の根拠を書き分ける", () => {
   it("手順書が、読んだのか走らせたのかを分けろと言っている", () => {
-    // **そこにしか無い言い方で見る**（**「確かめる」は節の中に何度も出る**）
-    expect(issueStep(), "書き分けの言い方が無い").toContain("確かめていない");
+    // **この Issue の芯**である。**その行にしか無い言い方で見る**
+    // ——**`確かめていない` は隣の行にも出る**ので、**そこへ当てると、
+    // 芯を消しても緑になる**（#483 のレビュー 2 周目で実際にそうだった）。
+    expect(evidenceRules(), "根拠を書けと言っていない").toContain("読んだものか、走らせたものか");
+    expect(evidenceRules(), "読んだだけのときの言い方が無い").toContain("「〜のはず」ではなく");
   });
 
   it("確かめていない前提の上に、完了条件を建てないと書いてある", () => {
     // **害は 1 往復では済まない**——**条件がその前提から建つ**ので、
     // **覆ったときに条件ごと作り直しになる**（#470 は題ごと書き直した）
-    expect(issueStep(), "完了条件の建て方が書かれていない").toContain("まず確かめる");
+    expect(evidenceRules(), "完了条件の建て方が書かれていない").toContain("まず確かめる");
   });
 
   it("測ることを義務づけていない", () => {
