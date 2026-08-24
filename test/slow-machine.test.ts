@@ -116,7 +116,9 @@ describe("プロセスを起こす試験の枠", () => {
     // 伸ばす理由は「プロセスを起こすこと」なので、起こさない側は既定のまま
     const unit = named("unit");
 
-    expect(unit?.test.include).toEqual(["src/**/*.test.ts", "test/**/*.test.ts"]);
+    // **直下も見る** (#493)。**`AGENTS.md` の隣に置く試験は repo 直下**にあり、
+    // **ここが「何を集めるか」を固定している**——**足し忘れると、置いただけで走らない。**
+    expect(unit?.test.include).toEqual(["*.test.ts", "src/**/*.test.ts", "test/**/*.test.ts"]);
     expect(unit?.test.testTimeout).toBeUndefined();
   });
 

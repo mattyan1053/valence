@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const AGENTS = fileURLToPath(new URL("../AGENTS.md", import.meta.url));
+const AGENTS = fileURLToPath(new URL("./AGENTS.md", import.meta.url));
 
 function agentsText(): string {
   return readFileSync(AGENTS, "utf8");

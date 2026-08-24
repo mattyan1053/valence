@@ -27,7 +27,10 @@ export const projects = [
       environment: "node",
       // UI コンポーネントのテストを書くときに jsdom の project を足す。
       // それまでは node で足りるので増やさない。
-      include: ["src/**/*.test.ts", "test/**/*.test.ts"],
+      //
+      // **直下も見る** (#493)。**`AGENTS.md` は repo 直下**なので、**co-location で
+      // 並ぶ試験もそこに置く**——**include に足さないと、置いただけで走らない。**
+      include: ["*.test.ts", "src/**/*.test.ts", "test/**/*.test.ts"],
       // **上の include は `*.db.test.ts` にも当たる。** 除かないと、
       // **DB を要求する試験が `./task check` に混ざる。**
       exclude: [DB_TEST_PATTERN],
