@@ -1282,7 +1282,21 @@ if [[ -n $mismatched ]]; then
   #
   # **猶予も 1 本ずつ数える** (#442)。**PR ごとに起点を置いている**ので、
   # **1 本が猶予の中でも、もう 1 本は超えていることがある**——**超えたぶんで記録する。**
-  for mismatched_number in $mismatched; do
+  #
+  # **停止カウンタは、番号ごとに積む** (#448 のレビュー)。**`bin/loop-stall` は
+  # 識別子ごとに数える**（記録は 1 行 1 識別子）ので、**`handoff-mismatch:<PR番号>` を
+  # PR の数だけ打てば、それぞれが独立に溜まる。**
+  #
+  # **ただし、受け取る側の手順はまだ単数である**（`loop/procedure/*.md` は
+  # `<PR番号>` を 1 つ渡す）——**そこを直すのは別の PR**である（**入口の印が回り、
+  # 走っているセッションが 1 周ずつ捨てる**ので、この PR には混ぜない）。
+  #
+  # **それまでは 1 本しか積まれない。** **どの 1 本かが周回ごとに変わると、
+  # 同じ識別子が積み上がらない**（**溜まらないので、人が呼ばれない**）ので、
+  # **番号の昇順で出す**——**いちばん上の行は、いつも同じ PR** である。
+  # **語に割ってから渡す**（`shellcheck` SC2086 は、ここでは意図どおり）
+  # shellcheck disable=SC2086
+  for mismatched_number in $(printf '%s\n' $mismatched | sort -n); do
     echo "[WARN] PR #${mismatched_number}: 未解決スレッドがあるのに changes-requested がありません" >&2
     if mismatch_is_overlooked "$mismatched_number"; then
       mismatch_exit=3

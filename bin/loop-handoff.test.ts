@@ -2425,6 +2425,25 @@ describe("bin/loop-handoff", () => {
       ]);
     });
 
+    it("番号の昇順で出す", () => {
+      // **当面、積めるのは 1 本だけ**である（**受け取る側の手順は単数のまま**）
+      // ——**どの 1 本かが周回ごとに変わると、同じ id が積み上がらない。**
+      // **並びを番号で決める**ので、**いちばん上の行はいつも同じ PR** である。
+      withState({
+        prs: [
+          { number: 13, unresolvedBy: ["bot"] },
+          { number: 12, unresolvedBy: ["bot"] },
+        ],
+      });
+
+      const warned = run("master")
+        .stderr.split("\n")
+        .filter((line) => line.includes("changes-requested がありません"))
+        .map((line) => line.replace(/^\[WARN\] PR #(\d+):.*$/, "$1"));
+
+      expect(warned, "並びが番号で決まっていない").toEqual(["12", "13"]);
+    });
+
     it("1 件目を見たあとも、標準エラーが読める", () => {
       // **`exec 7>… 2>/dev/null` は、標準エラーそのものを以後ずっと捨てる**
       // （#445 で踏んだ）——**猶予を見に行った瞬間から、警告が丸ごと消える。**
