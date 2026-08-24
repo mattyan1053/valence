@@ -36,6 +36,7 @@ import { createUserRepositoryPermissions } from "../infrastructure/github/user-r
 import { refreshUserTokens } from "../infrastructure/github/user-token";
 import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
 import { reportLoginFailure } from "../infrastructure/observability/login-failure";
+import { allowedRedirectOrigins as readAllowedRedirectOrigins } from "../infrastructure/supabase/redirect-allowlist";
 import {
   createSessionClient,
   currentAccessToken,
@@ -142,6 +143,14 @@ async function storeForCurrentUser(
 }
 
 /** GitHub の認可画面の URL。**戻り先はこちらで決める**（外から受けない）。 */
+/**
+ * 戻り先として許してよいオリジン (#451)。**正は `supabase/config.toml`**
+ * ——**GoTrue が突き合わせるのと同じ一覧**を、**読む口 1 つ**から渡す。
+ */
+export function allowedRedirectOrigins(): string[] {
+  return readAllowedRedirectOrigins();
+}
+
 export async function githubLoginUrl(callbackUrl: string): Promise<string> {
   const { connection } = settings();
   return startGithubLogin(await sessionClient(connection), connection, callbackUrl);
