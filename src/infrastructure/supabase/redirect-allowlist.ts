@@ -45,12 +45,44 @@ function configPath(): string {
   return join(process.cwd(), "supabase", "config.toml");
 }
 
-/** `"…"` の並びから、URL だけを取り出す。**書式が変わったら空になる。** */
-function quoted(line: string | undefined): string[] {
-  if (line === undefined) {
-    return [];
-  }
-  return [...line.matchAll(/"([^"]+)"/g)].map((match) => match[1] as string);
+/**
+ * `"…"` の並びから、URL だけを取り出す。
+ *
+ * **「読める」の定義を 1 つにする** (#477 のレビュー)——**中身を確かめる側
+ * （`fullyQuoted`）と、ここで、空文字の扱いが食い違っていた**（**`[""]` は
+ * 「全部読めた」と判定され、ここで落ちる**）。**何にも当たらないパターン**なので
+ * **害は無かった**が、**2 つの正規表現が少しずつ違う「読める」を持つ**のは、
+ * **判定が 2 段あることに気づけなくなる形**である。
+ */
+function quoted(line: string): string[] {
+  return [...line.matchAll(/"([^"]*)"/g)].map((match) => match[1] as string);
+}
+
+/**
+ * 配列の中身が、この形で全部読めるか (#469 のレビュー)。
+ *
+ * **外側が当たっても、中身が全部読めるとは限らない**——**`'` で囲んだ要素は
+ * TOML として有効**である。**拾える側だけ返すと、一覧が黙って短くなり**、
+ * **ログインの失敗が「許可されていない host」に化ける**（**この直しが消しに来た形**）。
+ *
+ * **末尾のカンマは書ける形**なので、**読める側に入れる。**
+ */
+function fullyQuoted(body: string): boolean {
+  return /^\s*(?:"[^"]*"\s*,\s*)*(?:"[^"]*"\s*)?$/.test(body);
+}
+
+/**
+ * その鍵が書かれている行。**無ければ `undefined`**（**書いていない、は読めた側**）。
+ *
+ * **探す側はゆるく** (#469 のレビュー 3 周目)——**TOML は鍵の前に空白を置ける**ので、
+ * **行頭に固定すると「書いてあるのに書いていない」になる**（**そこが `listed` 0 件へ
+ * 落ちると、この口が消しに来た誤診がそのまま残る**）。
+ *
+ * **読む側は厳しいまま**（下の 2 つの正規表現）——**知らない書き方は
+ * 「書かれているが読めない」へ落ちる。** **書式が増えても、そこに穴は開かない。**
+ */
+function lineOf(config: string, key: string): string | undefined {
+  return config.split("\n").find((line) => new RegExp(`^\\s*${key}\\s*=`).test(line));
 }
 
 /**
@@ -58,8 +90,20 @@ function quoted(line: string | undefined): string[] {
  *
  * **`**` を含んだまま返す**——**GoTrue が突き合わせるのはこの形**である。
  *
- * **書式が変わったら空**（**`listed` で 0 件**）——**「読めた。1 つも許していない」**
- * である。**読めなかったのとは別**である。
+ * **書いていないのと、読めないのを分ける** (#469)。
+ *
+ * - **鍵が無い** → **`listed`**（**GoTrue の既定に従うだけ**。**読めた側**である）
+ * - **鍵はあるが、この形で読めない** → **`unreadable`**（**折り返した配列、
+ *   行の後ろの注釈、`'` で囲んだ値**）
+ * - **形に当たって中身が空** → **`listed` で 0 件**（**「読めた。1 つも許していない」**）
+ *
+ * **途中まで読めた結果を返さない**——**許可一覧が黙って短くなる**と、
+ * **ログインできるホストが減り**、**理由は「許可されていない host」に化ける**
+ * （#453 で分けたのは、まさにこれ）。
+ *
+ * **複数行を読めるようにはしない。** **そこまでやるなら、`#` の注釈・要素の中の `]`・
+ * 行をまたぐ引用符まで面倒を見ることになる**——**この一覧は開発用の 1 ファイル**で、
+ * **本番は `AUTH_ALLOWED_ORIGINS` が正**である（#453）。**読めないと言えば足りる。**
  */
 export function allowedRedirectPatterns(path = configPath()): AllowedRedirects<string> {
   let config: string;
@@ -68,11 +112,28 @@ export function allowedRedirectPatterns(path = configPath()): AllowedRedirects<s
   } catch {
     return { kind: "unreadable", source: path };
   }
-  const site = /^site_url\s*=\s*"([^"]+)"\s*$/m.exec(config);
-  const additional = /^additional_redirect_urls\s*=\s*\[(.*)\]\s*$/m.exec(config);
+  const siteLine = lineOf(config, "site_url");
+  const additionalLine = lineOf(config, "additional_redirect_urls");
+  const site =
+    siteLine === undefined ? undefined : /^\s*site_url\s*=\s*"([^"]*)"\s*$/.exec(siteLine);
+  const additional =
+    additionalLine === undefined
+      ? undefined
+      : /^\s*additional_redirect_urls\s*=\s*\[(.*)\]\s*$/.exec(additionalLine);
+  const body = additional?.[1];
+  if (
+    (siteLine !== undefined && site === null) ||
+    (additionalLine !== undefined && additional === null) ||
+    (body !== undefined && !fullyQuoted(body))
+  ) {
+    return { kind: "unreadable", source: path };
+  }
   return {
     kind: "listed",
-    listed: [...(site?.[1] === undefined ? [] : [site[1]]), ...quoted(additional?.[1])],
+    listed: [
+      ...(site?.[1] === undefined ? [] : [site[1]]),
+      ...(body === undefined ? [] : quoted(body)),
+    ],
   };
 }
 
