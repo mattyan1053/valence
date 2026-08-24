@@ -2410,8 +2410,19 @@ describe("bin/loop-handoff", () => {
       const handoff = overlooked("master");
 
       expect(handoff.status, "矛盾を知らせていない").toBe(3);
-      expect(handoff.stderr, "1 本目が出ていない").toContain("#12");
-      expect(handoff.stderr, "2 本目が出ていない").toContain("#13");
+      // **行の形まで見る**（#448 のレビュー）——**`toContain("#12")` は
+      // 「PR #12 と #13 の 1 件」でも通る。** **PR ごとに 1 行**が、この口の契約である。
+      expect(
+        handoff.stderr
+          .split("\n")
+          .filter((line) =>
+            line.includes("未解決スレッドがあるのに changes-requested がありません"),
+          ),
+        "PR ごとに 1 行になっていない",
+      ).toEqual([
+        "[WARN] PR #12: 未解決スレッドがあるのに changes-requested がありません",
+        "[WARN] PR #13: 未解決スレッドがあるのに changes-requested がありません",
+      ]);
     });
 
     it("1 件目を見たあとも、標準エラーが読める", () => {
