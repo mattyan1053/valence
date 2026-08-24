@@ -114,6 +114,23 @@ describe("ユーザートークンで見られるリポジトリを解決する"
     expect(listing.invalid[0]?.index).toBe(1);
   });
 
+  it("遅いときは、待ち切らずに落とす", async () => {
+    // **画面ごと止めない** (#120 / #158 と同じ考え方)——**返らない要求を待ち続けると、
+    // 入り口が開かないまま**である。**上限を過ぎたら落とし、使う側は
+    // 「いま取得できませんでした」へ倒す。**
+    //
+    // **引く向きとは関係なく効く** (#472 のレビュー)。**#470 の「遅いときの振る舞いを
+    // 決める」は、ここが引き受ける**——**速くする話ではない。**
+    const never = (async (_url: string | URL, init: RequestInit = {}) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })) as unknown as typeof fetch;
+
+    await expect(
+      createUserVisibleRepositories({ fetchImpl: never, timeoutMs: 20 }).list("user-token"),
+    ).rejects.toThrow();
+  });
+
   it("エラーの文面に応答の中身を載せない", async () => {
     // **この要求の応答にはユーザーの持ち物が並ぶ**（§6「出力に何が含まれうるかで判断する」）
     const { fetchImpl } = fetcher([{ body: { message: "Bad credentials" }, status: 403 }]);
