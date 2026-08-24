@@ -33,6 +33,18 @@ body:
       description: 何が確認できたら閉じてよいか
 
   - type: textarea
+    id: evidence
+    attributes:
+      label: 確かめたこと
+      description: |
+        本文に書いた「現状はこうなっている」の根拠。**読んだのか、走らせたのか**を分けて書く。
+        走らせたなら、その出力（`AGENTS.md` §6 に当たるものは貼らない）。
+        読んだだけなら「〜と読んだ。確かめていない」と書く——**確かめていない前提の上に、
+        完了条件を建てない**（`loop/procedure/master.md` のステップ 5）。
+        **確かめていないなら空欄でよい。空欄は「確かめていない」と読む**
+        （必須にすると `n/a` が埋まり、欲しかった区別がそこで消える）。
+
+  - type: textarea
     id: out-of-scope
     attributes:
       label: やらないこと
