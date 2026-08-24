@@ -114,6 +114,28 @@ describe("状態が矛盾したとき", () => {
     expect(section, "単数のまま残っている").not.toContain("handoff-mismatch:<PR番号>");
   });
 
+  it.each(PROCEDURES)("$role は、番号を読めなかったときに素通りしない", ({ role }) => {
+    // **`$( )` は終了コードを捨てる** (#454 のレビュー)——**取得に失敗しても、
+    // 出力が空なら「食い違い 0 件」として素通りする**（**exit 3 を見ているのに、
+    // 停止カウンタが 1 件も動かない**）。
+    //
+    // **古い版のスクリプトは `--mismatched` を知らない**ので **usage で落ちる**
+    // ——**手順書だけが新しい並びは、同期の窓の中で実在する**（#281 と同じ形）。
+    const section = procedureText(role).split("### 周回の出口")[1]?.split("\n## ")[0] ?? "";
+
+    expect(section, "終了コードを捨てている").not.toContain(
+      `for number in $(bin/loop-handoff ${role} --mismatched)`,
+    );
+    expect(section, "出力を先に受けていない").toContain(
+      `="$(bin/loop-handoff ${role} --mismatched)"`,
+    );
+    // **「0 件」と「判定できない」を分ける**（**混ぜると、読めない周回が健全に見える**）
+    expect(section, "終了コードで分けていない").toContain('case "$?" in');
+    expect(section, "判定できないぶんを数えていない").toContain(
+      "bin/loop-stall mismatch-lookup-failed",
+    );
+  });
+
   it("停止識別子が用意されている", () => {
     expect(read("bin/loop-stall")).toContain("handoff-mismatch");
   });

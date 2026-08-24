@@ -707,9 +707,20 @@ lease を返して呼び直すだけ**で、**出口を通らない**——**だ
   #
   # **番号は `bin/loop-handoff` に訊く**（**`[WARN]` の文面から拾わない**）。
   # **返るのは見送られたものだけ**で、**猶予の中の PR は入っていない。**
-  for number in $(bin/loop-handoff worker --mismatched); do
-    bin/loop-stall "handoff-mismatch:$number"
-  done
+  #
+  # **出力を先に受ける** (#454 のレビュー)。**`for number in $(…)` は終了コードを
+  # 捨てる**ので、**読めなかった周回が「食い違い 0 件」に化ける**——**exit 3 を
+  # 見ているのに、停止カウンタが 1 件も動かない。** **古い版のスクリプトは
+  # `--mismatched` を知らず usage で落ちる**ので、**同期の窓の中で実在する。**
+  mismatched="$(bin/loop-handoff worker --mismatched)"
+  case "$?" in
+    # **語に割って渡す**（番号だけが並んでいる）
+    0) for number in $mismatched; do bin/loop-stall "handoff-mismatch:$number"; done ;;
+    1) ;;                                        # 見送られた食い違いは無い
+    # **番号が分からないので、まとめて 1 つ数える** (#454 のレビュー)。**積まない側へ
+    # 倒さない**——**読めないまま続けば、人が要るのはどちらにせよ同じ**である。
+    *) bin/loop-stall mismatch-lookup-failed ;;
+  esac
   ```
 
   **番号が 1 つも返らなくても、exit 3 は exit 3 である**——**報告は飛ばさない。**
