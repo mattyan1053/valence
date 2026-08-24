@@ -2254,6 +2254,23 @@ describe("bin/loop-handoff", () => {
       expect(run("master").status, "出口を通っても数えていない").toBe(3);
     });
 
+    it("周回の数より大きい起点は、置き直す", () => {
+      // **前の版は起点に時刻を置いていた** (#442 のレビュー 3 周目)。**桁が違うので
+      // 引き算は負になる**——**そこで「数えない」だけで済ませると、記録が書き直されず、
+      // witness が動くまで二度と数えない**（**黙る側へ倒れたまま戻らない**）。
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      run("master"); // 起点を置く
+      const record = join(repo, ".git", "valence-loop-mismatch-12");
+      const witness = readFileSync(record, "utf8").split("\t")[0];
+      writeFileSync(record, `${witness}\t1700000000\n`); // **前の版が置いた形**
+      masterRounds(2);
+
+      expect(run("master").status, "前の版の起点を、そのまま引いている").not.toBe(3);
+      masterRounds(2);
+
+      expect(run("master").status, "置き直していない（witness が動くまで数えない）").toBe(3);
+    });
+
     it("状態が変われば、数え直す", () => {
       // **witness が動けば、それは別の食い違い**である——**新しい指摘が届いた PR を、
       // 前の状態の猶予で数えない。**

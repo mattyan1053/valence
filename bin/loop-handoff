@@ -771,10 +771,11 @@ mismatch_is_overlooked() {
   # **まだ 1 度も出口を通っていない**なら 0（**「見ていない」であって、判定不能ではない**）
   now_last="$(master_rounds_now)" || now_last=0
   mismatch_record_locked "$record" || return 1
+  # **起点が周回の数より大きいなら、前の版が置いた時刻**である（**桁が違う**）。
+  # **そのまま引くと負になる**——**「数えない」だけで済ませると記録が書き直されず、
+  # witness が動くまで二度と数えない**ので、**下の「状態が変わった」側で置き直す。**
   if [[ -f $record ]] && IFS=$'\t' read -r stored_witness stored_at <"$record" 2>/dev/null &&
-    [[ $stored_witness == "$witness" && $stored_at =~ ^[0-9]+$ ]]; then
-    # **前の版が置いた起点は時刻**である（**桁が違う**）——**引き算は大きく負になり、
-    # 数えない側へ落ちる**（**猶予が振り出しに戻るだけ**）。
+    [[ $stored_witness == "$witness" && $stored_at =~ ^[0-9]+$ ]] && ((stored_at <= now_last)); then
     seen=$((now_last - stored_at))
     ((seen >= MISMATCH_GRACE_ROUNDS)) && verdict=0
   else
