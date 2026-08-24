@@ -151,6 +151,38 @@ function runBlock(block: string, place: { path: string; repo: string }): void {
   expect(result.status, result.stderr).toBe(0);
 }
 
+/** ステップ 2.2（自分の `in-progress` を見るところ）。**次の節まで。** */
+function resumeSection(): string {
+  const text = procedureText("worker");
+  const from = text.indexOf("### 2.2");
+  expect(from, "ステップ 2.2 が見つからない").toBeGreaterThanOrEqual(0);
+  return text.slice(from).split("\n## ")[0] ?? "";
+}
+
+describe("PR を出さずに終わった Issue", () => {
+  it("畳む道が書いてある", () => {
+    // **#489 で踏んだ**（#491）。**「測って、変えないことが結論」で終わる Issue に
+    // 畳み方が無く**、**worker は毎周回そこへ入る**——**master が閉じるまで
+    // `ready` へ進めない。**
+    //
+    // **手は 1 つ**である（MERGED の分岐にあるもの）——**写さずに指す**ので、
+    // **ここで見るのは「その道が書いてあるか」だけ。**
+    const section = resumeSection();
+
+    expect(section, "PR が要らなかった道が無い").toContain("変更が要らなかった");
+    expect(section, "畳む手を指していない").toContain("MERGED の分岐と同じ 2 行");
+  });
+
+  it("`backlog` に意味が 2 つあることが読める", () => {
+    // **`backlog` を避けたのは、「まだ着手していない」だけを読んだから**である
+    // ——**「終わったが、閉じるのは master」でも同じ label を使う。**
+    // **読み取れないなら、書き足りていない。**
+    expect(procedureText("worker"), "backlog の 2 つ目の意味が書かれていない").toContain(
+      "終わったが、閉じるのは master",
+    );
+  });
+});
+
 describe("マージしたのに閉じない Issue の行き先", () => {
   it("手順書のとおりに打つと、どの一覧にも出てこない状態にならない", () => {
     // **完了条件そのもの。** **`Closes` の無い PR がマージされたあと、
