@@ -700,6 +700,103 @@ pr_witness() {
     "$1" "${head_of[$1]-}" "${unresolved_of[$1]-}" "${last_comment_of[$1]-}"
 }
 
+# **master がまだ見ていないだけの状態を、食い違いとして数えない** (#440)。
+#
+# **レビューが着いた PR は、master が判定するまで「未解決があるのに
+# `changes-requested` が無い」に見える**——**master は 1 周に 1 本しか見ない**ので、
+# **PR が 2 本並べば、必ず片方がこの形になる。** **2026-08-24 の 1 日で 3 回出て、
+# 3 回とも master が手で `--reset` している**（**消し忘れれば、異常なしで人が呼ばれる**）。
+#
+# **時刻では切らない**（#129。**遅い周回と落ちた周回は、経過時間では分けられない**）
+# ——**master の周回が進んだかで見る**（`bin/loop-cadence` と同じ物差し）。
+#
+# **同じ状態のまま、master の周回が 2 つ進んだら数える。** **2 つなのは、
+# 「1 周に 1 本」で PR が 2 本並びうるから**である（**1 人 1 本・全体で 2 本**）
+# ——**1 つだと、master が正しくもう一方を見ている周回で鳴る。**
+#
+# **状態が変われば、数え直す。** **witness（head・未解決の数・最後の発言）が動けば、
+# それは別の食い違い**である。
+#
+# **master の周回を読めないときは数えない**——**「見送った」と言える根拠が無い。**
+# **WARN は出す**ので、黙って消えるのではない。
+readonly MISMATCH_GRACE_ROUNDS=2
+
+# **数えるのは「PR を見た周回」である** (#442 のレビュー 2 周目)。**`acquire` の数では
+# 足りない**——**手順が入れ替わって捨てた周回も 1 つと数える**（**実測で 22 秒差の 2 本**）
+# ——**捨てた周回は PR を 1 本も見ていない**（**捨てるのは 1.1、出口は最後**）。
+# **この口は出口でしか呼ばれない**ので、**呼ばれた ＝ その周回は PR を見ている。**
+# **新しい種類の行を、既にある記録へ足さない** (#281)——**別のファイルに、数だけ置く。**
+readonly MASTER_ROUNDS="$common_dir/valence-loop-master-rounds"
+
+master_rounds_now() {
+  local seen
+  [[ -f $MASTER_ROUNDS ]] || return 1
+  read -r seen <"$MASTER_ROUNDS" 2>/dev/null || return 1
+  [[ $seen =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$seen"
+}
+
+# **master の出口を 1 つ数える。** **数えられなくても、周回は止めない。**
+# **錠は要らない**——**書くのは master の出口だけ**で、**その周回は lease で直列化
+# されている。** **置き換えは `mv`** で、**半端な値が読まれない。**
+master_round_counted() {
+  local seen
+  seen="$(master_rounds_now)" || seen=0
+  if ! { printf '%s\n' "$((seen + 1))" >"$MASTER_ROUNDS.tmp" 2>/dev/null &&
+    mv -f "$MASTER_ROUNDS.tmp" "$MASTER_ROUNDS" 2>/dev/null; }; then
+    rm -f "$MASTER_ROUNDS.tmp" 2>/dev/null || true
+    echo "[WARN] master の周回を数えられません: $MASTER_ROUNDS" >&2
+  fi
+}
+
+# **起点の記録を、錠の下で触る** (#442 のレビュー)。**共通ディレクトリは 3 つの
+# セッションが同時に読み書きする**——**`bin/loop-lease` の `record_missing` と同じ形。**
+#
+# **握られていたら、何もしない**（`flock -n`）。**倒れる先は「数えない」**である
+# ——**待たない**（**出口は速いほうがよい**）し、**取り損ねて数えるより、取り損ねて
+# 数えないほうが安い**（**WARN は出る**）。
+mismatch_record_locked() {
+  exec 7>"$1.lock" 2>/dev/null || return 1
+  flock -n 7 || {
+    exec 7>&-
+    return 1
+  }
+}
+
+# **この食い違いを、master が見送ったと言えるか。**
+mismatch_is_overlooked() {
+  local number="$1" witness record stored_witness stored_at seen now_last verdict=1
+  witness="$(pr_witness "$number")"
+  record="$common_dir/valence-loop-mismatch-$number"
+  # **まだ 1 度も出口を通っていない**なら 0（**「見ていない」であって、判定不能ではない**）
+  now_last="$(master_rounds_now)" || now_last=0
+  mismatch_record_locked "$record" || return 1
+  # **起点が周回の数より大きいなら、前の版が置いた時刻**である（**桁が違う**）。
+  # **そのまま引くと負になる**——**「数えない」だけで済ませると記録が書き直されず、
+  # witness が動くまで二度と数えない**ので、**下の「状態が変わった」側で置き直す。**
+  if [[ -f $record ]] && IFS=$'\t' read -r stored_witness stored_at <"$record" 2>/dev/null &&
+    [[ $stored_witness == "$witness" && $stored_at =~ ^[0-9]+$ ]] && ((stored_at <= now_last)); then
+    seen=$((now_last - stored_at))
+    ((seen >= MISMATCH_GRACE_ROUNDS)) && verdict=0
+  else
+    # **初めて見た状態**（あるいは状態が変わった）。**起点を置いて、今回は数えない。**
+    # **置くのは「master が PR を見た回数」**である（**時刻ではない**）。
+    printf '%s\t%s\n' "$witness" "$now_last" >"$record" ||
+      echo "[WARN] 食い違いの起点を記録できません: $record" >&2
+  fi
+  exec 7>&-
+  return "$verdict"
+}
+
+# **解けた食い違いの起点を捨てる。** **握られていたら、次の周回に任せる。**
+mismatch_forget() {
+  local record="$common_dir/valence-loop-mismatch-$1"
+  [[ -f $record ]] || return 0
+  mismatch_record_locked "$record" || return 0
+  rm -f "$record" 2>/dev/null || true
+  exec 7>&-
+}
+
 changes_requested=""
 gateable=""
 # **label と実態の食い違い。** 未解決が残っているのに `changes-requested` が無い状態で、
@@ -709,8 +806,11 @@ mismatched=""
 answered=""
 # **当否がまだ判断されていない指摘がある** PR。**動けるのは master だけ**である。
 untriaged=""
+# **見た PR を控える** (#442 のレビュー)——**食い違いが解けたら、起点を捨てる**ため。
+examined=""
 while IFS="$FIELD" read -r number labels _head _labeled_at _pushed_at _body; do
   [[ -n $number ]] || continue
+  examined="${examined:+$examined }$number"
   unresolved="${unresolved_of[$number]-0}"
   [[ $unresolved =~ ^[0-9]+$ ]] || fail_unknown "未解決スレッド数が数値ではありません: $unresolved"
   untriaged_here="${untriaged_of[$number]-0}"
@@ -743,6 +843,25 @@ while IFS="$FIELD" read -r number labels _head _labeled_at _pushed_at _body; do
     gateable="${gateable:+$gateable }$number"
   fi
 done <<<"$prs"
+
+# **解けた食い違いの起点は、その場で捨てる** (#442 のレビュー)。
+#
+# **残すと、猶予が次に効かない**——**`changes-requested` が付いて一度解け、
+# head も未解決の数も最後の発言も変わらないまま label だけ外れる**と
+# （**`bin/loop-request-changes` が外したあと、付け直しに失敗した形**。
+# **そこは exit 3 で投稿へ進まないので `comment_id` も動かない**）、
+# **古い起点がそのまま使われ、既に進んだ master の周回で即座に数える。**
+#
+# **同じ head に 2 度目のレビューが着く形は、これに当たらない**——**witness に
+# `comment_id` が入っていて、id は進む**ので、**起点は置き直される。**
+#
+# **消す側を足したので、残る側を見る**（`AGENTS.md` §5）——**閉じた PR の起点も、
+# ここを通らなくなるだけで残る。** **読む者はいない**（**番号ごとの記録で、その番号は
+# 二度と現れない**）が、**残ることは書いておく。**
+for number in $examined; do
+  [[ $number != "$mismatched" ]] || continue
+  mismatch_forget "$number"
+done
 
 # 上から順に見る。**具体的な持ち物がある側だけ**が持ち手になる。
 #
@@ -1094,6 +1213,10 @@ if ((peek == 1)); then
   exit 1
 fi
 
+# **ここへ来たということは、その周回は PR を見ている**（**捨てた周回は 1.1 で終わる**）。
+# **`--who` と `--sent` は上で返っている**ので、**決めに来た周回だけを数える。**
+[[ $ROLE != "master" ]] || master_round_counted
+
 lock_records
 
 # **判断し直す周回は、前の送信待ちを引き継がない** (#258)。**残すと、あとから
@@ -1138,7 +1261,11 @@ done
 mismatch_exit=0
 if [[ -n $mismatched ]]; then
   echo "[WARN] PR #${mismatched}: 未解決スレッドがあるのに changes-requested がありません" >&2
-  mismatch_exit=3
+  if mismatch_is_overlooked "$mismatched"; then
+    mismatch_exit=3
+  else
+    echo "       master がまだ判定していないだけかもしれません（$MISMATCH_GRACE_ROUNDS 周ぶん待ちます）" >&2
+  fi
 fi
 
 # **渡す相手がいなければ、ここで終わる**（記録は上で通してある）。
