@@ -14,6 +14,21 @@ function render(props: DependencyGraphViewProps): string {
   return renderToStaticMarkup(createElement(DependencyGraphView, props));
 }
 
+/**
+ * 一覧（`<ol>`）の中だけ。
+ *
+ * **図と一覧に、同じ `#1` / `#2` が出る** (#474 のレビュー)——**図は一覧より先に描かれる**
+ * ので、**全体を見る判定は図の並びで満たされ**、**一覧の行順が逆転しても緑のまま**になる。
+ * **一覧は Tier・承認・Merge が付く行**なので、**そこの並びを見る側は、ここを通す。**
+ */
+function list(markup: string): string {
+  const from = markup.indexOf("<ol");
+  expect(from, "一覧が出ていない").toBeGreaterThanOrEqual(0);
+  const to = markup.indexOf("</ol>", from);
+  expect(to, "一覧が閉じていない").toBeGreaterThan(from);
+  return markup.slice(from, to);
+}
+
 function pullRequest(number: number, base: string, head: string): PullRequestRef {
   return {
     number,
@@ -89,12 +104,15 @@ describe("DependencyGraphView の図", () => {
 describe("DependencyGraphView", () => {
   it("土台が先、その上に積まれたものが後に出る", () => {
     // **並びは `order.ordered` が持っている。** ここで並べ替え直さない
-    const markup = render(
-      props({ pullRequests: [STACK[1] as PullRequestRef, STACK[0] as PullRequestRef] }),
+    //
+    // **見るのは一覧の中だけ** (#474 のレビュー)——**図にも同じ `#1` / `#2` が出る**ので、
+    // **全体を見ると、図の並びで満たされてしまう。**
+    const rows = list(
+      render(props({ pullRequests: [STACK[1] as PullRequestRef, STACK[0] as PullRequestRef] })),
     );
 
-    expect(markup.indexOf("#1")).toBeGreaterThanOrEqual(0);
-    expect(markup.indexOf("#1")).toBeLessThan(markup.indexOf("#2"));
+    expect(rows.indexOf("#1")).toBeGreaterThanOrEqual(0);
+    expect(rows.indexOf("#1")).toBeLessThan(rows.indexOf("#2"));
   });
 
   it("何の上に積まれているかが分かる", () => {
