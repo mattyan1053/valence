@@ -16,6 +16,8 @@
 import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
+import { DependencyGraphFigure } from "./dependency-graph-figure";
+import { layoutDependencyGraph } from "./graph-layout";
 
 /**
  * 読めなかった 1 件。
@@ -126,7 +128,21 @@ export function DependencyGraphView({
       {pullRequests.length === 0 ? (
         <EmptyNotice unreadable={invalid.length} />
       ) : (
-        <ol>{rowsFor([...order.ordered, ...unplaced])}</ol>
+        <>
+          {/*
+           **図と一覧の両方を出す** (#471)。**図は関係を追うため**、
+           **一覧は 1 件ずつの中身のため**（**Tier・承認・Merge は行に付く**）——
+           **並びはどちらも `order` が持つ**ので、**作り直さない。**
+           */}
+          <DependencyGraphFigure
+            layout={layoutDependencyGraph({
+              placed: [...order.ordered, ...unplaced],
+              edges,
+            })}
+            missing={{ unordered: order.cyclic.length, unreadable: invalid.length }}
+          />
+          <ol>{rowsFor([...order.ordered, ...unplaced])}</ol>
+        </>
       )}
 
       {order.cyclic.length > 0 && (
