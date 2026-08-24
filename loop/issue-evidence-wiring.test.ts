@@ -52,6 +52,64 @@ function evidenceRules(): string {
   return to < 0 ? rest.slice(bullets) : rest.slice(bullets, to);
 }
 
+/**
+ * その id の欄だけ（`id: <名前>` から、次の欄まで）。
+ *
+ * **切るのは「次の欄」であって「次の textarea」ではない** (#486 のレビュー)——
+ * **後ろの欄が `input` や `dropdown` になった日に、そこから先が丸ごと入る**
+ * （**その欄の `required: true` で落ちたり、その欄の文が `toContain` を満たして
+ * 本命の消失を見逃したりする**）。**型を見ずに、次の項目で切る。**
+ */
+function fieldBlock(template: string, id: string): string {
+  const from = template.indexOf(`id: ${id}`);
+  expect(from, `テンプレートに ${id} の欄がありません`).toBeGreaterThanOrEqual(0);
+  const rest = template.slice(from);
+  const to = rest.indexOf("\n  - type:");
+  return to < 0 ? rest : rest.slice(0, to);
+}
+
+/**
+ * テンプレートの「確かめたこと」の欄だけ。
+ *
+ * **テンプレート全体へ投げない** (#484)——**`確かめていない` はこの欄に 2 度出る**うえ、
+ * **欄の外に足された文にも当たりうる。** **切り出してから、その行にしか無い語で見る。**
+ */
+function evidenceField(): string {
+  return fieldBlock(read(".github/ISSUE_TEMPLATE/task.yml"), "evidence");
+}
+
+describe("欄の切り出し", () => {
+  /** **後ろの欄の型を変えた入力**を置く (#486 のレビュー)——**踏む形そのもの。** */
+  const template = [
+    "body:",
+    "  - type: textarea",
+    "    id: evidence",
+    "    attributes:",
+    "      label: 確かめたこと",
+    "  - type: input",
+    "    id: after",
+    "    attributes:",
+    "      label: あとの欄",
+    "    validations:",
+    "      required: true",
+    "",
+  ].join("\n");
+
+  it("次の欄が textarea でなくても、そこで切る", () => {
+    const block = fieldBlock(template, "evidence");
+
+    expect(block, "後ろの欄まで入っている").not.toContain("あとの欄");
+    expect(block, "後ろの欄の必須が入っている").not.toContain("required: true");
+    expect(block, "この欄が入っていない").toContain("確かめたこと");
+  });
+
+  it("最後の欄なら、終わりまで取る", () => {
+    const block = fieldBlock(template, "after");
+
+    expect(block, "この欄が入っていない").toContain("あとの欄");
+  });
+});
+
 describe("起票の根拠を書き分ける", () => {
   it("手順書が、読んだのか走らせたのかを分けろと言っている", () => {
     // **この Issue の芯**である。**その行にしか無い言い方で見る**
@@ -74,11 +132,16 @@ describe("起票の根拠を書き分ける", () => {
   });
 
   it("人が書くテンプレートにも、同じことが書いてある", () => {
-    // **片方だけ直すと、次に書く人がどちらを見るか分からない**（#481 の条件）
-    const template = read(".github/ISSUE_TEMPLATE/task.yml");
-
-    expect(template, "テンプレートに根拠の欄が無い").toContain("確かめたこと");
-    expect(template, "読んだだけのときの書き方が無い").toContain("確かめていない");
+    // **片方だけ直すと、次に書く人がどちらを見るか分からない**（#481 の条件）。
+    //
+    // **欄の中だけを見る** (#484)——**前はテンプレート全体へ `確かめていない` を
+    // 投げていた**ので、**欄の説明が消えても、空欄の 2 行が受けて緑**だった。
+    expect(read(".github/ISSUE_TEMPLATE/task.yml"), "テンプレートに根拠の欄が無い").toContain(
+      "確かめたこと",
+    );
+    expect(evidenceField(), "読んだだけのときの書き方が無い").toContain(
+      "「〜と読んだ。確かめていない」と書く",
+    );
   });
 
   it("空欄が何を意味するかが、決めてある", () => {
@@ -88,20 +151,18 @@ describe("起票の根拠を書き分ける", () => {
     //
     // **代わりに、空欄の読み方を決める**——**決めていないと、読む人が
     // 「書き忘れ」と読むか「確かめていない」と読むかで分かれる。**
-    const template = read(".github/ISSUE_TEMPLATE/task.yml");
-
-    expect(template, "空欄でよいと書いていない").toContain("確かめていないなら空欄でよい");
-    expect(template, "空欄の読み方が決まっていない").toContain("空欄は「確かめていない」と読む");
+    // **規則そのものの言明だけを見る** (#484)——**「確かめていないなら空欄でよい」は
+    // そこから出てくる帰結**で、**同じ規則に 2 度当てると、言い換えるたびに
+    // 2 箇所が赤くなる**（**守れる範囲は増えない**）。
+    expect(evidenceField(), "空欄の読み方が決まっていない").toContain(
+      "空欄は「確かめていない」と読む",
+    );
   });
 
   it("根拠の欄を必須にしていない", () => {
     // **「入れなかったこと」を試験する** (#483 のレビュー)——**次に読む人が
     // `required: true` を足したくなったとき、ここで赤くなる。**
-    const template = read(".github/ISSUE_TEMPLATE/task.yml");
-    const evidence = template.slice(template.indexOf("id: evidence"));
-    const field = evidence.slice(0, evidence.indexOf("  - type: textarea", 1));
-
-    expect(field, "根拠の欄を必須にしている").not.toContain("required: true");
+    expect(evidenceField(), "根拠の欄を必須にしている").not.toContain("required: true");
   });
 
   it("手順書が、テンプレートの欄を名指ししている", () => {
