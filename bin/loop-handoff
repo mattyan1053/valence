@@ -100,8 +100,9 @@ done
 readonly FIELD=$'\037'
 
 usage() {
-  echo "使い方: bin/loop-handoff <役> [--sent=<token> | --who]   役: ${ROLES[*]}" >&2
+  echo "使い方: bin/loop-handoff <役> [--sent=<token> | --who | --mismatched]   役: ${ROLES[*]}" >&2
   echo "        --who は「いま誰の番か」を読むだけ（自分の番でも答える。記録も送信もしない）" >&2
+  echo "        --mismatched は見送られた食い違いの PR 番号を 1 行 1 件で返す（読むだけ）" >&2
   echo "        token は入口の bin/loop-lease acquire が出したもの（握ったまま打つ）" >&2
   exit 2
 }
@@ -138,6 +139,20 @@ sent_token=""
 #
 # **判定を並べ替えの側へ書き写さないため**の口である（`AGENTS.md` §5）。
 peek=0
+# **見送られた食い違いの番号を返す口** (#449)。**書かない・送らない・数えない。**
+#
+# **`bin/loop-stall` は識別子ごとに数える**ので、**受け取る側は番号ごとに打つ**
+# ——**そのために番号が要る。** **`[WARN]` の文面から拾わせない**（**人が読む形**で、
+# **変えた日に黙って 0 件になる**）。
+list_mismatched=0
+# **この呼び出しは、周回の一部ではない**（#454 のレビュー 2 周目）。**読むだけの口を
+# 足すたびに、下の条件へ書き足さない**——**「読むだけか」を 1 つ持つ**ので、
+# **次の口は、ここに 1 行足せば揃う。**
+#
+# **足し忘れると、周回の外から打った人の記録が「入口を飛ばした周回」として残る**
+# ——**打った本人には見えない**し、**`./task loop:status` は既に 2 つの原因を
+# 分けられないと断っている**（**3 つ目を足すと、読む人が分ける望みがさらに減る**）。
+reads_only=0
 if [[ $# -eq 2 ]]; then
   case "$2" in
     --sent=*)
@@ -148,11 +163,18 @@ if [[ $# -eq 2 ]]; then
       # **古い手順書が打つ形。** **usage で落とさない**——**何が足りないかを言う**
       confirm_sent=1
       ;;
-    --who) peek=1 ;;
+    --who)
+      peek=1
+      reads_only=1
+      ;;
+    --mismatched)
+      list_mismatched=1
+      reads_only=1
+      ;;
     *) usage ;;
   esac
 fi
-readonly confirm_sent sent_token peek
+readonly confirm_sent sent_token peek list_mismatched reads_only
 
 # **読めなかったら「送らない」に倒さない。** 倒すと、止まっていることに気づけない。
 fail_unknown() {
@@ -376,7 +398,10 @@ fi
 # ——**`--who` は「読むだけ」と決めた口**なのに、**打つと `./task loop:status` へ
 # 偽の運用違反が残る**（**決めた契約と実装が食い違う**）。**周回の中から打つぶんは、
 # 同じ周回の出口（ふつうの呼び出し）がこれまでどおり通る。**
-((peek == 1)) || "${BASH_SOURCE[0]%/*}/loop-lease" check || true
+#
+# **見るのは口の名前ではなく `reads_only`** (#454 のレビュー 2 周目)。**口の名前で
+# 書くと、増えたぶんだけここに条件が並び、足し忘れた口だけが記録を残す。**
+((reads_only == 1)) || "${BASH_SOURCE[0]%/*}/loop-lease" check || true
 
 # **一覧（検索）を信じない。** `gh issue list` / `gh pr list` の label 絞り込みは
 # **検索の索引を経由するので、付け替えた直後は古い値が返る**（実測: `ready` を付けた直後、
@@ -767,8 +792,10 @@ mismatch_record_locked() {
 }
 
 # **この食い違いを、master が見送ったと言えるか。**
+# **訊くだけの呼び出しは `--peek`** (#449)。**起点を置かない**——**出口の 1 回と
+# 訊く 1 回で、猶予が 2 周ぶん進んでしまう。**
 mismatch_is_overlooked() {
-  local number="$1" witness record stored_witness stored_at seen now_last verdict=1
+  local number="$1" peek_only="${2-}" witness record stored_witness stored_at seen now_last verdict=1
   witness="$(pr_witness "$number")"
   record="$common_dir/valence-loop-mismatch-$number"
   # **まだ 1 度も出口を通っていない**なら 0（**「見ていない」であって、判定不能ではない**）
@@ -781,7 +808,7 @@ mismatch_is_overlooked() {
     [[ $stored_witness == "$witness" && $stored_at =~ ^[0-9]+$ ]] && ((stored_at <= now_last)); then
     seen=$((now_last - stored_at))
     ((seen >= MISMATCH_GRACE_ROUNDS)) && verdict=0
-  else
+  elif [[ $peek_only != "--peek" ]]; then
     # **初めて見た状態**（あるいは状態が変わった）。**起点を置いて、今回は数えない。**
     # **置くのは「master が PR を見た回数」**である（**時刻ではない**）。
     printf '%s\t%s\n' "$witness" "$now_last" >"$record" ||
@@ -870,6 +897,25 @@ done <<<"$prs"
 # ここを通らなくなるだけで残る。** **読む者はいない**（**番号ごとの記録で、その番号は
 # 二度と現れない**）が、**残ることは書いておく。**
 #
+# **見送られた番号を返して終わる** (#449)。**忘れる側より前に置く**——**訊くだけの
+# 口なので、記録は 1 つも動かさない**（**起点は `--peek` で置かない**）。
+#
+# **返すのは、猶予を過ぎたものだけ**である。**まだ見ていないだけの PR を返すと、
+# 受け取る側がそのまま停止カウンタへ積む**（**#442 が置いた待ちが消える**）。
+#
+# **並びは番号の昇順**（#445 と同じ）。**語に割ってから渡す**
+# shellcheck disable=SC2086
+if ((list_mismatched == 1)); then
+  listed=1
+  for number in $(printf '%s\n' $mismatched | sort -n); do
+    [[ -n $number ]] || continue
+    mismatch_is_overlooked "$number" --peek || continue
+    printf '%s\n' "$number"
+    listed=0
+  done
+  exit "$listed"
+fi
+
 # **並びに居るかで見る** (#445)。**`!=` は「1 本しか無い」ことの実装**であって、
 # **意図そのものではない**——**消したいのは「いま食い違っていない PR の起点」**である。
 # **前後に空白を付けて挟む**ので、**番号の部分一致では当たらない**（`1234` の中の `234`）。
@@ -1287,13 +1333,15 @@ if [[ -n $mismatched ]]; then
   # 識別子ごとに数える**（記録は 1 行 1 識別子）ので、**`handoff-mismatch:<PR番号>` を
   # PR の数だけ打てば、それぞれが独立に溜まる。**
   #
-  # **ただし、受け取る側の手順はまだ単数である**（`loop/procedure/*.md` は
-  # `<PR番号>` を 1 つ渡す）——**そこを直すのは別の PR**である（**入口の印が回り、
-  # 走っているセッションが 1 周ずつ捨てる**ので、この PR には混ぜない）。
+  # **受け取る側は `--mismatched` で番号を訊く** (#449)——**この `[WARN]` は人が
+  # 読む形**で、**文面から拾わせない。**
   #
-  # **それまでは 1 本しか積まれない。** **どの 1 本かが周回ごとに変わると、
-  # 同じ識別子が積み上がらない**（**溜まらないので、人が呼ばれない**）ので、
-  # **番号の昇順で出す**——**いちばん上の行は、いつも同じ PR** である。
+  # **2 本あっても、人が呼ばれるのは早くならない。** **上限は識別子ごと**なので、
+  # **どちらも同じ周回数で上限へ届く**——**変わるのは「両方が数えられる」ことだけ**
+  # である（**前は、選ばれなかったほうが一度も積まれなかった**）。
+  #
+  # **番号の昇順で出す。** **読む人が毎周回同じ順で追える**——**並びが動くと、
+  # 変わったのが状態なのか順序なのか、目では見分けられない。**
   # **語に割ってから渡す**（`shellcheck` SC2086 は、ここでは意図どおり）
   # shellcheck disable=SC2086
   for mismatched_number in $(printf '%s\n' $mismatched | sort -n); do

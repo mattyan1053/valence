@@ -2449,9 +2449,10 @@ describe("bin/loop-handoff", () => {
     });
 
     it("番号の昇順で出す", () => {
-      // **当面、積めるのは 1 本だけ**である（**受け取る側の手順は単数のまま**）
-      // ——**どの 1 本かが周回ごとに変わると、同じ id が積み上がらない。**
-      // **並びを番号で決める**ので、**いちばん上の行はいつも同じ PR** である。
+      // **読む人が、毎周回同じ順で追える** (#449 で理由が変わった)。**受け取る側は
+      // 番号ごとに積むようになった**ので、**「いちばん上の 1 本だけが積まれる」は
+      // もう起きない**——**それでも並びは決めておく**（**順序が動くと、変わったのが
+      // 状態なのか並びなのか、目では見分けられない**）。
       withState({
         prs: [
           { number: 13, unresolvedBy: ["bot"] },
@@ -2465,6 +2466,65 @@ describe("bin/loop-handoff", () => {
         .map((line) => line.replace(/^\[WARN\] PR #(\d+):.*$/, "$1"));
 
       expect(warned, "並びが番号で決まっていない").toEqual(["12", "13"]);
+    });
+
+    it("食い違いの番号を、機械が読める形で返す", () => {
+      // **`[WARN]` は人が読む形**である (#449)——**受け取る側に文字列から拾わせると、
+      // 文面を変えた日に黙って 0 件になる。** **番号は、この口が返す。**
+      //
+      // **`bin/loop-stall` は識別子ごとに数える**ので、**受け取る側は番号ごとに打つ**
+      // ——**1 本ぶんしか打たないと、選ばれなかった PR は一度も積まれない。**
+      withState({
+        prs: [
+          { number: 13, unresolvedBy: ["bot"] },
+          { number: 12, unresolvedBy: ["bot"] },
+        ],
+      });
+      run("master"); // 起点を置く
+      masterRounds(2);
+
+      const listed = run("master", {}, ["--mismatched"]);
+
+      expect(listed.status, "食い違いがあるのに、無いと返している").toBe(0);
+      expect(listed.stdout, "1 行 1 件・番号の昇順で返っていない").toBe("12\n13\n");
+    });
+
+    it("猶予の中の PR は返さない", () => {
+      // **返した番号は、そのまま停止カウンタへ積まれる** (#449)——**猶予の中のものを
+      // 返すと、#442 が置いた「master がまだ見ていないだけ」の待ちが消える。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      run("master"); // 起点を置くだけ（まだ見送りではない）
+
+      const listed = run("master", {}, ["--mismatched"]);
+
+      expect(listed.stdout, "猶予の中の PR を返している").toBe("");
+      expect(listed.status, "1 本も無いのに、あると返している").toBe(1);
+    });
+
+    it("訊いただけでは、起点を置かない", () => {
+      // **訊く口が記録を動かすと、出口の 1 回とここの 1 回で猶予が 2 周ぶん進む**
+      // ——**「まだ見ていないだけ」を待つ周回が、半分になる。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+
+      run("master", {}, ["--mismatched"]);
+
+      expect(
+        existsSync(join(repo, ".git", "valence-loop-mismatch-12")),
+        "訊いただけで起点を置いている",
+      ).toBe(false);
+    });
+
+    it("訊いた周回は、master の周回として数えない", () => {
+      // **数えているのは「決めに来た呼び出し」**である (#442)——**訊くだけの口で
+      // 数えると、出口を通っていない周回で猶予が進む。**
+      withState({ prs: [{ number: 12, unresolvedBy: ["bot"] }] });
+      run("master"); // 出口を 1 つ通る
+      const rounds = join(repo, ".git", "valence-loop-master-rounds");
+      const before = readFileSync(rounds, "utf8");
+
+      run("master", {}, ["--mismatched"]);
+
+      expect(readFileSync(rounds, "utf8"), "訊いただけで、周回を数えている").toBe(before);
     });
 
     it("1 件目を見たあとも、標準エラーが読める", () => {
@@ -2826,13 +2886,23 @@ describe("bin/loop-handoff", () => {
       expect(peeked.stdout).toBe("");
     });
 
-    it("読むだけの口は、入口を飛ばしたと記録しない", () => {
+    /**
+     * **読むだけの口**（#454 のレビュー 2 周目）。**増えたらここへ足す。**
+     *
+     * **口ごとに条件を書き足すと、足し忘れた口だけが記録を残す**——**症状は
+     * 「診断で手で叩いた人の記録が、運用違反として残る」**で、**打った本人には
+     * 見えない。** **実装側も 1 つの旗（`reads_only`）で持つ。**
+     */
+    const READS_ONLY = ["--who", "--mismatched"];
+
+    it.each(READS_ONLY)("読むだけの口（%s）は、入口を飛ばしたと記録しない", (flag) => {
       // **周回の外から打つ人がいる** (#362 のレビュー)——**読むだけのつもりで打つと、
       // `./task loop:status` に偽の運用違反が残る。** **契約（読むだけ）と実装を
       // 食い違わせない。**
       withState({ prs: [{ number: 12 }] });
 
-      expect(run("master", {}, ["--who"]).status).toBe(0);
+      // **使い方の誤り（2）ではない**——**口として通っていることを先に見る**
+      expect(run("master", {}, [flag]).status, "その口が通っていない").not.toBe(2);
 
       expect(peekMissingRecord(), "読むだけの口が、運用違反を作っている").toBe("");
       // **ふつうに打つ側は、これまでどおり記録する**（退行の検出）

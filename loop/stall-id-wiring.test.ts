@@ -29,8 +29,22 @@ function read(path: string): string {
  */
 const STALL_CALL = /bin\/loop-stall (?:"([^"]+)"|([a-z][\w:<>-]*))/g;
 
+/**
+ * **変数で打つところは、一覧の形へ戻して見る** (#449)。
+ *
+ * **番号ごとに打つ節は `$number` を渡す**（食い違いは 2 本以上あることがある）
+ * ——**一覧が持っているのは `<PR番号>` という形**なので、**そのままだと
+ * 「一覧に無い識別子を打っている」に見える。** **置き換えるのは書き方だけ**で、
+ * **綴りの違いは、これまでどおり赤くなる。**
+ */
+function normalize(id: string): string {
+  return id.replace(/\$\{?number\}?/g, "<PR番号>");
+}
+
 function identifiersIn(role: LoopRole): string[] {
-  return [...procedureText(role).matchAll(STALL_CALL)].map((match) => match[1] ?? match[2] ?? "");
+  return [...procedureText(role).matchAll(STALL_CALL)].map((match) =>
+    normalize(match[1] ?? match[2] ?? ""),
+  );
 }
 
 /** 節ごとに、そこで打つ識別子を並べる。**絞らずに全部出す**（列挙が主題である）。 */
@@ -44,7 +58,7 @@ function identifiersWithSection(role: LoopRole): [string, string][] {
     const found = new RegExp(STALL_CALL.source).exec(line);
     const id = found?.[1] ?? found?.[2];
     if (id !== undefined) {
-      pairs.push([section, id]);
+      pairs.push([section, normalize(id)]);
     }
   }
   return pairs;
@@ -222,6 +236,10 @@ describe("停止識別子", () => {
       // 古くなる**ので、**両方の出口で同じ口を打つ**
       ["### 周回の出口", "return-main-failed"],
       ["### 周回の出口", "handoff-mismatch:<PR番号>"],
+      // **番号が読めなかったぶん** (#454 のレビュー)。**`$( )` が終了コードを捨てると、
+      // 読めない周回が「0 件」に化ける**——**別の名前で数える**（**どの PR かは
+      // 分かっていないので、`handoff-mismatch:<PR番号>` には混ぜない**）
+      ["### 周回の出口", "mismatch-lookup-failed"],
       // **付録にも 1 つある** (#373)。**打つ手ではなく、なぜそこで積むのかの説明**
       // ——**配られた本文が古いまま、ディスクからも読めなかったとき**である。
       // **列挙から外さない**（**外すと、説明の中の名前だけが古くなっても気づけない**）
