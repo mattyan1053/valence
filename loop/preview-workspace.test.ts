@@ -306,6 +306,22 @@ describe("./task loop:preview", () => {
     expect(git(dir, ["worktree", "list", "--porcelain"])).toContain(`${dir}-preview`);
   });
 
+  it("clone 本体と同じポートへ落ちる worker 名も、足す前に弾く", () => {
+    // **clone 本体は `git worktree list` に出ているのに、検査から外れていた**
+    // （#473 のレビュー。#195 から在る 1 行）——**実在してポートを握っている作業場**である。
+    //
+    // **数字を書き写していない。本物に探させた**（`foo-preview` と
+    // `foo-preview-worker-w104` は、どちらも同じポートへ落ちる）。
+    const { dir, env } = repo("foo-preview");
+
+    const clash = task(dir, env, ["loop:worker:add", "w104"]);
+
+    expect(clash.status, "clone 本体とポートが重なる名前を通している").not.toBe(0);
+    expect(`${clash.stdout}${clash.stderr}`, "何と重なるのかが出ていない").toMatch(
+      /ポート \d+ が foo-preview と重なります/,
+    );
+  });
+
   it("人が見る画面と同じポートへ落ちる worker 名は、足す前に弾く", () => {
     // **作られていなくても予約する**（#195 のレビュー 2 周目と同じ形）——**順番を
     // 変えただけで踏める**（`add` を先に、`loop:preview:add` を後に打つ）。
