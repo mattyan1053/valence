@@ -298,6 +298,71 @@ cmd_dev() {
 # 開発サーバーを再起動する
 cmd_restart() { ensure_up; compose restart app; }
 
+# **人が最初に開くパス** (#495)。**`next dev` は要求されたパスをその場で組み立てる**
+# （`Dockerfile` の `CMD` は `pnpm dev`）ので、**入り口だけ温めても盤面で待つ**
+# ——**実測は入り口 43.4 秒 / 盤面 7.4 秒**（#479）。**本番は `next build` 済みなので無い。**
+#
+# **`acme/valence` はテナントではない**（§1。**設定に置いた owner ではない**）
+# ——**組み立てるのは `/repos/[owner]/[name]` という 1 つのルート**で、
+# **どの値でも同じものが組まれる**（**組み立ては認証の前**。#479）。
+readonly WARM_PATHS=("/" "/repos/acme/valence")
+
+# **コンテナの中から自分自身を叩く。** **公開ポートではなく 3000**（`compose.yaml` の右側）
+# ——**ホストに curl を要求しない**（このファイルの冒頭。`AGENTS.md` §2）。
+readonly WARM_ORIGIN="http://127.0.0.1:3000"
+
+# **1 本に許す時間（ミリ秒）。** **組み立てに 43 秒かかった実測**があるので、
+# **短くすると、温める前に諦める。**
+readonly WARM_REQUEST_MS="${VALENCE_WARM_REQUEST_MS:-180000}"
+
+# **応答が返るまで待つ上限（秒）。** **`./task up` はコンテナを起こしたら返る**ので、
+# **`next dev` が聞き始めるまでに間がある。**
+readonly WARM_WAIT_SEC="${VALENCE_WARM_WAIT_SEC:-60}"
+
+# **1 本投げて、状態コードを出す。** **`redirect: "manual"` で追わない**
+# ——**組み立てが目的**なので、**入り口がログインへ倒れても、そのルートは組み上がる。**
+readonly WARM_SCRIPT='fetch(process.argv[1],{redirect:"manual",signal:AbortSignal.timeout(Number(process.env.WARM_REQUEST_MS))}).then((r)=>{console.log(r.status)},(e)=>{console.error(String(e));process.exit(1)})'
+
+# **人が最初に開く画面を、いま組み立てておく** (#495)。
+#
+# **待ちは消えない。** **人の前から `up` の中へ移るだけ**である。
+#
+# **「起きたか」を TCP で判定しない** (#479)——**Docker の port publish は TCP を先に
+# 受ける**ので、**繋がっても中身はまだ**である。**応答が返ることで見る**——
+# **返らなければ打ち直す。**
+#
+# **落ちても止めない。** **温めは速さのためのもの**で、**上がったかどうかとは別**である。
+warm_screens() {
+  local path url deadline status failed=0
+  echo "==> 人が最初に開く画面を組み立てます（up はそのぶん長くなります）"
+  for path in "${WARM_PATHS[@]}"; do
+    url="${WARM_ORIGIN}${path}"
+    deadline=$((SECONDS + WARM_WAIT_SEC))
+    while :; do
+      status=0
+      compose exec -T -e "WARM_REQUEST_MS=$WARM_REQUEST_MS" app \
+        node -e "$WARM_SCRIPT" "$url" >/dev/null 2>&1 || status=$?
+      if ((status == 0)); then
+        echo "    組み立てました: $path"
+        break
+      fi
+      if ((SECONDS >= deadline)); then
+        echo "==> 温められませんでした: $path（画面は上がっています。最初の 1 回だけ遅くなります）" >&2
+        # **温められなかったことは、この口の失敗である** (#495 の実装中に変異で判った)
+        # ——**黙って 0 を返すと、「落ちても `up` は成功する」を確かめる術が無くなる**
+        # （**呑む側を消しても、誰も気づかない**）。**呑むのは `loop:preview:up` の側。**
+        failed=1
+        break
+      fi
+      sleep 1
+    done
+  done
+  return "$failed"
+}
+
+# 人が最初に開く画面を、いま組み立てておく 例: ./task warm
+cmd_warm() { ensure_up; warm_screens; }
+
 # 任意の pnpm コマンドを流す 例: ./task pnpm add zod
 cmd_pnpm() { ensure_up; exec_app pnpm "$@"; }
 
@@ -929,6 +994,11 @@ cmd_loop_preview_up() {
     return 1
   fi
   (cd "$wt" && ./task up) || return 1
+  # **返る前に温める** (#495)。**人の前の 43 秒を、ここへ移す**——**`up` はそのぶん長い。**
+  # **落ちても上げ直しは成功させる**（**温めは速さのためのもの**）。
+  if ! (cd "$wt" && ./task warm); then
+    echo "==> 温めを実行できませんでした（画面は上がっています）" >&2
+  fi
   cmd_loop_preview_show
 }
 

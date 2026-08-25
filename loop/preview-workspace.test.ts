@@ -80,7 +80,29 @@ describe("./task loop:preview", () => {
     git(dir, ["fetch", "--quiet", "origin", "main"]);
     const stub = join(dir, "stub");
     mkdirSync(stub);
-    writeFileSync(join(stub, "docker"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    // **何を打ったかを残す** (#495)。**温めはコンテナの中で走る**ので、**ホスト側から
+    // 見えるのは `docker` への呼び出しだけ**である——**そこを記録して突き合わせる。**
+    //
+    // **`exec` だけは落とせるようにする**（`warm.fail` に回数を書く）——**温めが
+    // 落ちても `up` は成功する**、を実際に走らせて見るため。
+    writeFileSync(
+      join(stub, "docker"),
+      [
+        "#!/usr/bin/env bash",
+        `log=${JSON.stringify(join(dir, "docker.log"))}`,
+        `fails=${JSON.stringify(join(dir, "warm.fail"))}`,
+        `state=${JSON.stringify(join(dir, "warm.count"))}`,
+        'printf "%s\\n" "$*" >>"$log"',
+        'if [[ $* == *" exec "* ]]; then',
+        '  count=$(( $(cat "$state" 2>/dev/null || echo 0) + 1 ))',
+        '  printf "%s" "$count" >"$state"',
+        '  (( count > $(cat "$fails" 2>/dev/null || echo 0) )) || exit 1',
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
     return { dir, origin, env: { ...process.env, PATH: `${stub}:${process.env.PATH ?? ""}` } };
   }
 
@@ -294,6 +316,104 @@ describe("./task loop:preview", () => {
     });
 
     expect(new Set(ports).size, `clone の名前で変わっている: ${ports.join(" / ")}`).toBe(1);
+  });
+
+  /** ホスト側から見える `docker` への呼び出し。**温めは中で走る**ので、ここが唯一の跡。 */
+  function dockerCalls(dir: string): string[] {
+    return readFileSync(join(dir, "docker.log"), "utf8").split("\n").filter(Boolean);
+  }
+
+  /** 温めが叩いた URL。**`docker ... exec -T app node -e <script> <url>` の最後**である。 */
+  function warmedUrls(dir: string): string[] {
+    return dockerCalls(dir)
+      .filter((line) => line.includes(" exec "))
+      .map((line) => line.split(" ").at(-1) ?? "");
+  }
+
+  it("上げ直したら、人が最初に開く画面を組み立てておく", () => {
+    // **`next dev` は要求されたパスをその場で組み立てる** (#479 の実測: 入り口 43.4 秒 /
+    // 盤面 7.4 秒)——**人が開くたびに待つ。** **入り口だけでは足りない**（**パスごと**）。
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+
+    const up = task(dir, env, ["loop:preview:up"]);
+
+    expect(up.status, up.stderr).toBe(0);
+    const warmed = warmedUrls(dir);
+    expect(
+      warmed.some((url) => url.endsWith(":3000/")),
+      `入り口を叩いていない: ${warmed}`,
+    ).toBe(true);
+    expect(
+      warmed.some((url) => url.includes("/repos/")),
+      `盤面を叩いていない: ${warmed}`,
+    ).toBe(true);
+  });
+
+  it("温めるのは、人が見る作業場のコンテナである", () => {
+    // **worker の作業場を温めても、人は開かない** (#495 の範囲外)——**打つ先を間違えると、
+    // 温まるのは別の画面**で、**人の前の待ちはそのまま残る。**
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+
+    expect(task(dir, env, ["loop:preview:up"]).status).toBe(0);
+
+    const execs = dockerCalls(dir).filter((line) => line.includes(" exec "));
+    expect(execs, "温めていない").not.toEqual([]);
+    for (const line of execs) {
+      expect(line, `別の作業場を温めている: ${line}`).toContain("-p valence-preview ");
+    }
+  });
+
+  it("温められなくても、上げ直しは成功する", () => {
+    // **温めは速さのためのもの**で、**上がったかどうかとは別**である
+    // ——**ここで落とすと、画面は上がっているのに「失敗した」と読まれる。**
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    writeFileSync(join(dir, "warm.fail"), "99");
+
+    const up = task(dir, { ...env, VALENCE_WARM_WAIT_SEC: "0" }, ["loop:preview:up"]);
+
+    expect(up.status, up.stderr).toBe(0);
+    expect(`${up.stdout}${up.stderr}`, "落ちたことを黙っている").toContain("温められませんでした");
+  });
+
+  it("応答が返るまで待つ（繋がっただけでは温めない）", () => {
+    // **`./task up` はコンテナを起こしたら返る**ので、**`next dev` はまだ聞いていない。**
+    // **TCP では判定しない** (#479)——**Docker の port publish は TCP を先に受ける**ので、
+    // **繋がっても中身はまだ**である。**応答が返ることで見る**＝**返らなければ打ち直す。**
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    writeFileSync(join(dir, "warm.fail"), "2");
+
+    const up = task(dir, { ...env, VALENCE_WARM_WAIT_SEC: "30" }, ["loop:preview:up"]);
+
+    expect(up.status, up.stderr).toBe(0);
+    const entry = warmedUrls(dir).filter((url) => url.endsWith(":3000/"));
+    expect(entry.length, `打ち直していない: ${warmedUrls(dir)}`).toBeGreaterThan(1);
+  });
+
+  it("温められなければ、`./task warm` は失敗として返す", () => {
+    // **呑むのは `loop:preview:up` の側**である——**ここで 0 を返すと、
+    // 「落ちても上げ直しは成功する」を確かめる術が無くなる**
+    // （**呑む側を消しても、どの試験も赤くならない**）。
+    const { dir, env } = repo();
+    writeFileSync(join(dir, "warm.fail"), "99");
+
+    const warmed = task(dir, { ...env, VALENCE_WARM_WAIT_SEC: "0" }, ["warm"]);
+
+    expect(warmed.status, "温められなかったのに、成功として返している").not.toBe(0);
+  });
+
+  it("温めると up が長くなることを、打つ前に言う", () => {
+    // **待ちが消えるのではなく、人の前から `up` の中へ移るだけ**である
+    // ——**「速くなった」と読ませない。**
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+
+    const up = task(dir, env, ["loop:preview:up"]);
+
+    expect(up.stdout, "up が長くなることを言っていない").toContain("up はそのぶん長くなります");
   });
 
   it("`-preview` で終わる名前でも、人が見る作業場を作れる", () => {
