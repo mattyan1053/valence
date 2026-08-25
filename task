@@ -311,13 +311,17 @@ readonly WARM_PATHS=("/" "/repos/acme/valence")
 # ——**ホストに curl を要求しない**（このファイルの冒頭。`AGENTS.md` §2）。
 readonly WARM_ORIGIN="http://127.0.0.1:3000"
 
-# **1 本に許す時間（ミリ秒）。** **組み立てに 43 秒かかった実測**があるので、
-# **短くすると、温める前に諦める。**
-readonly WARM_REQUEST_MS="${VALENCE_WARM_REQUEST_MS:-180000}"
-
-# **応答が返るまで待つ上限（秒）。** **`./task up` はコンテナを起こしたら返る**ので、
-# **`next dev` が聞き始めるまでに間がある。**
-readonly WARM_WAIT_SEC="${VALENCE_WARM_WAIT_SEC:-60}"
+# **温めに使ってよい時間（秒）。** **これが唯一の上限**である (#496 のレビュー)。
+#
+# **上限を 2 つ置かない。** **「1 本に 180 秒」と「待つのは 60 秒」を並べると、
+# 期限を見るのは要求が返ってからなので合成される**——**期限の直前に打ち直しが
+# 始まれば、そのぶんまるごと待つ**（**1 パスで 4 分、2 パスで 8 分**）。
+# **`up` は止まらないが、返ってこない**——**この口が消しに来た待ちを、自分で作る。**
+#
+# **長さの根拠は組み立ての実測**（#479 の 43.4 秒。**機械と状態で変わるので、
+# いちばん大きいものを引いている**）——**`./task up` はコンテナを起こしたら返る**ので、
+# **`next dev` が聞き始めるまでの間も、この中に入る。**
+readonly WARM_WAIT_SEC="${VALENCE_WARM_WAIT_SEC:-180}"
 
 # **1 本投げて、状態コードを出す。** **`redirect: "manual"` で追わない**
 # ——**組み立てが目的**なので、**入り口がログインへ倒れても、そのルートは組み上がる。**
@@ -333,18 +337,25 @@ readonly WARM_SCRIPT='fetch(process.argv[1],{redirect:"manual",signal:AbortSigna
 #
 # **落ちても止めない。** **温めは速さのためのもの**で、**上がったかどうかとは別**である。
 warm_screens() {
-  local path url deadline status failed=0
-  echo "==> 人が最初に開く画面を組み立てます（up はそのぶん長くなります）"
+  local path url deadline remaining status failed=0
+  echo "==> 人が最初に開く画面を組み立てます（up はそのぶん長くなります。上限 ${WARM_WAIT_SEC} 秒）"
+  # **期限は全体で 1 つ**である (#496 のレビュー)——**パスごとに置き直すと、
+  # 「上限 N 秒」がパスの数だけ伸びる。**
+  deadline=$((SECONDS + WARM_WAIT_SEC))
   for path in "${WARM_PATHS[@]}"; do
     url="${WARM_ORIGIN}${path}"
-    deadline=$((SECONDS + WARM_WAIT_SEC))
     while :; do
-      status=0
-      compose exec -T -e "WARM_REQUEST_MS=$WARM_REQUEST_MS" app \
-        node -e "$WARM_SCRIPT" "$url" >/dev/null 2>&1 || status=$?
-      if ((status == 0)); then
-        echo "    組み立てました: $path"
-        break
+      remaining=$((deadline - SECONDS))
+      if ((remaining > 0)); then
+        status=0
+        # **1 本に許す時間も、残りの期限を超えない。** **返ってこない相手**
+        # （**組み立てが詰まる・SSR が返らない**）**でも、期限で切れる。**
+        compose exec -T -e "WARM_REQUEST_MS=$((remaining * 1000))" app \
+          node -e "$WARM_SCRIPT" "$url" >/dev/null 2>&1 || status=$?
+        if ((status == 0)); then
+          echo "    組み立てました: $path"
+          break
+        fi
       fi
       if ((SECONDS >= deadline)); then
         echo "==> 温められませんでした: $path（画面は上がっています。最初の 1 回だけ遅くなります）" >&2

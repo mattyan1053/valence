@@ -93,9 +93,19 @@ describe("./task loop:preview", () => {
         `fails=${JSON.stringify(join(dir, "warm.fail"))}`,
         `state=${JSON.stringify(join(dir, "warm.count"))}`,
         'printf "%s\\n" "$*" >>"$log"',
+        `hang=${JSON.stringify(join(dir, "warm.hang"))}`,
         'if [[ $* == *" exec "* ]]; then',
         '  count=$(( $(cat "$state" 2>/dev/null || echo 0) + 1 ))',
         '  printf "%s" "$count" >"$state"',
+        // **返らない相手** (#496 のレビュー)。**渡された上限ぶん黙ってから落ちる**
+        // ——**組み立てが詰まる・SSR が返らない**、を置く。**20 秒で頭打ちにする**のは
+        // **試験を待たせないため**で、**判定に使うのはそこではない。**
+        "  if [[ -f $hang ]]; then",
+        '    all="$*"; ms="${all##*WARM_REQUEST_MS=}"; ms="${ms%% *}"',
+        "    sec=$(( ms / 1000 )); (( sec < 20 )) || sec=20",
+        '    sleep "$sec"',
+        "    exit 1",
+        "  fi",
         '  (( count > $(cat "$fails" 2>/dev/null || echo 0) )) || exit 1',
         "fi",
         "exit 0",
@@ -391,6 +401,43 @@ describe("./task loop:preview", () => {
     expect(up.status, up.stderr).toBe(0);
     const entry = warmedUrls(dir).filter((url) => url.endsWith(":3000/"));
     expect(entry.length, `打ち直していない: ${warmedUrls(dir)}`).toBeGreaterThan(1);
+  });
+
+  it("1 本に許す時間は、残りの上限を超えない", () => {
+    // **2 つの上限を合成しない** (#496 のレビュー)。**期限を見るのは要求が返ってから**
+    // なので、**期限の直前に打ち直しが始まると、そのぶんまるごと待つ**
+    // ——**上限 60 秒のつもりが、1 パスで 4 分・2 パスで 8 分**になる。
+    // **`up` は止まらないが、返ってこない**（**この口が消しに来た待ちを、自分で作る**）。
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+
+    expect(task(dir, { ...env, VALENCE_WARM_WAIT_SEC: "5" }, ["loop:preview:up"]).status).toBe(0);
+
+    const asked = dockerCalls(dir)
+      .filter((line) => line.includes(" exec "))
+      .map((line) => Number(line.match(/WARM_REQUEST_MS=(\d+)/)?.[1] ?? -1));
+    expect(asked, "温めていない").not.toEqual([]);
+    for (const ms of asked) {
+      expect(ms, `残りの上限（5 秒）を超えて待とうとしている: ${ms}ms`).toBeLessThanOrEqual(5000);
+    }
+  });
+
+  it("返らない相手でも、上限のうちに上げ直しが返る", () => {
+    // **踏むのは、いちばん困っているとき**である——**ふつうに温まる道では出ない**
+    // （**1 本目が返れば打ち直さない**）。**出るのは、組み立てが詰まる場面**——
+    // **まさにこの口が長い上限を置いた理由の場面**である。
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    writeFileSync(join(dir, "warm.hang"), "");
+
+    const started = Date.now();
+    const up = task(dir, { ...env, VALENCE_WARM_WAIT_SEC: "6" }, ["loop:preview:up"]);
+    const elapsed = (Date.now() - started) / 1000;
+
+    expect(up.status, up.stderr).toBe(0);
+    // **上限は全体で 1 つ**である——**パスごとに置き直すと、パスの数だけ伸びる**
+    // （**出力にも `SKILL.md` にも「上限 N 秒」と書いてある**）。
+    expect(elapsed, `上限 6 秒のはずが ${elapsed.toFixed(1)} 秒かかっている`).toBeLessThan(10);
   });
 
   it("温められなければ、`./task warm` は失敗として返す", () => {
