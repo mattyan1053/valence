@@ -147,6 +147,36 @@ show_workspace() {
   echo "  workspace=$1"
 }
 
+# **`stale` の原因は 2 つあり、打つ手が逆である** (#497)。
+#
+# - **cron が古く、突かれた周回だけが新しい** → **予定表が空である。**
+#   **セッションが死ぬと、そのセッションの予定も消える**（**recurring は 7 日で
+#   期限切れになる**）——**引いて入れ直す。**
+# - **どちらの周回も新しくない** → **そのセッションが動いていない。**
+#   **引いても空**なので、**起こすほうが先**である。
+#
+# **見分けるのは `last_poke`** である（2026-08-25、worker-1 が言語化した）——
+# **cron が生きていれば、突かれずとも記録が増える。** **2 度とも前者だった**
+# （2026-08-24 / 2026-08-25。**どちらも `last_poke` だけが新しかった**）。
+#
+# **判定は増やさない**（#497 の範囲外）。**`ok` / `stale` / `unknown` / `never` は
+# そのまま**で、**変えるのは、出したあとに何を読むか**だけである。
+#
+# **新しいかどうかは、その作業場の窓で見る**——**窓は「これだけ黙っていたら止まって
+# いる」**なので、**同じ物差しを突かれた側にも当てる。**
+#
+# **窓が分からないときは、予定表の側へ倒す**——**cron の記録が 1 本も無いなら、
+# 予定が入っていないことは、窓を知らなくても言える**（`last_cron == "-"` と同じ向き）。
+show_reading() {
+  local last_poke="${1-}" window="${2-}"
+  if [[ $last_poke != "-" ]] && [[ -n $last_poke ]] &&
+    { [[ -z $window ]] || ((NOW - last_poke <= window)); }; then
+    echo "  読み=突かれた周回だけが新しい。予定表が空である——そのセッションで CronList を引いて入れ直す"
+    return 0
+  fi
+  echo "  読み=どちらの周回も新しくない。そのセッションが動いていない——引いても空なので、先に起こす"
+}
+
 # **記録から、周期を測る** (#438)。**間隔が渡されなかったときの物差し。**
 #
 # **間隔はリポジトリへ固定しない**（#378 / `AGENTS.md` §1。**起動した人が決めるもの**）
@@ -214,7 +244,10 @@ last_gap() {
 
 evaluate_scope() {
   local scope="$1" workspace="${2-}"
-  local starts last_cron last_poke last_unknown age verdict window longest
+  local starts last_cron last_poke last_unknown age verdict longest
+  # **窓は、間隔が分かったときにしか決まらない** ——**空のまま読む道がある**
+  # （**cron の記録が 1 本も無い行**）ので、**先に置く**（`set -u`）。
+  local window=""
   local at trigger _where interval interval_shown gap running_since cron_at=()
   starts="$common_dir/valence-loop-starts-$scope"
   if [[ ! -f $starts ]]; then
@@ -222,6 +255,8 @@ evaluate_scope() {
     # ——**足したばかりの worker が、永久に見えなくなる。**
     echo "scope=${scope:0:12} last_cron=- last_poke=- last_unknown=- age=- interval=${INTERVAL:-unknown} never"
     show_workspace "$workspace"
+    # **記録が 1 行も無い**——**引く先のセッションが、そもそも居ない。**
+    show_reading "-"
     stale=1
     return 0
   fi
@@ -321,6 +356,7 @@ evaluate_scope() {
   fi
   echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"
   [[ $verdict != "stale" ]] || show_workspace "$workspace"
+  [[ $verdict != "stale" ]] || show_reading "$last_poke" "$window"
   case "$verdict" in
     stale) stale=1 ;;
     unknown) undecidable=1 ;;
@@ -391,11 +427,16 @@ fi
 # ので、**「このセッション」と書くと、別の役だけが止まっているときに嘘になる**
 # ——**読んだ人は自分の予定表を引き、そこは正常なので、そこで止まる。**
 #
+# **次の一手は、行ごとに違う** (#497)。**`stale` の原因は 2 つあり、打つ手が逆**なので、
+# **ここで 1 つに決めない**——**決めていたぶん（「まず予定表を引くこと」）は、
+# 「どちらも古い」行には効かない**（**引いても空**で、**そこで読む人が止まる**）。
+# **判定は `show_reading` が行ごとに出す**ので、**ここはそこへ向けるだけ**である。
+#
 # **止まっているときだけ言う**（**毎回鳴る案内は、読まれなくなる**）。
 # **`./task loop:status` はこの stderr ごと拾う**ので、そちらから読む人にも届く。
 if ((stale == 1)); then
-  echo "[WARN] まず予定表を引くこと——stale と出た役のセッションで CronList を見る" >&2
-  echo "       呼んだ役が健全でも、別の役が stale なら、空なのはそちらの予定表である" >&2
+  echo "[WARN] 次の一手は、その行の 読み= にある——stale の原因は 2 つある" >&2
+  echo "       読み= が指すのは stale と出た役のセッションで、呼んだ役ではない" >&2
   echo "       どの作業場かは、その行の下の workspace= を見る" >&2
   echo "       interval=~ の行は、記録から測った周期を物差しにしている" >&2
   echo "       （この道具は他のセッションを引けない。入れ直すのもセッション自身）" >&2

@@ -200,10 +200,92 @@ describe("周回が始まったことを、どう始まったかごと残す", (
     const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
 
     expect(done.status, "止まっていると言っていない").toBe(1);
-    expect(done.stderr, "まず予定表を引く、が無い").toMatch(/CronList/);
+    // **次の一手は行ごとに違う** (#497)——**案内はそこへ向ける**（下の 4 件が中身を見る）。
+    // **見出しの行だけを見る**（`AGENTS.md` §4）——**`読み=` は案内の中に 2 行あり**、
+    // **stderr 全体に当てると、見出しから消しても、もう 1 行が受けて緑になる**（実測）。
+    const warn = done.stderr.split("\n").find((line) => line.startsWith("[WARN]")) ?? "";
+    expect(warn, "見出しが 読み= を指していない").toContain("読み=");
     // **限界も同じところに**——**言えるのは「記録に無い」まで**である
     expect(done.stderr, "この記録から言えることの限界が無い").toMatch(/直近/);
     expect(done.stderr, "走っている最中の cron が記録に残らないことが無い").toMatch(/acquire/);
+  });
+
+  describe("stale の原因は 2 つある（#497）", () => {
+    // **`stale` は「直近の記録に cron の周回が無い」としか言っていない**——**原因は
+    // 2 つあり、打つ手が逆である。**
+    //
+    // - **予定が消えた**（**セッションが死ぬと、そのセッションの予定も消える**。
+    //   **recurring は 7 日で期限切れになる**）→ **引いて入れ直す**
+    // - **そのセッションが動いていない** → **引いても空**なので、**起こすほうが先**
+    //
+    // **見分けるのは `last_poke`** である——**cron が生きていれば、突かれずとも
+    // 記録が増える。** **2 度あった**（2026-08-24 / 2026-08-25。どちらも前者）。
+    //
+    // **判定（`ok` / `stale` / `unknown` / `never`）は変えない**——**変えるのは、
+    // 出したあとに何を読むか**だけである。
+
+    /** **その行の段だけを見る**（**判定の範囲を本文より狭くする**。`AGENTS.md` §4）。 */
+    function section(stdout: string, role: string): string {
+      return stdout.split(/^scope=/m).find((part) => part.startsWith(role)) ?? "";
+    }
+
+    it("突かれた周回だけが新しいなら、予定表が空だと言う", () => {
+      // **これが 2 度とも踏んだ形である**——**人に突かれてしか動いていない。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [9_500, "poke"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "止まっていると言っていない").toBe(1);
+      const row = section(done.stdout, "worker");
+      expect(row, "予定表を引けと言っていない").toContain("CronList");
+      expect(row, "動いていない側の手を出している").not.toContain("先に起こす");
+    });
+
+    it("どちらの周回も新しくないなら、先に起こせと言う", () => {
+      // **引いても空である**（**セッションが居なければ、予定表も無い**）——
+      // **ここで「引け」と言うと、読んだ人は空を見て、そこで止まる。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [5_000, "poke"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "止まっていると言っていない").toBe(1);
+      const row = section(done.stdout, "worker");
+      expect(row, "先に起こせと言っていない").toContain("先に起こす");
+      expect(row, "予定表の側の手を出している").not.toContain("CronList");
+    });
+
+    it("cron の記録が 1 本も無くても、突かれていれば予定表の側へ倒す", () => {
+      // **窓が分からない**（**cron が 1 本も無いので、記録から周期を測れない**）
+      // ——**それでも「予定が入っていない」ことは、窓を知らなくても言える。**
+      const { dir } = workspace();
+      records(dir, [[9_500, "poke"]]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+      expect(done.status, "止まっていると言っていない").toBe(1);
+      const row = section(done.stdout, "worker");
+      expect(row, "予定表を引けと言っていない").toContain("CronList");
+    });
+
+    it("1 度も始まっていない作業場にも、次の一手を出す", () => {
+      // **`never` も止まっている側**である（**足したばかりの worker がここへ来る**）
+      // ——**記録が 1 行も無いので、引く先のセッションがそもそも居ない。**
+      const { dir } = workspace();
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "始まっていないと言っていない").toBe(1);
+      const row = section(done.stdout, "worker");
+      expect(row, "never の行に次の一手が無い").toContain("先に起こす");
+    });
   });
 
   it("別の役だけが止まっていても、その役の予定表へ案内する", () => {
@@ -327,7 +409,9 @@ describe("周回が始まったことを、どう始まったかごと残す", (
     const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
 
     expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
-    expect(done.stderr, "止まっていないのに案内している").not.toMatch(/CronList/);
+    expect(done.stderr, "止まっていないのに案内している").not.toMatch(/次の一手/);
+    // **読みも止まっている行にだけ出す** (#497)——**毎回出ると、案内ごと読まれなくなる**
+    expect(done.stdout, "止まっていないのに読みを出している").not.toContain("読み=");
   });
 
   it("cron が続いているうちは、何も言わない", () => {
