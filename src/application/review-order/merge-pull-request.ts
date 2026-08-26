@@ -20,6 +20,7 @@ import { orderByDependency } from "../../domain/graph/dependency-order";
 import { mergeBlockFor } from "../../domain/graph/merge-block";
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
+import { errorKind } from "../observability/error-kind";
 import type { PullRequestMerges } from "../ports/pull-request-merge";
 import type { PullRequestSource } from "../ports/pull-request-source";
 import type { RepositoryPermissions } from "../ports/repository-permissions";
@@ -32,7 +33,7 @@ export type MergePullRequestResult =
   /** 失効していて、更新もできなかった。**入口へ戻す。** */
   | { readonly kind: "needs-login" }
   /** **入り直しても直らない**（置き場が落ちている / GitHub が返さない）。 */
-  | { readonly kind: "unavailable" }
+  | { readonly kind: "unavailable"; readonly reason?: string }
   /** **そのユーザーには無い**（§6。**「見えない」と「存在しない」を分けない**）。 */
   | { readonly kind: "not-found" }
   /**
@@ -149,10 +150,10 @@ export async function mergePullRequest({
       orderByDependency(listing.pullRequests, edges),
       listing.invalid.length,
     );
-  } catch {
+  } catch (error) {
     // **確かめられなければマージしない。** **依存を見られないまま通すと、
     // この Issue が塞ごうとしたものがそのまま通る**（#345）
-    return { kind: "unavailable" };
+    return { kind: "unavailable", reason: `order/${errorKind(error)}` };
   }
   if (judgedBaseBranch === undefined) {
     // **一覧に居ない番号**である。**`mergeBlockFor` も `not-orderable` へ倒す**が、
@@ -178,9 +179,9 @@ export async function mergePullRequest({
       // **判定に使った base**（#350）——**adapter がマージ直前に突き合わせる。**
       expectedBaseBranch: judgedBaseBranch,
     });
-  } catch {
+  } catch (error) {
     // **投げたものを「マージできた」に化けさせない。** **マージは取り消せない**ので、
     // **「したかどうか分からない」を「した」と言うと、誰も確かめに行かない。**
-    return { kind: "unavailable" };
+    return { kind: "unavailable", reason: `merge/${errorKind(error)}` };
   }
 }

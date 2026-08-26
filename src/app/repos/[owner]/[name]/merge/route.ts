@@ -102,7 +102,13 @@ export function mergeOutcomeParam(result: MergePullRequestResult): MergeNoticeKi
  * `dependency-pending` / `not-orderable` / `base-changed` / `merged`）。
  */
 export function mergeUnavailableReason(result: MergePullRequestResult): string | undefined {
-  return mergeOutcomeParam(result) === "unavailable" ? result.kind : undefined;
+  if (mergeOutcomeParam(result) !== "unavailable") {
+    return undefined;
+  }
+  // **握り潰した例外の落ちどころも添える** (#506 の 2-b)
+  return result.kind === "unavailable" && result.reason !== undefined
+    ? `${result.kind}/${result.reason}`
+    : result.kind;
 }
 
 /**

@@ -17,6 +17,7 @@
 
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
+import { errorKind } from "../observability/error-kind";
 import type {
   PullRequestApprovalListing,
   PullRequestApprovals,
@@ -31,8 +32,13 @@ export type RepositoryBoardResult =
   | { readonly kind: "signed-out" }
   /** 失効していて、更新もできなかった。**入口へ戻す。** */
   | { readonly kind: "needs-login" }
-  /** **入り直しても直らない**（置き場が落ちている / 一覧を読めない）。 */
-  | { readonly kind: "unavailable" }
+  /**
+   * **入り直しても直らない**（置き場が落ちている / 一覧を読めない）。
+   *
+   * **どこで落ちたかを添える** (#506 の 2-b)——**型と実物を食い違わせない**
+   * （**`authorizeRepository` が付けたものが、そのまま通ってくる**）。
+   */
+  | { readonly kind: "unavailable"; readonly reason?: string }
   /**
    * **そのユーザーには無い。**
    *
@@ -128,7 +134,7 @@ export async function viewRepositoryBoard({
   let board: ReviewOrderPlan;
   try {
     board = await plan();
-  } catch {
+  } catch (error) {
     // **`planReviewOrder` は一覧を取れないと投げる**（**空の計画にすると
     // 「取得できなかった」が「PR が 0 件」に化ける**ため）——**そのまま通すと、
     // 見てよい人にまでフレームワークのエラー画面が出て、
@@ -136,7 +142,7 @@ export async function viewRepositoryBoard({
     //
     // **`not-found` へは倒さない。** **ここへ来た時点で「見える」と分かっている**
     // ので、**故障を「ありません」に化けさせる理由が無い。**
-    return { kind: "unavailable" };
+    return { kind: "unavailable", reason: `board/${errorKind(error)}` };
   }
 
   return {

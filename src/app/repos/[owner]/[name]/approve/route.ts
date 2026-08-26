@@ -90,7 +90,14 @@ export function approveOutcomeParam(
  * `approved`）——**毎回鳴る記録は、そのうち読まれなくなる**（#248）。
  */
 export function approveUnavailableReason(result: ApprovePullRequestResult): string | undefined {
-  return approveOutcomeParam(result) === "unavailable" ? result.kind : undefined;
+  if (approveOutcomeParam(result) !== "unavailable") {
+    return undefined;
+  }
+  // **握り潰した例外の落ちどころも添える** (#506 の 2-b)——**`unavailable` だけでは
+  // 「なぜ」が出ない。** **種類だけ**（中身は `errorKind` が落としている。§6）。
+  return result.kind === "unavailable" && result.reason !== undefined
+    ? `${result.kind}/${result.reason}`
+    : result.kind;
 }
 
 /**

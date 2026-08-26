@@ -206,7 +206,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       approvals: approvals(),
     });
 
-    expect(result).toEqual({ kind: "unavailable" });
+    expect(result).toEqual({ kind: "unavailable", reason: "list/Error" });
     expect(board.calls, "確かめられていないのに PR を取りに行っている").toBe(0);
   });
 
@@ -228,7 +228,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       approvals: approvals(),
     });
 
-    expect(result).toEqual({ kind: "unavailable" });
+    expect(result).toEqual({ kind: "unavailable", reason: "invalid-listing" });
     expect(board.calls, "見えるか分からないのに PR を取りに行っている").toBe(0);
   });
 
@@ -253,8 +253,9 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
   });
 
   it.each([
-    { kind: "needs-login" as const, expected: "needs-login" },
-    { kind: "unavailable" as const, expected: "unavailable" },
+    { kind: "needs-login" as const, expected: { kind: "needs-login" } },
+    // **どこで落ちたかを添える** (#506 の 2-b)——**トークンの側で止まったと分かる**
+    { kind: "unavailable" as const, expected: { kind: "unavailable", reason: "token" } },
   ])("トークンが $kind なら、そこで止まる", async ({ kind, expected }) => {
     const listing = repositories(VISIBLE);
     const board = plan();
@@ -269,7 +270,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       approvals: approvals(),
     });
 
-    expect(result).toEqual({ kind: expected });
+    expect(result).toEqual(expected);
     expect(listing.seen, "使えないトークンで叩きに行っている").toEqual([]);
     expect(board.calls, "使えないトークンのまま PR を取りに行っている").toBe(0);
   });
@@ -291,7 +292,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       approvals: approvals(),
     });
 
-    expect(result).toEqual({ kind: "unavailable" });
+    expect(result).toEqual({ kind: "unavailable", reason: "board/Error" });
   });
 
   it("承認の状態も、その人のトークンで読む", async () => {
@@ -468,7 +469,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       approvals: approvals(),
     });
 
-    expect(result).toEqual({ kind: "unavailable" });
+    expect(result).toEqual({ kind: "unavailable", reason: "store/Error" });
     expect(board.calls).toBe(0);
   });
 });
