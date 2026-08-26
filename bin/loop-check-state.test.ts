@@ -11,7 +11,15 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -259,7 +267,7 @@ describe("bin/loop-check-state", () => {
         );
         const held = holdLock({
           dir: repo,
-          lock: join(repo, ".git", "valence-check-durations.lock"),
+          lock: join(repo, ".git", "valence-check-runs.lock"),
         });
         const racers = ["A", "B"].map((id) =>
           spawn(SCRIPT, ["running", id], { cwd: repo, detached: true, stdio: "ignore" }),
@@ -395,6 +403,210 @@ describe("bin/loop-check-state", () => {
     it("積む先が無ければ、記録が無いと答える", () => {
       // **「無い」と「読めない」を混ぜない**（`--verdict` と同じ語彙）
       expect(run(["--durations"]).status).toBe(4);
+    });
+
+    describe("2 本が重なったことを、記録から読む", () => {
+      // **`./task check` が 2 本並走すると、負荷で時間切れになる**（#509）。
+      // **今日 2 件測れた**が、**どちらも人の報告でしか残っていない**——
+      // **重なったことが記録に無ければ、頻度も、直したあとの効きも測れない。**
+      //
+      // **所要時間は作業場ごとに積んでいた**ので、**別々のファイルに分かれていた**
+      // ——**同じ機械で走っているのに、突き合わせる先が無い。**
+
+      /** 積む先。**共有の `.git`**（**作業場をまたいで 1 つ**）。 */
+      function runsPath(): string {
+        return join(repo, ".git", "valence-check-runs");
+      }
+
+      /** この作業場の名前（`git rev-parse --show-toplevel`）。 */
+      function here(): string {
+        return realpathSync(repo);
+      }
+
+      /** 別の作業場が積んだ行を置く。**`<作業場>\t<始め>\t<終わり>\t<結果>`** */
+      function seed(rows: readonly (readonly string[])[]): void {
+        writeFileSync(runsPath(), `${rows.map((row) => row.join("\t")).join("\n")}\n`);
+      }
+
+      function overlaps(): { status: number; stdout: string; stderr: string } {
+        return run(["--overlaps"]);
+      }
+
+      it("積んだ行に、どの作業場のものかが残る", () => {
+        // **名前が無いと、突き合わせられない**——**行が混ざるだけ**である
+        run(["running", "A"]);
+        run(["finished", "A", "0"]);
+
+        const rows = readFileSync(runsPath(), "utf8")
+          .split("\n")
+          .filter((line) => line !== "")
+          .map((line) => line.split("\t"));
+
+        expect(rows.length, "共有の記録に積まれていない").toBe(1);
+        expect(rows[0]?.[0], "どの作業場のものか分からない").toBe(here());
+      });
+
+      it("`--durations` は、この作業場のぶんだけを、これまでどおり出す", () => {
+        // **読み手の意味を変えない**（`AGENTS.md` §5）——**所要時間は
+        // 「この作業場の速さ」**で、**他所のぶんを混ぜると、振れ幅が別のものになる。**
+        const started = Math.floor(Date.now() / 1000) - 600;
+        seed([["/somewhere/else", `${started}`, `${started + 300}`, "0"]]);
+        run(["running", "A"]);
+        run(["finished", "A", "0"]);
+
+        const rows = durations();
+
+        expect(rows.length, "他の作業場のぶんを混ぜている").toBe(1);
+        expect(rows[0]?.length, "列が増えている（読み手の書式が変わっている）").toBe(3);
+      });
+
+      it("別の作業場と重なっていたら、その組を出す", () => {
+        // **完了条件の 1 つ目**（#509）——**人の報告に頼らずに、あとから分かること**
+        const now = Math.floor(Date.now() / 1000);
+        seed([
+          [here(), `${now - 900}`, `${now - 300}`, "0"],
+          ["/somewhere/else", `${now - 600}`, `${now - 60}`, "0"],
+        ]);
+
+        const found = overlaps();
+
+        expect(found.status, found.stderr).toBe(0);
+        expect(found.stdout, "こちらの作業場が出ていない").toContain(here());
+        expect(found.stdout, "相手の作業場が出ていない").toContain("/somewhere/else");
+      });
+
+      it("重なっていなければ、無いと言う", () => {
+        // **「無い」と「読めない」を混ぜない**——**0 件は、この口の正常な答え**である
+        const now = Math.floor(Date.now() / 1000);
+        seed([
+          [here(), `${now - 900}`, `${now - 600}`, "0"],
+          ["/somewhere/else", `${now - 300}`, `${now - 60}`, "0"],
+        ]);
+
+        const found = overlaps();
+
+        expect(found.status, "重なっていないのに、あると言っている").toBe(1);
+        expect(found.stdout, "何か出している").toBe("");
+      });
+
+      it("同じ作業場どうしは、重なりに数えない", () => {
+        // **見たいのは「同じ機械で 2 つの作業場が走った」ほう**である
+        // ——**1 つの作業場の中で区間が重なるのは、片付けの跡**（**次の走りが
+        // 片付けるまで、切られた走りの終わりは書かれない**）。
+        //
+        // **どちらも終わった走りにする**——**切られた走りは別の規則で外れる**ので、
+        // **それだと、この規則を消しても赤くならない**（**変異で判った**）。
+        const now = Math.floor(Date.now() / 1000);
+        seed([
+          [here(), `${now - 900}`, `${now - 300}`, "0"],
+          [here(), `${now - 600}`, `${now - 60}`, "1"],
+        ]);
+
+        expect(overlaps().status, "同じ作業場の 2 本を、並走として数えている").toBe(1);
+      });
+
+      it("切られた走りは、区間として数えない", () => {
+        // **終わりは片付けた時刻**である（**次の走りが片付けるまで書かれない**）
+        // ——**そのまま区間として読むと、次の走りまでの何十分かが
+        // 「重なっていた」に化ける。** **切られたことは `--durations` に残る。**
+        const now = Math.floor(Date.now() / 1000);
+        seed([
+          [here(), `${now - 3600}`, `${now - 60}`, "killed"],
+          ["/somewhere/else", `${now - 900}`, `${now - 300}`, "0"],
+        ]);
+
+        expect(overlaps().status, "片付けの時刻を、走っていた時間として読んでいる").toBe(1);
+      });
+
+      it(
+        "積めなくても、合否は残り、この check は止まらない",
+        () => {
+          // **「積めなくても、合否は残っている」と書いてある道**（#391）——
+          // **そこを通る試験が無かった。** **通らない行は、`set -u` で落ちても
+          // 緑のまま**である（**名前を変えたときに、まさにそこが残った**。#511 のレビュー）。
+          //
+          // **積む口を握らせて通す**（`bin/loop-lease` と同じ形の待ち時間の設定）。
+          run(["running", "A"]);
+          const held = holdLock({ dir: repo, lock: `${runsPath()}.lock` });
+          let finished: { status: number; stdout: string; stderr: string };
+          try {
+            finished = run(["finished", "A", "0"], {
+              ...process.env,
+              LOOP_CHECK_STATE_LOCK_WAIT_SEC: "1",
+            });
+          } finally {
+            held.release();
+          }
+
+          expect(finished.status, finished.stderr).toBe(0);
+          expect(finished.stderr, "積めなかったことを黙っている").toContain("積めません");
+          expect(run(["--verdict"]).status, "合否が残っていない").toBe(0);
+        },
+        budgetFor(4),
+      );
+
+      it(
+        "殺された走りを積めなくても、片付けは進む",
+        () => {
+          // **同じ道の、もう 1 つの口**（**片付けながら積む側**）——**こちらも
+          // 通らない行だった。** **片付けが止まると出られない** (#184)。
+          mkdirSync(statePath(), { recursive: true });
+          writeFileSync(
+            join(statePath(), "999999"), // **死んだ PID**（殺された走りの跡）
+            `running\n${Math.floor(Date.now() / 1000) - 600}\n`,
+          );
+          const held = holdLock({ dir: repo, lock: `${runsPath()}.lock` });
+          let started: { status: number; stdout: string; stderr: string };
+          try {
+            started = run(["running", "A"], {
+              ...process.env,
+              LOOP_CHECK_STATE_LOCK_WAIT_SEC: "1",
+            });
+          } finally {
+            held.release();
+          }
+
+          expect(started.status, started.stderr).toBe(0);
+          expect(started.stderr, "積めなかったことを黙っている").toContain("積めません");
+          expect(
+            existsSync(join(statePath(), "999999")),
+            "殺された記録が残っている（出られなくなる）",
+          ).toBe(false);
+        },
+        budgetFor(4),
+      );
+
+      it("記録が無ければ、記録が無いと答える", () => {
+        expect(overlaps().status).toBe(4);
+      });
+
+      it("刈り込みは、作業場ごとに数える", () => {
+        // **共有にしたので、他所の走りでこちらの履歴が押し出されうる**
+        // ——**振れ幅を見るための直近が、隣の作業場の忙しさで消える。**
+        const now = Math.floor(Date.now() / 1000);
+        seed(
+          Array.from({ length: 12 }, (_, index) => [
+            "/somewhere/else",
+            `${now - 3600 + index * 60}`,
+            `${now - 3300 + index * 60}`,
+            "0",
+          ]),
+        );
+
+        run(["running", "A"]);
+        run(["finished", "A", "0"]);
+
+        expect(durations().length, "こちらのぶんが押し出されている").toBe(1);
+        // **他所のぶんも落とさない**（**同じ形の裏側**）——**こちらが積むたびに
+        // 隣の履歴が消えると、隣から見て「押し出された」になる。**
+        const rows = readFileSync(runsPath(), "utf8")
+          .split("\n")
+          .filter((line) => line !== "");
+        expect(
+          rows.filter((line) => line.startsWith("/somewhere/else")).length,
+          "他の作業場のぶんを落としている",
+        ).toBe(12);
+      });
     });
   });
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { holdLock } from "../test/held-lock";
 
 const SCRIPT = fileURLToPath(new URL("./loop-procedure-changed", import.meta.url));
 
@@ -181,6 +182,29 @@ describe("bin/loop-procedure-changed", () => {
       expect(answered.stdout, "捨てた理由が出ていない").toContain("task");
       // **語を名指しする**——**別の WARN（lease の確認など）で満たさない**
       expect(answered.stderr, "書けなかったことを黙っている").toMatch(
+        /\[WARN\] 捨てた周回を記録できません/,
+      );
+    });
+
+    it("握られていて積めなくても、黙らない", () => {
+      // **開けない錠と、握られている錠は別の道である** (#511 のレビュー)。
+      // **開けない錠では `exec` そのものが失敗する**ので、**上の試験は通る**——
+      // **握られている側は、`exec` が成功したあとで待ちに入る**。
+      //
+      // **`2>/dev/null` を `exec` に直接付けていると、そこから先の標準エラーが
+      // 丸ごと消える** (#445 と同じ形)——**警告を出したつもりで、何も出ていない。**
+      const before = commit("src/a.ts", "前\n");
+      commit("task", "後\n");
+      const held = holdLock({ dir: repo, lock: join(repo, ".git", "valence-loop-churn.lock") });
+      let answered: ReturnType<typeof run>;
+      try {
+        answered = run(before);
+      } finally {
+        held.release();
+      }
+
+      expect(answered.status, "記録できないことで、判定が変わっている").toBe(0);
+      expect(answered.stderr, "握られていたことを黙っている").toMatch(
         /\[WARN\] 捨てた周回を記録できません/,
       );
     });
