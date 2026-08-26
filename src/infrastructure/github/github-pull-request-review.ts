@@ -54,9 +54,22 @@ const SELF_APPROVAL_PATTERN = /can not approve your own pull request/i;
  * **この要求の応答には、そのユーザーの持ち物が並ぶ。** **載せるのは状態コードだけ。**
  */
 class ApproveFailed extends Error {
+  /**
+   * **断られた状態コード** (#516)。
+   *
+   * **`message` ではなく欄として持つ。** **記録に残す側（`errorKind`）は
+   * `message` を読まない**（§6。**応答本文が入っていることがある**）ので、
+   * **文面へ埋めた値は、そこで消える**——**実際に消えていた**
+   * （`kind=unavailable/approve/ApproveFailed` で止まっていた）。
+   *
+   * **読む側はこのクラスを知らない**（§3）——**数値の欄があるかどうかだけを見る。**
+   */
+  readonly status: number;
+
   constructor(status: number) {
     super(`GitHub が承認を受け付けませんでした (status ${status})`);
     this.name = "ApproveFailed";
+    this.status = status;
   }
 }
 
