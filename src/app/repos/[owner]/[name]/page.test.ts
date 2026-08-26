@@ -15,6 +15,7 @@ import { mergeBlockFor } from "../../../../domain/graph/merge-block";
 import {
   approvalDisplay,
   approveNoticeKind,
+  boardUnavailableReason,
   dynamic,
   mergeButtonBlock,
   mergeNoticeKind,
@@ -164,5 +165,31 @@ describe("依存の判定を、ボタンへ詰め替える", () => {
 
     expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 0))).toEqual({});
     expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 1))).toEqual({ notOrderable: true });
+  });
+});
+
+describe("盤面を出せなかった理由を、サーバ側へ残す（#513 のレビュー）", () => {
+  // **押した経路と同じものが、見に来た経路にもある**——**GET で落ちても、
+  // 画面には「いま見られません」しか出ない**（§6）ので、**記録が要る。**
+
+  it("落ちどころまで残す", () => {
+    expect(boardUnavailableReason({ kind: "unavailable", reason: "store/Error" })).toBe(
+      "unavailable/store/Error",
+    );
+  });
+
+  it("落ちどころが無ければ、まとめた語だけ残す", () => {
+    expect(boardUnavailableReason({ kind: "unavailable" })).toBe("unavailable");
+  });
+
+  it("見られたときは、残さない", () => {
+    // **毎回鳴る記録は、そのうち読まれなくなる**（#248）
+    expect(boardUnavailableReason({ kind: "board" })).toBeUndefined();
+  });
+
+  it("ログインの状態は、この口では残さない", () => {
+    // **`signed-out` / `needs-login` は画面に出ている**（ログインへの導線がある）
+    expect(boardUnavailableReason({ kind: "signed-out" })).toBeUndefined();
+    expect(boardUnavailableReason({ kind: "needs-login" })).toBeUndefined();
   });
 });

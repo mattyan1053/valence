@@ -169,7 +169,7 @@ describe("PR に承認を出す前に、押してよいかを確かめる", () =
       input({ permissions: failing, reviews: NEVER_APPROVES }),
     );
 
-    expect(result.kind).toBe("unavailable");
+    expect(result).toEqual({ kind: "unavailable", reason: "permissions/Error" });
   });
 
   it("承認そのものが落ちたら、成功と言わない", async () => {
@@ -185,6 +185,8 @@ describe("PR に承認を出す前に、押してよいかを確かめる", () =
       input({ permissions: permissions("write"), reviews: throwing }),
     );
 
-    expect(result.kind).toBe("unavailable");
+    // **どこで落ちたかまで残す** (#506 の 2-b)——**`unavailable` だけでは、
+    // 押せない理由が誰にも分からない**（**中身は出さない**。§6）
+    expect(result).toEqual({ kind: "unavailable", reason: "approve/Error" });
   });
 });
