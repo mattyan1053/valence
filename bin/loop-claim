@@ -232,6 +232,10 @@ read_record() {
 #   exit 0 = 1 件以上ある。**種別ごとに 1 行**
 #            `stalled<TAB><Issue番号><TAB><着手からの秒数>`  実装が出ていない
 #            `unowned<TAB><Issue番号>`                      着手中なのに記録が無い
+#
+# **「実装が出ていない」は、open PR が無いことではない** (#512)。**その番号を名乗る
+# 枝が、open にも、最近入ったぶんにも無いこと**である——**親として残した Issue は
+# 子 PR で閉じない**ので、**open な子が無い谷が普通の作業時間として現れる。**
 #   exit 1 = 無い
 #   exit 2 = 判定できない
 if [[ $ACTION == "idle" ]]; then
@@ -246,6 +250,10 @@ if [[ $ACTION == "idle" ]]; then
     echo "[FAIL] 取り合いのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
     exit 2
   fi
+
+  # **時計は 1 つ** (#514 のレビュー)。**入った PR を絞る窓も、経過の判定も、
+  # 同じ `now` から決める**——**2 度読むと、その間に進んだぶんだけ食い違う。**
+  now="$(date +%s)"
 
   repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || {
     echo "[FAIL] リポジトリを特定できません" >&2
@@ -271,6 +279,34 @@ if [[ $ACTION == "idle" ]]; then
       (.closingIssuesReferences[]
         | "closes\t\(.repository.owner.login)/\(.repository.name)\t\(.number)")')"; then
     echo "[FAIL] open PR の一覧を読めません" >&2
+    exit 2
+  fi
+
+  # **入った子 PR も見る** (#512)。**親として残した Issue は、子 PR では閉じない**
+  # （`Closes` を書かない。#321）——**open な子が無い谷では、動いている証拠が
+  # 一切見えない。** **時計は `take` のときのまま**なので、**谷の長さに関係なく鳴る**
+  # （**実測: 直前の子 PR が入った 75 秒後に `stalled` が出た**。#506）。
+  #
+  # **絞るのは query の側である** (#514 のレビュー)。**`gh pr list` が返すのは
+  # 「作られた順」**で、**入った順ではない**（**実データで食い違っている**）——
+  # **件数で切ると、落ちるのは「そのあとに 100 本作られた PR」**である。
+  # **長く置かれた枝ほど落ちやすい**（**`parked` の PR は日をまたぐ**）——
+  # **まさに「入ったばかりなのに黙って `stalled`」**という、この口が消しに来た形になる。
+  #
+  # **`merged:>=` で絞れば、並びに依らない。** **`--limit` が効くのは
+  # 「その窓の中で何本入ったか」**なので、**2 時間に 100 本入る機械なら、
+  # 止まっているほうが先に分かる。**
+  #
+  # **窓の下限を作るのに `date -u -d "@<epoch>"` を使う**——**この関数は既に
+  # `date -d <ISO>` で入った時刻を読む**ので、**同じ道具しか要求していない。**
+  if ! since="$(date -u -d "@$((now - IDLE_SEC))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+    || [[ -z $since ]]; then
+    echo "[FAIL] 入った PR を絞る時刻を作れません（date -d が使えません）" >&2
+    exit 2
+  fi
+  if ! merged_pr_lines="$(gh pr list --state merged --search "merged:>=$since" --limit 100 \
+    --json headRefName,mergedAt --jq '.[] | "\(.headRefName)\t\(.mergedAt)"')"; then
+    echo "[FAIL] 入った PR の一覧を読めません" >&2
     exit 2
   fi
 
@@ -325,7 +361,30 @@ if [[ $ACTION == "idle" ]]; then
     return 1
   }
 
-  now="$(date +%s)"
+  # **最近入った子 PR は、動いている証拠である** (#512)。
+  #
+  # **枝の名前で見るのは open のときと同じ** (#322)——**判定を 2 通り持たない。**
+  #
+  # **谷を許すぶん、止まった判定は遅れる**（**最後の子 PR が入ってから `IDLE_SEC`**）。
+  # **そちらへ倒したのは、いま出ている誤報が「毎回」だから**である——**親を割って
+  # 進めるのはこちらが勧めている形**なので、**勧めどおりに進めると必ず鳴る。**
+  moved_recently() {
+    local number="$1" head merged_at merged_epoch
+    while IFS=$'\t' read -r head merged_at; do
+      [[ $head =~ ^[a-z]+/([0-9]+)- ]] || continue
+      [[ ${BASH_REMATCH[1]} == "$number" ]] || continue
+      # **読めない時刻を「動いている」に倒さない**——**倒すと、この検出器だけが
+      # 静かに消える**（**番号を読めない枝を、実装が出ていない側へ倒すのと同じ向き**）。
+      # **黙らずに言う。**
+      if ! merged_epoch="$(date -d "$merged_at" +%s 2>/dev/null)" || [[ -z $merged_epoch ]]; then
+        echo "[WARN] #$number の子 PR が入った時刻を読めません: $merged_at" >&2
+        continue
+      fi
+      ((now - merged_epoch < IDLE_SEC)) && return 0
+    done <<<"$merged_pr_lines"
+    return 1
+  }
+
   idle_found=0
   while IFS=$'\t' read -r number labels; do
     [[ $number =~ ^[0-9]+$ ]] || continue
@@ -368,6 +427,8 @@ if [[ $ACTION == "idle" ]]; then
     ((now - held_taken >= IDLE_SEC)) || continue
     # **`Closes` を書かない PR も実装である** (#321)
     implemented_by_open_pr "$number" && continue
+    # **入ったばかりの子 PR も、動いている証拠である** (#512)
+    moved_recently "$number" && continue
     still_in_progress "$number" || continue
     printf '%s\t%s\t%s\n' "stalled" "$number" "$((now - held_taken))"
     idle_found=1
