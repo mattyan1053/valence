@@ -5,9 +5,29 @@
  * **ここが見るのは、受け取った本文を内側の語彙へ直す部分と、戻し方**である。
  */
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { boardRedirect } from "../board-redirect";
 import { headShaFrom, mergeOutcomeParam, pullRequestNumberFrom } from "./route";
+
+/**
+ * **戻り先は、開いたオリジンから組む** (#506)——**`Host` が許可一覧に載っている
+ * ことが要る。** **この試験の中で渡す**（**`supabase/config.toml` に寄りかからない**
+ * ——**あちらが変わると、関係のない理由でここが赤くなる**）。
+ */
+const SUPPLIED = "AUTH_ALLOWED_ORIGINS";
+const suppliedBefore = process.env[SUPPLIED];
+
+beforeAll(() => {
+  process.env[SUPPLIED] = "http://localhost:3000,http://127.0.0.1:3000";
+});
+
+afterAll(() => {
+  if (suppliedBefore === undefined) {
+    delete process.env[SUPPLIED];
+  } else {
+    process.env[SUPPLIED] = suppliedBefore;
+  }
+});
 
 describe("送られてきた PR 番号を読む", () => {
   it("数として読めるものだけを通す", () => {
@@ -47,7 +67,10 @@ describe("結果を、押した人へ返す形にする", () => {
 });
 
 describe("押したあと、盤面へ戻す", () => {
-  const request = new Request("http://localhost:3000/repos/acme/web/merge", { method: "POST" });
+  const request = new Request("http://localhost:3000/repos/acme/web/merge", {
+    method: "POST",
+    headers: { host: "localhost:3000" },
+  });
 
   it("303 で戻す（POST を持ち越さない）", () => {
     // **307 のままだと、盤面へメソッドごと再送されて 405 で終わる**

@@ -10,9 +10,29 @@
  * この Issue の完了条件である。
  */
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { boardRedirect } from "../board-redirect";
 import { approveOutcomeParam, pullRequestNumberFrom } from "./route";
+
+/**
+ * **戻り先は、開いたオリジンから組む** (#506)——**`Host` が許可一覧に載っている
+ * ことが要る。** **この試験の中で渡す**（**`supabase/config.toml` に寄りかからない**
+ * ——**あちらが変わると、関係のない理由でここが赤くなる**）。
+ */
+const SUPPLIED = "AUTH_ALLOWED_ORIGINS";
+const suppliedBefore = process.env[SUPPLIED];
+
+beforeAll(() => {
+  process.env[SUPPLIED] = "http://localhost:3000,http://127.0.0.1:3000";
+});
+
+afterAll(() => {
+  if (suppliedBefore === undefined) {
+    delete process.env[SUPPLIED];
+  } else {
+    process.env[SUPPLIED] = suppliedBefore;
+  }
+});
 
 describe("送られてきた PR 番号を読む", () => {
   it("数として読めるものだけを通す", () => {
@@ -71,7 +91,10 @@ describe("結果を、押した人へ返す形にする", () => {
 });
 
 describe("押したあと、盤面へ戻す", () => {
-  const request = new Request("http://localhost:3000/repos/acme/web/approve", { method: "POST" });
+  const request = new Request("http://localhost:3000/repos/acme/web/approve", {
+    method: "POST",
+    headers: { host: "localhost:3000" },
+  });
 
   it("303 で戻す（POST を持ち越さない）", () => {
     // **`redirect()` は Route Handler では 307**（#342 のレビュー）——
@@ -101,9 +124,13 @@ describe("押したあと、盤面へ戻す", () => {
     );
   });
 
-  it("要求が来たオリジンの上に組み立てる", () => {
-    // **設定へ書き固めない**（`src/app/auth/urls.ts` と同じ理由）
-    const other = new Request("http://127.0.0.1:3000/repos/acme/web/approve", { method: "POST" });
+  it("開いたオリジンの上に組み立てる", () => {
+    // **設定へ書き固めない**（`src/app/auth/urls.ts` と同じ理由）。
+    // **待ち受けアドレスと違うときに何が起きるかは `../board-redirect.test.ts`**（#506）
+    const other = new Request("http://127.0.0.1:3000/repos/acme/web/approve", {
+      method: "POST",
+      headers: { host: "127.0.0.1:3000" },
+    });
 
     expect(
       boardRedirect(other, { owner: "acme", name: "web" }, undefined).headers.get("location"),
