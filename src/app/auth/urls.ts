@@ -48,7 +48,13 @@ export function originFrom(request: Request, allowed: AllowedRedirects<string>):
   return matched;
 }
 
-function openedOrigin(request: Request): string {
+/**
+ * この配備で許されている、開いたオリジン。
+ *
+ * **戻り先を組む場所は、ここを通る** (#506)——**盤面へ戻す側にも同じ形が
+ * あった**（**`request.url` から組んでいた**）。**判定を 2 箇所に置かない。**
+ */
+export function openedOrigin(request: Request): string {
   return originFrom(request, allowedRedirectOrigins());
 }
 
