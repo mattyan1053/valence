@@ -83,11 +83,17 @@ export function DependencyGraphFigure({
                 fill="none"
                 stroke="currentColor"
               />
+              {/*
+               **色は親から受け取る** (#505)。**SVG の既定の `fill` は黒**なので、
+               **書かないと暗いテーマで背景と同じ色になる**——**枠だけが
+               `currentColor` で追随し**、**四角は見えるのに文字が見えなかった。**
+               */}
               <text
                 x={node.x + layout.nodeWidth / 2}
                 y={node.y + layout.nodeHeight / 2}
                 textAnchor="middle"
                 dominantBaseline="middle"
+                fill="currentColor"
               >
                 #{node.number}
               </text>
