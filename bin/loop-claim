@@ -251,6 +251,10 @@ if [[ $ACTION == "idle" ]]; then
     exit 2
   fi
 
+  # **時計は 1 つ** (#514 のレビュー)。**入った PR を絞る窓も、経過の判定も、
+  # 同じ `now` から決める**——**2 度読むと、その間に進んだぶんだけ食い違う。**
+  now="$(date +%s)"
+
   repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')" || {
     echo "[FAIL] リポジトリを特定できません" >&2
     exit 2
@@ -283,10 +287,25 @@ if [[ $ACTION == "idle" ]]; then
   # 一切見えない。** **時計は `take` のときのまま**なので、**谷の長さに関係なく鳴る**
   # （**実測: 直前の子 PR が入った 75 秒後に `stalled` が出た**。#506）。
   #
-  # **件数で切っても取りこぼさない。** **`IDLE_SEC` より古いものは、どのみち証拠に
-  # ならない**——**その間に 100 本入る機械なら、止まっているほうが先に分かる。**
-  if ! merged_pr_lines="$(gh pr list --state merged --limit 100 --json headRefName,mergedAt \
-    --jq '.[] | "\(.headRefName)\t\(.mergedAt)"')"; then
+  # **絞るのは query の側である** (#514 のレビュー)。**`gh pr list` が返すのは
+  # 「作られた順」**で、**入った順ではない**（**実データで食い違っている**）——
+  # **件数で切ると、落ちるのは「そのあとに 100 本作られた PR」**である。
+  # **長く置かれた枝ほど落ちやすい**（**`parked` の PR は日をまたぐ**）——
+  # **まさに「入ったばかりなのに黙って `stalled`」**という、この口が消しに来た形になる。
+  #
+  # **`merged:>=` で絞れば、並びに依らない。** **`--limit` が効くのは
+  # 「その窓の中で何本入ったか」**なので、**2 時間に 100 本入る機械なら、
+  # 止まっているほうが先に分かる。**
+  #
+  # **窓の下限を作るのに `date -u -d "@<epoch>"` を使う**——**この関数は既に
+  # `date -d <ISO>` で入った時刻を読む**ので、**同じ道具しか要求していない。**
+  if ! since="$(date -u -d "@$((now - IDLE_SEC))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+    || [[ -z $since ]]; then
+    echo "[FAIL] 入った PR を絞る時刻を作れません（date -d が使えません）" >&2
+    exit 2
+  fi
+  if ! merged_pr_lines="$(gh pr list --state merged --search "merged:>=$since" --limit 100 \
+    --json headRefName,mergedAt --jq '.[] | "\(.headRefName)\t\(.mergedAt)"')"; then
     echo "[FAIL] 入った PR の一覧を読めません" >&2
     exit 2
   fi
@@ -366,7 +385,6 @@ if [[ $ACTION == "idle" ]]; then
     return 1
   }
 
-  now="$(date +%s)"
   idle_found=0
   while IFS=$'\t' read -r number labels; do
     [[ $number =~ ^[0-9]+$ ]] || continue

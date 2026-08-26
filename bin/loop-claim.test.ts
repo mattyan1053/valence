@@ -1342,6 +1342,9 @@ describe("bin/loop-claim", () => {
           "  exit 0",
           "fi",
           'if [[ $* == *"--state merged"* ]]; then',
+          // **何で絞って訊いたかを残す**（#514 のレビュー）——**並びに頼っていないこと**
+          // **を、呼び方から見る**
+          `  printf '%s\\n' "$*" >>${JSON.stringify(join(repo, "merged-query"))}`,
           `  printf '%b' ${JSON.stringify(mergedPrs)}`,
           `  [[ -n ${JSON.stringify(mergedPrs)} ]] && echo`,
           "  exit 0",
@@ -1424,6 +1427,21 @@ describe("bin/loop-claim", () => {
       writeClaim(506, { touched: NOW, taken: NOW - 9000 });
 
       expect(run(["idle"]).status, "入ったばかりの子 PR があるのに、止まっていると言う").toBe(1);
+    });
+
+    it("入った子 PR は、入った時刻で絞って訊く", () => {
+      // **`gh pr list` が返すのは「作られた順」**である (#514 のレビュー。**実データで
+      // 入った順と食い違う**)——**件数で切ると、落ちるのは「そのあとに 100 本
+      // 作られた PR」**で、**長く置かれた枝ほど落ちやすい**（`parked` は日をまたぐ）。
+      //
+      // **並びに頼らない**——**窓は query の側で決める。**
+      withIdle({ inProgress: [{ number: 506 }] });
+      writeClaim(506, { touched: NOW, taken: NOW - 9000 });
+
+      run(["idle"]);
+
+      const asked = readFileSync(join(repo, "merged-query"), "utf8");
+      expect(asked, "入った時刻で絞らずに訊いている").toMatch(/merged:>=\d{4}-\d{2}-\d{2}T/);
     });
 
     it("子 PR が入ってから長く経てば、これまでどおり並べる", () => {
