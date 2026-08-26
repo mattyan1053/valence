@@ -12,7 +12,12 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { boardRedirect } from "../board-redirect";
-import { approveOutcomeParam, approveUnavailableReason, pullRequestNumberFrom } from "./route";
+import {
+  approveOutcomeParam,
+  approveUnavailableReason,
+  pullRequestNumberFrom,
+  respondToApprove,
+} from "./route";
 
 /**
  * **戻り先は、開いたオリジンから組む** (#506)——**`Host` が許可一覧に載っている
@@ -109,6 +114,80 @@ describe("押せなかった理由を、サーバ側へ残す（#506 の 2）", 
   it("押せたときは、残さない", () => {
     // **毎回鳴る記録は、そのうち読まれなくなる**（#248）
     expect(approveUnavailableReason({ kind: "approved" })).toBeUndefined();
+  });
+});
+
+describe("押した要求そのものが、記録の口を呼ぶ（#510 のレビュー）", () => {
+  // **書いてあることと、呼ばれることは別**である——**呼び出しを消しても、
+  // 部品だけを見る試験は緑のまま**だった。**要求の経路を通す。**
+  //
+  // **モックは使わない**（`AGENTS.md` §4）——**受け口をインメモリの実装で渡す。**
+
+  function pressed(body: Record<string, string>): Request {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(body)) {
+      form.set(key, value);
+    }
+    return new Request("http://localhost:3000/repos/acme/web/approve", {
+      method: "POST",
+      headers: { host: "localhost:3000" },
+      body: form,
+    });
+  }
+
+  function recorder() {
+    const recorded: string[] = [];
+    return {
+      recorded,
+      report: (action: string, kind: string) => recorded.push(`${action}=${kind}`),
+    };
+  }
+
+  it("読めない要求は、GitHub を叩かずに残す", async () => {
+    const { recorded, report } = recorder();
+    let asked = 0;
+
+    await respondToApprove(
+      pressed({ number: "abc" }),
+      { owner: "acme", name: "web" },
+      {
+        approve: async () => {
+          asked += 1;
+          return { kind: "approved" };
+        },
+        report,
+      },
+    );
+
+    expect(asked, "読めない要求で GitHub を叩いている").toBe(0);
+    expect(recorded).toEqual(["approve=unreadable-request"]);
+  });
+
+  it("まとめられた理由は、まとめる前の形で残る", async () => {
+    const { recorded, report } = recorder();
+
+    const response = await respondToApprove(
+      pressed({ number: "42" }),
+      { owner: "acme", name: "web" },
+      { approve: async () => ({ kind: "needs-login" }), report },
+    );
+
+    expect(recorded).toEqual(["approve=needs-login"]);
+    // **画面には、まとめた語しか出さない**（§6）
+    expect(response.headers.get("location")).toContain("approve=unavailable");
+  });
+
+  it("押せたときは、何も残さない", async () => {
+    const { recorded, report } = recorder();
+
+    const response = await respondToApprove(
+      pressed({ number: "42" }),
+      { owner: "acme", name: "web" },
+      { approve: async () => ({ kind: "approved" }), report },
+    );
+
+    expect(recorded).toEqual([]);
+    expect(response.headers.get("location")).toBe("http://localhost:3000/repos/acme/web");
   });
 });
 

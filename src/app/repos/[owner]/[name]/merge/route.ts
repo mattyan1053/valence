@@ -105,11 +105,26 @@ export function mergeUnavailableReason(result: MergePullRequestResult): string |
   return mergeOutcomeParam(result) === "unavailable" ? result.kind : undefined;
 }
 
-export async function POST(
+/**
+ * **要求を受けてから戻すまで** (#510 のレビュー)。**受け口を引数で渡す**
+ * ——**`POST` から呼ぶと composition が本物を掴む**ので、**記録の口を呼んでいることを
+ * 試験から見られない。** **モックは使わない**（`AGENTS.md` §4）。
+ */
+export type MergeDeps = {
+  readonly merge: (
+    repository: { readonly owner: string; readonly name: string },
+    number: number,
+    headSha: string,
+  ) => Promise<MergePullRequestResult>;
+  /** 押せなかった理由を残す口（`reportBoardActionUnavailable`）。 */
+  readonly report: (action: "merge", kind: string) => void;
+};
+
+export async function respondToMerge(
   request: Request,
-  { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
+  repository: { readonly owner: string; readonly name: string },
+  deps: MergeDeps,
 ): Promise<Response> {
-  const { owner, name } = await params;
   const form = await request.formData().catch(() => undefined);
   const number = pullRequestNumberFrom(form?.get("number"));
   const headSha = headShaFrom(form?.get("sha"));
@@ -117,21 +132,33 @@ export async function POST(
   if (number === undefined || headSha === undefined) {
     // **読めない要求で GitHub を叩かない。** **commit が無い要求も通さない**
     // ——**通すと、見せていない head がマージできる。**
-    reportBoardActionUnavailable("merge", "unreadable-request");
-    return boardRedirect(request, { owner, name }, { param: "merge", value: "unavailable" });
+    deps.report("merge", "unreadable-request");
+    return boardRedirect(request, repository, { param: "merge", value: "unavailable" });
   }
 
-  const result = await mergePullRequestForCurrentUser({ owner, name }, number, headSha);
+  const result = await deps.merge(repository, number, headSha);
   const outcome = mergeOutcomeParam(result);
   // **まとめた語を、まとめる前の形で残す** (#506 の 2)
   const reason = mergeUnavailableReason(result);
   if (reason !== undefined) {
-    reportBoardActionUnavailable("merge", reason);
+    deps.report("merge", reason);
   }
   // **成功のときは何も載せない**（上記）
   return boardRedirect(
     request,
-    { owner, name },
+    repository,
     outcome === undefined ? undefined : { param: "merge", value: outcome },
+  );
+}
+
+export async function POST(
+  request: Request,
+  { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
+): Promise<Response> {
+  const { owner, name } = await params;
+  return respondToMerge(
+    request,
+    { owner, name },
+    { merge: mergePullRequestForCurrentUser, report: reportBoardActionUnavailable },
   );
 }

@@ -93,31 +93,60 @@ export function approveUnavailableReason(result: ApprovePullRequestResult): stri
   return approveOutcomeParam(result) === "unavailable" ? result.kind : undefined;
 }
 
-export async function POST(
+/**
+ * **要求を受けてから戻すまで** (#510 のレビュー)。
+ *
+ * **受け口を引数で渡す**——**`POST` から呼ぶと、composition が本物を掴む**ので、
+ * **「記録の口を呼んでいること」を試験から見られない**（**呼び出しを消しても
+ * 部品の試験は緑のまま**だった）。**モックは使わない**（`AGENTS.md` §4）
+ * ——**インメモリの実装を渡す形にする。**
+ */
+export type ApproveDeps = {
+  readonly approve: (
+    repository: { readonly owner: string; readonly name: string },
+    number: number,
+  ) => Promise<ApprovePullRequestResult>;
+  /** 押せなかった理由を残す口（`reportBoardActionUnavailable`）。 */
+  readonly report: (action: "approve", kind: string) => void;
+};
+
+export async function respondToApprove(
   request: Request,
-  { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
+  repository: { readonly owner: string; readonly name: string },
+  deps: ApproveDeps,
 ): Promise<Response> {
-  const { owner, name } = await params;
   const form = await request.formData().catch(() => undefined);
   const number = pullRequestNumberFrom(form?.get("number"));
 
   if (number === undefined) {
     // **読めない要求で GitHub を叩かない**
-    reportBoardActionUnavailable("approve", "unreadable-request");
-    return boardRedirect(request, { owner, name }, { param: "approve", value: "unavailable" });
+    deps.report("approve", "unreadable-request");
+    return boardRedirect(request, repository, { param: "approve", value: "unavailable" });
   }
 
-  const result = await approvePullRequestForCurrentUser({ owner, name }, number);
+  const result = await deps.approve(repository, number);
   const outcome = approveOutcomeParam(result);
   // **まとめた語を、まとめる前の形で残す** (#506 の 2)
   const reason = approveUnavailableReason(result);
   if (reason !== undefined) {
-    reportBoardActionUnavailable("approve", reason);
+    deps.report("approve", reason);
   }
   // **成功のときは何も載せない**（上記）——**押した結果は盤面そのもので確かめる**
   return boardRedirect(
     request,
-    { owner, name },
+    repository,
     outcome === undefined ? undefined : { param: "approve", value: outcome },
+  );
+}
+
+export async function POST(
+  request: Request,
+  { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
+): Promise<Response> {
+  const { owner, name } = await params;
+  return respondToApprove(
+    request,
+    { owner, name },
+    { approve: approvePullRequestForCurrentUser, report: reportBoardActionUnavailable },
   );
 }

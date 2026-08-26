@@ -12,6 +12,7 @@ import {
   mergeOutcomeParam,
   mergeUnavailableReason,
   pullRequestNumberFrom,
+  respondToMerge,
 } from "./route";
 
 /**
@@ -86,6 +87,77 @@ describe("押せなかった理由を、サーバ側へ残す（#506 の 2）", 
 
   it("マージできたときは、残さない", () => {
     expect(mergeUnavailableReason({ kind: "merged" })).toBeUndefined();
+  });
+});
+
+describe("押した要求そのものが、記録の口を呼ぶ（#510 のレビュー）", () => {
+  const SHA = "0".repeat(40);
+
+  function pressed(body: Record<string, string>): Request {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(body)) {
+      form.set(key, value);
+    }
+    return new Request("http://localhost:3000/repos/acme/web/merge", {
+      method: "POST",
+      headers: { host: "localhost:3000" },
+      body: form,
+    });
+  }
+
+  function recorder() {
+    const recorded: string[] = [];
+    return {
+      recorded,
+      report: (action: string, kind: string) => recorded.push(`${action}=${kind}`),
+    };
+  }
+
+  it("commit が無い要求は、GitHub を叩かずに残す", async () => {
+    const { recorded, report } = recorder();
+    let asked = 0;
+
+    await respondToMerge(
+      pressed({ number: "42" }),
+      { owner: "acme", name: "web" },
+      {
+        merge: async () => {
+          asked += 1;
+          return { kind: "merged" };
+        },
+        report,
+      },
+    );
+
+    expect(asked, "commit の無い要求で GitHub を叩いている").toBe(0);
+    expect(recorded).toEqual(["merge=unreadable-request"]);
+  });
+
+  it("まとめられた理由は、まとめる前の形で残る", async () => {
+    const { recorded, report } = recorder();
+
+    const response = await respondToMerge(
+      pressed({ number: "42", sha: SHA }),
+      { owner: "acme", name: "web" },
+      { merge: async () => ({ kind: "not-found" }), report },
+    );
+
+    expect(recorded).toEqual(["merge=not-found"]);
+    // **見えないリポジトリの存在を、画面では教えない**（§6）
+    expect(response.headers.get("location")).toContain("merge=unavailable");
+  });
+
+  it("マージできたときは、何も残さない", async () => {
+    const { recorded, report } = recorder();
+
+    const response = await respondToMerge(
+      pressed({ number: "42", sha: SHA }),
+      { owner: "acme", name: "web" },
+      { merge: async () => ({ kind: "merged" }), report },
+    );
+
+    expect(recorded).toEqual([]);
+    expect(response.headers.get("location")).toBe("http://localhost:3000/repos/acme/web");
   });
 });
 
