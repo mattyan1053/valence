@@ -5,6 +5,7 @@
 #   bin/loop-check-state finished <走りの id> <合否>    走り終えた
 #   bin/loop-check-state --verdict                      いまの記録を読む
 #   bin/loop-check-state --durations                    積んだ所要時間を読む
+#   bin/loop-check-state --overlaps                     重なった走りを読む
 #
 #   --verdict の終了コード:
 #     0 = 緑 / 1 = 赤 / 2 = 読めない・使い方の誤り / 3 = まだ走っている / 4 = 記録が無い
@@ -31,7 +32,21 @@
 # ——**別の作業場の check は、こちらの commit の可否と関係が無い。**
 #
 # **所要時間は、別の口へ積む** (#391)。**走りの記録は次の走りが片付ける**ので、
-# **そこに時刻を書くだけでは残らない**——**`valence-check-durations` へ 1 行足す。**
+# **そこに時刻を書くだけでは残らない**——**`valence-check-runs` へ 1 行足す。**
+#
+# **積む先だけは共有である** (#509)。**`./task check` が 2 本並走すると負荷で時間切れに
+# なる**——**同じ機械の話**なので、**作業場ごとに分けて積むと、突き合わせる先が無い**
+# （**重なったことが、人の報告にしか残らなかった**）。**行に作業場を書き**、
+# **`--overlaps` が区間の交わりを読む。**
+#
+# **合否の記録（`valence-check-state.d`）は作業場ごとのまま**である——**別の作業場の
+# check は、こちらの commit の可否と関係が無い。** **共有にするのは「速さ」だけ**で、
+# **`--durations` はこの作業場のぶんだけを、これまでどおり 3 列で返す**
+# （**読み手の意味を変えない**）。
+#
+# **前の版が `valence-check-durations` へ積んだぶんは、そのまま置いていく**
+# （`AGENTS.md` §5）——**移し替えない。** **測るための記録**なので、
+# **混ぜて読み違えるより、そこで途切れるほうが安い。**
 #
 # **走りの記録には、1 行目を変えずに行を足す**（`AGENTS.md` §5。**新しい書き手 →
 # 古い読み手**）。**前の版の `--verdict` も `running` の片付けも `read -r ... <記録` で
@@ -49,8 +64,10 @@ usage() {
   echo "        bin/loop-check-state finished <走りの id> <合否>  走り終えた" >&2
   echo "        bin/loop-check-state --verdict                    いまの記録を読む" >&2
   echo "        bin/loop-check-state --durations                  積んだ所要時間を読む" >&2
+  echo "        bin/loop-check-state --overlaps                   重なった走りを読む" >&2
   echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
   printf '        --durations: <始め>\\t<終わり>\\t<合否 または killed>（4 記録が無い）\n' >&2
+  printf '        --overlaps: <重なった秒>\\t<作業場>\\t<作業場>（0 あり / 1 無い / 4 記録が無い）\n' >&2
   exit 2
 }
 
@@ -61,10 +78,33 @@ if ! git_dir="$(git rev-parse --git-dir 2>/dev/null)" || [[ -z $git_dir ]]; then
   exit 2
 fi
 readonly STATE_DIR="$git_dir/valence-check-state.d"
-# **積む先も作業場ごと**（**走りの記録と同じ場所**——**別の作業場の速さと混ぜない**）
-readonly DURATIONS="$git_dir/valence-check-durations"
+# **積む先は共有** (#509)。**並走したことは、同じ機械の 2 つの作業場にまたがる**
+# ——**分けて積むと、突き合わせる先が無い。**
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の共通ディレクトリを特定できません" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリへ移動できません" >&2
+  exit 2
+}
+readonly RUNS="$common_dir/valence-check-runs"
+# **どの作業場の走りか**（`bin/loop-claim` / `bin/loop-lease` と同じ引き方
+# ——**持ち主の名前を 2 通り持たない**）。
+if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $toplevel ]]; then
+  echo "[FAIL] 作業場の根を特定できません" >&2
+  exit 2
+fi
+toplevel="$(cd "$toplevel" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] 作業場の根へ移動できません" >&2
+  exit 2
+}
+readonly WORKSPACE="$toplevel"
 # **直近のぶんだけ残す**（`bin/loop-lease` の周回の長さと同じ形）。**際限なく足すと、
 # 読むたびに重くなる**——**振れ幅を見るには、直近の何十回かで足りる。**
+#
+# **数えるのは作業場ごと** (#509)。**共有の記録を全体で切ると、隣の作業場が忙しい日に
+# こちらの直近が押し出される**——**振れ幅を見る先が、他所の都合で消える。**
 readonly RECENT_RUNS=10
 # ロックを待つ秒数。**試験で短くできるようにしてある**（`bin/loop-lease` と同じ形）
 readonly LOCK_WAIT_SEC="${LOOP_CHECK_STATE_LOCK_WAIT_SEC:-10}"
@@ -80,23 +120,32 @@ now_epoch() { date +%s; }
 # **読んで、足して、書き戻す**ので、**2 本が同時に終わると 1 行落ちうる**
 # ——**`flock` で直列にする**（**測るための記録なので、待たせても誰も止まらない**）。
 append_duration() {
-  local started="$1" ended="$2" result="$3" kept=()
+  local started="$1" ended="$2" result="$3" all=() kept=() others=() line row_workspace
   [[ $started =~ ^[0-9]+$ ]] || return 1
-  exec 8>"$DURATIONS.lock" 2>/dev/null || return 1
+  exec 8>"$RUNS.lock" 2>/dev/null || return 1
   flock -w "$LOCK_WAIT_SEC" 8 || {
     exec 8>&-
     return 1
   }
-  if [[ -f $DURATIONS ]]; then
-    mapfile -t kept <"$DURATIONS" 2>/dev/null || kept=()
+  if [[ -f $RUNS ]]; then
+    mapfile -t all <"$RUNS" 2>/dev/null || all=()
   fi
-  kept+=("$(printf '%s\t%s\t%s' "$started" "$ended" "$result")")
+  # **こちらのぶんと、他所のぶんを分けて数える** (#509)——**切るのは自分のぶんだけ。**
+  for line in "${all[@]}"; do
+    row_workspace="${line%%$'\t'*}"
+    if [[ $row_workspace == "$WORKSPACE" ]]; then
+      kept+=("$line")
+    else
+      others+=("$line")
+    fi
+  done
+  kept+=("$(printf '%s\t%s\t%s\t%s' "$WORKSPACE" "$started" "$ended" "$result")")
   # **数より短いときに切り出さない。** **要素数を超える負の開始位置は空になる**
   # ——**積んだ行が丸ごと消える**（**測るための記録が、静かに空のままになる**）
   ((${#kept[@]} <= RECENT_RUNS)) || kept=("${kept[@]: -RECENT_RUNS}")
-  if ! { printf '%s\n' "${kept[@]}" >"$DURATIONS.tmp" 2>/dev/null \
-    && mv -f "$DURATIONS.tmp" "$DURATIONS" 2>/dev/null; }; then
-    rm -f "$DURATIONS.tmp" 2>/dev/null
+  if ! { printf '%s\n' ${others[@]+"${others[@]}"} "${kept[@]}" >"$RUNS.tmp" 2>/dev/null \
+    && mv -f "$RUNS.tmp" "$RUNS" 2>/dev/null; }; then
+    rm -f "$RUNS.tmp" 2>/dev/null
     exec 8>&-
     return 1
   fi
@@ -199,11 +248,54 @@ case "$1" in
   --durations)
     [[ $# -eq 1 ]] || usage
     # **「無い」と「読めない」を混ぜない**（`--verdict` と同じ語彙）
-    [[ -s $DURATIONS ]] || exit 4
-    cat "$DURATIONS" || {
-      echo "[FAIL] 所要時間の記録を読めません: $DURATIONS" >&2
+    [[ -s $RUNS ]] || exit 4
+    # **この作業場のぶんだけを、これまでどおり 3 列で出す** (#509)——**共有にしたのは
+    # 積む先**で、**「所要時間」の意味は変えない**（**他所の速さと混ぜない**）。
+    mine=""
+    mine="$(awk -F'\t' -v me="$WORKSPACE" '$1 == me { print $2 "\t" $3 "\t" $4 }' "$RUNS")" || {
+      echo "[FAIL] 所要時間の記録を読めません: $RUNS" >&2
       exit 2
     }
+    [[ -n $mine ]] || exit 4
+    printf '%s\n' "$mine"
+    ;;
+  --overlaps)
+    [[ $# -eq 1 ]] || usage
+    # **重なったことを、人の報告に頼らずに読む** (#509)。
+    #
+    # **同じ作業場どうしは数えない**——**殺された走りの「終わり」は片付けた時刻**なので、
+    # **次の走りと必ず重なって見える**（**負荷の話ではなく、片付けの跡である**）。
+    #
+    # **切られた走りは、区間として読まない**（**同じ理由**）。**終わりが片付けた時刻**
+    # なので、**次の走りまでの何十分かが、まるごと「重なっていた」に化ける。**
+    # **切られたこと自体は `--durations` に残る**——**ここで見るのは、
+    # 終わりまで走った 2 本が本当に重なったか**である。
+    [[ -s $RUNS ]] || exit 4
+    overlapping=""
+    overlapping="$(awk -F'\t' '
+      # **数え始めを 0 に置く。** **awk の未初期化は空文字**なので、**添字にすると
+      # 1 本目が `workspace[""]` へ入り**、**0 番を読む側からは消える**（**実際に踏んだ**）。
+      BEGIN { n = 0 }
+      $4 == "killed" { next }
+      $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {
+        workspace[n] = $1; from[n] = $2; to[n] = $3; n++
+      }
+      END {
+        for (i = 0; i < n; i++) {
+          for (j = i + 1; j < n; j++) {
+            if (workspace[i] == workspace[j]) { continue }
+            begin = from[i] > from[j] ? from[i] : from[j]
+            end = to[i] < to[j] ? to[i] : to[j]
+            if (end <= begin) { continue }
+            print (end - begin) "\t" workspace[i] "\t" workspace[j]
+          }
+        }
+      }' "$RUNS")" || {
+      echo "[FAIL] 走りの記録を読めません: $RUNS" >&2
+      exit 2
+    }
+    [[ -n $overlapping ]] || exit 1
+    printf '%s\n' "$overlapping"
     ;;
   --verdict)
     [[ $# -eq 1 ]] || usage
