@@ -13,6 +13,7 @@
  * 操作そのものは持たない**——**呼ぶ側が `authorized` を受けてから動く。**
  */
 
+import { errorKind } from "../observability/error-kind";
 import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type {
@@ -27,8 +28,14 @@ export type RepositoryAuthorization =
   | { readonly kind: "signed-out" }
   /** 失効していて、更新もできなかった。**入口へ戻す。** */
   | { readonly kind: "needs-login" }
-  /** **入り直しても直らない**（置き場が落ちている / 一覧を読めない）。 */
-  | { readonly kind: "unavailable" }
+  /**
+   * **入り直しても直らない**（置き場が落ちている / 一覧を読めない）。
+   *
+   * **どこで落ちたかを添える** (#506 の 2-b)——**握り潰すと、押した人にも
+   * 調べる人にも「いま押せません」しか残らない**（**実際、`kind=unavailable`
+   * まで分かっても、そこから先が無かった**）。**中身は出さない**（`errorKind`）。
+   */
+  | { readonly kind: "unavailable"; readonly reason?: string }
   /**
    * **そのユーザーには無い。**
    *
@@ -102,9 +109,9 @@ export async function authorizeRepository({
   let store: UserTokenStore | undefined;
   try {
     store = await openStore();
-  } catch {
+  } catch (error) {
     // **開けなかったことを「見えない」にも「期限切れ」にも化けさせない**
-    return { kind: "unavailable" };
+    return { kind: "unavailable", reason: `store/${errorKind(error)}` };
   }
   if (store === undefined) {
     return { kind: "signed-out" };
@@ -117,7 +124,7 @@ export async function authorizeRepository({
       return { kind: "needs-login" };
     case "unavailable":
       // **`kind` を並べて書くのは、次に増えたときここで型が落ちるため**
-      return { kind: "unavailable" };
+      return { kind: "unavailable", reason: "token" };
     case "usable":
       break;
   }
@@ -125,10 +132,10 @@ export async function authorizeRepository({
   let listing: VisibleRepositoryListing;
   try {
     listing = await repositories.list(usable.accessToken);
-  } catch {
+  } catch (error) {
     // **投げたものを `not-found` へ倒さない。** **故障が
     // 「そんなリポジトリはありません」に化ける**
-    return { kind: "unavailable" };
+    return { kind: "unavailable", reason: `list/${errorKind(error)}` };
   }
 
   if (isVisible(listing, repository)) {
@@ -138,7 +145,7 @@ export async function authorizeRepository({
   // その中に居たかどうかを言えない**——**漏れはしない**（**`unavailable` は
   // 対象が在るかどうかに関係なく返る**ので、**存在を教えない**）
   if (listing.invalid.length > 0) {
-    return { kind: "unavailable" };
+    return { kind: "unavailable", reason: "invalid-listing" };
   }
   return { kind: "not-found" };
 
@@ -156,9 +163,9 @@ export async function authorizeRepository({
     let level: Awaited<ReturnType<RepositoryPermissions["levelFor"]>>;
     try {
       level = await permissions.levelFor(userAccessToken, repository);
-    } catch {
+    } catch (error) {
       // **判定不能を「許す」へ倒さない。** **書き込みは取り消せない**
-      return { kind: "unavailable" };
+      return { kind: "unavailable", reason: `permissions/${errorKind(error)}` };
     }
     // **書ける側を並べ、それ以外は下へ倒す** (#90)——**GitHub が値を増やしても、
     // 知らない値が「書ける」にはならない。**

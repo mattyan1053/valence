@@ -94,7 +94,9 @@ describe("そのリポジトリを触ってよいか", () => {
       },
     });
 
-    expect(await run()).toEqual({ kind: "unavailable" });
+    // **どこで落ちたかまで残す** (#506 の 2-b)——**握り潰すと、押した人にも
+    // 調べる人にも「いま押せません」しか残らない**
+    expect(await run()).toEqual({ kind: "unavailable", reason: "store/Error" });
   });
 
   it("失効していたら、入り直しへ送る", async () => {
@@ -126,7 +128,8 @@ describe("そのリポジトリを触ってよいか", () => {
       listing: { repositories: [], invalid: [{ index: 2, reason: "name が無い" }] },
     });
 
-    expect(await run()).toEqual({ kind: "unavailable" });
+    // **例外ではないので、種類ではなく「読めない行があった」と残す** (#506 の 2-b)
+    expect(await run()).toEqual({ kind: "unavailable", reason: "invalid-listing" });
   });
 
   it("一覧が落ちたら、「ありません」に化けさせない", async () => {
@@ -145,7 +148,7 @@ describe("そのリポジトリを触ってよいか", () => {
         permissions: permissions("write"),
         require: "read",
       }),
-    ).toEqual({ kind: "unavailable" });
+    ).toEqual({ kind: "unavailable", reason: "list/Error" });
   });
 
   it("read でよいなら、権限の高さは引かない", async () => {
@@ -193,7 +196,7 @@ describe("そのリポジトリを触ってよいか", () => {
       },
     });
 
-    expect(await run()).toEqual({ kind: "unavailable" });
+    expect(await run()).toEqual({ kind: "unavailable", reason: "permissions/Error" });
   });
 
   it("大文字小文字は区別しない", async () => {

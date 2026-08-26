@@ -147,6 +147,18 @@ describe("押した要求そのものが、記録の口を呼ぶ（#510 のレ�
     expect(response.headers.get("location")).toContain("merge=unavailable");
   });
 
+  it("握り潰した例外の落ちどころも、記録に出る", async () => {
+    const { recorded, report } = recorder();
+
+    await respondToMerge(
+      pressed({ number: "42", sha: SHA }),
+      { owner: "acme", name: "web" },
+      { merge: async () => ({ kind: "unavailable", reason: "merge/Error" }), report },
+    );
+
+    expect(recorded).toEqual(["merge=unavailable/merge/Error"]);
+  });
+
   it("マージできたときは、何も残さない", async () => {
     const { recorded, report } = recorder();
 

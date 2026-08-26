@@ -177,6 +177,20 @@ describe("押した要求そのものが、記録の口を呼ぶ（#510 のレ�
     expect(response.headers.get("location")).toContain("approve=unavailable");
   });
 
+  it("握り潰した例外の落ちどころも、記録に出る", async () => {
+    // **#506 の 2-b**——**`kind=unavailable` だけでは「なぜ」が出ない**（**例外を
+    // 握り潰している側**）。**種類だけを添える**（中身は出さない。§6）。
+    const { recorded, report } = recorder();
+
+    await respondToApprove(
+      pressed({ number: "42" }),
+      { owner: "acme", name: "web" },
+      { approve: async () => ({ kind: "unavailable", reason: "approve/TypeError" }), report },
+    );
+
+    expect(recorded).toEqual(["approve=unavailable/approve/TypeError"]);
+  });
+
   it("押せたときは、何も残さない", async () => {
     const { recorded, report } = recorder();
 

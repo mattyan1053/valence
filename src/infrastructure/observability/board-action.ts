@@ -15,8 +15,13 @@
  * 汚さずに「出していないこと」を見られる。**
  */
 
-/** 押した操作。**画面の語彙と揃える**（`?approve=` / `?merge=`）。 */
-export type BoardAction = "approve" | "merge";
+/**
+ * 押した操作。**画面の語彙と揃える**（`?approve=` / `?merge=`）。
+ *
+ * **`view` は「盤面を見に来た」** (#513 のレビュー)——**押していないが、
+ * 落ちどころが消えるのは同じ**である（**GET の経路にも `unavailable` がある**）。
+ */
+export type BoardAction = "approve" | "merge" | "view";
 
 /**
  * 押せなかった理由を 1 行残す。

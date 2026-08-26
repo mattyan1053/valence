@@ -10,7 +10,10 @@
 
 import { notFound } from "next/navigation";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
-import { repositoryBoardForCurrentUser } from "../../../../composition/auth";
+import {
+  reportBoardActionUnavailable,
+  repositoryBoardForCurrentUser,
+} from "../../../../composition/auth";
 import { mergeBlockFor } from "../../../../domain/graph/merge-block";
 import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge";
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
@@ -128,6 +131,25 @@ export function mergeButtonBlock(block: ReturnType<typeof mergeBlockFor>): {
   }
 }
 
+/**
+ * **盤面を出せなかった理由** (#513 のレビュー)。
+ *
+ * **押した経路と同じものが、見に来た経路にもある**——**`store` / `list` /
+ * `token` / `board` で落ちると、画面には「いま見られません」しか出ない**（§6）
+ * ので、**サーバ側に残さないと、どこで落ちたかが消える。**
+ *
+ * **画面に出す語（`notice`）は変えない。** **残すのは記録だけ**である。
+ */
+export function boardUnavailableReason(result: {
+  readonly kind: string;
+  readonly reason?: string;
+}): string | undefined {
+  if (result.kind !== "unavailable") {
+    return undefined;
+  }
+  return result.reason === undefined ? result.kind : `${result.kind}/${result.reason}`;
+}
+
 export default async function RepositoryBoardPage({
   params,
   searchParams,
@@ -140,6 +162,11 @@ export default async function RepositoryBoardPage({
   const outcome = approveNoticeKind(query.approve);
   const mergeOutcome = mergeNoticeKind(query.merge);
   const result = await repositoryBoardForCurrentUser({ owner, name });
+  // **落ちどころを、サーバ側に残す** (#513 のレビュー)——**押した経路と同じ**
+  const unavailable = boardUnavailableReason(result);
+  if (unavailable !== undefined) {
+    reportBoardActionUnavailable("view", unavailable);
+  }
 
   if (result.kind === "not-found") {
     // **存在も漏らさない。** **見えない人には、無いのと同じに見える**

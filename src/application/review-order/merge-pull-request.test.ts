@@ -191,7 +191,8 @@ describe("PR をマージする前に、押してよいかを確かめる", () =
 
     const result = await mergePullRequest(input({ permissions: failing, merges: NEVER_MERGES }));
 
-    expect(result.kind).toBe("unavailable");
+    // **どこで落ちたかまで残す** (#506 の 2-b)
+    expect(result).toEqual({ kind: "unavailable", reason: "permissions/Error" });
   });
 
   it("マージそのものが落ちたら、成功と言わない", async () => {
@@ -205,7 +206,7 @@ describe("PR をマージする前に、押してよいかを確かめる", () =
       input({ permissions: permissions("write"), merges: throwing }),
     );
 
-    expect(result.kind).toBe("unavailable");
+    expect(result).toEqual({ kind: "unavailable", reason: "merge/Error" });
   });
 });
 
@@ -263,7 +264,8 @@ describe("依存が残っている PR はマージしない", () => {
       input({ permissions: permissions("write"), merges: NEVER_MERGES, pullRequests: failing }),
     );
 
-    expect(result.kind).toBe("unavailable");
+    // **依存を見に行けなかった側**（`order`）——**マージの側と分ける**
+    expect(result).toEqual({ kind: "unavailable", reason: "order/Error" });
   });
 
   it("押してよいと分かる前に、一覧を読みに行かない", async () => {

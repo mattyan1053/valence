@@ -13,23 +13,9 @@
  */
 
 import type { LoginStage } from "../../application/auth/complete-login";
-
-/**
- * 例外の**種類だけ**を取る。
- *
- * **`message` を読まない。** **何が入るか保証できない**（応答本文がそのまま
- * 入っていることがある）——**`cause` も同じ**なので、**辿らない。**
- *
- * **`Error` 以外も投げられる**（`throw "文字列"` も `throw {token}` も書ける）。
- * **種類が分からないときこそ、中身を出さない**——**`typeof` までで止める。**
- */
-function kindOf(error: unknown): string {
-  if (error instanceof Error) {
-    // **クラス名だけ。** `ZodError` / `TypeError` / `Error` のような、書いた人が付けた名前である
-    return error.constructor.name;
-  }
-  return typeof error;
-}
+// **種類だけを取る判断は 1 箇所**（#506 の 2-b で application へ移した）
+// ——**握り潰した側でも同じことが要る**ので、**両方から使えるところに置いてある。**
+import { errorKind } from "../../application/observability/error-kind";
 
 /**
  * 落ちた段を 1 行だけ残す。
@@ -41,7 +27,7 @@ export function reportLoginFailure(
   error: unknown,
   write: (line: string) => void = console.error,
 ): void {
-  write(`[auth] login failed stage=${stage} error=${kindOf(error)}`);
+  write(`[auth] login failed stage=${stage} error=${errorKind(error)}`);
 }
 
 /**

@@ -23,6 +23,7 @@
 
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
+import { errorKind } from "../observability/error-kind";
 import type { PullRequestReviews } from "../ports/pull-request-review";
 import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
@@ -34,7 +35,7 @@ export type ApprovePullRequestResult =
   /** 失効していて、更新もできなかった。**入口へ戻す。** */
   | { readonly kind: "needs-login" }
   /** **入り直しても直らない**（置き場が落ちている / GitHub が返さない）。 */
-  | { readonly kind: "unavailable" }
+  | { readonly kind: "unavailable"; readonly reason?: string }
   /**
    * **そのユーザーには無い。**
    *
@@ -105,9 +106,10 @@ export async function approvePullRequest({
     // **確かめた本人のトークンで出す。** **`authorizeRepository` が
     // `userAccessToken` を返すのは、続けて使う側があるため**である（#317）。
     return await reviews.approve(authorization.userAccessToken, { repository, number });
-  } catch {
+  } catch (error) {
     // **投げたものを「押せた」に化けさせない。** **押していないのに
     // 「承認しました」と出ると、誰も気づけない**——**取り消す相手も無い。**
-    return { kind: "unavailable" };
+    // **どこで落ちたかを添える** (#506 の 2-b)
+    return { kind: "unavailable", reason: `approve/${errorKind(error)}` };
   }
 }
