@@ -7,7 +7,12 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { boardRedirect } from "../board-redirect";
-import { headShaFrom, mergeOutcomeParam, pullRequestNumberFrom } from "./route";
+import {
+  headShaFrom,
+  mergeOutcomeParam,
+  mergeUnavailableReason,
+  pullRequestNumberFrom,
+} from "./route";
 
 /**
  * **戻り先は、開いたオリジンから組む** (#506)——**`Host` が許可一覧に載っている
@@ -63,6 +68,24 @@ describe("結果を、押した人へ返す形にする", () => {
     expect(mergeOutcomeParam({ kind: "not-found" })).toBe("unavailable");
     expect(mergeOutcomeParam({ kind: "signed-out" })).toBe("unavailable");
     expect(mergeOutcomeParam({ kind: "needs-login" })).toBe("unavailable");
+  });
+});
+
+describe("押せなかった理由を、サーバ側へ残す（#506 の 2）", () => {
+  it("まとめられた 4 つを、そのまま区別できる形で残す", () => {
+    for (const kind of ["signed-out", "needs-login", "not-found", "unavailable"] as const) {
+      expect(mergeUnavailableReason({ kind }), kind).toBe(kind);
+    }
+  });
+
+  it("押した人へ理由が届いているものは、残さない", () => {
+    // **`forbidden` / `not-mergeable` / `dependency-pending` は画面に出る**
+    expect(mergeUnavailableReason({ kind: "forbidden" })).toBeUndefined();
+    expect(mergeUnavailableReason({ kind: "not-mergeable" })).toBeUndefined();
+  });
+
+  it("マージできたときは、残さない", () => {
+    expect(mergeUnavailableReason({ kind: "merged" })).toBeUndefined();
   });
 });
 

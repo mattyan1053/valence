@@ -13,7 +13,10 @@
 
 import { z } from "zod";
 import type { ApprovePullRequestResult } from "../../../../../application/review-order/approve-pull-request";
-import { approvePullRequestForCurrentUser } from "../../../../../composition/auth";
+import {
+  approvePullRequestForCurrentUser,
+  reportBoardActionUnavailable,
+} from "../../../../../composition/auth";
 import type { ApproveNoticeKind } from "../../../../../ui/approve/approve-button";
 import { boardRedirect } from "../board-redirect";
 
@@ -76,6 +79,20 @@ export function approveOutcomeParam(
   }
 }
 
+/**
+ * **サーバ側に残す理由** (#506 の 2)。
+ *
+ * **`unavailable` は 4 つをまとめた語**である（`signed-out` / `needs-login` /
+ * `not-found` / `unavailable`）——**画面では分けない**（§6。**見えないリポジトリの
+ * 存在を教える**）**が、押せない理由が誰にも分からないままになっていた。**
+ *
+ * **押した人へ理由が届いているものは残さない**（`forbidden` / `self-approval` /
+ * `approved`）——**毎回鳴る記録は、そのうち読まれなくなる**（#248）。
+ */
+export function approveUnavailableReason(result: ApprovePullRequestResult): string | undefined {
+  return approveOutcomeParam(result) === "unavailable" ? result.kind : undefined;
+}
+
 export async function POST(
   request: Request,
   { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
@@ -86,11 +103,17 @@ export async function POST(
 
   if (number === undefined) {
     // **読めない要求で GitHub を叩かない**
+    reportBoardActionUnavailable("approve", "unreadable-request");
     return boardRedirect(request, { owner, name }, { param: "approve", value: "unavailable" });
   }
 
   const result = await approvePullRequestForCurrentUser({ owner, name }, number);
   const outcome = approveOutcomeParam(result);
+  // **まとめた語を、まとめる前の形で残す** (#506 の 2)
+  const reason = approveUnavailableReason(result);
+  if (reason !== undefined) {
+    reportBoardActionUnavailable("approve", reason);
+  }
   // **成功のときは何も載せない**（上記）——**押した結果は盤面そのもので確かめる**
   return boardRedirect(
     request,

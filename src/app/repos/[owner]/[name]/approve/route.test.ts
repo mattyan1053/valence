@@ -12,7 +12,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { boardRedirect } from "../board-redirect";
-import { approveOutcomeParam, pullRequestNumberFrom } from "./route";
+import { approveOutcomeParam, approveUnavailableReason, pullRequestNumberFrom } from "./route";
 
 /**
  * **戻り先は、開いたオリジンから組む** (#506)——**`Host` が許可一覧に載っている
@@ -87,6 +87,28 @@ describe("結果を、押した人へ返す形にする", () => {
     // **§6。**「権限がありません」と「ありません」を区別できる応答にしない**
     // ——**ここで `not-found` を返すと、見えないリポジトリの存在を教える**
     expect(approveOutcomeParam({ kind: "not-found" })).toBe("unavailable");
+  });
+});
+
+describe("押せなかった理由を、サーバ側へ残す（#506 の 2）", () => {
+  // **画面には出せない**——**4 つを 1 語（`unavailable`）にまとめてある**（§6）。
+  // **どこにも残らないと、利用者が「押せない」と言っても、どれか分からない。**
+
+  it("まとめられた 4 つを、そのまま区別できる形で残す", () => {
+    for (const kind of ["signed-out", "needs-login", "not-found", "unavailable"] as const) {
+      expect(approveUnavailableReason({ kind }), kind).toBe(kind);
+    }
+  });
+
+  it("押した人へ理由が届いているものは、残さない", () => {
+    // **`forbidden` / `self-approval` は画面に出る**——**記録する必要が無い。**
+    expect(approveUnavailableReason({ kind: "forbidden" })).toBeUndefined();
+    expect(approveUnavailableReason({ kind: "self-approval" })).toBeUndefined();
+  });
+
+  it("押せたときは、残さない", () => {
+    // **毎回鳴る記録は、そのうち読まれなくなる**（#248）
+    expect(approveUnavailableReason({ kind: "approved" })).toBeUndefined();
   });
 });
 

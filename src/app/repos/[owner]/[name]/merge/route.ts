@@ -12,7 +12,10 @@
 
 import { z } from "zod";
 import type { MergePullRequestResult } from "../../../../../application/review-order/merge-pull-request";
-import { mergePullRequestForCurrentUser } from "../../../../../composition/auth";
+import {
+  mergePullRequestForCurrentUser,
+  reportBoardActionUnavailable,
+} from "../../../../../composition/auth";
 import type { MergeNoticeKind } from "../../../../../ui/merge/merge-button";
 import { boardRedirect } from "../board-redirect";
 
@@ -88,6 +91,20 @@ export function mergeOutcomeParam(result: MergePullRequestResult): MergeNoticeKi
   }
 }
 
+/**
+ * **サーバ側に残す理由** (#506 の 2)。
+ *
+ * **`unavailable` は 4 つをまとめた語**である（`signed-out` / `needs-login` /
+ * `not-found` / `unavailable`）——**画面では分けない**（§6）**が、押せない理由が
+ * 誰にも分からないままになっていた。**
+ *
+ * **押した人へ理由が届いているものは残さない**（`forbidden` / `not-mergeable` /
+ * `dependency-pending` / `not-orderable` / `base-changed` / `merged`）。
+ */
+export function mergeUnavailableReason(result: MergePullRequestResult): string | undefined {
+  return mergeOutcomeParam(result) === "unavailable" ? result.kind : undefined;
+}
+
 export async function POST(
   request: Request,
   { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
@@ -100,11 +117,17 @@ export async function POST(
   if (number === undefined || headSha === undefined) {
     // **読めない要求で GitHub を叩かない。** **commit が無い要求も通さない**
     // ——**通すと、見せていない head がマージできる。**
+    reportBoardActionUnavailable("merge", "unreadable-request");
     return boardRedirect(request, { owner, name }, { param: "merge", value: "unavailable" });
   }
 
   const result = await mergePullRequestForCurrentUser({ owner, name }, number, headSha);
   const outcome = mergeOutcomeParam(result);
+  // **まとめた語を、まとめる前の形で残す** (#506 の 2)
+  const reason = mergeUnavailableReason(result);
+  if (reason !== undefined) {
+    reportBoardActionUnavailable("merge", reason);
+  }
   // **成功のときは何も載せない**（上記）
   return boardRedirect(
     request,
