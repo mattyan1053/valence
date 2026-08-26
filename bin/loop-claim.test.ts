@@ -1297,6 +1297,13 @@ describe("bin/loop-claim", () => {
        * 見たかった経路まで届かない**（届いていないのに緑になる）。
        */
       failOn?: "issue list" | "pr list" | "issue view";
+      /**
+       * **入った子 PR**（#512）。**枝の名前と、入った時刻**である。
+       *
+       * **親 Issue は子 PR で閉じない**（`Closes` を書かない。#321）ので、
+       * **open な子が無い谷では、動いている証拠が一切見えなくなる。**
+       */
+      mergedPrs?: { head: string; mergedAt: string }[];
     }): void {
       const issues = (options.inProgress ?? [])
         .map((issue) => `${issue.number}\t${(issue.labels ?? ["in-progress"]).join(",")}`)
@@ -1307,6 +1314,10 @@ describe("bin/loop-claim", () => {
           ...(pr.head === undefined ? [] : [`head\t${pr.head}`]),
           ...(pr.closes ?? []).map((number) => `closes\t${pr.repo ?? "owner/repo"}\t${number}`),
         ])
+        .join("\n");
+      // **入った PR は別の一覧で返る**（`--state merged`）——**open の一覧と混ぜない**
+      const mergedPrs = (options.mergedPrs ?? [])
+        .map((pr) => `${pr.head}\t${pr.mergedAt}`)
         .join("\n");
       const labelsDir = writeLabelFixtures(options);
       const refsDir = writeReferenceFixtures(options.referencedBy);
@@ -1328,6 +1339,11 @@ describe("bin/loop-claim", () => {
           'if [[ $* == *"issue list"* ]]; then',
           `  printf '%b' ${JSON.stringify(issues)}`,
           `  [[ -n ${JSON.stringify(issues)} ]] && echo`,
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"--state merged"* ]]; then',
+          `  printf '%b' ${JSON.stringify(mergedPrs)}`,
+          `  [[ -n ${JSON.stringify(mergedPrs)} ]] && echo`,
           "  exit 0",
           "fi",
           'if [[ $* == *"pr list"* ]]; then',
@@ -1393,6 +1409,68 @@ describe("bin/loop-claim", () => {
       const [kind, number, elapsed] = (idle.stdout.split("\n")[0] ?? "").split("\t");
       expect([kind, number]).toEqual(["stalled", "264"]);
       expect(Number(elapsed)).toBeGreaterThanOrEqual(9000);
+    });
+
+    it("子 PR が最近入っていれば、親を止まっていると言わない", () => {
+      // **親として残した Issue は、子 PR と子 PR のあいだで必ず「実装が出ていない」に
+      // 倒れる** (#512)。**時計は `take` のときのまま**で、**open な子が無い瞬間**は
+      // **谷の長さに関係なく鳴る**——**実測では、直前の子が入った 75 秒後に鳴った。**
+      const iso = (secondsAgo: number): string =>
+        new Date((NOW - secondsAgo) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+      withIdle({
+        inProgress: [{ number: 506 }],
+        mergedPrs: [{ head: "fix/506-redirect-to-opened-origin", mergedAt: iso(600) }],
+      });
+      writeClaim(506, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).status, "入ったばかりの子 PR があるのに、止まっていると言う").toBe(1);
+    });
+
+    it("子 PR が入ってから長く経てば、これまでどおり並べる", () => {
+      // **谷を許すぶん、止まった判定は遅れる**（**その代わり、動いている間は鳴らない**）
+      // ——**「本当に止まったときは倒れる」**が消えていないことを見る。
+      const iso = (secondsAgo: number): string =>
+        new Date((NOW - secondsAgo) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+      withIdle({
+        inProgress: [{ number: 506 }],
+        mergedPrs: [{ head: "fix/506-redirect-to-opened-origin", mergedAt: iso(20000) }],
+      });
+      writeClaim(506, { touched: NOW, taken: NOW - 30000 });
+
+      expect(run(["idle"]).stdout.split("\n")[0], "止まっているのに黙っている").toMatch(
+        /^stalled\t506\t/,
+      );
+    });
+
+    it("別の Issue の子 PR が入っても、黙らない", () => {
+      // **枝の番号で見る** (#322)——**他所の番号で黙ると、この検出器が消える**
+      const iso = (secondsAgo: number): string =>
+        new Date((NOW - secondsAgo) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+      withIdle({
+        inProgress: [{ number: 506 }],
+        mergedPrs: [{ head: "fix/999-something-else", mergedAt: iso(60) }],
+      });
+      writeClaim(506, { touched: NOW, taken: NOW - 9000 });
+
+      expect(run(["idle"]).stdout.split("\n")[0], "別の Issue の枝で黙っている").toMatch(
+        /^stalled\t506\t/,
+      );
+    });
+
+    it("入った時刻を読めない子 PR は、動いている証拠に数えない", () => {
+      // **読めないものを「動いている」に倒すと、この検出器だけが静かに消える**
+      // （**番号を読めない枝を、実装が出ていない側へ倒すのと同じ向き**）。
+      // **黙らずに言う**——**読めなかったことは、行として残す。**
+      withIdle({
+        inProgress: [{ number: 506 }],
+        mergedPrs: [{ head: "fix/506-redirect-to-opened-origin", mergedAt: "いつか" }],
+      });
+      writeClaim(506, { touched: NOW, taken: NOW - 9000 });
+
+      const idle = run(["idle"]);
+
+      expect(idle.stdout.split("\n")[0], "読めない時刻で黙っている").toMatch(/^stalled\t506\t/);
+      expect(idle.stderr, "読めなかったことを黙っている").toMatch(/入った時刻を読めません/);
     });
 
     it("`Closes` が無くても、実装が出ていれば並べない", () => {
