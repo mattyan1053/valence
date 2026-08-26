@@ -1531,21 +1531,64 @@ describe("呼び直した周回を、cron として記録しない", () => {
  *
  * **数は書いてよい。ただし、数える側を置く**——**そうしないと、次に足した人が
  * また置き去りにする**（**散文は、誰も走らせない**）。
+ *
+ * **数え方は、走らせて数える**（#502 のレビュー）。**文字列で数えると、書き方に
+ * 依存する**——**別の場所に例が増えれば赤くなり**、**変数経由で出す分岐を足せば
+ * 数に入らない。** **黙るほうが問題である**（**この試験は「足したのに直し忘れる」
+ * を捕まえるために在る**）。
+ *
+ * **`show_reading` を切り出し、入力を全部通して、出た文面の種類を数える**
+ * ——**出し方に依存しない**（#500 で順序を測ったときと同じ手）。
  */
-describe("説明の数と、実際に出る読みを突き合わせる（#501）", () => {
-  /** **読みの文面は、この形でしか書かれない**（`  読み=` から始まる文字列）。 */
-  const READING = /"\s{2}読み=/g;
+describe("説明の数と、実際に出る読みを突き合わせる（#501 / #502）", () => {
   /** **数を書いている文**（**`原因は予定表が…` のような、数でない行には当たらない**）。 */
   const CLAIM = /原因は\s*(\d+)\s*つ/g;
 
-  it("説明に書いた原因の数が、`show_reading` が出す読みの数と合っている", () => {
-    const script = readFileSync(join(REPO_ROOT, "bin/loop-cadence"), "utf8");
-    const readings = script.match(READING) ?? [];
-    const claims = [...script.matchAll(CLAIM)].map(([, count]) => Number(count));
+  /** **読みを出す側**（`show_reading` が中で呼ぶものも要る）。 */
+  const PARTS = ["recorded_round", "fresh_round", "show_reading"] as const;
 
-    // **数える側が空になったことを、緑と混ぜない**——**文面の書き方を変えると
-    // `READING` が当たらなくなり**、**この試験は何も見ないまま通る。**
-    expect(readings.length, "読みの文面が 1 つも見つからない").toBeGreaterThan(0);
+  /** **その版の `bin/loop-cadence` から、関数をそのまま取り出す。書き写さない。** */
+  function shellFunction(script: string, name: string): string {
+    const from = script.indexOf(`${name}() {`);
+    expect(from, `${name} が bin/loop-cadence にありません`).toBeGreaterThanOrEqual(0);
+    return `${script.slice(from).split("\n}\n")[0] ?? ""}\n}\n`;
+  }
+
+  /**
+   * **走らせて、出た読みの種類を数える。**
+   *
+   * **入力を全部通す**——**`last_poke` / `last_unknown` は「無い・古い・新しい」の
+   * 3 通り、窓は「分かる・分からない」の 2 通り。** **分岐が増えれば、その組み合わせ
+   * のどこかで新しい文面が出る**ので、**出し方（`echo` か変数か）に依存しない。**
+   */
+  function readingsOf(script: string): string[] {
+    const driver = [
+      "set -u",
+      "NOW=10000",
+      ...PARTS.map((name) => shellFunction(script, name)),
+      "for poke in - 1000 9500; do",
+      "  for unknown in - 1000 9500; do",
+      '    for window in "" 3600; do',
+      '      show_reading "$poke" "$unknown" "$window"',
+      "    done",
+      "  done",
+      "done",
+    ].join("\n");
+    const run = spawnSync("/bin/bash", ["-c", driver], { encoding: "utf8" });
+    expect(run.status, run.stderr).toBe(0);
+    const lines = run.stdout.split("\n").filter((line) => line.trim().length > 0);
+    return [...new Set(lines)];
+  }
+
+  const script = () => readFileSync(join(REPO_ROOT, "bin/loop-cadence"), "utf8");
+
+  it("説明に書いた原因の数が、`show_reading` が出す読みの数と合っている", () => {
+    const readings = readingsOf(script());
+    const claims = [...script().matchAll(CLAIM)].map(([, count]) => Number(count));
+
+    // **数える側が空になったことを、緑と混ぜない**——**取り出しに失敗すると、
+    // 何も見ないまま通る。**
+    expect(readings.length, "読みが 1 つも出ていない").toBeGreaterThan(0);
     for (const claim of claims) {
       expect(claim, "説明の数が、出る読みの数と合っていない").toBe(readings.length);
     }
@@ -1555,5 +1598,31 @@ describe("説明の数と、実際に出る読みを突き合わせる（#501）
     // **数でない文に、数を書かない**——**「原因は 1 つではない」は、数える側からは
     // 「1 つ」に見える**（**この試験を書いている最中に、自分で踏んだ**）。
     // **倒れる向きは安全側**である（**赤くなるので気づく。黙って見逃さない**）。
+  });
+
+  it("`show_reading` の外に同じ書き方の文面があっても、数に入らない", () => {
+    // **文字列で数えると、ここで赤くなった**（#502 のレビュー）——**原因は増えて
+    // いないのに、例を 1 行足しただけで数が変わる。**
+    const decoy = `# 例: echo "  読み=これは説明のための例である"\n${script()}`;
+
+    expect(readingsOf(decoy), "外に置いた例を数えている").toStrictEqual(readingsOf(script()));
+  });
+
+  it("`show_reading` の中に違う出し方で足したら、数に入る", () => {
+    // **こちらが本当に怖い側**である（#502 のレビュー）——**文字列で数えると、
+    // 二重引用符で書かれた文面しか見えない**ので、**単引用符や変数経由で出す分岐を
+    // 足しても数が増えず**、**説明が古いまま黙って緑になる。**
+    //
+    // **最後の 1 行を、別の書き方の新しい文面に差し替える**——**手前の分岐は
+    // `$asleep` を出したままなので、読みは 1 種類増える。**
+    const added = script().replace(
+      '\n  echo "$asleep"\n}',
+      "\n  echo '  読み=試験が足した 5 つ目（別の書き方で出している）'\n}",
+    );
+    expect(added, "書き換えが当たっていない").not.toBe(script());
+
+    expect(readingsOf(added).length, "違う出し方で足した読みが、数から漏れた").toBe(
+      readingsOf(script()).length + 1,
+    );
   });
 });
