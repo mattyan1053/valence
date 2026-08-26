@@ -243,6 +243,7 @@ readonly STOP_IDS=(
   "dirty|worker: 作業ツリーが dirty"
   "main-sync-failed|両方: origin/main への追随に失敗 (どちらも origin/main へ detach する)"
   "wrong-branch:<PR番号>|worker: PR の head ブランチに切り替わっていない"
+  "claim-release-failed:<PR番号>|worker: 保留された PR の claim を返せなかった (持ったまま次へ進まない)"
   "too-many-own-prs:<件数>|worker: この作業場の open PR が 2 件以上 (全体で 2 本・1 人 1 本)"
   "local-ci-failed:<PR番号>|worker: ./task check が通らない"
   # **「分からない」を「赤」と混ぜない** (#147)。`./task check` が途中で殺されると

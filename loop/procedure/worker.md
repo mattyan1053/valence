@@ -327,6 +327,16 @@ printf '%s\n' "$head_prs"
 
       ```bash
       bin/loop-claim release <PR番号>   # **保留された PR は、いま直していない**
+      case "$?" in
+        0) ;;                                        # 返せた。ステップ 4 へ進む
+        # **返せていないなら、進まない** (#504 のレビュー 2 周目)。**`release` は
+        # 記録を読めない・消せないときに exit 2 を返す**——**そのまま次の PR を
+        # 作ると、記録を持ったまま 2 本目へ進む**（**この節が消しに来た状態**）。
+        *)
+          bin/loop-stall "claim-release-failed:<PR番号>"
+          exit
+          ;;
+      esac
       ```
 
       **持ったまま進まない** (#504 のレビュー)。**`bin/loop-claim pr` が exit 0 を

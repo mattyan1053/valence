@@ -11,7 +11,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,6 +75,48 @@ function prOwnershipBranch(): string {
   const to = rest.indexOf("esac");
   expect(to, "分岐が閉じていません").toBeGreaterThanOrEqual(0);
   return rest.slice(0, to);
+}
+
+/** 保留の分岐が打つ bash ブロック（**書き写さない**——**手順書から取り出す**）。 */
+function parkedReleaseBlock(): string {
+  const rest = resumeSection().slice(resumeSection().indexOf(PARKED));
+  const blocks = [...rest.matchAll(/```bash\n([\s\S]*?)```/g)].map((found) => found[1] ?? "");
+  expect(blocks.length, "保留の分岐に bash ブロックがありません").toBeGreaterThan(0);
+  return blocks[0] ?? "";
+}
+
+/**
+ * **手順書のブロックを、実際に走らせる**（#504 のレビュー 2 周目）。
+ *
+ * **コマンドが書いてあることと、失敗したときに止まることは別**である
+ * ——**`bin/loop-claim release` は exit 2 を返しうる**（記録を読めない・消せない）。
+ *
+ * **`echo NEXT` を後ろに置く**——**ブロックが `exit` すれば出ない。**
+ */
+function runParkedRelease(releaseExit: number): { next: boolean; stalls: string } {
+  const dir = mkdtempSync(join(tmpdir(), "parked-release-"));
+  sandboxes.push(dir);
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  writeFileSync(join(dir, "bin", "loop-claim"), `#!/usr/bin/env bash\nexit ${releaseExit}\n`, {
+    mode: 0o755,
+  });
+  writeFileSync(
+    join(dir, "bin", "loop-stall"),
+    `#!/usr/bin/env bash\nprintf '%s\\n' "$1" >>"${join(dir, "stalls")}"\n`,
+    { mode: 0o755 },
+  );
+  const done = spawnSync(
+    "/bin/bash",
+    ["-c", `${parkedReleaseBlock().replaceAll("<PR番号>", "42")}\necho NEXT\n`],
+    { cwd: dir, encoding: "utf8" },
+  );
+  let stalls = "";
+  try {
+    stalls = readFileSync(join(dir, "stalls"), "utf8");
+  } catch {
+    stalls = "";
+  }
+  return { next: done.stdout.includes("NEXT"), stalls };
 }
 
 describe("取り違えた Issue を返す道", () => {
@@ -174,7 +216,27 @@ describe("取り違えた Issue を返す道", () => {
 
     expect(branch, "保留のまま進む先が書いていない").toContain("ステップ 4");
     expect(branch, "自分のものなのに返している").not.toContain("release-issue");
-    expect(branch, "正常な状態で停止を積んでいる").not.toContain("bin/loop-stall");
+    // **「停止を書いていない」では見られなくなった** (#504 のレビュー 2 周目)
+    // ——**返せなかったときは止まる**ので、**文字列の有無では正常な周回を測れない。**
+    // **走らせて見る**（`記録を返せた周回は、そのまま進む`）。
+  });
+
+  it("記録を返せなかった周回は、先へ進まない", () => {
+    // **書いてあることと、止まることは別**（#504 のレビュー 2 周目）——
+    // **`release` は exit 2 を返しうる**（**記録を読めない・消せない**）。
+    // **そのまま進むと記録は残ったまま**で、**この節が消しに来た状態が戻る。**
+    const done = runParkedRelease(2);
+
+    expect(done.next, "返せていないのに先へ進んでいる").toBe(false);
+    expect(done.stalls, "止めたことを記録していない").toContain("claim-release-failed:42");
+  });
+
+  it("記録を返せた周回は、そのまま進む", () => {
+    // **もう片方の端**——**止める側だけを見ると、いつも止まる実装でも緑になる。**
+    const done = runParkedRelease(0);
+
+    expect(done.next, "返せたのに止まっている").toBe(true);
+    expect(done.stalls, "正常な周回で停止を積んでいる").toBe("");
   });
 
   it("手順書が名指しする口は、すべて使い方に載っている", () => {
