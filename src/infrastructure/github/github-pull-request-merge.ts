@@ -125,9 +125,19 @@ const NOT_MERGEABLE_STATUSES = new Set([405, 409]);
  * **応答の中身を載せない**（§6）——**載せるのは状態コードだけ。**
  */
 class MergeFailed extends Error {
+  /**
+   * **断られた状態コード** (#516)。**`message` ではなく欄として持つ**
+   * ——**記録に残す側は `message` を読まない**（§6）ので、**文面へ埋めると消える。**
+   *
+   * **投げどころは 6 箇所**（**マージ・方式の設定・base の読み直し**）
+   * **すべてこの形を通る**——**片方だけ載せると、どこで断られたかで見え方が変わる。**
+   */
+  readonly status: number;
+
   constructor(status: number) {
     super(`GitHub がマージを受け付けませんでした (status ${status})`);
     this.name = "MergeFailed";
+    this.status = status;
   }
 }
 

@@ -176,6 +176,42 @@ describe("GitHub で PR をマージする", () => {
     }
   });
 
+  it("断られた status を、投げるものに載せる", async () => {
+    // **記録に届くのは名前と `status` だけ** (#516)——**`message` は読まれない。**
+    //
+    // **マージそのものと、その前に引く 2 つ**（**方式の設定・いまの base**）
+    // **も同じ扱いにする**——**片方だけ載せると、どこで断られたかで見え方が変わる。**
+    const cases = [
+      { name: "マージ", fetch: fetcher({ status: 403, body: { message: "no" } }) },
+      {
+        name: "方式の設定",
+        fetch: fetcher({ status: 200, body: { merged: true } }, { status: 404, body: {} }),
+      },
+      {
+        name: "base の読み直し",
+        fetch: fetcher(
+          { status: 200, body: { merged: true } },
+          { status: 200, body: ALLOWED },
+          {
+            status: 500,
+            body: {},
+          },
+        ),
+      },
+    ] as const;
+
+    for (const { name, fetch: fetchImpl } of cases) {
+      const merges = createGitHubPullRequestMerges({ fetchImpl });
+
+      const error = await merges.merge(USER_TOKEN, TARGET).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+
+      expect((error as { readonly status?: unknown }).status, name).toBeTypeOf("number");
+    }
+  });
+
   it("マージされていない 200 を、成功と言わない", async () => {
     // **GitHub は `merged: false` を 200 で返すことがある**——**それを
     // 「マージしました」と出すと、入っていない PR が入った顔で並ぶ**

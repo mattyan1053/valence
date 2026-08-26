@@ -92,6 +92,23 @@ describe("GitHub に承認を出す", () => {
     }
   });
 
+  it("断られた status を、投げるものに載せる", async () => {
+    // **記録に届くのは名前と `status` だけ** (#516)——**`message` は読まれない**
+    // ので、**`message` に埋めても消える。** **欄として持つ。**
+    for (const status of [403, 404, 422]) {
+      const reviews = createGitHubPullRequestReviews({
+        fetchImpl: fetcher({ status, body: { message: "no" } }),
+      });
+
+      const error = await reviews.approve(USER_TOKEN, TARGET).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+
+      expect((error as { readonly status?: unknown }).status, String(status)).toBe(status);
+    }
+  });
+
   it("承認になっていない応答を、成功と言わない", async () => {
     // **`event` を取り違えれば `COMMENTED` が返る**——**それを「承認しました」と
     // 出すと、誰も承認していない PR が承認済みとして並ぶ**
