@@ -518,6 +518,64 @@ describe("bin/loop-check-state", () => {
         expect(overlaps().status, "片付けの時刻を、走っていた時間として読んでいる").toBe(1);
       });
 
+      it(
+        "積めなくても、合否は残り、この check は止まらない",
+        () => {
+          // **「積めなくても、合否は残っている」と書いてある道**（#391）——
+          // **そこを通る試験が無かった。** **通らない行は、`set -u` で落ちても
+          // 緑のまま**である（**名前を変えたときに、まさにそこが残った**。#511 のレビュー）。
+          //
+          // **積む口を握らせて通す**（`bin/loop-lease` と同じ形の待ち時間の設定）。
+          run(["running", "A"]);
+          const held = holdLock({ dir: repo, lock: `${runsPath()}.lock` });
+          let finished: { status: number; stdout: string; stderr: string };
+          try {
+            finished = run(["finished", "A", "0"], {
+              ...process.env,
+              LOOP_CHECK_STATE_LOCK_WAIT_SEC: "1",
+            });
+          } finally {
+            held.release();
+          }
+
+          expect(finished.status, finished.stderr).toBe(0);
+          expect(finished.stderr, "積めなかったことを黙っている").toContain("積めません");
+          expect(run(["--verdict"]).status, "合否が残っていない").toBe(0);
+        },
+        budgetFor(4),
+      );
+
+      it(
+        "殺された走りを積めなくても、片付けは進む",
+        () => {
+          // **同じ道の、もう 1 つの口**（**片付けながら積む側**）——**こちらも
+          // 通らない行だった。** **片付けが止まると出られない** (#184)。
+          mkdirSync(statePath(), { recursive: true });
+          writeFileSync(
+            join(statePath(), "999999"), // **死んだ PID**（殺された走りの跡）
+            `running\n${Math.floor(Date.now() / 1000) - 600}\n`,
+          );
+          const held = holdLock({ dir: repo, lock: `${runsPath()}.lock` });
+          let started: { status: number; stdout: string; stderr: string };
+          try {
+            started = run(["running", "A"], {
+              ...process.env,
+              LOOP_CHECK_STATE_LOCK_WAIT_SEC: "1",
+            });
+          } finally {
+            held.release();
+          }
+
+          expect(started.status, started.stderr).toBe(0);
+          expect(started.stderr, "積めなかったことを黙っている").toContain("積めません");
+          expect(
+            existsSync(join(statePath(), "999999")),
+            "殺された記録が残っている（出られなくなる）",
+          ).toBe(false);
+        },
+        budgetFor(4),
+      );
+
       it("記録が無ければ、記録が無いと答える", () => {
         expect(overlaps().status).toBe(4);
       });

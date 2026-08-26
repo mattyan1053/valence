@@ -122,7 +122,10 @@ now_epoch() { date +%s; }
 append_duration() {
   local started="$1" ended="$2" result="$3" all=() kept=() others=() line row_workspace
   [[ $started =~ ^[0-9]+$ ]] || return 1
-  exec 8>"$RUNS.lock" 2>/dev/null || return 1
+  # **`2>/dev/null` は、まとまりの中で掛ける** (#445 で踏んだ。`bin/loop-handoff` と
+  # 同じ形)。**`exec` に直接付けると、標準エラーそのものが以後ずっと `/dev/null` へ
+  # 向く**——**この口を通ったあとの `[WARN]` が、丸ごと消える。**
+  { exec 8>"$RUNS.lock"; } 2>/dev/null || return 1
   flock -w "$LOCK_WAIT_SEC" 8 || {
     exec 8>&-
     return 1
@@ -189,13 +192,14 @@ case "$1" in
     # 見ると、両方が `killed` を積む**——**水増しされるのは「切られやすさ」**で、
     # **測るために作った数そのもの**である。
     #
-    # **追記の口（`$DURATIONS.lock`）とは別の口を使う**——**同じ口だと、
+    # **追記の口（`$RUNS.lock`）とは別の口を使う**——**同じ口だと、
     # `append_duration` が自分の待ちに入る。**
     #
     # **取り損ねても、片付けは進む** (#184)。**握れなかったときは積まない**
     # ——**握っている側が積む**ので、**落ちるのは「二重に数える」側ではない。**
     measure_killed=1
-    exec 7>"$STATE_DIR.lock" 2>/dev/null || measure_killed=0
+    # **ここも、まとまりの中で掛ける** (#445)——**下の `[WARN]` は、この行より後**である
+    { exec 7>"$STATE_DIR.lock"; } 2>/dev/null || measure_killed=0
     ((measure_killed == 0)) || flock -w "$LOCK_WAIT_SEC" 7 || measure_killed=0
     for old in "$STATE_DIR"/*; do
       [[ -f $old ]] || continue
@@ -214,7 +218,7 @@ case "$1" in
       old_started="$(started_at_of "$old")"
       if ((measure_killed == 1)) && [[ -n $old_started ]]; then
         append_duration "$old_started" "$started" killed ||
-          echo "[WARN] 殺された走りの所要時間を積めません: $DURATIONS" >&2
+          echo "[WARN] 殺された走りの所要時間を積めません: $RUNS" >&2
       fi
       rm -f "$old"
     done
@@ -243,7 +247,7 @@ case "$1" in
     }
     # **積めなくても、合否は残っている**——**この check を落とさない** (#391)
     [[ -z $started ]] || append_duration "$started" "$ended" "$3" ||
-      echo "[WARN] 所要時間を積めません: $DURATIONS" >&2
+      echo "[WARN] 所要時間を積めません: $RUNS" >&2
     ;;
   --durations)
     [[ $# -eq 1 ]] || usage

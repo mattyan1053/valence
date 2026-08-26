@@ -139,7 +139,12 @@ readonly RECENT_CHURNS=10
 record_churn() {
   local files="$1" kept=() line
   line="$(date +%s)"$'\t'"$ROLE"$'\t'"$workspace_dir"$'\t'"$BEFORE..$AFTER"$'\t'"$(printf '%s' "$files" | tr '\n' ',')"
-  exec 8>"$CHURN_LOG.lock" 2>/dev/null || return 1
+  # **`2>/dev/null` は、まとまりの中で掛ける** (#445 で踏んだ。`bin/loop-handoff` と
+  # 同じ形)。**`exec` に直接付けると、標準エラーそのものが以後ずっと `/dev/null` へ
+  # 向く**——**握られていて積めなかったときの `[WARN]` が、丸ごと消える**
+  # （**開けない錠では、この行そのものが失敗するので出る**——**握られている側だけが
+  # 黙っていた**）。
+  { exec 8>"$CHURN_LOG.lock"; } 2>/dev/null || return 1
   flock -w 10 8 || {
     exec 8>&-
     return 1
