@@ -37,6 +37,8 @@ import { refreshUserTokens } from "../infrastructure/github/user-token";
 import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
 import { reportLoginFailure } from "../infrastructure/observability/login-failure";
 
+// **押せなかった理由を残す口** (#506 の 2)。**画面では 1 語にまとめてある**（§6）
+export { reportBoardActionUnavailable } from "../infrastructure/observability/board-action";
 // **戻ってこなかったコールバックを残す口** (#455)。**adapter を束ねるのはここ**である
 export { reportDroppedCallback } from "../infrastructure/observability/login-failure";
 

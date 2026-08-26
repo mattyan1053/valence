@@ -12,7 +12,10 @@
 
 import { z } from "zod";
 import type { MergePullRequestResult } from "../../../../../application/review-order/merge-pull-request";
-import { mergePullRequestForCurrentUser } from "../../../../../composition/auth";
+import {
+  mergePullRequestForCurrentUser,
+  reportBoardActionUnavailable,
+} from "../../../../../composition/auth";
 import type { MergeNoticeKind } from "../../../../../ui/merge/merge-button";
 import { boardRedirect } from "../board-redirect";
 
@@ -88,11 +91,40 @@ export function mergeOutcomeParam(result: MergePullRequestResult): MergeNoticeKi
   }
 }
 
-export async function POST(
+/**
+ * **サーバ側に残す理由** (#506 の 2)。
+ *
+ * **`unavailable` は 4 つをまとめた語**である（`signed-out` / `needs-login` /
+ * `not-found` / `unavailable`）——**画面では分けない**（§6）**が、押せない理由が
+ * 誰にも分からないままになっていた。**
+ *
+ * **押した人へ理由が届いているものは残さない**（`forbidden` / `not-mergeable` /
+ * `dependency-pending` / `not-orderable` / `base-changed` / `merged`）。
+ */
+export function mergeUnavailableReason(result: MergePullRequestResult): string | undefined {
+  return mergeOutcomeParam(result) === "unavailable" ? result.kind : undefined;
+}
+
+/**
+ * **要求を受けてから戻すまで** (#510 のレビュー)。**受け口を引数で渡す**
+ * ——**`POST` から呼ぶと composition が本物を掴む**ので、**記録の口を呼んでいることを
+ * 試験から見られない。** **モックは使わない**（`AGENTS.md` §4）。
+ */
+export type MergeDeps = {
+  readonly merge: (
+    repository: { readonly owner: string; readonly name: string },
+    number: number,
+    headSha: string,
+  ) => Promise<MergePullRequestResult>;
+  /** 押せなかった理由を残す口（`reportBoardActionUnavailable`）。 */
+  readonly report: (action: "merge", kind: string) => void;
+};
+
+export async function respondToMerge(
   request: Request,
-  { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
+  repository: { readonly owner: string; readonly name: string },
+  deps: MergeDeps,
 ): Promise<Response> {
-  const { owner, name } = await params;
   const form = await request.formData().catch(() => undefined);
   const number = pullRequestNumberFrom(form?.get("number"));
   const headSha = headShaFrom(form?.get("sha"));
@@ -100,15 +132,33 @@ export async function POST(
   if (number === undefined || headSha === undefined) {
     // **読めない要求で GitHub を叩かない。** **commit が無い要求も通さない**
     // ——**通すと、見せていない head がマージできる。**
-    return boardRedirect(request, { owner, name }, { param: "merge", value: "unavailable" });
+    deps.report("merge", "unreadable-request");
+    return boardRedirect(request, repository, { param: "merge", value: "unavailable" });
   }
 
-  const result = await mergePullRequestForCurrentUser({ owner, name }, number, headSha);
+  const result = await deps.merge(repository, number, headSha);
   const outcome = mergeOutcomeParam(result);
+  // **まとめた語を、まとめる前の形で残す** (#506 の 2)
+  const reason = mergeUnavailableReason(result);
+  if (reason !== undefined) {
+    deps.report("merge", reason);
+  }
   // **成功のときは何も載せない**（上記）
   return boardRedirect(
     request,
-    { owner, name },
+    repository,
     outcome === undefined ? undefined : { param: "merge", value: outcome },
+  );
+}
+
+export async function POST(
+  request: Request,
+  { params }: { readonly params: Promise<{ readonly owner: string; readonly name: string }> },
+): Promise<Response> {
+  const { owner, name } = await params;
+  return respondToMerge(
+    request,
+    { owner, name },
+    { merge: mergePullRequestForCurrentUser, report: reportBoardActionUnavailable },
   );
 }
