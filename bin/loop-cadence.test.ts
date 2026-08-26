@@ -1544,6 +1544,33 @@ describe("説明の数と、実際に出る読みを突き合わせる（#501 / 
   /** **数を書いている文**（**`原因は予定表が…` のような、数でない行には当たらない**）。 */
   const CLAIM = /原因は\s*(\d+)\s*つ/g;
 
+  /**
+   * **説明の側も、その節だけを見る**（#502 のレビュー 2 周目）。
+   *
+   * **突き合わせは 2 つの側を持つ**——**読みの側を狭めたとき、説明の側は自分の
+   * diff に出てこない**（**`AGENTS.md` §5 の「変えた側ではなく残る側を数える」**）。
+   *
+   * **節は、直前の関数の終わりから `recorded_round` の定義まで**である
+   * ——**中身の言葉ではなく、置かれている場所で切る**（**切り方が、数えたい語に
+   * 依存しないように**）。
+   *
+   * **`[WARN]` の側は、ここには入らない**——**あちらには数を書いていない**
+   * （**「原因は行ごとに違う」**）。**数を書く場所を 1 つに寄せてある。**
+   */
+  function explanationOf(script: string): string {
+    const end = script.indexOf("recorded_round() {");
+    expect(end, "recorded_round が bin/loop-cadence にありません").toBeGreaterThanOrEqual(0);
+    const before = script.slice(0, end);
+    const start = before.lastIndexOf("\n}\n");
+    expect(start, "説明の節の始まりが見つかりません").toBeGreaterThanOrEqual(0);
+    return before.slice(start + 3);
+  }
+
+  /** **その節に書かれた数**（**書かれていなければ空**）。 */
+  function claimsOf(script: string): number[] {
+    return [...explanationOf(script).matchAll(CLAIM)].map(([, count]) => Number(count));
+  }
+
   /** **読みを出す側**（`show_reading` が中で呼ぶものも要る）。 */
   const PARTS = ["recorded_round", "fresh_round", "show_reading"] as const;
 
@@ -1584,7 +1611,7 @@ describe("説明の数と、実際に出る読みを突き合わせる（#501 / 
 
   it("説明に書いた原因の数が、`show_reading` が出す読みの数と合っている", () => {
     const readings = readingsOf(script());
-    const claims = [...script().matchAll(CLAIM)].map(([, count]) => Number(count));
+    const claims = claimsOf(script());
 
     // **数える側が空になったことを、緑と混ぜない**——**取り出しに失敗すると、
     // 何も見ないまま通る。**
@@ -1598,6 +1625,23 @@ describe("説明の数と、実際に出る読みを突き合わせる（#501 / 
     // **数でない文に、数を書かない**——**「原因は 1 つではない」は、数える側からは
     // 「1 つ」に見える**（**この試験を書いている最中に、自分で踏んだ**）。
     // **倒れる向きは安全側**である（**赤くなるので気づく。黙って見逃さない**）。
+  });
+
+  it("説明の節の外に数を書いても、突き合わせに入らない", () => {
+    // **前の周回で読みの側を狭めたとき、説明の側は自分の diff に出てこなかった**
+    // （#502 のレビュー 2 周目）——**片方を直したら、突き合わせている相手を見る。**
+    const decoy = `# **別の話。原因は 2 つある**\n${script()}`;
+
+    expect(claimsOf(decoy), "節の外に書いた数を拾っている").toStrictEqual(claimsOf(script()));
+  });
+
+  it("説明の節の数を変えたら、突き合わせに出る", () => {
+    // **狭めた先が空になっていないこと**——**節の切り方を間違えると、
+    // 何も拾わないまま緑になる。**
+    const changed = script().replace("原因は 4 つ", "原因は 3 つ");
+    expect(changed, "書き換えが当たっていない").not.toBe(script());
+
+    expect(claimsOf(changed), "節の中の数を拾えていない").toStrictEqual([3]);
   });
 
   it("`show_reading` の外に同じ書き方の文面があっても、数に入らない", () => {
