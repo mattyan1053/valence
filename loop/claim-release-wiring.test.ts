@@ -153,6 +153,20 @@ describe("取り違えた Issue を返す道", () => {
     expect(returning, "返す道が、保留の分岐より後ろにある").toBeLessThan(section.indexOf(PARKED));
   });
 
+  it("保留された PR の claim は、持ったまま次へ進まない", () => {
+    // **`bin/loop-claim pr` が exit 0 を返した時点で、この作業場が PR の記録を
+    // 持っている**（#504 のレビュー）——**そのままステップ 4 へ進むと、次の PR を
+    // 作ったあとに保留が解けたとき、`parked` でない自分の PR が 2 本になる**
+    // （**2.1 が `too-many-own-prs` を積み、止まり続ける**）。
+    //
+    // **保留された PR は、いま直していない**——**記録は返してから進む。**
+    const branch = parkedBranch();
+
+    expect(branch, "保留された PR の記録を返していない").toContain(
+      "bin/loop-claim release <PR番号>",
+    );
+  });
+
   it("自分の保留された PR では、これまでどおり何もしない", () => {
     // **両端の片方**（#503 の完了条件）——**`parked` は正常な状態**なので、
     // **停止も積まず、記録も返さない。** **止めると PR-B が作れず、保留の意味が消える。**
