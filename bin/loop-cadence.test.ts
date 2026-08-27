@@ -147,8 +147,8 @@ function running(dir: string, stamp: string, since: number): void {
   );
 }
 
-function cadence(dir: string, env: Record<string, string> = {}) {
-  return spawnSync(join(dir, "bin/loop-cadence"), [], {
+function cadence(dir: string, env: Record<string, string> = {}, args: string[] = []) {
+  return spawnSync(join(dir, "bin/loop-cadence"), args, {
     cwd: dir,
     encoding: "utf8",
     env: { ...process.env, ...env },
@@ -817,6 +817,61 @@ describe("周回が始まったことを、どう始まったかごと残す", (
  * **記録は「周回が始まったとき」に書かれる**ので、**入口が渡さなければ何も残らない**
  * ——**書く側だけ直しても、渡す側が古いままなら、この仕組みは働かない。**
  */
+describe("出口から毎回呼ぶ（--quiet）", () => {
+  // **予定表が空になったことを、手順で見つける** (#530)。**1 日に 3 回踏み、
+  // 3 回とも誰かの気まぐれで見つかった**——**道具は正しく読んでいた**が、
+  // **打つ手順が無かった。**
+  //
+  // **毎回鳴る検査は、そのうち読まれなくなる**（#248）ので、**続いている行は出さない。**
+
+  it("続いているときは、何も出さない", () => {
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [2_800, "cron"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "3000", LOOP_CRON_INTERVAL_SEC: "1800" }, [
+      "--quiet",
+    ]);
+
+    expect(done.status, "止まっていないのに、止まっていると言っている").toBe(0);
+    expect(done.stdout, "平常時に鳴っている（そのうち読まれなくなる）").toBe("");
+  });
+
+  it("止まっている行は、これまでどおり出す", () => {
+    // **突かれた周回だけが続く形**（**実測**）——**外からは動いて見える。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" }, [
+      "--quiet",
+    ]);
+
+    expect(done.status, "止まっていると言っていない").toBe(1);
+    expect(done.stdout, "止まっている行が消えている").toMatch(/stale/);
+    // **次の一手も消さない**——**行の「読み=」が、打つ手を決める**（#497）
+    expect(done.stdout, "次にどこを見るかが消えている").toMatch(/読み=/);
+  });
+
+  it("知らない引数は、使い方を出して落ちる", () => {
+    // **黙って全部出す側へ倒さない**——**打ち間違いが「平常時に鳴る」に化ける**
+    const { dir } = workspace();
+    records(dir, [[1_000, "cron"]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "1100", LOOP_CRON_INTERVAL_SEC: "1800" }, [
+      "--bogus",
+    ]);
+
+    expect(done.status, "知らない引数を受けている").toBe(2);
+    expect(done.stderr, "使い方が出ていない").toMatch(/--quiet/);
+  });
+});
+
 describe("手順と表示が、この記録につながっている", () => {
   it("入口が、どう始まったかを渡している", () => {
     const entry = readFileSync(join(REPO_ROOT, ".claude/commands/loop-worker.md"), "utf8");
