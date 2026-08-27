@@ -341,6 +341,63 @@ describe("周回が始まったことを、どう始まったかごと残す", (
       expect(row, "確かめていないことを断定している").not.toContain("予定表が空である");
     });
 
+    it("突かれた周回だけが新しくても、予定表が空だとは断定しない", () => {
+      // **踏んだ** (#531)。**この読みに従って master が「入れ直してください」と指示し**、
+      // **引いたら空ではなかった**——**登録は生きていて、刻みも 30 分だった。**
+      //
+      // **本当の原因は「セッションが塞がっていた」**である——**cron はセッションが
+      // 暇なときにしか発火しない**（**道具の説明**）。**`./task check` が 1 本 7〜8 分**、
+      // **レビュー対応が続けば、1.7 時間 cron が鳴らない。**
+      //
+      // **見分けはこの道具では付かない**（**他のセッションを引けない**、と自分で書いてある）
+      // ——**断定をやめて、引いた結果で分かれる形にする。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [9_500, "poke"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "止まっていると言っていない").toBe(1);
+      const row = section(done.stdout, "worker");
+      expect(row, "確かめていないことを断定している").not.toContain("予定表が空である");
+    });
+
+    it("突かれた周回だけが新しいなら、引いて見るように言う", () => {
+      // **隣の枝は既にそう書いてある**（「引いて見る（CronList）」）
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [9_500, "poke"],
+      ]);
+
+      const row = section(
+        cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" }).stdout,
+        "worker",
+      );
+
+      expect(row, "引く先が出ていない").toContain("CronList");
+    });
+
+    it("引いた結果で、行き先が分かれる", () => {
+      // **完了条件**——**空だった / 空でなかった、の両方に行き先があること。**
+      // **塞がっているセッションは、突いても意味が無い**（**いずれ回る**）。
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [9_500, "poke"],
+      ]);
+
+      const row = section(
+        cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" }).stdout,
+        "worker",
+      );
+
+      expect(row, "空だったときの行き先が無い").toContain("空なら");
+      expect(row, "空でなかったときの行き先が無い").toContain("空でなければ");
+    });
+
     it("1 度も始まっていない作業場にも、次の一手を出す", () => {
       // **`never` も止まっている側**である（**足したばかりの worker がここへ来る**）
       // ——**記録が 1 行も無いので、引く先のセッションがそもそも居ない。**
