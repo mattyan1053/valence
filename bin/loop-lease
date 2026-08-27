@@ -25,6 +25,30 @@ set -uo pipefail
 # **直列化しているつもりで 2 つ走る**。master と worker は互いを待たせない。
 readonly ROLES=(master worker)
 
+# **token の形は、ここ 1 箇所で決める** (#522)。**作る側（`acquire`）と読む側（`mine`）で
+# 食い違わせない**（`AGENTS.md` §5）——**作った直後に、この形で確かめている。**
+#
+# **形を見るのは、「渡された値が token ですらない」と「別の周回が持っている」を
+# 言い分けるため**である。**一律で後者だと言うと、握ったままの周回が
+# 「出口の順序を壊した」と読む**——**`release` を打ち直すか、出口を途中でやめる。**
+readonly TOKEN_BYTES=8
+readonly TOKEN_SHAPE="^[0-9a-f]{$((TOKEN_BYTES * 2))}$"
+
+# **渡された値が token ですらないなら、そう言う** (#522)。**判定も文面も、ここ 1 箇所**
+# である（`AGENTS.md` §5）——**`mine` と `release` の両方が通る**（**同じ文面を出す口を
+# 数えて見つけた**。**呼び手を数えても出てこない**）。
+#
+# **`release` のほうが危ない。** **毎周回の最後に、両方の役が打つ口**であり、
+# **「別の周回が持っている」と読んだ周回は、握ったまま終わるか、打ち直しに行く。**
+#
+# **`SCOPE_LABEL` は呼ぶ時点で決まっている**ので、ここでは触らない。
+not_a_token() {
+  [[ ! $1 =~ $TOKEN_SHAPE ]] || return 1
+  echo "[FAIL] 渡された値は token の形ではありません（$SCOPE_LABEL の lease は見ていません）" >&2
+  echo "       token は入口の acquire が出したものです（$((TOKEN_BYTES * 2)) 桁の 16 進）" >&2
+  return 0
+}
+
 # 抱えたままの lease を引き継ぐまでの時間。**周回が落ちても、その役のループが
 # 二度と動かなくならないようにする。**
 #
@@ -1363,6 +1387,19 @@ if [[ $ACTION == "recover" ]]; then
 fi
 
 set_role_paths "$ROLE" || exit 2
+# **記録に触る前に、渡された値そのものを見る** (#522 のレビュー 2 周目)。
+# **`lock_state` と `read_lease` は `case` より前に走る**ので、**枝の中に置くと
+# 「記録は見ていません」と言いながら、その前に読んでいる**——**壊れた記録では
+# そこで exit 2 になり、形の話にたどり着かない。**
+#
+# **`set_role_paths` の後ろに置く**——**あれは場所を組み立てるだけで、記録は読まない**
+# （**文面が名乗る `$SCOPE_LABEL` は、そこで決まる**）。
+#
+# **`recover` が印を確かめるのと同じ並び**である（**入口で決着させ、枝には残さない**）。
+if [[ $ACTION == "mine" || $ACTION == "release" ]]; then
+  [[ $# -eq 3 ]] || usage
+  ! not_a_token "$3" || exit 1
+fi
 lock_state || exit 2
 # **`release` は引き継がない** (#278 のレビュー)。**「引き継ぎます」の直後に
 # 「返します」が出る**と、**文言を直しに来て逆の文言を増やすことになる。**
@@ -1417,7 +1454,10 @@ mine)
   #
   # **周回ごとに違う証拠は最初からある**——**`acquire` が返し、`release` が要求する
   # token** である。**資格は token が持つ**（`release` と同じ線）。
-  [[ $# -eq 3 ]] || usage
+  #
+  # **引数の数と token の形は、上の入口で見ている** (#522 のレビュー 2 周目)。
+  # **ここには届かない**ので置かない——**残すと、上を外す変異が赤くならない**
+  # （#243 のレビューと同じ理由）。
   if [[ -z $held_token && -z $expired_token ]]; then
     switch_to_renamed_state "$3"
     case "$?" in
@@ -1550,7 +1590,9 @@ acquire | recover)
     exit 1
   fi
   # token は「返す資格」を表すだけなので、衝突しなければよい。
-  if ! token="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')" || [[ -z $token ]]; then
+  # **読む側と同じ定数から作る** (#522)——**片方だけ変えると、作った直後に落ちる**
+  if ! token="$(od -An -tx1 -N"$TOKEN_BYTES" /dev/urandom | tr -d ' \n')" ||
+    [[ ! $token =~ $TOKEN_SHAPE ]]; then
     echo "[FAIL] token を生成できません" >&2
     exit 2
   fi
@@ -1604,7 +1646,7 @@ acquire | recover)
   echo "$token"
   ;;
 release)
-  [[ $# -eq 3 ]] || usage
+  # **引数の数と token の形は、上の入口で見ている**（`mine` と同じ。#522 のレビュー 2 周目）。
   # **記録の名前は、走っているスクリプトが毎回組み立てる** (#240)。**worker は周回の
   # 途中で作業ツリーを入れ替える**（1.1 の同期、`gh pr checkout`）ので、
   # **`bin/loop-lease` 自身もそこで入れ替わる**——**取ったときと返すときで名前の
