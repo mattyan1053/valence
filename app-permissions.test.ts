@@ -7,6 +7,24 @@
  *
  * **「書いて終わり」にしない。** **叩く口はコードにある**ので、**そこから数えて、
  * 表に出ているかを見る**——**口を足したら、表に足すまで赤くなる。**
+ *
+ * ## この試験が測っていないこと（#523 のレビュー）
+ *
+ * **ここに並べてあるのは、素通りする道である。** **次に穴を塞ぐ人は、ここから読める。**
+ *
+ * - **HTTP の動詞。** **表は動詞込みで並べている**が、**突き合わせているのはパスだけ**
+ *   ——**同じパスに別の動詞を足すと通る**（**`PATCH /repos/{owner}/{repo}` は
+ *   Administration が要る**のに、**`GET` の行に当たって緑**になる）。
+ *   **塞ぐには、口を `fetch` の呼び出しから拾い直し、第 2 引数の `method` と
+ *   組にする必要がある**——**いまは文字列を数えているだけ**なので、**別の集め方**になる。
+ *   **`GET` は `method` を書かない**（既定）ので、**「書いていない＝GET」も仮定になる。**
+ * - **GraphQL の操作ごとの権限。** **`POST /graphql` は 1 つの口**だが、
+ *   **要る権限は問い合わせごとに変わる**——**URL では区別できない。**
+ *   **Issues を読むフィールドを足しても、`Pull requests` の行に当たって緑**である。
+ *   **これは #518 の外**（**「叩く口が表に出ている」は満たせる**）——
+ *   **必要になったら別の Issue に切り出す。**
+ * - **読みと書きの別。** **`POST /graphql` は読み**なので、**動詞からは決まらない。**
+ *   **そこは人が書き、レビューが見る。**
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -62,11 +80,14 @@ function looksLikeEndpoint(path: string): boolean {
 }
 
 /** その版が叩く口。**文字列として書かれているものを、そのまま拾う。** */
-function endpointsInFile(name: string): string[] {
-  const source = withoutComments(readFileSync(join(GITHUB_DIR, name), "utf8"));
-  return [...source.matchAll(/`([^`]*)`/g)]
-    .map(([, literal]) => normalize(literal ?? ""))
+function endpointsIn(source: string): string[] {
+  return [...withoutComments(source).matchAll(/`([^`]*)`|"([^"\n]*)"|'([^'\n]*)'/g)]
+    .map(([, backtick, double, single]) => normalize(backtick ?? double ?? single ?? ""))
     .filter(looksLikeEndpoint);
+}
+
+function endpointsInFile(name: string): string[] {
+  return endpointsIn(readFileSync(join(GITHUB_DIR, name), "utf8"));
 }
 
 /** **コードが叩く口。** **`src/infrastructure/github/` の中だけ**（外へ出る口はここ）。 */
@@ -92,6 +113,35 @@ function documentedEndpoints(): { path: string; line: string }[] {
       })),
     );
 }
+
+describe("叩く口を拾う", () => {
+  // **拾えない書き方があると、そこだけ表を更新しなくても緑になる**（#523 のレビュー）
+  // ——**この試験が守りたいのは「口を足したら赤くなる」**である。
+  it("バッククォートで書かれた口を拾う", () => {
+    expect(endpointsIn("await fetch(`${API_ORIGIN}/user/repos`);")).toContain("/user/repos");
+  });
+
+  it("ダブルクォートで書かれた口も拾う", () => {
+    // **先例がある**——**同じディレクトリの `user-token.ts` は `"..."` で URL を持つ。**
+    // **次に誰かが同じ書き方で口を足したら、表を更新しなくても緑**だった。
+    const source = 'const URL = "https://api.github.com/repos/{owner}/{repo}/issues";';
+
+    expect(endpointsIn(source)).toContain("/repos/{}/{}/issues");
+  });
+
+  it("シングルクォートで書かれた口も拾う", () => {
+    const source = "const URL = 'https://api.github.com/user/repos';";
+
+    expect(endpointsIn(source)).toContain("/user/repos");
+  });
+
+  it("コメントの中の口は、これまでどおり数えない", () => {
+    // **例として書いた URL を、叩く口と数えない**（引用符を増やしても変わらないこと）
+    const source = '// 例: "https://api.github.com/repos/{owner}/{repo}/issues"\n';
+
+    expect(endpointsIn(source)).toEqual([]);
+  });
+});
 
 describe("GitHub App に要る権限", () => {
   it("叩く口が、すべて表に出ている", () => {
