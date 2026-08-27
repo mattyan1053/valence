@@ -902,6 +902,36 @@ describe("bin/loop-lease", () => {
       expect(lines.at(-1), "いま鳴ったぶんが落ちている").toContain("cron-blocked");
     });
 
+    it("突かれて断られたぶんは、残さない", () => {
+      // **判定に効くのは cron だけ** (#537 のレビュー 2 周目)——**`poke-blocked` は
+      // 窓を食うだけ**である。**`poke` は「鳴った」ではない**（**人か別のセッションが
+      // 突いた**）ので、**この PR の主張の外**でもある。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+      const starts = startsFile();
+      const before = readFileSync(starts, "utf8");
+
+      expect(run(["acquire", "worker", stampFor("worker"), "--trigger", "poke"]).status).toBe(1);
+
+      expect(readFileSync(starts, "utf8"), "突きで窓を食っている").toBe(before);
+    });
+
+    it("突かれ続けても、直近の cron を押し出さない", () => {
+      // **これが本題である。** **窓が上限まで埋まっている作業場**で、
+      // **突きが 1 つ入るだけで、いちばん古い行が落ちる**——**そこに cron が居ると
+      // `last_cron=-` になり**、**予定表が直近に鳴っていても `stale`** になる。
+      // **この PR が直しに来た形そのもの**である。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+      const starts = startsFile();
+      const filler = Array.from({ length: 19 }, (_, at) => `${at + 2}\tpoke\t/どこか`);
+      writeFileSync(starts, `1\tcron\t/どこか\n${filler.join("\n")}\n`);
+
+      expect(run(["acquire", "worker", stampFor("worker"), "--trigger", "poke"]).status).toBe(1);
+
+      expect(readFileSync(starts, "utf8"), "直近の cron が押し出されている").toContain("1\tcron\t");
+    });
+
     it("書けなくても、答えは変わらない", () => {
       // **記録は診断**である——**取れなかったことは、書けても書けなくても同じ。**
       const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
