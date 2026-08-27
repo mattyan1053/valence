@@ -19,6 +19,7 @@ import {
   dynamic,
   mergeButtonBlock,
   mergeNoticeKind,
+  renderRepositoryBoard,
   unreadableNote,
 } from "./page";
 
@@ -191,5 +192,71 @@ describe("盤面を出せなかった理由を、サーバ側へ残す（#513 �
     // **`signed-out` / `needs-login` は画面に出ている**（ログインへの導線がある）
     expect(boardUnavailableReason({ kind: "signed-out" })).toBeUndefined();
     expect(boardUnavailableReason({ kind: "needs-login" })).toBeUndefined();
+  });
+});
+
+/**
+ * **記録の口を呼んでいること**（#519）。
+ *
+ * **`boardUnavailableReason`（何を残すか）は上で測れている**が、**それが GET の
+ * 経路から呼ばれること**は測れていなかった——**呼び出しの 1 行を消しても緑**だった。
+ *
+ * **受け口を引数で渡す**（#510 で POST を割ったのと同じ形）——**モックは使わない**
+ * （`AGENTS.md` §4）。**判定は `boardUnavailableReason` のまま 1 箇所**である（§5）。
+ */
+describe("盤面（GET）で落ちたことを、記録の口へ渡す", () => {
+  const recorder = () => {
+    const recorded: string[] = [];
+    return {
+      recorded,
+      report: (action: "view", kind: string) => {
+        recorded.push(`${action}=${kind}`);
+      },
+    };
+  };
+
+  it("出せなかったときは、落ちどころまで渡る", async () => {
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      { board: async () => ({ kind: "unavailable", reason: "store/Error" }), report },
+    );
+
+    expect(recorded).toEqual(["view=unavailable/store/Error"]);
+  });
+
+  it("ログインの状態は、この口では残さない", async () => {
+    // **毎回鳴る記録は、そのうち読まれなくなる**（#248）——**画面に出ているものは残さない**
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      { board: async () => ({ kind: "signed-out" }), report },
+    );
+
+    expect(recorded).toEqual([]);
+  });
+
+  it("どのリポジトリを見るかは、要求ごとに渡す", async () => {
+    // **設定に固定しない**（§1）——**受け取ったものがそのまま内側へ渡ること**
+    const asked: string[] = [];
+    const { report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      {
+        board: async (repository) => {
+          asked.push(`${repository.owner}/${repository.name}`);
+          return { kind: "signed-out" };
+        },
+        report,
+      },
+    );
+
+    expect(asked).toEqual(["acme/web"]);
   });
 });

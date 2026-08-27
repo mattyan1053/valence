@@ -10,6 +10,7 @@
 
 import { notFound } from "next/navigation";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
+import type { RepositoryBoardResult } from "../../../../application/review-order/view-repository-board";
 import {
   reportBoardActionUnavailable,
   repositoryBoardForCurrentUser,
@@ -150,22 +151,38 @@ export function boardUnavailableReason(result: {
   return result.reason === undefined ? result.kind : `${result.kind}/${result.reason}`;
 }
 
-export default async function RepositoryBoardPage({
-  params,
-  searchParams,
-}: {
-  readonly params: Promise<{ readonly owner: string; readonly name: string }>;
-  readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
-}) {
-  const { owner, name } = await params;
-  const query = await searchParams;
+/**
+ * **盤面を組み立てるまで** (#519)。
+ *
+ * **受け口を引数で渡す**——**画面から呼ぶと composition が本物を掴む**ので、
+ * **「記録の口を呼んでいること」を試験から見られない**（**#513 のレビューで
+ * 1 度戻し、そのときは見送った穴**——**呼び出しを消しても部品の試験は緑だった**）。
+ * **モックは使わない**（`AGENTS.md` §4）——**インメモリの実装を渡す形にする。**
+ *
+ * **判定は `boardUnavailableReason` のまま 1 箇所である**（§5）。
+ */
+export type BoardPageDeps = {
+  /** 盤面を引く口（`repositoryBoardForCurrentUser`）。 */
+  readonly board: (repository: {
+    readonly owner: string;
+    readonly name: string;
+  }) => Promise<RepositoryBoardResult>;
+  /** 出せなかった理由を残す口（`reportBoardActionUnavailable`）。 */
+  readonly report: (action: "view", kind: string) => void;
+};
+
+export async function renderRepositoryBoard(
+  { owner, name }: { readonly owner: string; readonly name: string },
+  query: Record<string, string | string[] | undefined>,
+  deps: BoardPageDeps,
+) {
   const outcome = approveNoticeKind(query.approve);
   const mergeOutcome = mergeNoticeKind(query.merge);
-  const result = await repositoryBoardForCurrentUser({ owner, name });
+  const result = await deps.board({ owner, name });
   // **落ちどころを、サーバ側に残す** (#513 のレビュー)——**押した経路と同じ**
   const unavailable = boardUnavailableReason(result);
   if (unavailable !== undefined) {
-    reportBoardActionUnavailable("view", unavailable);
+    deps.report("view", unavailable);
   }
 
   if (result.kind === "not-found") {
@@ -243,4 +260,17 @@ export default async function RepositoryBoardPage({
       )}
     </main>
   );
+}
+
+export default async function RepositoryBoardPage({
+  params,
+  searchParams,
+}: {
+  readonly params: Promise<{ readonly owner: string; readonly name: string }>;
+  readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  return renderRepositoryBoard(await params, await searchParams, {
+    board: repositoryBoardForCurrentUser,
+    report: reportBoardActionUnavailable,
+  });
 }
