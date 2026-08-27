@@ -46,18 +46,22 @@ function permissionsSection(): string {
 }
 
 /**
- * **足りないときに何が起きるかを書いた段落。** **節ごと見ない**（`AGENTS.md` §4）。
+ * **足りないときに何が起きるかを書いたところ。** **節ごと見ない**（`AGENTS.md` §4）。
  *
- * **`unavailable` は節の中に 2 行ある**——**症状の行を消しても、
- * 「見たら見直す」の行に当たって緑**だった（#523 のレビュー 2 周目）。
+ * **`unavailable` は節の中に 2 回出る**——**症状の行と、「見たら見直す」の行**。
+ * **症状の行を消しても、もう片方に当たって緑**だった（#523 のレビュー 2 周目）。
+ *
+ * **段落で切っても足りない**——**2 つは同じ段落にある**（**間に空行が無い**）。
+ * **次の一手を書いた行の手前まで**にする。
  */
 function symptomParagraph(): string {
   const section = permissionsSection();
   const from = section.indexOf("**足りないとどうなるか。**");
-  expect(from, "症状を書いた段落が無い").toBeGreaterThanOrEqual(0);
+  expect(from, "症状を書いたところが無い").toBeGreaterThanOrEqual(0);
   const rest = section.slice(from);
-  const end = rest.indexOf("\n\n");
-  return end < 0 ? rest : rest.slice(0, end);
+  // **次の一手（「見たら見直す」）は、症状ではない**——**含めると範囲が広がる**
+  const until = rest.indexOf("**`unavailable` を見たら");
+  return until < 0 ? rest : rest.slice(0, until);
 }
 
 /**
@@ -199,6 +203,9 @@ describe("GitHub App に要る権限", () => {
     // **症状のほうを消しても、もう片方に当たって緑**だった。**打つ行へ寄せる。**
     const symptom = symptomParagraph();
 
+    // **数えるのは、判定と同じ場所である**（§4）——**範囲の中に 2 つあるなら、
+    // 片方を消しても緑**になる。**範囲が広がったら、ここで赤くなる。**
+    expect(symptom.match(/unavailable/g) ?? [], "判定の範囲が広い").toHaveLength(1);
     expect(symptom, "断られたときの応答が書かれていない").toContain("403");
     expect(symptom, "画面に何が出るかが書かれていない").toContain("unavailable");
   });
