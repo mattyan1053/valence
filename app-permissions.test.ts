@@ -46,6 +46,21 @@ function permissionsSection(): string {
 }
 
 /**
+ * **足りないときに何が起きるかを書いた段落。** **節ごと見ない**（`AGENTS.md` §4）。
+ *
+ * **`unavailable` は節の中に 2 行ある**——**症状の行を消しても、
+ * 「見たら見直す」の行に当たって緑**だった（#523 のレビュー 2 周目）。
+ */
+function symptomParagraph(): string {
+  const section = permissionsSection();
+  const from = section.indexOf("**足りないとどうなるか。**");
+  expect(from, "症状を書いた段落が無い").toBeGreaterThanOrEqual(0);
+  const rest = section.slice(from);
+  const end = rest.indexOf("\n\n");
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+/**
  * **口の書き方を 1 つに揃える。** **`{owner}` も `${number}` も、埋める場所**である
  * ——**名前ではなく形で突き合わせる。**
  */
@@ -159,11 +174,32 @@ describe("GitHub App に要る権限", () => {
     expect(missing, "表に無い口を叩いている（権限を見直すこと）").toEqual([]);
   });
 
+  it("表にあってコードに無い口が残っていない", () => {
+    // **消す側も測る**（#523 のレビュー 2 周目。`AGENTS.md` §5「残る側を数える」）
+    // ——**口を消すと `endpointsInCode()` が縮むだけ**で、**表に古い行が残っても緑**だった。
+    //
+    // **残るのは「要らない権限」**である。**Merge の実装を消しても
+    // `Contents: Read and write` が要求のまま残り**、**利用者は書き込み権限を
+    // 与え続ける**——**#518 が欲しいのは「必要な権限が揃うこと」**なので、
+    // **多いのも外れ**である。
+    const code = endpointsInCode();
+
+    const stale = documentedEndpoints()
+      .map(({ path }) => path)
+      .filter((doc) => !code.some((path) => doc === path || doc.endsWith(path)));
+
+    expect(stale, "コードが叩いていない口が表に残っている（権限を見直すこと）").toEqual([]);
+  });
+
   it("足りないときに何が起きるかが書いてある", () => {
     // **`unavailable` を見た人が、権限を疑えること**（完了条件の 2 つ目）
-    const section = permissionsSection();
+    //
+    // **節ごと見ない**（#523 のレビュー 2 周目。`AGENTS.md` §4）——**`unavailable` は
+    // 節の中に 2 行ある**（**症状の行と、「見たら見直す」の行**）ので、
+    // **症状のほうを消しても、もう片方に当たって緑**だった。**打つ行へ寄せる。**
+    const symptom = symptomParagraph();
 
-    expect(section, "断られたときの応答が書かれていない").toContain("403");
-    expect(section, "画面に何が出るかが書かれていない").toContain("unavailable");
+    expect(symptom, "断られたときの応答が書かれていない").toContain("403");
+    expect(symptom, "画面に何が出るかが書かれていない").toContain("unavailable");
   });
 });
