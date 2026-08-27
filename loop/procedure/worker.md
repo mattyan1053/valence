@@ -520,6 +520,11 @@ git rebase origin/main        # コンフリクトは master のコメントに�
 # truncate して混ざる**——**合否は `$status` なので正しいまま**なので、
 # **読む側は log を疑わず、他方の失敗を自分のものとして読む**
 log="$(mktemp)" || { bin/loop-stall "local-ci-unknown:<Issue番号>"; exit; }
+# **前の走りが残っていないかを、先に見る** (#528 / #529 のレビュー)。
+# **`./task check` の中でも見ているが、その報せは `$log` へ入る**
+# ——**緑なら `cat` されずに消える**ので、**この経路では一度も見えない。**
+# **リダイレクトの外で打つ**（**残っていても、この check は止めない**）
+./task check:leftovers || true
 ./task check >"$log" 2>&1; status=$?
 mark="$(tail -1 "$log")"                   # check-exit=<合否>（走り終えた印）
 ((status == 0)) || cat "$log"              # **落ちたら全部出す**（消す前に。下記）
@@ -547,6 +552,8 @@ push を消さないため。
 # truncate して混ざる**——**合否は `$status` なので正しいまま**なので、
 # **読む側は log を疑わず、他方の失敗を自分のものとして読む**
 log="$(mktemp)" || { bin/loop-stall "local-ci-unknown:<Issue番号>"; exit; }
+# **前の走りが残っていないかを、先に見る**（上と同じ理由。#529 のレビュー）
+./task check:leftovers || true
 ./task check >"$log" 2>&1; status=$?
 mark="$(tail -1 "$log")"                   # check-exit=<合否>（走り終えた印）
 ((status == 0)) || cat "$log"              # **落ちたら全部出す**（消す前に。下記）
@@ -653,6 +660,8 @@ Biome の複雑度（#117）を 2 度見落とし、**どちらも CI まで気�
 ```bash
 # **出力先は実行ごとに分ける** (#130)。**固定パスだと 2 本走ると混ざる**
 log="$(mktemp)" || { bin/loop-stall "local-ci-unknown:<Issue番号>"; exit; }
+# **前の走りが残っていないかを、先に見る**（上と同じ理由。#529 のレビュー）
+./task check:leftovers || true
 ./task check >"$log" 2>&1; status=$?      # 合否はこの $status で決める
 tail -1 "$log"                             # check-exit=<合否>（走り終えた印）
 ((status == 0)) || cat "$log"              # **落ちたら全部出す**（絞るのは読む側でやる）
@@ -702,6 +711,8 @@ rm -f "$log"                               # **残さない**
 # truncate して混ざる**——**合否は `$status` なので正しいまま**なので、
 # **読む側は log を疑わず、他方の失敗を自分のものとして読む**
 log="$(mktemp)" || { bin/loop-stall "local-ci-unknown:<Issue番号>"; exit; }
+# **前の走りが残っていないかを、先に見る**（上と同じ理由。#529 のレビュー）
+./task check:leftovers || true
 ./task check >"$log" 2>&1; status=$?
 mark="$(tail -1 "$log")"                   # check-exit=<合否>（走り終えた印）
 ((status == 0)) || cat "$log"              # **落ちたら全部出す**（消す前に。下記）
