@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # **周回が始まっているかを見る** (#378)。
 #
-#   bin/loop-cadence
+#   bin/loop-cadence            すべての行を出す
+#   bin/loop-cadence --quiet    止まっている行だけを出す（続いていれば何も出さない）
 #
 #   exit 0 = cron の周回が続いている
 #   exit 1 = 止まっている作業場がある（cron の周回が来ていない）
@@ -25,11 +26,30 @@
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
 set -uo pipefail
 
-[[ $# -eq 0 ]] || {
-  echo "使い方: bin/loop-cadence   （引数は取らない）" >&2
-  echo "        exit 0 続いている / exit 1 止まっている / exit 2 判定できない" >&2
+# **止まっている行だけを出す** (#530)。**周回の出口から毎回呼ぶ**ためである
+# ——**平常時にも鳴る検査は、そのうち読まれなくなる**（#248。`bin/loop-stray-branches`
+# と同じ考え方）。
+#
+# **絞るのはここ**である（`AGENTS.md` §5）。**呼ぶ側で `grep` すると、読みが 2 箇所に
+# 分かれる**——**行の形を変えた日に、片方だけが古くなる。**
+#
+# **判定は変えない。** **出すか出さないかだけ**である（**終了コードは同じ**）。
+QUIET=0
+case "${1-}" in
+  "") ;;
+  --quiet) QUIET=1 ;;
+  *)
+    echo "使い方: bin/loop-cadence [--quiet]" >&2
+    echo "        exit 0 続いている / exit 1 止まっている / exit 2 判定できない" >&2
+    echo "        --quiet: 止まっている行だけを出す（続いていれば何も出さない）" >&2
+    exit 2
+    ;;
+esac
+[[ $# -le 1 ]] || {
+  echo "使い方: bin/loop-cadence [--quiet]" >&2
   exit 2
 }
+readonly QUIET
 
 # **いま。** **試験のためだけに外から渡せる**——**判定は時刻の差だけで決まる**ので、
 # **決まった時刻から見えないと、確かめようがない。**
@@ -316,6 +336,7 @@ evaluate_scope() {
   if [[ ! -f $starts ]]; then
     # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
     # ——**足したばかりの worker が、永久に見えなくなる。**
+    # **`never` も止まっている側である**——**`--quiet` でも出す。**
     echo "scope=${scope:0:12} last_cron=- last_poke=- last_unknown=- age=- interval=${INTERVAL:-unknown} never"
     show_workspace "$workspace"
     # **記録が 1 行も無い**——**引く先のセッションが、そもそも居ない。**
@@ -417,7 +438,11 @@ evaluate_scope() {
       ((age > window)) && verdict="stale"
     fi
   fi
-  echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"
+  # **続いている行は、`--quiet` では出さない** (#530)——**毎回鳴る検査は読まれなくなる。**
+  # **`ok` 以外は出す**（**`unknown` は「判定できない」で、黙る側へ倒さない**）。
+  if ((QUIET == 0)) || [[ $verdict != "ok" ]]; then
+    echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"
+  fi
   [[ $verdict != "stale" ]] || show_workspace "$workspace"
   [[ $verdict != "stale" ]] || show_reading "$last_poke" "$last_unknown" "$window"
   case "$verdict" in
