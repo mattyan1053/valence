@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# **切られた走りが、この作業場に残っていないか** (#528)。
+#
+#   bin/loop-check-leftovers <作業場の名前>
+#
+#   exit 0 = 残っていない
+#   exit 1 = 残っている（何が残っているかを標準エラーへ出す）
+#   exit 2 = 判定できない（使い方の誤り / docker を引けない）
+#
+# **`./task check` が呼び出し側の上限で切られると、コンテナの中の `pnpm check` は
+# 走り続ける。** **呼び出し側のシェルは死んでいる**（**`$status` も末尾の印も読めない**）
+# **のに、中で走っているものは残る**——**そのまま次を打つと、同じ木で 2 本走る**
+# （#509 で測った形。**あのときは load 41.8 で vitest が時間切れになった**）。
+# **実測 2 件**（2026-08-26 / 2026-08-27。**どちらも同じ作業場**）。
+#
+# **見るのは自分の作業場だけ**である (#186)。**別の作業場は別のコンテナ**
+# （compose の project は作業場ごと）——**そこを覗きに行かない。**
+# **名前は `task` から渡す**（`AGENTS.md` §5。**正規化を 2 箇所に持たない**）。
+#
+# **落とさない。** **踏んだ 2 回とも、気づけば人が落とせている**——**言えば足りる。**
+# **`./task test:watch` のように、人が意図して長く走らせているもの**もあるので、
+# **殺す側へ倒すと、正しく走っているものを止める**（`task` の `heartbeat()` の
+# 但し書きと同じ判断——**「殺す」は新しい失敗モードを持ち込む**）。
+#
+# **判定できないときは、そう言う** (#497)。**「見つからなかった」へ倒すと、
+# 見ていないことが「居ない」になる。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-check-leftovers <作業場の名前>" >&2
+  echo "        exit 0 残っていない / exit 1 残っている / exit 2 判定できない" >&2
+  exit 2
+}
+
+[[ $# -eq 1 && -n ${1-} ]] || usage
+readonly WORKSPACE="$1"
+
+# **compose がコンテナに付ける label で引く**（`task` の `warn_stale_containers` と
+# 同じ引き方）——**`compose ps` より速く、project を名指しできる。**
+if ! container="$(docker ps -q \
+  --filter "label=com.docker.compose.project=$WORKSPACE" \
+  --filter "label=com.docker.compose.service=app" 2>/dev/null)"; then
+  echo "[WARN] この作業場のコンテナを引けないので、残った走りがあるかを判定できません" >&2
+  exit 2
+fi
+
+container="${container%%$'\n'*}"
+# **上がっていなければ、走りは残っていない**——**覗きに行かない**
+[[ -n $container ]] || exit 0
+
+if ! processes="$(docker top "$container" 2>/dev/null)"; then
+  echo "[WARN] コンテナの中を読めないので、残った走りがあるかを判定できません" >&2
+  exit 2
+fi
+
+# **何を「走り」と数えるか。** **`./task check` が中で起こすもの**である
+# ——**`pnpm dev`（常に居る）を数えない**ので、**名指しで並べる。**
+#
+# **`vitest run` と `vitest --watch` を分ける**（`package.json` の `test` と
+# `test:watch`）——**後者は人が意図して走らせているもの**である。
+leftovers="$(printf '%s\n' "$processes" | grep -E "pnpm (check|test)\b|vitest run" || true)"
+
+[[ -n $leftovers ]] || exit 0
+
+echo "[WARN] この作業場に、前の走りが残っています（次の ./task check と重なります）" >&2
+printf '%s\n' "$leftovers" >&2
+echo "       切られた ./task check の残りなら、落としてから打ち直すこと" >&2
+echo "       他の作業場のものは触らないこと（見ているのはこの作業場のコンテナだけ）" >&2
+exit 1
