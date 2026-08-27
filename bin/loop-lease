@@ -1587,6 +1587,21 @@ acquire | recover)
     echo "[FAIL] $SCOPE_LABEL の周回が走っています（$((now - held_since)) 秒前に開始、$(activity_age)、あと $(expires_in) 秒で期限）。この周回は何もしません" >&2
     echo "       待たずに終わるのは、走っている側が同じ状態を読むためです。" >&2
     echo "       読み終えた後だった場合は 1 拍落ちますが、次の周回（保険）が拾います" >&2
+    # **鳴ったことは残す** (#536)。**前はここで何も書かなかった**ので、**忙しい
+    # 作業場は「cron が鳴っていない」と同じ顔になった**——**`bin/loop-cadence` が
+    # `stale` と出し、4 回突かれて 4 回とも予定表は生きていた。**
+    #
+    # **印は `<trigger>-blocked`** である。**前の版の読み手は、知らない印を
+    # 「不明」へ入れる**（`bin/loop-cadence` の `*)`）——**cron へ倒れないので、
+    # 断定は増えない**（**#281 の族。足す側で、古い読み手の行き先を数えた**）。
+    #
+    # **書けなくても、この周回の答えは変わらない**——**言うだけにして exit 1 を返す。**
+    # **作業場は `set_role_paths` が既に引いている**（`WORKSPACE_PATH`）——**下の
+    # 書き手はここより後で `git rev-parse` を打つ**ので、**ここでは使えない。**
+    if ! printf '%s\t%s\t%s\n' "$now" "$TRIGGER-blocked" "${WORKSPACE_PATH-}" \
+      >>"$STARTS" 2>/dev/null; then
+      echo "[WARN] 鳴ったが走れなかったことを書けません: $STARTS" >&2
+    fi
     exit 1
   fi
   # token は「返す資格」を表すだけなので、衝突しなければよい。

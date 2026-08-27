@@ -341,6 +341,58 @@ describe("周回が始まったことを、どう始まったかごと残す", (
       expect(row, "確かめていないことを断定している").not.toContain("予定表が空である");
     });
 
+    it("鳴ったが走れなかった cron も、鳴った証拠として数える", () => {
+      // **踏んだ** (#536)。**忙しい作業場は `stale` に見え続ける**——**鳴っていない
+      // からではなく、記録が増えないから**である（**走っている最中に鳴った cron は
+      // `acquire` で終わる**）。**4 回突かれて、4 回とも「空ではない」だった。**
+      //
+      // **`cron-blocked` は「鳴ったが走れなかった」**である——**予定表は生きている。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [9_500, "cron-blocked"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "走っているだけの作業場を止まっていると言っている").toBe(0);
+      expect(section(done.stdout, "worker"), "止まっていると出ている").toContain(" ok");
+    });
+
+    it("鳴ったことが何回あったかを、行に出す", () => {
+      // **「exit 1 で終わった cron が何回あったか」は、記録が無かった** (#536 の
+      // 「分かっていないこと」)——**数えられる形にする。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [9_400, "cron-blocked"],
+        [9_500, "cron-blocked"],
+      ]);
+
+      const row = section(
+        cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" }).stdout,
+        "worker",
+      );
+
+      expect(row, "鳴ったが走れなかった回数が読めない").toContain("blocked=2");
+    });
+
+    it("鳴っていなければ、これまでどおり止まっていると言う", () => {
+      // **消してはいけないほう**——**本当に予定表が空になった日は、これまでどおり出る。**
+      const { dir } = workspace();
+      records(dir, [
+        [1_000, "cron"],
+        [9_500, "poke"],
+      ]);
+
+      const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+      expect(done.status, "止まっているのに言っていない").toBe(1);
+      expect(section(done.stdout, "worker"), "鳴っていないのに数えている").not.toContain(
+        "blocked=",
+      );
+    });
+
     it("突かれた周回だけが新しくても、予定表が空だとは断定しない", () => {
       // **踏んだ** (#531)。**この読みに従って master が「入れ直してください」と指示し**、
       // **引いたら空ではなかった**——**登録は生きていて、刻みも 30 分だった。**
@@ -839,6 +891,29 @@ describe("周回が始まったことを、どう始まったかごと残す", (
 
     expect(done.status, `${done.stdout}\n${done.stderr}`).toBe(0);
     expect(done.stdout, "いま始めた周回が読めていない").toMatch(/last_cron=[0-9]{10}/);
+  });
+
+  it("走れなかった cron も、実物で読める", () => {
+    // **両端を留める** (#536)——**書く側（`bin/loop-lease` が `acquire` を断るとき）と
+    // 読む側（ここ）を、実物で繋ぐ。** **書式を写した試験だけだと、片方を直したときに
+    // 緑のまま食い違う。**
+    const { dir, stamp } = workspace();
+    // **1 本目は取ったまま返さない**——**次の cron が断られる状態を作る。**
+    const held = spawnSync(
+      join(dir, "bin/loop-lease"),
+      ["acquire", "worker", stamp, "--trigger", "cron"],
+      { cwd: dir, encoding: "utf8" },
+    );
+    expect(held.status, held.stderr).toBe(0);
+    const blocked = spawnSync(
+      join(dir, "bin/loop-lease"),
+      ["acquire", "worker", stamp, "--trigger", "cron"],
+      { cwd: dir, encoding: "utf8" },
+    );
+
+    expect(blocked.status, "走っているのに取れている").toBe(1);
+    const done = cadence(dir, { LOOP_CRON_INTERVAL_SEC: "1800" });
+    expect(done.stdout, "鳴ったが走れなかったことが読めない").toContain("blocked=1");
   });
 
   it("突かれただけの作業場は、実物でも止まっていると言う", () => {
