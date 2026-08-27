@@ -347,6 +347,10 @@ evaluate_scope() {
   last_cron="-"
   last_poke="-"
   last_unknown="-"
+  # **鳴ったが走れなかった cron** (#536)。**走っている最中に鳴った cron は
+  # `acquire` で終わる**——**前は記録が増えず、忙しい作業場が止まって見えた**
+  # （**4 回突かれて、4 回とも予定表は生きていた**）。**鳴った証拠として数える。**
+  blocked_rings=0
   # **3 列目（作業場）は読むために置いてある**——**`scope` は digest で、そこからは
   # パスへ戻せない**ので、**記録を人が読むときの手がかりはこれだけ**である。
   while IFS=$'\t' read -r at trigger _where; do
@@ -355,6 +359,14 @@ evaluate_scope() {
       cron)
         last_cron="$at"
         cron_at+=("$at")
+        ;;
+      # **鳴ったことは同じである** (#536)——**走れなかっただけ**なので、
+      # **予定表が生きている証拠**として、cron と同じ側に置く。
+      # **間隔の測りにも入れる**（**鳴った時刻そのもの**である）。
+      cron-blocked)
+        last_cron="$at"
+        cron_at+=("$at")
+        blocked_rings=$((blocked_rings + 1))
         ;;
       poke) last_poke="$at" ;;
       # **知らない印は「不明」へ入れる**——**cron へ倒さない**（渡し忘れた日から
@@ -441,7 +453,11 @@ evaluate_scope() {
   # **続いている行は、`--quiet` では出さない** (#530)——**毎回鳴る検査は読まれなくなる。**
   # **`ok` 以外は出す**（**`unknown` は「判定できない」で、黙る側へ倒さない**）。
   if ((QUIET == 0)) || [[ $verdict != "ok" ]]; then
-    echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"
+    # **鳴ったが走れなかった回数は、あるときだけ出す** (#536)。**毎行に `blocked=0` を
+    # 並べても読む人の役に立たない**——**「何回あったか」は、あった作業場でだけ要る。**
+    blocked_shown=""
+    ((blocked_rings == 0)) || blocked_shown=" blocked=$blocked_rings"
+    echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age${blocked_shown} ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"
   fi
   [[ $verdict != "stale" ]] || show_workspace "$workspace"
   [[ $verdict != "stale" ]] || show_reading "$last_poke" "$last_unknown" "$window"
@@ -530,8 +546,9 @@ if ((stale == 1)); then
   echo "       （この道具は他のセッションを引けない。入れ直すのもセッション自身）" >&2
   echo "       recurring の予定は 7 日で期限切れになるので、消えていることがある" >&2
   echo "       ここから言えるのは「直近の記録に、cron の周回が無い」まで" >&2
-  echo "       走っている最中に鳴った cron は acquire で終わり、記録は増えない" >&2
+  echo "       走っている最中に鳴った cron は acquire で終わるが、鳴ったことは残る（blocked=）" >&2
   echo "       塞がっているセッションは cron が発火しない（暇なときにしか鳴らない）" >&2
+  echo "       ——発火して走れなかったぶんは blocked= に出る（そちらは予定表が生きている）" >&2
   echo "       ——予定表が生きていても、突かれた周回だけが新しい顔になる（#531）" >&2
 fi
 

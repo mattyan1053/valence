@@ -863,6 +863,92 @@ describe("bin/loop-lease", () => {
     });
   });
 
+  describe("鳴ったが走れなかった cron（#536 / #537 のレビュー）", () => {
+    /** その役の `starts` の記録。 */
+    function startsFile(role = "worker"): string {
+      const scope = spawnSync(SCRIPT, ["scope", role], { cwd: sandbox, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      return join(sandbox, ".git", `valence-loop-starts-${scope.stdout.trim()}`);
+    }
+
+    it("走っている周回があるなら、鳴ったことを残す", () => {
+      // **前は何も書かなかった**ので、**忙しい作業場が「cron が鳴っていない」と
+      // 同じ顔になった**（#536。**4 回突かれて、4 回とも予定表は生きていた**）。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+
+      const blocked = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+
+      expect(blocked.status, "走っているのに取れている").toBe(1);
+      expect(readFileSync(startsFile(), "utf8"), "鳴ったことが残っていない").toContain(
+        "cron-blocked",
+      );
+    });
+
+    it("増え続けない（取得側と同じ上限で刈る）", () => {
+      // **この枝は追記して即終了する** (#537 のレビュー)——**取得側の刈り込みへ
+      // 到達しない。** **成功する取得が来ない限り、共有の `.git` の記録が
+      // 増え続け**、**`blocked=` が古い履歴まで数える**（**窓を持たなくなる**）。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+      const starts = startsFile();
+      const before = Array.from({ length: 25 }, (_, at) => `${at + 1}\tcron\t/どこか`).join("\n");
+      writeFileSync(starts, `${before}\n`);
+
+      expect(run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]).status).toBe(1);
+
+      const lines = readFileSync(starts, "utf8").split("\n").filter(Boolean);
+      expect(lines.length, "上限を超えて増えている").toBeLessThanOrEqual(20);
+      expect(lines.at(-1), "いま鳴ったぶんが落ちている").toContain("cron-blocked");
+    });
+
+    it("突かれて断られたぶんは、残さない", () => {
+      // **判定に効くのは cron だけ** (#537 のレビュー 2 周目)——**`poke-blocked` は
+      // 窓を食うだけ**である。**`poke` は「鳴った」ではない**（**人か別のセッションが
+      // 突いた**）ので、**この PR の主張の外**でもある。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+      const starts = startsFile();
+      const before = readFileSync(starts, "utf8");
+
+      expect(run(["acquire", "worker", stampFor("worker"), "--trigger", "poke"]).status).toBe(1);
+
+      expect(readFileSync(starts, "utf8"), "突きで窓を食っている").toBe(before);
+    });
+
+    it("突かれ続けても、直近の cron を押し出さない", () => {
+      // **これが本題である。** **窓が上限まで埋まっている作業場**で、
+      // **突きが 1 つ入るだけで、いちばん古い行が落ちる**——**そこに cron が居ると
+      // `last_cron=-` になり**、**予定表が直近に鳴っていても `stale`** になる。
+      // **この PR が直しに来た形そのもの**である。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+      const starts = startsFile();
+      const filler = Array.from({ length: 19 }, (_, at) => `${at + 2}\tpoke\t/どこか`);
+      writeFileSync(starts, `1\tcron\t/どこか\n${filler.join("\n")}\n`);
+
+      expect(run(["acquire", "worker", stampFor("worker"), "--trigger", "poke"]).status).toBe(1);
+
+      expect(readFileSync(starts, "utf8"), "直近の cron が押し出されている").toContain("1\tcron\t");
+    });
+
+    it("書けなくても、答えは変わらない", () => {
+      // **記録は診断**である——**取れなかったことは、書けても書けなくても同じ。**
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+      const starts = startsFile();
+      rmSync(starts, { force: true });
+      mkdirSync(starts, { recursive: true }); // **同じ名前のディレクトリ**（書けない）
+
+      const blocked = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+
+      expect(blocked.status, "書けないことで答えが変わっている").toBe(1);
+      // **文面は 1 つである**（`record_start`）——**取れた周回と同じ口を通る**ので、
+      // **どちらの記録が書けなかったかは、記録の中身が言う**（`AGENTS.md` §5）。
+      expect(blocked.stderr, "書けなかったことを黙っている").toContain("書けません");
+    });
+  });
+
   it("sha256sum が無くても、周回を始められる", () => {
     // **ホストには何もインストールしない**（§2）ので、**あることを前提にできない**
     // ——**入口 1.0 で必ず通る**ので、**無ければ周回が 1 つも始まらない**（#220 の形）。
