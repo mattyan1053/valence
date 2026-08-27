@@ -34,6 +34,21 @@ readonly ROLES=(master worker)
 readonly TOKEN_BYTES=8
 readonly TOKEN_SHAPE="^[0-9a-f]{$((TOKEN_BYTES * 2))}$"
 
+# **渡された値が token ですらないなら、そう言う** (#522)。**判定も文面も、ここ 1 箇所**
+# である（`AGENTS.md` §5）——**`mine` と `release` の両方が通る**（**同じ文面を出す口を
+# 数えて見つけた**。**呼び手を数えても出てこない**）。
+#
+# **`release` のほうが危ない。** **毎周回の最後に、両方の役が打つ口**であり、
+# **「別の周回が持っている」と読んだ周回は、握ったまま終わるか、打ち直しに行く。**
+#
+# **`SCOPE_LABEL` は呼ぶ時点で決まっている**ので、ここでは触らない。
+not_a_token() {
+  [[ ! $1 =~ $TOKEN_SHAPE ]] || return 1
+  echo "[FAIL] 渡された値は token の形ではありません（$SCOPE_LABEL の lease は見ていません）" >&2
+  echo "       token は入口の acquire が出したものです（$((TOKEN_BYTES * 2)) 桁の 16 進）" >&2
+  return 0
+}
+
 # 抱えたままの lease を引き継ぐまでの時間。**周回が落ちても、その役のループが
 # 二度と動かなくならないようにする。**
 #
@@ -1432,11 +1447,7 @@ mine)
   # 起きていないことを伝える**（#497 と同じ形。**原因を確かめずに 1 つに決めない**）。
   #
   # **記録に触らずに答える**——**token ですらない値では、引き当てる先が無い。**
-  if [[ ! $3 =~ $TOKEN_SHAPE ]]; then
-    echo "[INFO] 渡された値は token の形ではありません（$SCOPE_LABEL の lease は見ていません）" >&2
-    echo "       token は入口の acquire が出したものです（$((TOKEN_BYTES * 2)) 桁の 16 進）" >&2
-    exit 1
-  fi
+  ! not_a_token "$3" || exit 1
   if [[ -z $held_token && -z $expired_token ]]; then
     switch_to_renamed_state "$3"
     case "$?" in
@@ -1626,6 +1637,13 @@ acquire | recover)
   ;;
 release)
   [[ $# -eq 3 ]] || usage
+  # **記録に触る前に、渡された値そのものを見る** (#522 のレビュー)。**`mine` と同じ**
+  # ——**一律で「別の周回が持っています」と言うと、握ったままの周回が
+  # 「返せなかった」と読む**（**握ったまま終わるか、打ち直しに行く**）。
+  #
+  # **返させないことは変わらない**（**token ですらない値では、引き当てる先が無い**）
+  # ——**変わるのは、読んだ側が次に打つ手である。**
+  ! not_a_token "$3" || exit 1
   # **記録の名前は、走っているスクリプトが毎回組み立てる** (#240)。**worker は周回の
   # 途中で作業ツリーを入れ替える**（1.1 の同期、`gh pr checkout`）ので、
   # **`bin/loop-lease` 自身もそこで入れ替わる**——**取ったときと返すときで名前の

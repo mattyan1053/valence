@@ -345,6 +345,48 @@ describe("bin/loop-lease", () => {
     expect(acquire().status).toBe(1);
   });
 
+  /**
+   * **`release` も同じ文面を出す**（#522 のレビュー）。
+   *
+   * **数える軸を間違えていた**——**直しているのは文面**なので、**数えるのは
+   * `mine` の呼び手ではなく、同じ文面を出す側**である（`grep -n '別の周回が持っています'`）。
+   *
+   * **`release` のほうが危ない。** **毎周回の最後に、両方の役が打つ口**であり、
+   * **「別の周回が持っている」と読んだ周回は、握ったまま終わるか、打ち直しに行く。**
+   */
+  describe("release に token の形でない値を渡したとき", () => {
+    it("「別の周回が持っている」と言わない", () => {
+      const token = acquire().stdout.trim();
+      expect(token, "握れていない").not.toBe("");
+
+      const refused = run(["release", "worker", "06d4e9a4-0eb2-46d0-aa86-35133b9366fb"]);
+
+      expect(refused.stderr, "起きていないことを言っている").not.toContain("別の周回");
+      expect(refused.stderr, "渡された値のことだと分からない").toContain("token の形");
+    });
+
+    it("本当に別の周回が持っているときは、これまでどおり言う", () => {
+      // **消してはいけないほう**
+      expect(acquire().status).toBe(0);
+
+      const wrong = run(["release", "worker", "0123456789abcdef"]);
+
+      expect(wrong.stderr, "別の周回が持っていることが出ない").toContain("別の周回が持っています");
+    });
+
+    it("返させない（これまでどおり）", () => {
+      // **形が違うだけで通すと、走っている周回の lease が外れる**
+      const token = acquire().stdout.trim();
+      expect(token, "握れていない").not.toBe("");
+
+      expect(
+        run(["release", "worker", "06d4e9a4-0eb2-46d0-aa86-35133b9366fb"]).status,
+        "token でない値で返せている",
+      ).not.toBe(0);
+      expect(acquire().status, "lease が外れている").toBe(1);
+    });
+  });
+
   it("誰も持っていないのに返そうとしたら分かる", () => {
     const orphan = run(["release", "worker", "0123456789abcdef"]);
 
