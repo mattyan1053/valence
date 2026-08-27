@@ -346,6 +346,106 @@ describe("bin/loop-lease", () => {
   });
 
   /**
+   * **形の判定は、記録を読む前に走る**（#522 のレビュー 2 周目）。
+   *
+   * **「$SCOPE_LABEL の lease は見ていません」と書きながら、その前に読んでいた**
+   * ——**`lock_state` と `read_lease` は `case` より前**である。**記録が壊れていると
+   * そこで `exit 2` になり**、**形の判定へ届かない。**
+   *
+   * **`AGENTS.md` のレビュー観点の 1 つ目**（**書いた意図と実装が一致しているか**）。
+   */
+  describe("記録を読む前に、形で答える", () => {
+    /** **lease の記録を、読めない形に壊す。** 前の版が踏んだ形と同じ (#281)。 */
+    function breakState(): void {
+      const dir = join(sandbox, ".git");
+      const found = readdirSync(dir).find((name) => name.startsWith("valence-loop-lease-worker"));
+      expect(found, "lease の記録が見つからない").toBeDefined();
+      writeFileSync(join(dir, found ?? ""), "壊れた記録\n");
+    }
+
+    it("mine は、記録が読めなくても形の話で答える", () => {
+      expect(acquire().status).toBe(0);
+      breakState();
+
+      const answered = run(["mine", "worker", "06d4e9a4-0eb2-46d0-aa86-35133b9366fb"]);
+
+      expect(answered.stderr, "記録を読んでから答えている").toContain("token の形");
+      expect(answered.stderr, "記録を読みに行っている").not.toContain("記録を読めません");
+    });
+
+    it("release も、記録が読めなくても形の話で答える", () => {
+      expect(acquire().status).toBe(0);
+      breakState();
+
+      const refused = run(["release", "worker", "06d4e9a4-0eb2-46d0-aa86-35133b9366fb"]);
+
+      expect(refused.stderr, "記録を読んでから答えている").toContain("token の形");
+      expect(refused.stderr, "記録を読みに行っている").not.toContain("記録を読めません");
+    });
+
+    /**
+     * **ロックを取る前に答える。** **記録が読めるかどうかより手前**である
+     * ——**別の周回がロックを持っていると `lock_state` は待って落ちる**ので、
+     * **判定をその後ろに置くと、形の話にたどり着かない。**
+     */
+    function whileLocked(token: string): { status: number; stderr: string } {
+      const dir = join(sandbox, ".git");
+      const lock = readdirSync(dir).find((name) => name.endsWith(".lock"));
+      expect(lock, "ロックの置き場が見つからない").toBeDefined();
+      const script = [
+        // **握った合図を置いてから寝る**——**待ち時間で決めると、詰まった機械で揺れる**
+        'flock -x "$1" -c \'touch "$READY"; sleep 5\' >/dev/null 2>&1 &',
+        "holder=$!",
+        'for _ in $(seq 1 200); do [ -f "$READY" ] && break; sleep 0.05; done',
+        '"$0" mine worker "$2"',
+        "status=$?",
+        'kill "$holder" 2>/dev/null',
+        'exit "$status"',
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", script, SCRIPT, join(dir, lock ?? ""), token], {
+        cwd: sandbox,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LOOP_LEASE_LOCK_WAIT_SEC: "1",
+          READY: join(sandbox, "held"),
+        },
+      });
+      return { status: result.status ?? -1, stderr: result.stderr };
+    }
+
+    it("ロックを取れなくても、形の話で答える", () => {
+      expect(acquire().status).toBe(0);
+
+      const answered = whileLocked("06d4e9a4-0eb2-46d0-aa86-35133b9366fb");
+
+      expect(answered.stderr, "ロックを取ってから答えている").toContain("token の形");
+      expect(answered.stderr, "ロックを取りに行っている").not.toContain("ロックを取得できません");
+    });
+
+    it("形が正しければ、これまでどおりロックを待つ", () => {
+      // **消してはいけないほう**——**判定を先へ出したせいで、直列化が緩んでいないこと**
+      expect(acquire().status).toBe(0);
+
+      const answered = whileLocked("0123456789abcdef");
+
+      expect(answered.status, "ロックを待たずに答えている").toBe(2);
+      expect(answered.stderr).toContain("ロックを取得できません");
+    });
+
+    it("形が正しければ、これまでどおり記録を読む", () => {
+      // **消してはいけないほう**——**壊れた記録は、これまでどおり 2 で落ちる**
+      expect(acquire().status).toBe(0);
+      breakState();
+
+      const answered = run(["mine", "worker", "0123456789abcdef"]);
+
+      expect(answered.status, "壊れた記録を黙って通している").toBe(2);
+      expect(answered.stderr).toContain("記録を読めません");
+    });
+  });
+
+  /**
    * **`release` も同じ文面を出す**（#522 のレビュー）。
    *
    * **数える軸を間違えていた**——**直しているのは文面**なので、**数えるのは
