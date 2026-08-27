@@ -58,9 +58,14 @@ fi
 # **何を「走り」と数えるか。** **`./task check` が中で起こすもの**である
 # ——**`pnpm dev`（常に居る）を数えない**ので、**名指しで並べる。**
 #
-# **`vitest run` と `vitest --watch` を分ける**（`package.json` の `test` と
-# `test:watch`）——**後者は人が意図して走らせているもの**である。
-leftovers="$(printf '%s\n' "$processes" | grep -E "pnpm (check|test)\b|vitest run" || true)"
+# **`vitest run` と watch を分ける**（`package.json` の `test` と `test:watch`）
+# ——**後者は人が意図して走らせているもの**である。
+#
+# **`\b` では分けられない** (#529 のレビュー)——**`t` と非単語文字 `:` の間でも
+# 成立する**ので、**`pnpm test:watch` が `pnpm test\b` に当たる。**
+# **実物の `docker top` にその行は出る**（**測った**）ので、**毎回鳴っていた。**
+# **空白か行末までを見る**——**`docker top` の最後の列がコマンドである。**
+leftovers="$(printf '%s\n' "$processes" | grep -E "pnpm (check|test)( |$)|vitest run" || true)"
 
 [[ -n $leftovers ]] || exit 0
 

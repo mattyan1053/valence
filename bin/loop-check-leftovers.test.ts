@@ -123,6 +123,33 @@ describe("bin/loop-check-leftovers", () => {
     expect(docker.run().status).toBe(1);
   });
 
+  it("`./task test:watch` は、残骸として数えない", () => {
+    // **人が意図して走らせているもの**である（#529 のレビュー）——**止めないと決めた以上、
+    // 毎回「残っています」と言うのは、その判断と食い違う**（言うほうが無視される）。
+    //
+    // **`\b` は `t` と `:` の間でも成立する**ので、**`pnpm test\b` に当たっていた。**
+    // **実物の `docker top` にこの行が出ることを確かめてある**（#529）。
+    const docker = withDocker({
+      top: [
+        HEADER,
+        "u 3864163 9010 node /usr/local/bin/pnpm test:watch",
+        "u 3864200 3864163 sh -c vitest --project '!db'",
+      ],
+    });
+
+    const found = docker.run();
+
+    expect(found.status, "watch を残骸として数えている").toBe(0);
+    expect(found.stderr, "watch を挙げている").not.toContain("test:watch");
+  });
+
+  it("`pnpm test` は、これまでどおり数える", () => {
+    // **消してはいけないほう**——**`test:watch` を外したついでに、`test` まで外さない**
+    const docker = withDocker({ top: [HEADER, "u 100 1 node /usr/local/bin/pnpm test"] });
+
+    expect(docker.run().status, "走り切っていない `pnpm test` を見逃している").toBe(1);
+  });
+
   it("自分の作業場だけを見る", () => {
     // **別の作業場は別のコンテナ**である（#186）——**project label で絞る。**
     // **絞らずに引くと、他人の走りを自分のものとして数える。**
