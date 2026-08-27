@@ -49,6 +49,38 @@ ssh -L 3000:localhost:3000 -L 54321:localhost:54321 <user>@<remote-vm>
 
 詳細な開発ルール・アーキテクチャ方針は [AGENTS.md](./AGENTS.md) を参照。
 
+## GitHub App に要る権限
+
+**権限は `.env` では決まらない。** [App の設定画面](https://github.com/settings/apps)
+——**リポジトリの外**にある。**ここに書いてあるのは、この道具が実際に叩く口と、
+その口に要る権限**である（出どころは
+[Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)）。
+
+| 権限 | 何に要るか | 叩く口 |
+| --- | --- | --- |
+| **Metadata: Read** | リポジトリの解決、見られるリポジトリの一覧 | `GET /repos/{owner}/{repo}`、`GET /user/repos` |
+| **Pull requests: Read and write** | 盤面（PR 一覧・変更の要約・承認の一覧）と **Approve** | `GET /repos/{owner}/{repo}/pulls`、`GET /repos/{owner}/{repo}/pulls/{number}`、`GET /repos/{owner}/{repo}/pulls/{number}/files`、`POST /graphql`、**`POST /repos/{owner}/{repo}/pulls/{number}/reviews`** |
+| **Contents: Read and write** | **Merge**（**Pull requests では足りない**） | **`PUT /repos/{owner}/{repo}/pulls/{number}/merge`** |
+| **Checks: Read** | CI が通っているか | `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` |
+| **Commit statuses: Read** | 古い形式の CI（status API） | `GET /repos/{owner}/{repo}/commits/{sha}/status` |
+
+**App 自身の口は、権限ではなく秘密鍵で通る**（`GET /repos/{owner}/{repo}/installation`、
+`POST /app/installations/{id}/access_tokens`）。**installation は実行時に解決する**ので、
+設定には置かない。
+
+**足りないとどうなるか。** **GitHub が `403` で断り**、**画面には
+`unavailable`（`approve` / `merge`）が出る**——**押した人の権限ではなく、
+App の権限が足りないときも同じ顔**である
+（**user-to-server トークンの権限は「App の権限 ∩ その人の権限」**）。
+**`unavailable` を見たら、まずここを見直すこと。**
+
+**権限を足したら、既にインストールされている先で承認が要る**
+（GitHub がオーナーへ確認を出す。**承認されるまで古い権限のまま**である）。
+
+**能力を足すときは、この表も足す。** **叩く口はコードにあり**、
+**`app-permissions.test.ts` が「表に無い口を叩いていないか」を数える**
+——**表に足すまで `./task check` が赤くなる。**
+
 ## ライセンス
 
 [MIT](./LICENSE)
