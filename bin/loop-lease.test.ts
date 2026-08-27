@@ -863,6 +863,62 @@ describe("bin/loop-lease", () => {
     });
   });
 
+  describe("鳴ったが走れなかった cron（#536 / #537 のレビュー）", () => {
+    /** その役の `starts` の記録。 */
+    function startsFile(role = "worker"): string {
+      const scope = spawnSync(SCRIPT, ["scope", role], { cwd: sandbox, encoding: "utf8" });
+      expect(scope.status, scope.stderr).toBe(0);
+      return join(sandbox, ".git", `valence-loop-starts-${scope.stdout.trim()}`);
+    }
+
+    it("走っている周回があるなら、鳴ったことを残す", () => {
+      // **前は何も書かなかった**ので、**忙しい作業場が「cron が鳴っていない」と
+      // 同じ顔になった**（#536。**4 回突かれて、4 回とも予定表は生きていた**）。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+
+      const blocked = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+
+      expect(blocked.status, "走っているのに取れている").toBe(1);
+      expect(readFileSync(startsFile(), "utf8"), "鳴ったことが残っていない").toContain(
+        "cron-blocked",
+      );
+    });
+
+    it("増え続けない（取得側と同じ上限で刈る）", () => {
+      // **この枝は追記して即終了する** (#537 のレビュー)——**取得側の刈り込みへ
+      // 到達しない。** **成功する取得が来ない限り、共有の `.git` の記録が
+      // 増え続け**、**`blocked=` が古い履歴まで数える**（**窓を持たなくなる**）。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+      const starts = startsFile();
+      const before = Array.from({ length: 25 }, (_, at) => `${at + 1}\tcron\t/どこか`).join("\n");
+      writeFileSync(starts, `${before}\n`);
+
+      expect(run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]).status).toBe(1);
+
+      const lines = readFileSync(starts, "utf8").split("\n").filter(Boolean);
+      expect(lines.length, "上限を超えて増えている").toBeLessThanOrEqual(20);
+      expect(lines.at(-1), "いま鳴ったぶんが落ちている").toContain("cron-blocked");
+    });
+
+    it("書けなくても、答えは変わらない", () => {
+      // **記録は診断**である——**取れなかったことは、書けても書けなくても同じ。**
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+      expect(held.status, held.stderr).toBe(0);
+      const starts = startsFile();
+      rmSync(starts, { force: true });
+      mkdirSync(starts, { recursive: true }); // **同じ名前のディレクトリ**（書けない）
+
+      const blocked = run(["acquire", "worker", stampFor("worker"), "--trigger", "cron"]);
+
+      expect(blocked.status, "書けないことで答えが変わっている").toBe(1);
+      // **文面は 1 つである**（`record_start`）——**取れた周回と同じ口を通る**ので、
+      // **どちらの記録が書けなかったかは、記録の中身が言う**（`AGENTS.md` §5）。
+      expect(blocked.stderr, "書けなかったことを黙っている").toContain("書けません");
+    });
+  });
+
   it("sha256sum が無くても、周回を始められる", () => {
     // **ホストには何もインストールしない**（§2）ので、**あることを前提にできない**
     // ——**入口 1.0 で必ず通る**ので、**無ければ周回が 1 つも始まらない**（#220 の形）。

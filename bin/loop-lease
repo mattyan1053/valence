@@ -34,6 +34,28 @@ readonly ROLES=(master worker)
 readonly TOKEN_BYTES=8
 readonly TOKEN_SHAPE="^[0-9a-f]{$((TOKEN_BYTES * 2))}$"
 
+# **周回の始まりを 1 行足して、増え続けさせない** (#378 / #537 のレビュー)。
+#
+# **足す口は 2 つある**——**取れた周回と、鳴ったが走れなかった周回**（#536）。
+# **刈り込みを片方だけに置くと、もう片方だけが増え続ける**（**共有の `.git` に
+# 1 つしかない記録**で、**`bin/loop-cadence` は毎回全行を走査し、`blocked=` が
+# 古い履歴まで数える**）——**判定も上限も、ここ 1 箇所が持つ**（`AGENTS.md` §5）。
+#
+# **書けなくても、呼んだ側の答えは変えない**（**記録は診断**）——**言うだけである。**
+# **`lock_state` の中から呼ぶ**ので、**読み書きは直列**である。
+record_start() {
+  if ! printf '%s\t%s\t%s\n' "$now" "$1" "${2-}" >>"$STARTS" 2>/dev/null; then
+    echo "[WARN] $SCOPE_LABEL の周回の始まりを書けません: $STARTS" >&2
+    return 0
+  fi
+  local kept_starts
+  kept_starts="$(tail -n "$RECENT_STARTS" "$STARTS" 2>/dev/null)" || return 0
+  if ! { printf '%s\n' "$kept_starts" >"$STARTS.tmp" 2>/dev/null &&
+    mv -f "$STARTS.tmp" "$STARTS" 2>/dev/null; }; then
+    rm -f "$STARTS.tmp" 2>/dev/null || true
+  fi
+}
+
 # **渡された値が token ですらないなら、そう言う** (#522)。**判定も文面も、ここ 1 箇所**
 # である（`AGENTS.md` §5）——**`mine` と `release` の両方が通る**（**同じ文面を出す口を
 # 数えて見つけた**。**呼び手を数えても出てこない**）。
@@ -1598,10 +1620,11 @@ acquire | recover)
     # **書けなくても、この周回の答えは変わらない**——**言うだけにして exit 1 を返す。**
     # **作業場は `set_role_paths` が既に引いている**（`WORKSPACE_PATH`）——**下の
     # 書き手はここより後で `git rev-parse` を打つ**ので、**ここでは使えない。**
-    if ! printf '%s\t%s\t%s\n' "$now" "$TRIGGER-blocked" "${WORKSPACE_PATH-}" \
-      >>"$STARTS" 2>/dev/null; then
-      echo "[WARN] 鳴ったが走れなかったことを書けません: $STARTS" >&2
-    fi
+    #
+    # **刈り込みも通る** (#537 のレビュー)——**この枝は追記して即終了する**ので、
+    # **取得側の刈り込みへ到達しない。** **成功する取得が来ない限り増え続け、
+    # `blocked=` が古い履歴まで数える。**
+    record_start "$TRIGGER-blocked" "${WORKSPACE_PATH-}"
     exit 1
   fi
   # token は「返す資格」を表すだけなので、衝突しなければよい。
@@ -1650,14 +1673,7 @@ acquire | recover)
   # **作業場も書く** (#381 のレビュー)。**共通ディレクトリは worktree をまたいで 1 つ**
   # なので、**消した作業場の記録も残る**——**読む側が「まだ居るか」を見られるようにする。**
   # **scope からは戻せない**（digest である）ので、**ここで書くしかない。**
-  if ! printf '%s\t%s\t%s\n' "$now" "$TRIGGER" "$workspace" >>"$STARTS" 2>/dev/null; then
-    echo "[WARN] $SCOPE_LABEL の周回の始まりを書けません: $STARTS" >&2
-  elif kept_starts="$(tail -n "$RECENT_STARTS" "$STARTS" 2>/dev/null)"; then
-    if ! { printf '%s\n' "$kept_starts" >"$STARTS.tmp" 2>/dev/null &&
-      mv -f "$STARTS.tmp" "$STARTS" 2>/dev/null; }; then
-      rm -f "$STARTS.tmp" 2>/dev/null || true
-    fi
-  fi
+  record_start "$TRIGGER" "$workspace"
   echo "$token"
   ;;
 release)
