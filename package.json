@@ -11,7 +11,7 @@
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
     "start": "next start --hostname 0.0.0.0",
-    "lint": "biome check .",
+    "lint": "biome check . --max-diagnostics=none",
     "lint:shell": "bin/lint-shell",
     "fix": "biome check --write .",
     "typecheck": "next typegen && tsc --noEmit",
