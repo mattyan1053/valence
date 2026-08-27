@@ -26,6 +26,18 @@ function exitSection(role: LoopRole): string {
   return end < 0 ? rest : rest.slice(0, end + 1);
 }
 
+/**
+ * **その語が節にちょうど 1 回だけ出ることを見る**（`AGENTS.md` §4）。
+ *
+ * **`toContain` では足りない**——**この節は理由を厚く書く**ので、**指示の行を
+ * 消しても、説明の散文に当たって緑になる**（**実際にそうなっていた**：
+ * **「他の役なら、突く」を消しても、次の行の「できるのは突くことだけ」に当たった**）。
+ * **1 回しか出ない語を選び、その 1 回を数える**——**指示を消せば 0 になる。**
+ */
+function expectOnce(section: string, phrase: string, role: LoopRole): void {
+  expect(section.split(phrase).length - 1, `${role} の出口で「${phrase}」が 1 回ではない`).toBe(1);
+}
+
 describe("周回の出口が、予定表を見ている", () => {
   for (const role of ROLES) {
     it(`${role} の出口が、止まっている行だけを引く`, () => {
@@ -35,12 +47,29 @@ describe("周回の出口が、予定表を見ている", () => {
     });
 
     it(`${role} は、止まっていたときに何をするかを持っている`, () => {
-      // **見つけるだけでは終わらない**——**自分のぶんは入れ直し、他の役は突く。**
+      // **見つけるだけでは終わらない**——**自分のぶんは確かめて直し、他は突く。**
       // **他のセッションの予定表は入れ直せない**ので、**そこを取り違えない。**
       const section = exitSection(role);
 
-      expect(section, "自分のぶんを入れ直す道が無い").toContain("CronList");
-      expect(section, "他の役を突く道が無い").toContain("突く");
+      expectOnce(section, "CronList", role);
+      expectOnce(section, "突く", role);
+    });
+
+    it(`${role} は、止まっている作業場を役で分けていない`, () => {
+      // **worker は何人居てもよい**（入口 1.0）——**「他の役なら」で分けると、
+      // 別の worker の行はどちらの分岐にも当たらない**（`workspace=` は自分のもの
+      // ではなく、役は同じ `worker` である）。**分けるのは作業場である。**
+      const section = exitSection(role);
+
+      expectOnce(section, "自分の作業場なら", role);
+      expectOnce(section, "自分の作業場でないなら", role);
+    });
+
+    it(`${role} は、突くことを引き継ぎと切り離している`, () => {
+      // **`bin/loop-handoff` は、渡すものが無ければ exit 1 で「送らない」**——
+      // **そこへ添えると決めると、止まっている作業場を見つけた周回が黙る。**
+      // **止まっているかどうかは、渡すものの有無と関係がない。**
+      expectOnce(exitSection(role), "引き継ぎではない", role);
     });
   }
 });
