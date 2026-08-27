@@ -198,7 +198,7 @@ describe("`./task check` が、打つ前に見る", () => {
 
   it("走らせる前に見る", () => {
     // **打ったあとに気づいても遅い**——**2 本走り始めている**（#509）
-    const looked = check.indexOf("loop-check-leftovers");
+    const looked = check.indexOf("check_leftovers");
     const ran = check.indexOf("exec_app pnpm check");
 
     expect(looked, "見ていない").toBeGreaterThanOrEqual(0);
@@ -206,15 +206,26 @@ describe("`./task check` が、打つ前に見る", () => {
     expect(looked, "打ってから見ている").toBeLessThan(ran);
   });
 
-  it("この作業場の名前を渡す", () => {
-    // **正規化は `task` が持つ**（`AGENTS.md` §5）——**引く先を 2 箇所で組み立てない**
-    expect(check, "作業場を渡していない").toContain('loop-check-leftovers "$(workspace_name)"');
+  it("作業場の名前を組み立てるのは、1 箇所である", () => {
+    // **正規化は `task` が持つ**（`AGENTS.md` §5）——**呼ぶ側で組み立てない。**
+    // **口が 2 つある**（`./task check` の中と、`./task check:leftovers`）ので、
+    // **名前を渡すところが増えると、片方だけ直して食い違う。**
+    const calls = runner.split("\n").filter((row) => row.includes("./bin/loop-check-leftovers"));
+
+    expect(calls, "渡すところが 1 箇所ではない").toHaveLength(1);
+    expect(calls[0], "作業場を渡していない").toContain('"$(workspace_name)"');
+  });
+
+  it("単独で打てる口がある", () => {
+    // **`./task check` の中だけだと、手順書の受け方で報せが消える**
+    // （#529 のレビュー 3 周目）——**リダイレクトの外から打てること。**
+    expect(runner, "単独で打てない").toContain("cmd_check_leftovers()");
   });
 
   it("見つかっても、check は止めない", () => {
     // **`./task test:watch` のように、人が意図して走らせているものもある**
     // ——**止める側へ倒すと、正しく走っているものを止める。** **言うだけにする。**
-    const line = check.split("\n").find((row) => row.includes("loop-check-leftovers")) ?? "";
+    const line = check.split("\n").find((row) => row.includes("check_leftovers")) ?? "";
 
     expect(line, "落ちる側になっている").toContain("|| true");
   });
