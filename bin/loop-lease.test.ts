@@ -653,6 +653,48 @@ describe("bin/loop-lease", () => {
       expect(run(["release", "worker", token]).status, "見ただけで返せなくなっている").toBe(0);
     });
 
+    /**
+     * **token でない値を渡したときに、「別の周回が持っている」と言わない**（#522）。
+     *
+     * **踏んだのは `bin/loop-handoff --sent` に msg_id を渡したとき**である
+     * ——**lease は自分が握ったまま**なのに、**「返したあとに、次の周回が
+     * 取っています」**と言われた。**信じると、握ったままの周回が `release` を
+     * 打ち直すか、出口を途中でやめる**（**どちらもやってはいけない**）。
+     *
+     * **これは #497 と同じ形**である（**原因を確かめずに 1 つに決める**）。
+     */
+    describe("渡された値が token の形でないとき", () => {
+      it("「別の周回が持っている」と言わない", () => {
+        const token = acquire().stdout.trim();
+        expect(token, "握れていない").not.toBe("");
+
+        const answered = run(["mine", "worker", "06d4e9a4-0eb2-46d0-aa86-35133b9366fb"]);
+
+        // **握っているのは、いまのこの周回である**——**起きていないことを言わない**
+        expect(answered.stderr, "起きていないことを言っている").not.toContain("別の周回");
+        expect(answered.stderr, "渡された値のことだと分からない").toContain("token の形");
+      });
+
+      it("本当に別の周回が持っているときは、これまでどおり言う", () => {
+        // **消してはいけないほう**——**#522 が分けたいのは、この 2 つである**
+        acquireInAnotherSession();
+
+        const answered = run(["mine", "worker", "0123456789abcdef"]);
+
+        expect(answered.stderr, "別の周回が持っていることが出ない").toContain("別の周回");
+      });
+
+      it("資格としては通さない（これまでどおり）", () => {
+        const token = acquire().stdout.trim();
+        expect(token, "握れていない").not.toBe("");
+
+        expect(
+          run(["mine", "worker", "06d4e9a4-0eb2-46d0-aa86-35133b9366fb"]).status,
+          "token でない値を資格として通している",
+        ).not.toBe(0);
+      });
+    });
+
     it("token を渡さなければ、使い方の誤りとして落ちる", () => {
       // **古い手順書が打つ形**である（#340 の版）——**「持っている」へ倒さない**
       expect(run(["mine", "worker"]).status).toBe(2);

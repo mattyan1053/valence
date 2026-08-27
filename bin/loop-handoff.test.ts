@@ -1029,6 +1029,29 @@ describe("bin/loop-handoff", () => {
       expect(run("worker").status, "記録が上がっていて、2 通目が出ない").toBe(0);
     });
 
+    it("token でない値を渡したときも、そのことが理由に出る", () => {
+      // **#522**——**握ったままなのに「返したあと・次が取り直した・期限切れ」の
+      // どれかだと言われた。** **並べた理由に「そもそも token ではない」が無い**
+      // ので、**読んだ側は出口の順序を壊したと考える**（**握っているのに
+      // `release` を打ち直すか、出口を途中でやめる**）。
+      const token = acquireLease("worker");
+      try {
+        const broken = runWith(["worker", "--sent=06d4e9a4-0eb2-46d0-aa86-35133b9366fb"]);
+
+        expect(broken.status, "token でない値で記録できている").not.toBe(0);
+        // **並べている理由の行だけを見る**（`AGENTS.md` §4）——**stderr 全体で見ると、
+        // `bin/loop-lease` 側の文面に当たって緑になる**（**実際に、こちらを直さずに
+        // 通った**）。**この語を持つ行は 1 本だけ**である。
+        const reasons = broken.stderr.split("\n").find((line) => line.includes("のいずれかです"));
+        expect(reasons, "理由を並べている行が無い").toBeDefined();
+        expect(reasons, "並べた理由に、token の形の話が無い").toContain("token の形");
+      } finally {
+        releaseLease("worker", token);
+      }
+
+      expect(run("worker").status, "記録が上がっていて、2 通目が出ない").toBe(0);
+    });
+
     it("握っている周回では、これまでどおり記録できる", () => {
       // **退行の検出。** **厳しくしすぎると、正常な周回が記録できなくなる**
       // ——**そのときは毎周回 2 通目が出る**

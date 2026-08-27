@@ -25,6 +25,15 @@ set -uo pipefail
 # **直列化しているつもりで 2 つ走る**。master と worker は互いを待たせない。
 readonly ROLES=(master worker)
 
+# **token の形は、ここ 1 箇所で決める** (#522)。**作る側（`acquire`）と読む側（`mine`）で
+# 食い違わせない**（`AGENTS.md` §5）——**作った直後に、この形で確かめている。**
+#
+# **形を見るのは、「渡された値が token ですらない」と「別の周回が持っている」を
+# 言い分けるため**である。**一律で後者だと言うと、握ったままの周回が
+# 「出口の順序を壊した」と読む**——**`release` を打ち直すか、出口を途中でやめる。**
+readonly TOKEN_BYTES=8
+readonly TOKEN_SHAPE="^[0-9a-f]{$((TOKEN_BYTES * 2))}$"
+
 # 抱えたままの lease を引き継ぐまでの時間。**周回が落ちても、その役のループが
 # 二度と動かなくならないようにする。**
 #
@@ -1418,6 +1427,16 @@ mine)
   # **周回ごとに違う証拠は最初からある**——**`acquire` が返し、`release` が要求する
   # token** である。**資格は token が持つ**（`release` と同じ線）。
   [[ $# -eq 3 ]] || usage
+  # **記録を読む前に、渡された値そのものを見る** (#522)。**握っているかどうかとは
+  # 別のこと**である——**一律で「別の周回が持っています」と言うと、握ったままの周回に
+  # 起きていないことを伝える**（#497 と同じ形。**原因を確かめずに 1 つに決めない**）。
+  #
+  # **記録に触らずに答える**——**token ですらない値では、引き当てる先が無い。**
+  if [[ ! $3 =~ $TOKEN_SHAPE ]]; then
+    echo "[INFO] 渡された値は token の形ではありません（$SCOPE_LABEL の lease は見ていません）" >&2
+    echo "       token は入口の acquire が出したものです（$((TOKEN_BYTES * 2)) 桁の 16 進）" >&2
+    exit 1
+  fi
   if [[ -z $held_token && -z $expired_token ]]; then
     switch_to_renamed_state "$3"
     case "$?" in
@@ -1550,7 +1569,9 @@ acquire | recover)
     exit 1
   fi
   # token は「返す資格」を表すだけなので、衝突しなければよい。
-  if ! token="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')" || [[ -z $token ]]; then
+  # **読む側と同じ定数から作る** (#522)——**片方だけ変えると、作った直後に落ちる**
+  if ! token="$(od -An -tx1 -N"$TOKEN_BYTES" /dev/urandom | tr -d ' \n')" ||
+    [[ ! $token =~ $TOKEN_SHAPE ]]; then
     echo "[FAIL] token を生成できません" >&2
     exit 2
   fi
