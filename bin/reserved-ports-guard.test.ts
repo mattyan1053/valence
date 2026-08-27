@@ -158,13 +158,25 @@ describe("予約したポートの見張り", () => {
     expect(result.status, `落ちている: ${result.stderr}`).toBe(0);
   });
 
-  it("bind できないなら、落ちる", () => {
-    // **見張りを外さない。** **先に掴まれている状態は実際に起きる**
-    // ——**変わったのは「何をもって塞がっているとするか」だけ**である (#432)
+  it("bind できなくても、この step では落とさない", () => {
+    // **やり直しが片側にしか無かった** (#534)。**`bin/db-start` は #366 で
+    // やり直すのに、その手前のここで落ちるので届かない**——**runner 自身の
+    // 外向き接続が 543xx を掴んだだけで、PR の中身と関係なく赤くなった。**
+    //
+    // **見張りを外したのではない。** **落とす役を、やり直しを持っている側へ寄せた**
+    // ——**塞がったままなら `bin/db-start` が落とす**（`bin/db-start.test.ts`）。
     const result = runGuard({ listening: ["54322"], blocked: ["54322"] });
 
-    expect(result.status).toBe(1);
+    expect(result.status, "やり直しへ届かないまま落としている").toBe(0);
     expect(result.stderr, "何が握っていたか読めない").toContain("54322");
+  });
+
+  it("bind できないときは、次に何が起きるかを言う", () => {
+    // **黙って通さない** (#534)。**「言うだけ」にした以上、読み手は
+    // 「なぜ通ったのか」を知れないと、次に落ちたとき見に来られない。**
+    const result = runGuard({ listening: ["54322"], blocked: ["54322"] });
+
+    expect(result.stderr, "やり直す側の名前が出ていない").toContain("bin/db-start");
   });
 
   it("状態で絞り込んでいる（呼び方を見る）", () => {
@@ -196,7 +208,7 @@ describe("予約したポートの見張り", () => {
     // **落ちたときに読むのはこの出力だけ**である（TIME-WAIT も含めて出す）
     const result = runGuard({ connected: ["54322"], blocked: ["54322"] });
 
-    expect(result.status).toBe(1);
+    expect(result.status, "やり直しへ届かないまま落としている").toBe(0);
     expect(result.stderr, "参考の一覧が出ていない").toContain("TIME-WAIT");
   });
 
