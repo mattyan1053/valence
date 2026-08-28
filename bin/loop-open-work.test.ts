@@ -24,8 +24,17 @@ const FIELD = "";
 
 type Pr = { number: number; labels: string[] };
 
+/**
+ * **label も 1 つずつ列にする**（#550）。
+ *
+ * **カンマで繋がない**——**GitHub の label 名にはカンマを入れられる**ので、
+ * **`parked,awaiting-human` という 1 つの label が、2 つに見える。**
+ *
+ * **`<US>` が入らないことは確かめていない**（**スクリプトの冒頭にも書いてある**）
+ * ——**カンマよりは入りにくい**、までである。
+ */
 function lines(prs: readonly Pr[]): string {
-  return prs.map((pr) => [pr.number, pr.labels.join(",")].join(FIELD)).join("\n");
+  return prs.map((pr) => [pr.number, ...pr.labels].join(FIELD)).join("\n");
 }
 
 function run(input: string): { status: number; stdout: string; stderr: string } {
@@ -72,12 +81,30 @@ describe("着手できる open PR を数える", () => {
     expect(listed.stdout).toBe("0");
   });
 
-  it("label が似ているだけの PR を、人待ちに数えない", () => {
-    // **前方一致で見ない**——**`parked-later` のような label が付いた日に、
-    // 着手できる PR が黙って数から消える**
-    const listed = lines([{ number: 545, labels: ["parked-later", "awaiting-human-review"] }]);
+  it("カンマを含む 1 つの label を、2 つの label と見ない", () => {
+    // **GitHub の label 名にはカンマを入れられる**（#550）——**繋いでから
+    // 部分一致で見ると、`parked,awaiting-human` という名前の label が付いた
+    // ふつうの PR が、人待ちとして数から消える**（**そのまま `no-work` が積まれる**）
+    const listed = lines([{ number: 545, labels: ["parked,awaiting-human"] }]);
 
     expect(run(listed).stdout).toBe("1");
+  });
+
+  it("label が似ているだけの PR を、人待ちに数えない", () => {
+    // **前方一致で見ない**——**`parked-later` のような label が付いた日に、
+    // 着手できる PR が黙って数から消える。**
+    //
+    // **片側ずつ確かめる。** **両方とも似た名前にすると、片方だけ前方一致で見る
+    // 実装が生き残る**（**実際に生き残った**）——**もう片方が付いていないので、
+    // どちらにせよ人待ちにならない。**
+    expect(
+      run(lines([{ number: 545, labels: ["parked-later", "awaiting-human"] }])).stdout,
+      "`parked` を前方一致で見ている",
+    ).toBe("1");
+    expect(
+      run(lines([{ number: 545, labels: ["parked", "awaiting-human-review"] }])).stdout,
+      "`awaiting-human` を前方一致で見ている",
+    ).toBe("1");
   });
 
   it("最後の行に改行が無くても数える", () => {

@@ -70,8 +70,9 @@ function countWith(prs: readonly Pr[]): string {
     mkdirSync(join(workspace, "bin"), { recursive: true });
     copyFileSync(join(REPO_ROOT, "bin/loop-open-work"), join(workspace, "bin/loop-open-work"));
 
+    // **label も 1 つずつ列にする**（#550。**カンマで繋がない**）
     const listed = prs
-      .map((pr) => `${pr.number}${FIELD}${pr.labels.join(",")}`)
+      .map((pr) => [pr.number, ...pr.labels].join(FIELD))
       .join("\\n")
       .replaceAll("'", "'\\''");
     writeFileSync(
