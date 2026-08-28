@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -452,7 +453,12 @@ describe("作業場を並べられないとき", () => {
    *
    * **砂場は本物の worktree を触らない**——**自分の repo に自分で足す。**
    */
-  function runTask(failWorktreeList: boolean): { status: number; stderr: string } {
+  function runTask(failWorktreeList: boolean): {
+    status: number;
+    stderr: string;
+    asked: string;
+    added: string;
+  } {
     const stubs = mkdtempSync(join(tmpdir(), "worktree-list-"));
     sandboxes.push(stubs);
     writeFileSync(
@@ -466,9 +472,19 @@ describe("作業場を並べられないとき", () => {
     );
     chmodSync(join(stubs, "git"), 0o755);
     // **コンテナは見に行かせない**——**見たいのは並べるところ**である
-    writeFileSync(join(stubs, "docker"), '#!/usr/bin/env bash\nprintf ""\nexit 0\n', {
-      mode: 0o755,
-    });
+    // **何を訊かれたかを残す**（#557 のレビュー）——**「警告が出ない」だけでは、
+    // `--elsewhere` を 1 度も呼ばない実装でも通る。**
+    const asked = join(stubs, "docker.log");
+    writeFileSync(
+      join(stubs, "docker"),
+      [
+        "#!/usr/bin/env bash",
+        `printf '%s\\n' "$*" >>${JSON.stringify(asked)}`,
+        'printf ""',
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
     chmodSync(join(stubs, "docker"), 0o755);
 
     const repo = mkdtempSync(join(tmpdir(), "leftovers-repo-"));
@@ -524,7 +540,12 @@ describe("作業場を並べられないとき", () => {
       encoding: "utf8",
       env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` },
     });
-    return { status: done.status ?? -1, stderr: done.stderr };
+    return {
+      status: done.status ?? -1,
+      stderr: done.stderr,
+      asked: existsSync(asked) ? readFileSync(asked, "utf8") : "",
+      added,
+    };
   }
 
   it("並べられなければ、そう言う", () => {
@@ -539,6 +560,29 @@ describe("作業場を並べられないとき", () => {
     const done = runTask(true);
 
     expect(done.status, "他所の事情で合否が変わっている").toBe(0);
+  });
+
+  it("並べた作業場を、実際に見に行く", () => {
+    // **足しただけでは、判定に届いていない**（#557 のレビュー）——**`--elsewhere` を
+    // 1 度も呼ばない実装でも「警告が出ない」は通る。** **訊かれた先で見る。**
+    //
+    // **compose の project は作業場ごと**なので、**足した worktree の名前で
+    // `docker ps` が引かれていれば、その作業場を見に行っている。**
+    const done = runTask(false);
+    const projects = new Set(
+      [...done.asked.matchAll(/com\.docker\.compose\.project=(\S+)/g)].map(
+        ([, project]) => project ?? "",
+      ),
+    );
+
+    // **名前の作り方は `task` が持つ**（`normalize_workspace_name`）ので、
+    // **ここで組み立て直さない**（**写すと、正規化を 2 箇所に持つ**）
+    // ——**見るのは「自分のぶんだけではない」ことと、足した作業場が居ること**である。
+    expect(projects.size, "自分の作業場しか見に行っていない").toBeGreaterThanOrEqual(2);
+    expect(
+      [...projects].filter((project) => project.endsWith("-worker-b")),
+      "足した作業場を見に行っていない",
+    ).toHaveLength(1);
   });
 
   it("並べられたときは、余計なことを言わない", () => {
