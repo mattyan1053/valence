@@ -3,7 +3,7 @@
 #
 #   bin/loop-in-progress-work <Issue番号> [<Issue番号>...] < <open PR の一覧>
 #
-#   標準入力: 1 行 1 PR。`<PR番号><US><枝><US><label><US><label>...`
+#   標準入力: 1 行 1 PR。`<PR番号><US><枝><US><著者><US><label><US><label>...`
 #   標準出力: 着手を進められる Issue の件数（1 行）
 #
 #   exit 0 = 数えた (0 件でも 0)
@@ -34,6 +34,24 @@
 # **親子は書き写さない** (`AGENTS.md` §5)。**`bin/loop-issue-descendants` が持っている**
 # ——**タイトルの末尾で結び、孫まで辿り、輪で止まる**（#544 / #545）。
 #
+# **ループの外から出た PR は、この Issue の実装ではない** (#559 のレビュー)。
+# **枝の名前は誰でも付けられる**ので、**fork から `fix/501-...` で出た
+# `parked` + `awaiting-human` の PR が、#501 の「唯一の PR」になりうる**
+# ——**その Issue は数から落ち**、**ほかに作業が無ければ 3 周で全ループが止まる。**
+# **外の人に triage 権限は無い**ので、**自分では `parked` を外せない**（#70）。
+#
+# **著者の判定は書き写さない** (`AGENTS.md` §5)。**`bin/loop-outside-author` が
+# 持っている**——**`bin/loop-parked-issues` が使っているのと同じ境目**である。
+# **名前で訊く**（`--author`）——**番号で訊くと向こうが `gh pr view` を打ち、
+# 「一覧は引き直さない」が崩れる。**
+#
+# **判らないときは、作業が残っている側へ倒す。** **倒す先で壊れ方が違う**——
+# **中へ倒すと、その Issue が数から落ち、`no-work` が通って全ループが止まる。**
+# **外へ倒すと、数が 1 多いだけ**である（**人が呼ばれるのが遅れる**）。
+# **`bin/loop-parked-issues` は「これまでどおり数える」側へ倒している**が、
+# **同じ言葉ではない**——**どちらも「ループが止まらない側」であって、
+# 「中と読む側」ではない。**
+#
 # **一覧は引き直さない**（`bin/loop-parked-issues` と同じ）——**呼ぶ側が既に取っている。**
 #
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
@@ -41,7 +59,7 @@ set -uo pipefail
 
 usage() {
   echo "使い方: bin/loop-in-progress-work <Issue番号> [<Issue番号>...] < <open PR の一覧>" >&2
-  echo "        1 行 1 PR: <PR番号><US><枝><US><label><US><label>..." >&2
+  echo "        1 行 1 PR: <PR番号><US><枝><US><著者><US><label><US><label>..." >&2
   echo "        exit 0 = 数えた / exit 2 = 読めない" >&2
   exit 2
 }
@@ -59,6 +77,7 @@ HERE="${0%/*}"
 [[ $HERE != "$0" ]] || HERE="."
 readonly HERE
 readonly OPEN_WORK="$HERE/loop-open-work"
+readonly OUTSIDE_AUTHOR="$HERE/loop-outside-author"
 readonly DESCENDANTS="$HERE/loop-issue-descendants"
 
 # **一覧をまるごと受ける。** **Issue ごとに絞って `bin/loop-open-work` へ渡す。**
@@ -71,6 +90,8 @@ listed="$(cat)" || {
 # **割った親の子孫を、1 度だけ引く**（#559 のレビュー）。**訊く先は 1 つ**なので、
 # **親子の規則がそこにしか無い**（**写していない**）。
 declare -A tree=()
+# 著者ごとの答え（`bin/loop-outside-author` の終了コード）。**同じ問いを 2 度訊かない。**
+declare -A inside=()
 if (($# > 0)); then
   if ! descendants="$("$DESCENDANTS" "$@")"; then
     echo "[FAIL] 割った親の子孫を並べられません" >&2
@@ -97,10 +118,18 @@ for issue in "$@"; do
       exit 2
     fi
     branch="${fields[1]-}"
+    author="${fields[2]-}"
     # **番号のあとに区切りが要る** (`.claude/rules/git-workflow.md`)——**前方一致で
     # 結ぶと `fix/5011-x` が #501 の PR になる。**
     [[ $branch =~ ^[a-z]+/([0-9]+)- ]] || continue
     named="${BASH_REMATCH[1]}"
+    # **外から出た PR は、この Issue の実装ではない**——**同じ著者は 1 度しか訊かない**
+    if [[ -z ${inside[$author]-} ]]; then
+      "$OUTSIDE_AUTHOR" --author "$author" >/dev/null 2>&1
+      inside[$author]="$?"
+    fi
+    # **1（ループのアカウント）だけが「中」**——**0（外）も 2（判らない）も外す**
+    [[ ${inside[$author]} == "1" ]] || continue
     # **その Issue そのものか、割った子孫か**（#559 のレビュー）
     [[ $named == "$issue" || " ${tree[$issue]-} " == *" $named "* ]] || continue
     # **区切りで繋ぎ直す。** **`${fields[*]}` は IFS の先頭文字で繋ぐ**ので、

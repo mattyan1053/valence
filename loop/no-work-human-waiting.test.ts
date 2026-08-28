@@ -54,7 +54,10 @@ function countingBlock(): string {
   return found.join("\n");
 }
 
-type Pr = { number: number; branch?: string; labels: string[] };
+type Pr = { number: number; branch?: string; author?: string; labels: string[] };
+
+/** ループが認証しているアカウント。**既定はこれ**（**中から出た PR**）。 */
+const LOOP_ACCOUNT = "loop-account";
 
 /** そのブロックが `gh` へ渡す `--jq` の式。 */
 function expressionOf(block: string): string {
@@ -79,8 +82,14 @@ function renderAs(expression: string, prs: readonly Pr[]): string {
   // 要る**ので、**同じ一覧に 1 列増えた。** **式に無ければ出さない**
   // （**演じられないものを、演じたことにしない**）。
   const branchAt = expression.indexOf(".headRefName");
+  // **著者の列も式から読む** (#559 のレビュー)——**ループの外から出た PR を
+  // 実装として数えないために要る。** **枝と違って、無ければ落とす**
+  // ——**列が出ていなければ、その隣の列が著者として読まれる**ので、
+  // **演じずに黙って進むと、判定が当たっていないまま緑になる。**
+  const authorAt = expression.indexOf(".author.login");
   expect(numberAt, "式が PR 番号を出していない").toBeGreaterThanOrEqual(0);
   expect(labelsAt, "式が label を出していない").toBeGreaterThanOrEqual(0);
+  expect(authorAt, "式が著者を出していない").toBeGreaterThanOrEqual(0);
   const joinsLabels = expression.includes('join(",")');
 
   return prs
@@ -94,6 +103,7 @@ function renderAs(expression: string, prs: readonly Pr[]): string {
       if (branchAt >= 0) {
         columns.push({ at: branchAt, text: pr.branch ?? `fix/999-${pr.number}` });
       }
+      columns.push({ at: authorAt, text: pr.author ?? LOOP_ACCOUNT });
       return columns
         .sort((left, right) => left.at - right.at)
         .map((column) => column.text)
@@ -130,9 +140,14 @@ function countWith(prs: readonly Pr[]): string {
 
     writeFileSync(
       join(stub, "gh"),
-      ["#!/usr/bin/env bash", `printf '${listed === "" ? "" : `${listed}\\n`}'`, "exit 0", ""].join(
-        "\n",
-      ),
+      [
+        "#!/usr/bin/env bash",
+        // **著者の判定に要る一手**（`bin/loop-outside-author` が訊く）——**一覧とは別**
+        `if [[ $* == *"api user"* ]]; then printf '%s\\n' '${LOOP_ACCOUNT}'; exit 0; fi`,
+        `printf '${listed === "" ? "" : `${listed}\\n`}'`,
+        "exit 0",
+        "",
+      ].join("\n"),
       { mode: 0o755 },
     );
     // **落ちたら停止を積む側も偽物にする**（本物を呼ぶと、試験がカウンタを動かす）
@@ -267,7 +282,12 @@ describe("人待ちの PR を持つ着手中", () => {
       mkdirSync(stub, { recursive: true });
       mkdirSync(join(workspace, "bin"), { recursive: true });
       // **親子を引く口も要る** (#559 のレビュー)——**数える側が呼ぶ**
-      for (const name of ["loop-open-work", "loop-in-progress-work", "loop-issue-descendants"]) {
+      for (const name of [
+        "loop-open-work",
+        "loop-in-progress-work",
+        "loop-issue-descendants",
+        "loop-outside-author",
+      ]) {
         copyFileSync(join(REPO_ROOT, "bin", name), join(workspace, "bin", name));
       }
 
@@ -285,6 +305,8 @@ describe("人待ちの PR を持つ着手中", () => {
           `  printf '${titles === "" ? "" : `${titles}\\n`}'`,
           "  exit 0",
           "fi",
+          // **著者の判定に要る一手**（`bin/loop-outside-author` が訊く）——**一覧とは別**
+          `if [[ $* == *"api user"* ]]; then printf '%s\\n' '${LOOP_ACCOUNT}'; exit 0; fi`,
           'if [[ $* == *"issue list"* ]]; then',
           `  printf '${numbers === "" ? "" : `${numbers}\\n`}'`,
           "  exit 0",
@@ -336,6 +358,25 @@ describe("人待ちの PR を持つ着手中", () => {
     );
 
     expect(counted, "割った親に結べていない").toBe("0");
+  });
+
+  it("ループの外の著者の PR を、実装として数えない", () => {
+    // **枝の名前は誰でも付けられる** (#559 のレビュー)——**fork から `fix/501-...` で
+    // 出た `parked` + `awaiting-human` の PR が #501 の「唯一の PR」になると、
+    // その Issue は数から落ちる**（**外の人に triage 権限は無い**ので、#70）。
+    const counted = countWorkable(
+      [
+        {
+          number: 900,
+          branch: "fix/501-x",
+          author: "outsider",
+          labels: ["parked", "awaiting-human"],
+        },
+      ],
+      [501],
+    );
+
+    expect(counted, "外の PR を実装として数えている").toBe("1");
   });
 
   it("PR がまだ無い Issue は、これまでどおり数える", () => {

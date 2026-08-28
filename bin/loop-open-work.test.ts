@@ -22,7 +22,7 @@ const SCRIPT = fileURLToPath(new URL("./loop-open-work", import.meta.url));
 /** 列の区切り。**本物と同じ**（`bin/loop-parked-issues` が使っているもの）。 */
 const FIELD = "";
 
-type Pr = { number: number; branch?: string; labels: string[] };
+type Pr = { number: number; branch?: string; author?: string; labels: string[] };
 
 /**
  * **label も 1 つずつ列にする**（#550）。
@@ -34,10 +34,18 @@ type Pr = { number: number; branch?: string; labels: string[] };
  * ——**カンマよりは入りにくい**、までである。
  */
 function lines(prs: readonly Pr[]): string {
-  // **2 列目は枝である** (#558)——**同じ一覧を `bin/loop-in-progress-work` も回す**ので、
-  // **列が 1 つ増えた。** **この口は使わないが、読み飛ばす位置は合っていること。**
+  // **2 列目は枝、3 列目は著者である**（#558 / #559 のレビュー）——**同じ一覧を
+  // `bin/loop-in-progress-work` も回す**ので、**列が 2 つ増えた。**
+  // **この口はどちらも使わないが、読み飛ばす位置は合っていること。**
   return prs
-    .map((pr) => [pr.number, pr.branch ?? `fix/999-${pr.number}`, ...pr.labels].join(FIELD))
+    .map((pr) =>
+      [
+        pr.number,
+        pr.branch ?? `fix/999-${pr.number}`,
+        pr.author ?? "loop-account",
+        ...pr.labels,
+      ].join(FIELD),
+    )
     .join("\n");
 }
 
@@ -50,6 +58,15 @@ describe("着手できる open PR を数える", () => {
   it("人待ちの PR は数に入れない", () => {
     // **人だけが解ける**——**`blocked` の Issue と同じ扱いである**
     expect(run(lines([{ number: 502, labels: ["parked", "awaiting-human"] }])).stdout).toBe("0");
+  });
+
+  it("著者の名前を label として読まない", () => {
+    // **列が増えた側は、自分の diff に出てこない** (`AGENTS.md` §5)——**読み飛ばす
+    // 位置がずれても、ほとんどの入力では緑になる。** **GitHub のログイン名は
+    // label と同じ字種**なので、**`parked` という名前のアカウントは実在しうる。**
+    const listed = run(lines([{ number: 502, author: "parked", labels: ["awaiting-human"] }]));
+
+    expect(listed.stdout, "著者を label として数えている").toBe("1");
   });
 
   it("先行 PR 待ちの保留は数に入れる", () => {

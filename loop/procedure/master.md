@@ -1187,16 +1187,19 @@ gh issue edit <N> --remove-label waiting-condition
 どちらも正しく見える**）。
 
 ```bash
-# 開いている PR の一覧（1 行 1 件。`<PR番号><US><枝><US><label><US><label>...`）
+# 開いている PR の一覧（1 行 1 件。`<PR番号><US><枝><US><著者><US><label><US><label>...`）
 # **label をカンマで繋がない** (#550)——**GitHub の label 名にはカンマを入れられる**
 # ので、**繋ぐと `parked,awaiting-human` という 1 つの label が 2 つに見える**
 # **枝も取る** (#558)——**`bin/loop-in-progress-work` が Issue と結ぶのに要る**
 # （**`Closes` を書かない PR がある**。#321）。**一覧は 1 つにする**——**引き直すと、
 # 同じ周回の中に 2 つの一覧ができ、そこだけ古い値になりうる**
+# **著者も取る** (#559 のレビュー)——**枝の名前は誰でも付けられる**ので、
+# **ループの外から出た PR が、その Issue の「唯一の PR」になりうる**
+# （**判定は `bin/loop-outside-author` が持つ**。#70）
 # **先に変数へ受ける。** パイプで繋ぐと `$?` は数える側のものになり、
 # **取得できなかった周回が「0 件」と見分けが付かない**
-if ! open_prs="$(gh pr list --state open --limit 200 --json number,headRefName,labels \
-  --jq '.[] | [(.number | tostring), .headRefName] + [.labels[].name] | join("\u001f")')"; then
+if ! open_prs="$(gh pr list --state open --limit 200 --json number,headRefName,author,labels \
+  --jq '.[] | [(.number | tostring), .headRefName, .author.login] + [.labels[].name] | join("\u001f")')"; then
   bin/loop-stall pr-lookup-failed
   exit
 fi

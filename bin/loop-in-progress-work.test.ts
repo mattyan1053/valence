@@ -10,10 +10,17 @@ const SCRIPT = fileURLToPath(new URL("./loop-in-progress-work", import.meta.url)
 /** 列の区切り。**本物と同じ**（`bin/loop-open-work` が使っているもの）。 */
 const FIELD = "\u001f";
 
-type Pr = { number: number; branch: string; labels?: string[] };
+type Pr = { number: number; branch: string; author?: string; labels?: string[] };
+
+/** ループが認証しているアカウント。**既定はこれ**（**中から出た PR**）。 */
+const LOOP_ACCOUNT = "loop-account";
 
 function lines(prs: readonly Pr[]): string {
-  return prs.map((pr) => [pr.number, pr.branch, ...(pr.labels ?? [])].join(FIELD)).join("\n");
+  return prs
+    .map((pr) =>
+      [pr.number, pr.branch, pr.author ?? LOOP_ACCOUNT, ...(pr.labels ?? [])].join(FIELD),
+    )
+    .join("\n");
 }
 
 const sandboxes: string[] = [];
@@ -29,7 +36,13 @@ afterEach(() => {
  *
  * **身代わりを置く**——**この機械の実物の Issue で合否を決めない**（#556 と同じ理由）。
  */
-function run(issues: readonly number[], input: string, titles: Record<number, string> = {}) {
+function run(
+  issues: readonly number[],
+  input: string,
+  titles: Record<number, string> = {},
+  /** ループが認証しているアカウント。**空にすると「読めない」**（`gh` が落ちた形）。 */
+  account: string = LOOP_ACCOUNT,
+) {
   const dir = mkdtempSync(join(tmpdir(), "in-progress-work-"));
   sandboxes.push(dir);
   const listed = Object.entries(titles)
@@ -39,6 +52,12 @@ function run(issues: readonly number[], input: string, titles: Record<number, st
     join(dir, "gh"),
     [
       "#!/usr/bin/env bash",
+      // **著者の判定に要る一手**（`bin/loop-outside-author` が訊く）——**一覧とは別**
+      'if [[ $* == *"api user"* ]]; then',
+      ...(account === ""
+        ? ['  echo "gh が落ちた" >&2', "  exit 1"]
+        : [`  printf '%s\\n' ${JSON.stringify(account)}`, "  exit 0"]),
+      "fi",
       // **`%b` で出す**——**`%s` だと `\\t` が literal のまま渡り、列が割れない**
       `printf '%b' ${JSON.stringify(listed === "" ? "" : `${listed}\n`)}`,
       "exit 0",
@@ -70,6 +89,37 @@ describe("着手を進められる in-progress を数える", () => {
   it("PR がまだ無い Issue は、これまでどおり数える", () => {
     // **実装している最中である**——**外すと、3 周で全ループが止まる**
     expect(run([501], "").stdout).toBe("1");
+  });
+
+  it("ループの外の著者の PR は、その Issue の実装として数えない", () => {
+    // **一覧に著者が入っていなかった** (#559 のレビュー)——**枝の名前だけで結ぶと、
+    // fork から `fix/501-...` で出た `parked` + `awaiting-human` の PR が、
+    // #501 の「唯一の PR」になる。** **その Issue は着手中の数から落ち**、
+    // **ほかに作業が無ければ 3 周で全ループが止まる。**
+    //
+    // **外の人に triage 権限は無い**ので、**自分では `parked` を外せない**（#70）
+    // ——**ループが解ける保留ではない。**
+    const listed = run(
+      [501],
+      lines([{ number: 900, branch: "fix/501-count", author: "outsider", labels: WAITING }]),
+    );
+
+    expect(listed.stdout, "外の PR を実装として数えている").toBe("1");
+  });
+
+  it("著者が中か外か判らないときは、作業が残っている側へ倒す", () => {
+    // **判定不能を「外」にも「中」にも倒せる**が、**倒す先で壊れ方が違う**——
+    // **中へ倒すと、その Issue が数から落ち**、**`no-work` が通って全ループが止まる。**
+    // **外へ倒すと、数が 1 多いだけ**である（**人が呼ばれるのが遅れる**）。
+    const listed = run(
+      [501],
+      lines([{ number: 502, branch: "fix/501-count", labels: WAITING }]),
+      {},
+      "",
+    );
+
+    expect(listed.stdout, "判らないほうを、止まる側へ倒している").toBe("1");
+    expect(listed.status, "判らないだけで落ちている").toBe(0);
   });
 
   it("人待ちの PR しか持たない Issue は、数えない", () => {
