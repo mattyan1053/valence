@@ -70,20 +70,37 @@ function countWith(prs: readonly Pr[]): string {
     mkdirSync(join(workspace, "bin"), { recursive: true });
     copyFileSync(join(REPO_ROOT, "bin/loop-open-work"), join(workspace, "bin/loop-open-work"));
 
-    // **label も 1 つずつ列にする**（#550。**カンマで繋がない**）
-    const listed = prs
-      .map((pr) => [pr.number, ...pr.labels].join(FIELD))
-      .join("\\n")
-      .replaceAll("'", "'\\''");
+    // **式のとおりに返す**（#551 のレビュー）。**書式を試験側で決め打ちすると、
+    // `--jq` を元へ戻す変異が届かない**——**この PR が直したのは「生成側と解析側の
+    // 書式が食い違う」ことなのに、その食い違いを起こせない試験になっていた。**
+    //
+    // **`gh --jq` は `gh` が持っている jq** で、**この容器には jq が無い**
+    // （`bin/loop-fixup-lines.test.ts`）——**本物を通せない**ので、**知っている 2 つの
+    // 書式だけを演じ、知らない式は落とす。**
+    const render = (labels: (pr: Pr) => string[]) =>
+      prs
+        .map((pr) => [pr.number, ...labels(pr)].join(FIELD))
+        .join("\\n")
+        .replaceAll("'", "'\\''");
+    const asFields = render((pr) => pr.labels);
+    const asComma = render((pr) => (pr.labels.length === 0 ? [] : [pr.labels.join(",")]));
+    const emit = (listed: string) => `printf '${listed === "" ? "" : `${listed}\\n`}'`;
+
     writeFileSync(
       join(stub, "gh"),
       [
         "#!/usr/bin/env bash",
         // **label を「取り出す」ところまで見る**（#313 と同じ形）。**`--json` に
         // 書いてあっても、`--jq` が落としていれば、数える側は判別できない**
-        // ——**そこを見ないと、列を削る変異が生き残る**（**実際に生き残った**）
         `[[ $* == *".labels[].name"* ]] || { echo "スタブ: label を取り出していない: $*" >&2; exit 1; }`,
-        `printf '${listed === "" ? "" : `${listed}\\n`}'`,
+        `if [[ $* == *'join(",")'* ]]; then`,
+        `  ${emit(asComma)}`,
+        `elif [[ $* == *'join("\\u001f")'* ]]; then`,
+        `  ${emit(asFields)}`,
+        "else",
+        `  echo "スタブ: 知らない --jq の式: $*" >&2`,
+        "  exit 1",
+        "fi",
         "exit 0",
         "",
       ].join("\n"),

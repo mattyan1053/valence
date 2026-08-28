@@ -128,4 +128,14 @@ describe("着手できる open PR を数える", () => {
   it("引数は取らない", () => {
     expect(spawnSync(SCRIPT, ["545"], { encoding: "utf8" }).status).toBe(2);
   });
+
+  it("使い方の案内が、いまの書式を言う", () => {
+    // **契約が 2 箇所にある**（冒頭のコメントと `usage()`）——**書式を変えたとき、
+    // 案内だけ前のまま残っていた**（#551 のレビュー）。**案内どおり打ち直すと、
+    // この直しが消える**——**繋いだ文字列を渡す形へ戻る。**
+    const usage = spawnSync(SCRIPT, ["545"], { encoding: "utf8" }).stderr;
+
+    expect(usage, "区切りを案内していない").toContain("<label><US><label>");
+    expect(usage, "案内が前の書式のまま").not.toContain("カンマ");
+  });
 });

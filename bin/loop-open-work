@@ -29,7 +29,7 @@ set -uo pipefail
 
 usage() {
   echo "使い方: bin/loop-open-work < <open PR の一覧>" >&2
-  echo "        1 行 1 PR: <PR番号><US><label をカンマで繋いだもの>" >&2
+  echo "        1 行 1 PR: <PR番号><US><label><US><label>..." >&2
   echo "        exit 0 = 数えた / exit 2 = 読めない" >&2
   exit 2
 }
