@@ -55,7 +55,10 @@ describe("切られた check に付き直す", () => {
     const script = read("bin/loop-check-state");
     const awaiting = script.slice(script.indexOf("  --await)")).split("\n    ;;\n")[0] ?? "";
 
-    expect(awaiting, "書き手が居るかを見ていない").toContain("writer_alive || exit 5");
+    expect(awaiting, "書き手が居るかを見ていない").toContain("writer_alive && alive=1");
+    expect(awaiting, "書き手が居ないときに待つのをやめていない").toContain(
+      "((alive == 1)) || exit 5",
+    );
     expect(awaiting, "時間で打ち切っている").not.toMatch(/SECONDS|date \+%s/);
   });
 
@@ -75,6 +78,23 @@ describe("切られた check に付き直す", () => {
     const body = read("loop/procedure/worker.md");
 
     expect(body, "5 の意味を言っていない").toContain("`5` は「記録は残っているが");
+  });
+
+  it("書き手を、合否より先に見る", () => {
+    // **順序でしか閉じない窓である** (#555 のレビュー 2 周目)。**先に合否を見ると、
+    // 「まだ走っている」と読んだ直後に書き手が終わって消え**、**合否が出ているのに
+    // 「打ち直せ」と言う**——**いちばん拾いたい「ちょうど終わった」回**である。
+    //
+    // **静止した状態では、順序は見えない**（**どちらの順でも同じ答えになる**）
+    // ——**入れ違いは、実物を競らせないと起きない。** **だから並びで見る。**
+    const script = read("bin/loop-check-state");
+    const awaiting = script.slice(script.indexOf("  --await)")).split("\n    ;;\n")[0] ?? "";
+    const looked = awaiting.indexOf("writer_alive && alive=1");
+    const judged = awaiting.indexOf('"$0" --verdict');
+
+    expect(looked, "書き手を見ていない").toBeGreaterThanOrEqual(0);
+    expect(judged, "合否を見ていない").toBeGreaterThanOrEqual(0);
+    expect(looked, "合否を先に見ている（窓が開く）").toBeLessThan(judged);
   });
 
   it("待つのは、走っているあいだだけ", () => {

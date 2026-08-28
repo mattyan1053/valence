@@ -120,6 +120,26 @@ describe("bin/loop-check-state", () => {
       expect(waiting.status, "書き手が居ないのに待っている").toBe(5);
     });
 
+    it("書き手が居なくても、合否が出ていれば合否を返す", () => {
+      // **`--verdict` と `writer_alive` のあいだで終わりうる** (#555 のレビュー 2 周目)
+      // ——**そこは「ちょうど終わった」回**で、**いちばん拾いたい回**である。
+      // **合否が出ているのに「打ち直せ」と言うと、この PR が無くそうとしている
+      // 1 周ぶんの無駄そのものになる。**
+      //
+      // **見るのは、書き手が居なくなったあとでも合否が拾えること**である。
+      mkdirSync(statePath(), { recursive: true });
+      writeFileSync(join(statePath(), "999999999"), "finished 0\n1\n2\n");
+
+      const waiting = spawnSync(SCRIPT, ["--await"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...FAST, LOOP_CHECK_STATE_AWAIT_SEC: "1" },
+        timeout: 5000,
+      });
+
+      expect(waiting.status, "書き手が居ないだけで「来ない」と言っている").toBe(0);
+    });
+
     it("終わった記録は、書き手として数えない", () => {
       // **`finished` は既に書かれている**——**その id が生きていても、
       // 「これから書く側」ではない**（**PID は使い回される**）。
