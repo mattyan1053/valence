@@ -442,16 +442,24 @@ lease_record_intruders() {
 check_leftovers() {
   local status=0
   ./bin/loop-check-leftovers "$(workspace_name)" || status=$?
-  # **別の作業場と重なると、両方が倍かかる** (#547 で実測。**単独 442〜559 秒に対し、
+  # **別の作業場と重なると、両方が倍かかる** (#547 で実測。**単独 442〜796 秒に対し、
   # 重なると 1200 秒前後**)——**道具の 10 分制限を越え、切られた `vitest` が残る。**
-  #
   # **後から読む口（`--overlaps`）では間に合わない**ので、**打つ前に言う。**
-  # **返り値は変えない**——**「残っている」を報せる口の合否を、こちらで塗り替えない。**
-  local elsewhere
-  if elsewhere="$(./bin/loop-check-state --running-elsewhere)"; then
-    echo "[WARN] 別の作業場で check が走っています（重なると両方が倍かかります）" >&2
-    printf '%s\n' "$elsewhere" | sed 's/^/       /' >&2
-    echo "       待つか、重なることを承知で打つかは、打った側が決めます" >&2
+  #
+  # **見るのは docker である** (#549 のレビュー)。**外側の上限で切られると、
+  # 呼び出し側の PID は消えてもコンテナの中は走り続ける**（#528 が測った形）
+  # ——**まさに重なるときに、PID は死んでいる。**
+  #
+  # **並べるのも、名前を作るのもここ**（`AGENTS.md` §5。**正規化を 2 箇所に持たない**）。
+  # **落とさない。言うだけ**——**返り値は自分の作業場のぶんのままにする**
+  # （**他人の持ち物で、こちらの合否を決めない**。#186）。
+  local here path name
+  if here="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    while IFS= read -r path; do
+      [[ -n $path && $path != "$here" ]] || continue
+      name="$(normalize_workspace_name "$(basename -- "$path")")"
+      ./bin/loop-check-leftovers --elsewhere "$name" "$path" || true
+    done < <(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
   fi
   return "$status"
 }

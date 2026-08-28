@@ -208,12 +208,46 @@ describe("`./task check` が、打つ前に見る", () => {
 
   it("作業場の名前を組み立てるのは、1 箇所である", () => {
     // **正規化は `task` が持つ**（`AGENTS.md` §5）——**呼ぶ側で組み立てない。**
-    // **口が 2 つある**（`./task check` の中と、`./task check:leftovers`）ので、
-    // **名前を渡すところが増えると、片方だけ直して食い違う。**
+    // **渡す先が増えた**（自分の作業場と、別の作業場。#549 のレビュー）ので、
+    // **数で見ない**——**どの呼び方も、同じ正規化を通っていること**を見る。
     const calls = runner.split("\n").filter((row) => row.includes("./bin/loop-check-leftovers"));
+    const looking = runner.slice(runner.indexOf("check_leftovers() {")).split("\n}\n")[0] ?? "";
 
-    expect(calls, "渡すところが 1 箇所ではない").toHaveLength(1);
-    expect(calls[0], "作業場を渡していない").toContain('"$(workspace_name)"');
+    expect(calls.length, "渡すところが無い").toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call, `正規化を通さずに名前を渡している: ${call}`).toMatch(
+        /"\$\(workspace_name\)"|"\$name"/,
+      );
+    }
+    expect(looking, "別の作業場の名前を正規化していない").toContain(
+      'name="$(normalize_workspace_name',
+    );
+  });
+
+  it("別の作業場も見る", () => {
+    // **PID では見えない** (#549 のレビュー)。**外側の上限で切られると、呼び出し側の
+    // PID は消えてもコンテナの中は走り続ける**——**まさに重なるときに見えなくなる。**
+    // **重なりが、2 倍の正体である**（#547 で実測）。
+    const looking = runner.slice(runner.indexOf("check_leftovers() {")).split("\n}\n")[0] ?? "";
+
+    expect(looking, "別の作業場を見ていない").toContain("--elsewhere");
+    expect(looking, "作業場を並べていない").toContain("git worktree list");
+  });
+
+  it("自分の作業場を、別の作業場として数えない", () => {
+    // **自分のぶんは、上の口が既に見ている**——**二重に鳴ると読まれなくなる** (#248)
+    const looking = runner.slice(runner.indexOf("check_leftovers() {")).split("\n}\n")[0] ?? "";
+
+    expect(looking, "自分の作業場を外していない").toContain('$path != "$here"');
+  });
+
+  it("別の作業場のことで、こちらの合否を変えない", () => {
+    // **他人の持ち物で、こちらの分岐を決めない** (#186)——**見るだけ**である
+    const looking = runner.slice(runner.indexOf("check_leftovers() {")).split("\n}\n")[0] ?? "";
+    const line = looking.split("\n").find((row) => row.includes("--elsewhere")) ?? "";
+
+    expect(line, "落ちる側になっている").toContain("|| true");
+    expect(looking, "返り値を塗り替えている").toContain('return "$status"');
   });
 
   it("単独で打てる口がある", () => {
@@ -228,5 +262,97 @@ describe("`./task check` が、打つ前に見る", () => {
     const line = check.split("\n").find((row) => row.includes("check_leftovers")) ?? "";
 
     expect(line, "落ちる側になっている").toContain("|| true");
+  });
+});
+
+/**
+ * **別の作業場で走っているものも見る**（#549 のレビュー。**P1**）。
+ *
+ * **`./task check` が 2 本重なると、両方が倍かかる**（#547 で実測。**単独 442〜796 秒に
+ * 対し、重なると 1200 秒前後**）——**打つ前に分かれば、待てる。**
+ *
+ * **PID では見えない。** **外側の上限で切られると、呼び出し側の PID は消えても
+ * コンテナの中の `pnpm check` は走り続ける**（**この試験ファイルの前提そのもの**）
+ * ——**まさに重なるときに、記録の PID は死んでいる。**
+ *
+ * **見るだけである。** **落とさないし、触らない**（#186 が止めたのは、
+ * **合否や分岐が他人の持ち物で決まること**——**ここは言うだけ**である）。
+ */
+describe("bin/loop-check-leftovers --elsewhere", () => {
+  const sandboxes: string[] = [];
+
+  afterEach(() => {
+    for (const dir of sandboxes.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function withDocker(top: string[]): (args: string[]) => {
+    status: number;
+    stdout: string;
+    stderr: string;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "leftovers-elsewhere-"));
+    sandboxes.push(dir);
+    writeFileSync(
+      join(dir, "docker"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "ps" ]]; then echo "abc123"; exit 0; fi',
+        `if [[ $1 == "top" ]]; then printf '%s\\n' ${top.map((line) => JSON.stringify(line)).join(" ")}; exit 0; fi`,
+        "exit 2",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    chmodSync(join(dir, "docker"), 0o755);
+    return (args) => {
+      const result = spawnSync(SCRIPT, args, {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    };
+  }
+
+  const BUSY = [HEADER, "u 3632112 3632069 sh -c vitest run --project '!db'"];
+  const IDLE = [HEADER, "u 9129 9034 node /usr/local/bin/pnpm dev"];
+
+  it("走っていれば、どの作業場かと、何が走っているかを言う", () => {
+    const found = withDocker(BUSY)(["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"]);
+
+    expect(found.status, "走っているのに 0 を返している").toBe(1);
+    expect(found.stderr, "どの作業場か分からない").toContain("/home/x/valence-worker-b");
+    expect(found.stderr, "何が走っているかが出ない").toContain("vitest run");
+  });
+
+  it("走っていなければ、何も言わない", () => {
+    // **平常時に鳴る検査は読まれなくなる** (#248)
+    const quiet = withDocker(IDLE)(["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"]);
+
+    expect(quiet.status).toBe(0);
+    expect(quiet.stderr).toBe("");
+  });
+
+  it("自分の作業場向けの言い方をしない", () => {
+    // **「落としてから打ち直すこと」は自分の作業場への指示**である
+    // ——**他人のものを落とさせない**（#186）。
+    const found = withDocker(BUSY)(["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"]);
+
+    expect(found.stderr, "他所のものを落とせと言っている").not.toContain("落としてから");
+    expect(found.stderr, "待てることを言っていない").toContain("待つか");
+  });
+
+  it("場所を渡さなければ、使い方を出す", () => {
+    // **どの作業場かを言えないなら、この口は役に立たない**
+    expect(withDocker(BUSY)(["--elsewhere", "valence-worker-b"]).status).toBe(2);
+  });
+
+  it("これまでの呼び方は、これまでどおり", () => {
+    // **自分の作業場の口を壊さない**（**呼ぶところが 2 つになる**）
+    const found = withDocker(BUSY)(["valence"]);
+
+    expect(found.status).toBe(1);
+    expect(found.stderr, "自分の作業場への指示が消えている").toContain("落としてから");
   });
 });

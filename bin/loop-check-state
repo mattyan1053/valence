@@ -6,7 +6,6 @@
 #   bin/loop-check-state --verdict                      いまの記録を読む
 #   bin/loop-check-state --durations                    積んだ所要時間を読む
 #   bin/loop-check-state --overlaps                     重なった走りを読む
-#   bin/loop-check-state --running-elsewhere            別の作業場が、いま走っているか
 #
 #   --verdict の終了コード:
 #     0 = 緑 / 1 = 赤 / 2 = 読めない・使い方の誤り / 3 = まだ走っている / 4 = 記録が無い
@@ -69,7 +68,6 @@ usage() {
   echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
   printf '        --durations: <始め>\\t<終わり>\\t<合否 または killed>（4 記録が無い）\n' >&2
   printf '        --overlaps: <重なった秒>\\t<作業場>\\t<作業場>（0 あり / 1 無い / 4 記録が無い）\n' >&2
-  printf '        --running-elsewhere: <作業場>\\t<経過秒 または ->（0 あり / 1 無い）\n' >&2
   exit 2
 }
 
@@ -169,27 +167,6 @@ started_at_of() {
 # **id はファイル名になる。** **区切りやパスを含む値を受けない**
 valid_id() {
   [[ $1 =~ ^[A-Za-z0-9_.-]+$ ]]
-}
-
-# その記録の置き場から、どの作業場かを引く。
-#
-# **worktree の `.git` は共通ディレクトリの下にある**（`<共通>/worktrees/<名前>/`）ので、
-# **記録は読めるが、作業場の場所はそこには書いていない**——**`gitdir` が指している。**
-#
-# **読めなければ、記録の在りかで言う**（**黙るより粗くても言う**）。
-workspace_of_state_dir() {
-  local dir="$1" git_home="${1%/valence-check-state.d}" worktree
-  if [[ $git_home == "$common_dir" ]]; then
-    # **共通ディレクトリの親が、主の作業場**である
-    printf '%s' "${common_dir%/*}"
-    return 0
-  fi
-  if [[ -f $git_home/gitdir ]] && read -r worktree <"$git_home/gitdir" 2>/dev/null &&
-    [[ -n $worktree ]]; then
-    printf '%s' "${worktree%/.git}"
-    return 0
-  fi
-  printf '%s' "$git_home"
 }
 
 case "$1" in
@@ -323,45 +300,6 @@ case "$1" in
     }
     [[ -n $overlapping ]] || exit 1
     printf '%s\n' "$overlapping"
-    ;;
-  --running-elsewhere)
-    [[ $# -eq 1 ]] || usage
-    # **打つ前に、別の作業場が走っていないかを見る** (#547)。
-    #
-    # **実測で、単独なら 442〜559 秒、2 本が重なると 1200 秒前後**である
-    # ——**両方が同時に遅くなり、道具の 10 分制限を越える**（**切られた走りが
-    # `vitest` を残し、次の周回が 1 本ぶん余計に走る**）。
-    #
-    # **`--overlaps` は後から読むもの**で、**打つ前には間に合わない。**
-    # **記録は共通ディレクトリの下に揃っている**ので、**読むだけで分かる。**
-    #
-    # **落とさない。言うだけである**——**待つかどうかは打った側が決める**
-    # （`bin/loop-check-leftovers` と同じ判断）。**時間を判定に使わない**
-    # （#547 の「踏んではいけないところ」）。
-    found=0
-    for dir in "$common_dir/valence-check-state.d" "$common_dir"/worktrees/*/valence-check-state.d; do
-      [[ -d $dir ]] || continue
-      # **自分の作業場は数えない**——**自分が走っていることは自分が知っている**
-      [[ $dir -ef $STATE_DIR ]] && continue
-      where="$(workspace_of_state_dir "$dir")"
-      for record in "$dir"/*; do
-        [[ -f $record ]] || continue
-        read -r kind _ <"$record" 2>/dev/null || continue
-        [[ $kind == "running" ]] || continue
-        # **生きている PID でなければ、走っている周回のものではありえない**
-        # （`running` の片付けと同じ見方）——**殺された走りの記録は残り続ける。**
-        run_id="${record##*/}"
-        [[ $run_id =~ ^[0-9]+$ ]] || continue
-        kill -0 "$run_id" 2>/dev/null || continue
-        # **分からないものを埋めない**が、**黙りもしない**——**害は重なること**である
-        elapsed="-"
-        since="$(started_at_of "$record")"
-        [[ -z $since ]] || elapsed="$(($(now_epoch) - since))"
-        printf '%s\t%s\n' "$where" "$elapsed"
-        found=1
-      done
-    done
-    ((found == 1)) || exit 1
     ;;
   --verdict)
     [[ $# -eq 1 ]] || usage
