@@ -21,6 +21,7 @@ import type { MergeBlock } from "../../domain/graph/merge-block";
 import type { RiskTier } from "../../domain/triage/risk-tier";
 import type { NodeMark } from "./dependency-graph-figure";
 import { DependencyGraphFigure } from "./dependency-graph-figure";
+import { estimateLabelWidth } from "./fit-label";
 import { layoutDependencyGraph } from "./graph-layout";
 
 /** **親から受け取る**（`currentColor`）か、**塗らない**（`none`）か。 */
@@ -289,21 +290,13 @@ describe("箱の中で決められる", () => {
  * 溢れて重なる**——**読まずに拾えるように足したものが、読めなくなる。**
  *
  * **字幅の見積もりで見る。** **本当の幅はブラウザが決める**ので、**ここで測れるのは
- * 「収まらない方向へ変えたときに落ちるか」**である。**全角はほぼ 1em、半角は 0.6em** で
- * 数える（**多めに見積もらない**——**見積もりが甘いほうへ倒すと、この試験が何も
- * 言わなくなる**）。
+ * 「収まらない方向へ変えたときに落ちるか」**である。
+ *
+ * **見積もりは `fit-label` のものを使う**（#543 のレビュー）——**判定を 2 箇所に
+ * 持たない。** **写した側が狭いままだと、切る規則を直しても、この試験は古い幅で
+ * 通り続ける。** **表そのものは `fit-label.test.ts` が実フォントの字幅で留めている。**
  */
 describe("箱に収まっている", () => {
-  const HALF_WIDTH = 0.6;
-
-  function estimatedWidth(text: string, fontSize: number): number {
-    return [...text].reduce(
-      (total, character) =>
-        total + fontSize * ((character.codePointAt(0) ?? 0) > 0x2e80 ? 1 : HALF_WIDTH),
-      0,
-    );
-  }
-
   function attrsOf(rest: string): Record<string, string> {
     const attrs: Record<string, string> = {};
     for (const [, name, value] of rest.matchAll(/([a-zA-Z-]+)="([^"]*)"/g)) {
@@ -329,7 +322,7 @@ describe("箱に収まっている", () => {
     const labels: Label[] = [...inner.matchAll(/<text ([^>]*)>([^<]*)<\/text>/g)].map(
       ([, rest, text]) => {
         const attrs = attrsOf(rest ?? "");
-        const width = estimatedWidth(text ?? "", Number(attrs["font-size"]));
+        const width = estimateLabelWidth(text ?? "", Number(attrs["font-size"]));
         const x = Number(attrs.x);
         const left = attrs["text-anchor"] === "end" ? x - width : x;
         const y = Number(attrs.y);
