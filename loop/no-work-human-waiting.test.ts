@@ -56,6 +56,39 @@ function countingBlock(): string {
 
 type Pr = { number: number; labels: string[] };
 
+/** そのブロックが `gh` へ渡す `--jq` の式。 */
+function expressionOf(block: string): string {
+  const found = /--jq '([^']*)'/.exec(block);
+  expect(found, "`--jq` の式が見つからない").not.toBeNull();
+  return found?.[1] ?? "";
+}
+
+/**
+ * **式のとおりに 1 行を組み立てる。**
+ *
+ * **読むのは 3 つだけ**——**どの列を、どの順で、何で繋ぐか。** **`.number` と
+ * `.labels[].name` が式に出てくる順が、そのまま列の順**である（**入れ替えれば、
+ * 出力も入れ替わる**）。**`join(",")` があれば label は 1 列に畳まれる。**
+ *
+ * **どちらの列も出てこない式は落とす**——**演じられないものを、演じたことにしない。**
+ */
+function renderAs(expression: string, prs: readonly Pr[]): string {
+  const numberAt = expression.indexOf(".number");
+  const labelsAt = expression.indexOf(".labels[].name");
+  expect(numberAt, "式が PR 番号を出していない").toBeGreaterThanOrEqual(0);
+  expect(labelsAt, "式が label を出していない").toBeGreaterThanOrEqual(0);
+  const joinsLabels = expression.includes('join(",")');
+
+  return prs
+    .map((pr) => {
+      const labels = joinsLabels ? [pr.labels.join(",")] : pr.labels;
+      const columns =
+        numberAt < labelsAt ? [`${pr.number}`, ...labels] : [...labels, `${pr.number}`];
+      return columns.join(FIELD);
+    })
+    .join("\\n");
+}
+
 /**
  * そのブロックを、偽の `gh` で走らせる。
  *
@@ -70,22 +103,23 @@ function countWith(prs: readonly Pr[]): string {
     mkdirSync(join(workspace, "bin"), { recursive: true });
     copyFileSync(join(REPO_ROOT, "bin/loop-open-work"), join(workspace, "bin/loop-open-work"));
 
-    const listed = prs
-      .map((pr) => `${pr.number}${FIELD}${pr.labels.join(",")}`)
-      .join("\\n")
-      .replaceAll("'", "'\\''");
+    // **式から、出す列を組み立てる**（#551 のレビュー 2 周目）。**部分文字列で
+    // 分岐して決め打ちの行を返すと、列の順を入れ替える変異が素通りする**
+    // ——**本物の `gh` は式のとおりに出す**ので、**列が逆なら `bin/loop-open-work` は
+    // PR 番号を読めずに落ちる。**
+    //
+    // **本物の jq は通せない。** **`gh` そのものを偽物へ差し替えている**ので、
+    // **`gh` 内蔵の jq には届かない**（**`gh` が jq の導入を要求しないのは、
+    // 本物の `gh` を呼べるときの話である**）。**この容器に jq も無い**
+    // （`bin/loop-fixup-lines.test.ts`）——**なので、式のうち「どの列を、どの順で、
+    // 何で繋ぐか」だけを読んで演じる。** **読めない式は落とす**（`renderAs`）。
+    const listed = renderAs(expressionOf(countingBlock()), prs).replaceAll("'", "'\\''");
+
     writeFileSync(
       join(stub, "gh"),
-      [
-        "#!/usr/bin/env bash",
-        // **label を「取り出す」ところまで見る**（#313 と同じ形）。**`--json` に
-        // 書いてあっても、`--jq` が落としていれば、数える側は判別できない**
-        // ——**そこを見ないと、列を削る変異が生き残る**（**実際に生き残った**）
-        `[[ $* == *".labels[].name"* ]] || { echo "スタブ: label を取り出していない: $*" >&2; exit 1; }`,
-        `printf '${listed === "" ? "" : `${listed}\\n`}'`,
-        "exit 0",
-        "",
-      ].join("\n"),
+      ["#!/usr/bin/env bash", `printf '${listed === "" ? "" : `${listed}\\n`}'`, "exit 0", ""].join(
+        "\n",
+      ),
       { mode: 0o755 },
     );
     // **落ちたら停止を積む側も偽物にする**（本物を呼ぶと、試験がカウンタを動かす）

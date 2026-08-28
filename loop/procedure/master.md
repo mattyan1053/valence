@@ -1185,11 +1185,13 @@ gh issue edit <N> --remove-label waiting-condition
 どちらも正しく見える**）。
 
 ```bash
-# 開いている PR の一覧（1 行 1 件。`<PR番号><US><label>`）
+# 開いている PR の一覧（1 行 1 件。`<PR番号><US><label><US><label>...`）
+# **label をカンマで繋がない** (#550)——**GitHub の label 名にはカンマを入れられる**
+# ので、**繋ぐと `parked,awaiting-human` という 1 つの label が 2 つに見える**
 # **先に変数へ受ける。** パイプで繋ぐと `$?` は数える側のものになり、
 # **取得できなかった周回が「0 件」と見分けが付かない**
 if ! open_prs="$(gh pr list --state open --limit 200 --json number,labels \
-  --jq '.[] | "\(.number)\u001f\([.labels[].name] | join(","))"')"; then
+  --jq '.[] | [(.number | tostring)] + [.labels[].name] | join("\u001f")')"; then
   bin/loop-stall pr-lookup-failed
   exit
 fi
