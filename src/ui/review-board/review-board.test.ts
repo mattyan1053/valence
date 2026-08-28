@@ -2,7 +2,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
+import { buildDependencyEdges } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
+import { orderByDependency } from "../../domain/graph/dependency-order";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { ReviewBoardProps } from "./review-board";
 import { ReviewBoard } from "./review-board";
@@ -47,6 +49,8 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
       [1, change()],
       [2, change()],
     ]),
+    // **既定は「分かっている」**——**この試験群が見ているのは、そこではない**
+    headKnown: () => true,
     ...overrides,
   };
 }
@@ -185,5 +189,131 @@ describe("1 件も無いとき", () => {
     );
 
     expect(markup, "何も見えない画面になっている").toMatch(/ありません/);
+  });
+});
+
+/**
+ * **10 本並べたとき、図の中だけで「次に見る 1 本」が決まるか**（#540）。
+ *
+ * **「読める」と「決められる」は別**である（#505 の次の段）。**箱に番号しか
+ * 入っていないと、危なさも何待ちかも脇の文章にしか無い**——**溺れている人は、
+ * 文章を読む前に「どれから見るか」を決めたい**（README）。
+ *
+ * **測るのは `<svg>` の中だけ**である。**外（一覧の文章）を混ぜると、
+ * 「文章を読まずに選べる」を測ったことにならない**——**実データは要らない**ので、
+ * **PR 10 本・深さ 3 以上をここで置く。**
+ */
+describe("図の中だけで、次の 1 本を選べる", () => {
+  /** **10 本。** 4 本積み・3 本積み・2 本積み・1 本、で**深さ 3** を作る。 */
+  const TEN: readonly PullRequestRef[] = [
+    pullRequest(1, "main", "feat/a"),
+    pullRequest(2, "feat/a", "feat/b"),
+    pullRequest(3, "feat/b", "feat/c"),
+    pullRequest(4, "feat/c", "feat/d"),
+    pullRequest(5, "main", "feat/e"),
+    pullRequest(6, "feat/e", "feat/f"),
+    pullRequest(7, "feat/f", "feat/g"),
+    pullRequest(8, "main", "feat/h"),
+    pullRequest(9, "feat/h", "feat/i"),
+    pullRequest(10, "main", "feat/j"),
+  ];
+  const TEN_EDGES = buildDependencyEdges(TEN);
+  const TEN_ORDER = orderByDependency(TEN, TEN_EDGES);
+
+  /**
+   * **#8 だけが「要注意 かつ 押せる」**になるように置く。
+   * **#10 は材料が届いていない**（`changes` に居ない）。
+   */
+  const TEN_CHANGES = new Map<number, ChangeSummary>([
+    [1, change()],
+    [2, change({ changedFileCount: 9, changedLineCount: 400 })],
+    [3, change({ changedFileCount: 9, changedLineCount: 400 })],
+    [4, change({ ciStatus: "failing" })],
+    [5, change()],
+    [6, change({ changedFileCount: 9, changedLineCount: 400 })],
+    [7, change({ changedFileCount: 9, changedLineCount: 400 })],
+    [8, change({ touchesSensitivePath: true })],
+    [9, change({ changedFileCount: 9, changedLineCount: 400 })],
+  ]);
+
+  /** **図の中だけ。** 外は見ない。 */
+  function figure(): string {
+    const markup = render(
+      props({ pullRequests: TEN, edges: TEN_EDGES, order: TEN_ORDER, changes: TEN_CHANGES }),
+    );
+    const from = markup.indexOf("<svg");
+    expect(from, "図が出ていない").toBeGreaterThanOrEqual(0);
+    const to = markup.indexOf("</svg>", from);
+    expect(to, "図が閉じていない").toBeGreaterThan(from);
+    return markup.slice(from, to);
+  }
+
+  /** 箱 1 つぶんの文字。 */
+  function boxes(svg: string): string[] {
+    return [...svg.matchAll(/<g>([\s\S]*?)<\/g>/g)].map(([, inner]) =>
+      (inner ?? "")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    );
+  }
+
+  /**
+   * 箱の枠が立っている列。
+   *
+   * **`rect` は箱の枠だけではない**（**危なさの帯も `rect`**）——**まとめて数えると
+   * 列が倍に見える**ので、**いちばん広いものだけを箱として数える。**
+   */
+  function columnsOf(svg: string): Set<string> {
+    const rects = [...svg.matchAll(/<rect x="(\d+)" y="\d+" width="(\d+)"/g)].map(
+      ([, x, width]) => ({ x: x ?? "", width: Number(width) }),
+    );
+    expect(rects, "図に箱の枠が 1 つも無い").not.toEqual([]);
+    const widest = Math.max(...rects.map((rect) => rect.width));
+    return new Set(rects.filter((rect) => rect.width === widest).map((rect) => rect.x));
+  }
+
+  it("10 本すべてが、深さの違う列に並ぶ", () => {
+    const svg = figure();
+
+    expect(boxes(svg), "図に出ていない PR がある").toHaveLength(10);
+    // **深さ 3 以上**（#540 の完了条件）——**列が 4 つ立つ**
+    expect(columnsOf(svg).size, "深さ 3 以上の形になっていない").toBe(4);
+  });
+
+  it("1 件ごとに、危なさと何待ちかが箱に入っている", () => {
+    // **どれか 1 つの箱に在ることではなく、全部の箱に在ること**を見る
+    const all = boxes(figure());
+    const tiered = all.filter((box) => /すぐ|通常|要注意|未判定/.test(box));
+    const waiting = all.filter((box) => /押せる|待ち: #|順序不明/.test(box));
+
+    expect(tiered, "危なさの無い箱がある").toHaveLength(10);
+    expect(waiting, "何待ちかの無い箱がある").toHaveLength(10);
+  });
+
+  it("いま見るべき 1 本が、文章を読まずに絞り込める", () => {
+    // **土台が 4 本（#1 #5 #8 #10）**あり、**そのうち要注意は #8 だけ**である
+    // ——**「押せる」と「要注意」の重なりが 1 つに定まる**なら、目で選べている
+    const all = boxes(figure());
+    const next = all.filter((box) => box.includes("押せる") && box.includes("要注意"));
+
+    expect(next, "次に見る 1 本が絞り込めない").toHaveLength(1);
+    expect(next[0] ?? "", "絞り込んだ先が #8 ではない").toContain("#8");
+  });
+
+  it("材料が届いていない PR を、判定済みに見せない", () => {
+    // **#10 は `changes` に居ない**——**空欄にすると「すぐ通せる」と見分けが付かない**
+    const box = boxes(figure()).find((candidate) => candidate.startsWith("#10 "));
+
+    expect(box, "#10 の箱が無い").toBeDefined();
+    expect(box ?? "").toContain("未判定");
+  });
+
+  it("測っているのは図の中であって、脇の文章ではない", () => {
+    // **この試験が「文章を読まずに」を測れている条件**である——**文章が混ざっていたら、
+    // 箱が空でも緑になりうる**
+    expect(figure(), "図の中に、脇の説明文が入り込んでいる").not.toContain(
+      "いつもどおり中身を読んでください",
+    );
   });
 });

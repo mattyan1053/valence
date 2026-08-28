@@ -16,6 +16,8 @@
 import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
+import { mergeBlocksFor } from "../../domain/graph/merge-block";
+import type { RiskTier } from "../../domain/triage/risk-tier";
 import { DependencyGraphFigure } from "./dependency-graph-figure";
 import { layoutDependencyGraph } from "./graph-layout";
 
@@ -47,10 +49,46 @@ export type DependencyGraphViewProps = {
    * 作り直すと、片方だけ直して**画面から PR が消える**穴が復活する。
    */
   readonly renderAside?: (pullRequestNumber: number) => ReactNode;
+  /**
+   * 図の箱に載せる危なさ（#540）。**材料が届いていない PR は `undefined`。**
+   *
+   * **Tier そのものではなく、Tier を返す口で受ける。** **判定材料（`ChangeSummary`）は
+   * この部品の関心ではない**——**持たせると、依存グラフが triage を知ることになる。**
+   *
+   * **任意でよい。** **渡さなければ「未判定」と出るだけ**で、
+   * **「抜けが無い」と言い切る類の値ではない**（`invalid` とは違う）。
+   * **「危なくない」へは倒れない**ので、渡し忘れは画面に出る。
+   */
+  readonly tierOf?: (pullRequestNumber: number) => RiskTier | undefined;
+  /**
+   * **その PR の head の commit が分かっているか**（#541 のレビュー）。
+   *
+   * **`MergeBlock` は依存の順序しか知らない**ので、**これを渡さないと、
+   * 無効な Merge ボタンの隣に「押せる」と出る**（**`head.sha` が欠けた PR は
+   * 図に残る**）。
+   *
+   * **任意にしない。** **どちらへ倒しても嘘になる**（`NodeMark.headKnown`）。
+   */
+  readonly headKnown: (pullRequestNumber: number) => boolean;
 };
 
-function dependsOnOf(edges: readonly DependencyEdge[], number: number): readonly number[] {
-  return edges.filter((edge) => edge.dependent === number).map((edge) => edge.dependsOn);
+/**
+ * 「何の上に積まれているか」を、辺を 1 度なめて引けるようにする（#541 のレビュー）。
+ *
+ * **行ごとに `edges` を絞ると、本数の 2 乗になる**——**盤面は全部の行について引く。**
+ * **並びは辺のとおりに保つ**（**呼ぶたびに変わると、読み手には理由の分からない揺れ**）。
+ */
+function dependsOnIndex(edges: readonly DependencyEdge[]): ReadonlyMap<number, readonly number[]> {
+  const found = new Map<number, number[]>();
+  for (const edge of edges) {
+    const listed = found.get(edge.dependent);
+    if (listed === undefined) {
+      found.set(edge.dependent, [edge.dependsOn]);
+    } else {
+      listed.push(edge.dependsOn);
+    }
+  }
+  return found;
 }
 
 function PullRequestRow({
@@ -100,8 +138,11 @@ export function DependencyGraphView({
   order,
   invalid,
   renderAside,
+  tierOf,
+  headKnown,
 }: DependencyGraphViewProps) {
   const byNumber = new Map(pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]));
+  const dependsOn = dependsOnIndex(edges);
   const rowsFor = (numbers: readonly number[]) =>
     numbers
       .map((number) => byNumber.get(number))
@@ -110,7 +151,7 @@ export function DependencyGraphView({
         <PullRequestRow
           key={pullRequest.number}
           pullRequest={pullRequest}
-          dependsOn={dependsOnOf(edges, pullRequest.number)}
+          dependsOn={dependsOn.get(pullRequest.number) ?? []}
           aside={renderAside?.(pullRequest.number)}
         />
       ));
@@ -121,6 +162,11 @@ export function DependencyGraphView({
   const unplaced = pullRequests
     .map((pullRequest) => pullRequest.number)
     .filter((number) => !placed.has(number));
+
+  // **図に出す番号ぶんを、まとめて 1 度で判定する**（#541 のレビュー）。
+  // **箱ごとに呼ぶと、そのたびに辺と順序をなめ直す**——**本数の 2 乗**になる。
+  const figured = [...order.ordered, ...unplaced];
+  const blocks = mergeBlocksFor(figured, edges, order, invalid.length);
 
   return (
     <section>
@@ -135,13 +181,22 @@ export function DependencyGraphView({
            **並びはどちらも `order` が持つ**ので、**作り直さない。**
            */}
           <DependencyGraphFigure
-            layout={layoutDependencyGraph({
-              placed: [...order.ordered, ...unplaced],
-              edges,
-            })}
+            layout={layoutDependencyGraph({ placed: figured, edges })}
             missing={{ unordered: order.cyclic.length, unreadable: invalid.length }}
+            // **「何待ちか」を書き写さない**（#540）。**Merge ボタンと同じ規則を、
+            // 同じ入力で呼ぶ**（`mergeBlocksFor` は `mergeBlockFor` と同じ判定である）
+            // ——**書き写すと、押せないボタンの隣に「押せる」と出る**
+            // （#345 が閉じた形が、図の側で開く）。
+            markOf={(number) => ({
+              tier: tierOf?.(number),
+              // **知らない番号を「押せる」へ倒さない**（`mergeBlockFor` と同じ判断）
+              block: blocks.get(number) ?? { kind: "not-orderable" },
+              // **札の広さを、判定に合わせる**（#541 のレビュー）——**`MergeBlock` は
+              // 依存の順序しか知らない**ので、**押せるかどうかはここで足す。**
+              headKnown: headKnown(number),
+            })}
           />
-          <ol>{rowsFor([...order.ordered, ...unplaced])}</ol>
+          <ol>{rowsFor(figured)}</ol>
         </>
       )}
 

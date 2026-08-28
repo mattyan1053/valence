@@ -70,6 +70,63 @@ export function mergeBlockFor(
   order: DependencyOrder,
   unreadableCount: number,
 ): MergeBlock {
+  return blockFrom(number, indexFor(edges, order), unreadableCount);
+}
+
+/**
+ * **一覧ぶんをまとめて判定する**（#541 のレビュー）。
+ *
+ * **1 件ずつ呼ぶと、辺と順序を毎回なめ直す**——**盤面は全部の行について呼ぶ**ので、
+ * **本数の 2 乗**になる（**open な PR が数百あるリポジトリで、図を描くだけで効く**）。
+ *
+ * **判定は `mergeBlockFor` と同じものである**（**下の `blockFrom` を、どちらも呼ぶ**）
+ * ——**速さのために規則を書き写さない。** **書き写すと、片方だけ直した日から、
+ * 図と Merge ボタンが違うことを言う。**
+ *
+ * **訊かれた番号だけを返す。** **一覧に無い番号は `not-orderable`** である
+ * （`mergeBlockFor` と同じ）。
+ */
+export function mergeBlocksFor(
+  numbers: readonly number[],
+  edges: readonly DependencyEdge[],
+  order: DependencyOrder,
+  unreadableCount: number,
+): ReadonlyMap<number, MergeBlock> {
+  const index = indexFor(edges, order);
+  return new Map(numbers.map((number) => [number, blockFrom(number, index, unreadableCount)]));
+}
+
+/**
+ * 判定に使う索引。**辺と順序を、1 度だけなめて作る。**
+ *
+ * **`dependsOn` は辺の並びを保つ。** **「何を先に入れるか」は画面へそのまま出る**ので、
+ * **並びが呼ぶたびに変わると、読み手には理由の分からない揺れになる。**
+ */
+type OrderIndex = {
+  readonly dependsOn: ReadonlyMap<number, readonly number[]>;
+  readonly cyclic: ReadonlySet<number>;
+  readonly ordered: ReadonlySet<number>;
+};
+
+function indexFor(edges: readonly DependencyEdge[], order: DependencyOrder): OrderIndex {
+  const dependsOn = new Map<number, number[]>();
+  for (const edge of edges) {
+    const found = dependsOn.get(edge.dependent);
+    if (found === undefined) {
+      dependsOn.set(edge.dependent, [edge.dependsOn]);
+    } else {
+      found.push(edge.dependsOn);
+    }
+  }
+  return {
+    dependsOn,
+    cyclic: new Set(order.cyclic),
+    ordered: new Set(order.ordered),
+  };
+}
+
+/** **規則はここ 1 箇所にある。** 上の 2 つは、索引の作り方が違うだけである。 */
+function blockFrom(number: number, index: OrderIndex, unreadableCount: number): MergeBlock {
   // **図に抜けがあるなら、どの行の「依存なし」も信じられない**（#348 のレビュー）。
   // **読めなかった PR は辺を持たない**ので、**土台だけが読めなかった場合、
   // 上段が「依存なし」に見える**——**しかもその経路は投げないので、
@@ -81,16 +138,16 @@ export function mergeBlockFor(
     return { kind: "not-orderable" };
   }
 
-  if (order.cyclic.includes(number)) {
+  if (index.cyclic.has(number)) {
     return { kind: "not-orderable" };
   }
 
-  const numbers = edges.filter((edge) => edge.dependent === number).map((edge) => edge.dependsOn);
-  if (numbers.length > 0) {
+  const numbers = index.dependsOn.get(number);
+  if (numbers !== undefined && numbers.length > 0) {
     return { kind: "depends-on", numbers };
   }
 
   // **一覧に無い番号を「マージしてよい」と言わない。** **盤面を出してから押すまでに
   // 一覧は変わる**ので、**知らない番号は「並べられなかった」側と同じ扱いにする。**
-  return order.ordered.includes(number) ? { kind: "ready" } : { kind: "not-orderable" };
+  return index.ordered.has(number) ? { kind: "ready" } : { kind: "not-orderable" };
 }

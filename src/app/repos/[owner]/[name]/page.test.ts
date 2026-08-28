@@ -9,6 +9,7 @@
  * で、**焼き付けたら全テナントに同じものが出る**（`AGENTS.md` §1 の逆）。
  */
 
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
 import { mergeBlockFor } from "../../../../domain/graph/merge-block";
@@ -258,5 +259,90 @@ describe("盤面（GET）で落ちたことを、記録の口へ渡す", () => {
     );
 
     expect(asked).toEqual(["acme/web"]);
+  });
+});
+
+/**
+ * **箱の札と、その隣のボタンが食い違わない**（#541 のレビュー）。
+ *
+ * **`head.sha` が欠けた応答は、意図して正常な PR として図に残す**
+ * （`pull-request-mapping.ts`）。**そのとき `MergeButton` は無効になる**
+ * （**確かめられない対象をマージさせない**）が、**`MergeBlock` は依存の順序しか
+ * 知らない**ので `ready` を返す——**無効なボタンの隣に「押せる」と出ていた。**
+ *
+ * **#345 が閉じたのは「規則の写し」で、ここは「語の広さ」**である——**入り口が違う。**
+ *
+ * **踏む形を入力に置いて測る**（#505）——**両方を同じ描画から読む**ので、
+ * **片方だけ直しても緑にならない。**
+ */
+describe("commit が分からない PR", () => {
+  const pullRequest = (number: number, base: string, head: string) => ({
+    number,
+    base: { repository: "r", branch: base },
+    head: { repository: "r", branch: head },
+  });
+
+  /** **#1 は commit が分かる。#2 は分からない。** どちらも依存は残っていない。 */
+  async function board(): Promise<string> {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        {
+          board: async () => ({
+            kind: "board",
+            plan: {
+              pullRequests: [pullRequest(1, "main", "feat/a"), pullRequest(2, "main", "feat/b")],
+              edges: [],
+              order: { ordered: [1, 2], cyclic: [] },
+              invalid: [],
+              changes: new Map(),
+              changesUnavailable: [],
+              heads: new Map([[1, "abc1234"]]),
+            },
+            approvals: { approved: new Set<number>(), unavailable: [] },
+          }),
+          report: () => {},
+        },
+      ),
+    );
+  }
+
+  /** 箱 1 つぶんの文字。**番号は箱の先頭にある。** */
+  function boxOf(markup: string, number: number): string {
+    const found = [...markup.matchAll(/<g>([\s\S]*?)<\/g>/g)]
+      .map(([, inner]) =>
+        (inner ?? "")
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim(),
+      )
+      .filter((box) => box.startsWith(`#${number} `));
+    expect(found, `#${number} の箱が 1 つに定まらない`).toHaveLength(1);
+    return found[0] ?? "";
+  }
+
+  /** その PR の Merge ボタンが無効か。**`number` を持つ form の中だけを見る。** */
+  function mergeDisabled(markup: string, number: number): boolean {
+    const forms = [...markup.matchAll(/<form[^>]*>([\s\S]*?)<\/form>/g)]
+      .map(([, inner]) => inner ?? "")
+      .filter((inner) => inner.includes(`value="${number}"`) && inner.includes("Merge"));
+    expect(forms, `#${number} の Merge が 1 つに定まらない`).toHaveLength(1);
+    return (forms[0] ?? "").includes("disabled=");
+  }
+
+  it("押せないボタンの隣に「押せる」と出さない", async () => {
+    const markup = await board();
+
+    expect(mergeDisabled(markup, 2), "commit が分からないのに押せてしまう").toBe(true);
+    expect(boxOf(markup, 2), "無効なボタンの隣で「押せる」と言っている").not.toContain("押せる");
+  });
+
+  it("commit が分かる PR は、これまでどおり押せると出る", async () => {
+    // **片側だけを見ると、全部に「押せない」と出しても緑になる**
+    const markup = await board();
+
+    expect(mergeDisabled(markup, 1), "押せるはずのボタンが無効になっている").toBe(false);
+    expect(boxOf(markup, 1)).toContain("押せる");
   });
 });

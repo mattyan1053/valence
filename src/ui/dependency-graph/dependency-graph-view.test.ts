@@ -51,6 +51,8 @@ function props(overrides: Partial<DependencyGraphViewProps> = {}): DependencyGra
     edges: STACK_EDGES,
     order: STACK_ORDER,
     invalid: [],
+    // **既定は「分かっている」**——**この試験群が見ているのは、そこではない**
+    headKnown: () => true,
     ...overrides,
   };
 }
@@ -116,10 +118,15 @@ describe("DependencyGraphView", () => {
   });
 
   it("何の上に積まれているかが分かる", () => {
-    const markup = render(props());
+    // **`#1` は図の箱にも出る**（**箱には番号が入っている**）ので、**判定は一覧へ寄せる**
+    // ——**全体に当てると、図が描けているだけで緑になる**（`AGENTS.md` §4）。
+    const rows = list(render(props()));
 
-    expect(markup).toContain("#1");
-    expect(markup).toContain("feat/b");
+    // **土台は base ブランチを、その上は土台の番号を出す**——**両方見る**
+    // （**片方だけだと、全部の行を同じ形で出しても緑になる**）
+    expect(rows, "何の上に積まれているかが出ていない").toContain("← #1 の上");
+    expect(rows, "土台の行に、マージ先が出ていない").toContain("← main");
+    expect(rows).toContain("feat/b");
   });
 
   describe("読めなかった PR", () => {
@@ -225,5 +232,104 @@ describe("1 件も無いとき", () => {
 
     expect(markup, "読めなかったのに「無い」と言っている").not.toMatch(/PR を(出す|作る)/);
     expect(markup, "抜けがあることを言っていない").toMatch(/抜け/);
+  });
+});
+
+/**
+ * **図の箱だけで、次の 1 本が決まるか**（#540）。
+ *
+ * **「何待ちか」を書き写さない。** **判定は `mergeBlockFor`（domain）が持つ**
+ * ——**Merge ボタンと同じ関数を、同じ入力で呼ぶ**ので、**画面の中で食い違わない。**
+ */
+describe("図の箱に、何待ちかを載せる", () => {
+  /** 箱 1 つぶんの文字。**箱は `<g>` で 1 つにまとまっている。** */
+  function boxes(markup: string): string[] {
+    const found = [...markup.matchAll(/<g>([\s\S]*?)<\/g>/g)].map(([, inner]) =>
+      (inner ?? "")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    );
+    expect(found, "図に箱が 1 つも無い").not.toEqual([]);
+    return found;
+  }
+
+  function boxOf(markup: string, number: number): string {
+    const found = boxes(markup).filter((box) => box.startsWith(`#${number} `));
+    expect(found, `#${number} の箱が 1 つに定まらない`).toHaveLength(1);
+    return found[0] ?? "";
+  }
+
+  it("土台は押せる、その上は土台待ちと出る", () => {
+    const markup = render(props());
+
+    expect(boxOf(markup, 1), "土台が押せると出ていない").toContain("押せる");
+    expect(boxOf(markup, 2), "何を待っているかが出ていない").toContain("待ち: #1");
+  });
+
+  it("読めなかった PR があるなら、どの箱も押せるにしない", () => {
+    // **辺が作られないので、どの行の「依存なし」も信じられない**（#348 のレビュー）
+    // ——**Merge ボタンと同じ判定**である
+    const markup = render(props({ invalid: [{ index: 0, reason: "base が読めない" }] }));
+
+    expect(boxOf(markup, 1)).toContain("順序不明");
+    expect(boxOf(markup, 1), "抜けがあるのに押せると言っている").not.toContain("押せる");
+  });
+
+  it("危なさを渡さなければ、未判定と出る", () => {
+    // **空欄にすると「すぐ通せる」と見分けが付かない**——**「安全」に倒さない**
+    const markup = render(props());
+
+    expect(boxOf(markup, 1)).toContain("未判定");
+  });
+
+  it("commit が分からない PR は、押せるとは出ない", () => {
+    // **`MergeBlock` は依存の順序しか知らない**（#541 のレビュー）
+    // ——**押せるかどうかは、渡す側から受ける**
+    const markup = render(props({ headKnown: (number) => number !== 1 }));
+
+    expect(boxOf(markup, 1)).toContain("commit 不明");
+    expect(boxOf(markup, 1), "commit が分からないのに押せると言っている").not.toContain("押せる");
+  });
+
+  it("渡された危なさが、その箱に出る", () => {
+    const markup = render(props({ tierOf: (number) => (number === 1 ? "high-risk" : undefined) }));
+
+    expect(boxOf(markup, 1)).toContain("要注意");
+    expect(boxOf(markup, 2), "渡していない PR にまで危なさを出している").toContain("未判定");
+  });
+});
+
+/**
+ * **本数が増えても、画面が固まらない**（#540 の完了条件。**#120 / #158 で踏んでいる**）。
+ *
+ * **ここで測れるのは「描き切って返る」までである**（#541 のレビュー）。
+ * **2 乗になっていないことは、ここでは測れない**——**300 本のとき、辺と順序をなめ直す
+ * ぶんは React の描画に埋もれる**ので、**線形と 2 乗が同じ顔で通る。**
+ * **判定の側は domain で測っている**（`merge-block.test.ts` の
+ * 「本数が増えても、2 乗にならない」。**10000 件で、1 件ずつ呼ぶ形は 50 秒かかる**）。
+ */
+describe("本数が増えたとき", () => {
+  it("300 本でも、描き切って返る", () => {
+    const many = Array.from({ length: 300 }, (_, index) =>
+      pullRequest(index + 1, index === 0 ? "main" : `feat/${index}`, `feat/${index + 1}`),
+    );
+    const edges: DependencyEdge[] = many
+      .slice(1)
+      .map((request) => ({ dependent: request.number, dependsOn: request.number - 1 }));
+
+    const started = process.hrtime.bigint();
+    const markup = render({
+      ...props(),
+      pullRequests: many,
+      edges,
+      order: { ordered: many.map((request) => request.number), cyclic: [] },
+    });
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(markup, "300 本目が出ていない").toContain("#300");
+    // **上限は緩く取る**——**見たいのは「返ってくる」ことだけ**で、
+    // **機械の混み具合で落ちる試験は、読まれなくなる**
+    expect(elapsedMs, `描くのに ${elapsedMs}ms かかっている`).toBeLessThan(3000);
   });
 });

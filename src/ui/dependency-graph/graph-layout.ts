@@ -42,8 +42,15 @@ export type GraphLayout = {
   readonly nodeHeight: number;
 };
 
-const NODE_WIDTH = 92;
-const NODE_HEIGHT = 30;
+/**
+ * **箱の大きさは、中に入るものが決める**（#540）。
+ *
+ * **番号だけなら 92x30 で足りていた。** **危なさと「何待ちか」が入った**ので、
+ * **2 行ぶんの高さと、`待ち: #123 ほか2 件` が収まる幅**を取る——**溢れさせると、
+ * 「読まずに拾える」ために足したものが読めなくなる。**
+ */
+const NODE_WIDTH = 176;
+const NODE_HEIGHT = 54;
 const COLUMN_GAP = 44;
 const ROW_GAP = 12;
 

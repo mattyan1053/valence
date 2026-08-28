@@ -10,8 +10,14 @@
  * **図を、完全なものとして出さない。** **循環しているぶんと読めなかったぶんは
  * 図に出ない**ので、**その件数を図の脇に書く**——**欠けた図が完全な図の顔で出るのは、
  * このリポジトリが繰り返し塞いできた形**である。
+ *
+ * **箱には、決めるのに要ることを入れる**（#540）。**番号だけの箱は、読めても
+ * 決められない**——**危なさも「何待ちか」も脇の文章にしか無いと、10 本並んだとき
+ * 全部読むまで順番が決まらない。** **判定はしない**（下の `NodeMark` を受けるだけ）。
  */
 
+import type { MergeBlock } from "../../domain/graph/merge-block";
+import type { RiskTier } from "../../domain/triage/risk-tier";
 import type { GraphLayout } from "./graph-layout";
 
 /** 図に出ていないもの。**0 件なら何も言わない。** */
@@ -21,6 +27,92 @@ export type MissingFromFigure = {
   /** 読めなかった。 */
   readonly unreadable: number;
 };
+
+/**
+ * 箱 1 つに載せるもの。
+ *
+ * **判定をここで作らない。** **危なさは `classifyRiskTier`、何待ちかは `mergeBlockFor`**
+ * が決めたものを、そのまま受ける——**書き写すと、Merge ボタンの側と食い違う。**
+ */
+export type NodeMark = {
+  /**
+   * 危なさ。**材料が届いていない PR は `undefined`。**
+   *
+   * **任意の項目にしない。** **書かない＝「危なくない」に倒れる**ので、
+   * **「まだ分からない」を値として渡させる**（#348 の `unreadableCount` と同じ理由）。
+   */
+  readonly tier: RiskTier | undefined;
+  /** いま押せるか、何を待っているか。 */
+  readonly block: MergeBlock;
+  /**
+   * **見せている commit が分かっているか**（#541 のレビュー）。
+   *
+   * **`MergeBlock` が答えているのは依存の順序だけ**である。**`head.sha` が欠けた PR は
+   * 図に残る**（`pull-request-mapping.ts`）が、**`MergeButton` はそれを無効にする**
+   * ——**確かめられない対象をマージさせない**ため。**渡さないと、無効なボタンの隣に
+   * 「押せる」と出る。**
+   *
+   * **任意にしない。** **既定を `true` にすると言い過ぎ**、**`false` にすると
+   * どの PR も「commit 不明」になる**——**どちらへ倒しても嘘になる。**
+   */
+  readonly headKnown: boolean;
+};
+
+/**
+ * 箱に出す、危なさの札。
+ *
+ * **`RiskTierView` の言葉を使い回さない。** **あちらは「何をすべきか」を文で言う**
+ * もので、**ここは一覧して比べるための札**である——**箱に入る長さでないと意味が無い。**
+ *
+ * **`Record` で持つ。** Tier を足したときにここへ書き忘れると**型検査が落ちる**。
+ */
+const TIER_LABEL: Record<RiskTier, string> = {
+  "fast-track": "すぐ",
+  "needs-review": "通常",
+  "high-risk": "要注意",
+};
+
+/**
+ * 危なさを、**濃さでも出す**。**読まずに拾えるのは、札より先にこちら**である。
+ *
+ * **色では出せない**（#505）——**テーマが決める `currentColor` しか使えない**ので、
+ * **濃さで段を付ける。**
+ */
+const TIER_WEIGHT: Record<RiskTier, number> = {
+  "fast-track": 0.2,
+  "needs-review": 0.5,
+  "high-risk": 1,
+};
+
+/** **材料が届いていない。** **空欄にすると `fast-track` と見分けが付かない。** */
+const UNKNOWN_LABEL = "未判定";
+
+/**
+ * **何を待っているか。** **番号まで出す**——**「押せない」だけでは次の手が分からない。**
+ *
+ * **「押せる」と言うのは、ボタンが押せるときだけ**である（#541 のレビュー）。
+ * **依存が残っているほうを先に出す**——**そちらは先に入れれば解ける**が、
+ * **commit が分からないのは、盤面を読み込み直すまで変わらない。**
+ */
+function markLabel({ block, headKnown }: NodeMark): string {
+  switch (block.kind) {
+    case "ready":
+      // **ボタンと同じ条件**（`MergeButton` の `headSha === undefined`）
+      return headKnown ? "押せる" : "commit 不明";
+    case "depends-on": {
+      const [first, ...rest] = block.numbers;
+      // **`mergeBlockFor` は空なら `ready` を返す**ので実際には来ないが、**型は許す**
+      // ——**「押せる」へ倒すと、依存を壊す側へ倒れる。**
+      if (first === undefined) {
+        return "順序不明";
+      }
+      return rest.length === 0 ? `待ち: #${first}` : `待ち: #${first} ほか${rest.length} 件`;
+    }
+    case "not-orderable":
+      // **原因は言い分けない**（`mergeNotice` と同じ理由。#348 のレビュー）
+      return "順序不明";
+  }
+}
 
 function MissingNote({ missing }: { missing: MissingFromFigure }) {
   const parts: string[] = [];
@@ -39,9 +131,17 @@ function MissingNote({ missing }: { missing: MissingFromFigure }) {
 export function DependencyGraphFigure({
   layout,
   missing,
+  markOf,
 }: {
   readonly layout: GraphLayout;
   readonly missing: MissingFromFigure;
+  /**
+   * 箱 1 つぶんの中身。
+   *
+   * **任意にしない。** **渡さなければ番号だけに戻る**が、**それは #540 が消しに来た
+   * 状態**である——**合成で渡し忘れた日から、静かに元へ戻る。**
+   */
+  readonly markOf: (pullRequestNumber: number) => NodeMark;
 }) {
   if (layout.nodes.length === 0) {
     return <MissingNote missing={missing} />;
@@ -55,7 +155,7 @@ export function DependencyGraphFigure({
       <div style={{ overflowX: "auto" }}>
         <svg
           role="img"
-          aria-label="PR の依存グラフ。左が土台で、右へ行くほど上に積まれている"
+          aria-label="PR の依存グラフ。左が土台で、右へ行くほど上に積まれている。各箱に番号・危なさ・何待ちかが入っている"
           viewBox={`0 0 ${layout.width} ${layout.height}`}
           width={layout.width}
           height={layout.height}
@@ -72,37 +172,78 @@ export function DependencyGraphFigure({
               strokeWidth={1}
             />
           ))}
-          {layout.nodes.map((node) => (
-            <g key={node.number}>
-              <rect
-                x={node.x}
-                y={node.y}
-                width={layout.nodeWidth}
-                height={layout.nodeHeight}
-                rx={4}
-                fill="none"
-                stroke="currentColor"
-              />
-              {/*
-               **色は親から受け取る** (#505)。**SVG の既定の `fill` は黒**なので、
-               **書かないと暗いテーマで背景と同じ色になる**——**枠だけが
-               `currentColor` で追随し**、**四角は見えるのに文字が見えなかった。**
-               */}
-              <text
-                x={node.x + layout.nodeWidth / 2}
-                y={node.y + layout.nodeHeight / 2}
-                textAnchor="middle"
-                dominantBaseline="middle"
-                fill="currentColor"
-              >
-                #{node.number}
-              </text>
-            </g>
-          ))}
+          {layout.nodes.map((node) => {
+            const mark = markOf(node.number);
+            const { tier } = mark;
+            return (
+              <g key={node.number}>
+                <rect
+                  x={node.x}
+                  y={node.y}
+                  width={layout.nodeWidth}
+                  height={layout.nodeHeight}
+                  rx={4}
+                  fill="none"
+                  stroke="currentColor"
+                  // **判定できていない箱を、判定済みと同じ形にしない**
+                  strokeDasharray={tier === undefined ? "3 3" : undefined}
+                />
+                {/*
+                 **危なさを、濃さの帯で出す**（#540）。**札より先に目に入るのはここ**
+                 で、**10 本並んだときに拾えるのは形と濃さである。**
+                 **材料が無いなら帯を出さない**——**薄い帯は「危なくない」に見える。**
+                 */}
+                {tier === undefined ? undefined : (
+                  <rect
+                    x={node.x + 1}
+                    y={node.y + 1}
+                    width={5}
+                    height={layout.nodeHeight - 2}
+                    fill="currentColor"
+                    fillOpacity={TIER_WEIGHT[tier]}
+                  />
+                )}
+                {/*
+                 **色は親から受け取る** (#505)。**SVG の既定の `fill` は黒**なので、
+                 **書かないと暗いテーマで背景と同じ色になる**——**枠だけが
+                 `currentColor` で追随し**、**四角は見えるのに文字が見えなかった。**
+                 */}
+                <text
+                  x={node.x + 16}
+                  y={node.y + 18}
+                  dominantBaseline="middle"
+                  fill="currentColor"
+                  fontSize={13}
+                  fontWeight="bold"
+                >
+                  #{node.number}
+                </text>
+                <text
+                  x={node.x + layout.nodeWidth - 10}
+                  y={node.y + 18}
+                  textAnchor="end"
+                  dominantBaseline="middle"
+                  fill="currentColor"
+                  fontSize={11}
+                >
+                  {tier === undefined ? UNKNOWN_LABEL : TIER_LABEL[tier]}
+                </text>
+                <text
+                  x={node.x + 16}
+                  y={node.y + 38}
+                  dominantBaseline="middle"
+                  fill="currentColor"
+                  fontSize={11}
+                >
+                  {markLabel(mark)}
+                </text>
+              </g>
+            );
+          })}
         </svg>
       </div>
       <figcaption>
-        左が土台、右へ行くほど上に積まれている。
+        左が土台、右へ行くほど上に積まれている。箱には番号・危なさ・何待ちかが入っている。
         <MissingNote missing={missing} />
       </figcaption>
     </figure>
