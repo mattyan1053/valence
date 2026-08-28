@@ -15,13 +15,22 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-check-leftovers", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /** `docker top` が返す表。**1 行目は見出し**（実物と同じ形）。 */
 const HEADER = "UID                 PID                 PPID                CMD";
@@ -434,12 +443,20 @@ describe("作業場を並べられないとき", () => {
   /** 実物の `git`。**並べるところ以外は、そのまま通す**（**過剰に身代わりを置かない**）。 */
   const REAL_GIT = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
 
-  /** **実物の `./task` を、身代わりの `git` / `docker` で走らせる。** */
+  /**
+   * **実物の `./task` を、砂場で走らせる**（#556 と同じ形）。
+   *
+   * **本物のリポジトリで打たない。** **`git worktree list` はこの機械の実物を返す**ので、
+   * **別の作業場が worktree を足せば一覧が変わり**、**その `git` が競って落ちれば
+   * 「並べられない」が出る**——**合否が他人の持ち物で決まる**（`AGENTS.md` §5 / #186）。
+   *
+   * **砂場は本物の worktree を触らない**——**自分の repo に自分で足す。**
+   */
   function runTask(failWorktreeList: boolean): { status: number; stderr: string } {
-    const dir = mkdtempSync(join(tmpdir(), "worktree-list-"));
-    sandboxes.push(dir);
+    const stubs = mkdtempSync(join(tmpdir(), "worktree-list-"));
+    sandboxes.push(stubs);
     writeFileSync(
-      join(dir, "git"),
+      join(stubs, "git"),
       [
         "#!/usr/bin/env bash",
         ...(failWorktreeList ? ['if [[ $* == *"worktree list"* ]]; then exit 1; fi'] : []),
@@ -447,14 +464,65 @@ describe("作業場を並べられないとき", () => {
       ].join("\n"),
       { mode: 0o755 },
     );
-    chmodSync(join(dir, "git"), 0o755);
+    chmodSync(join(stubs, "git"), 0o755);
     // **コンテナは見に行かせない**——**見たいのは並べるところ**である
-    writeFileSync(join(dir, "docker"), '#!/usr/bin/env bash\nprintf ""\nexit 0\n', { mode: 0o755 });
-    chmodSync(join(dir, "docker"), 0o755);
+    writeFileSync(join(stubs, "docker"), '#!/usr/bin/env bash\nprintf ""\nexit 0\n', {
+      mode: 0o755,
+    });
+    chmodSync(join(stubs, "docker"), 0o755);
+
+    const repo = mkdtempSync(join(tmpdir(), "leftovers-repo-"));
+    sandboxes.push(repo);
+    expect(spawnSync(REAL_GIT, ["init", "--quiet", "-b", "main", repo]).status).toBe(0);
+    expect(
+      spawnSync(
+        REAL_GIT,
+        [
+          "-c",
+          "user.email=loop@example.invalid",
+          "-c",
+          "user.name=loop",
+          "commit",
+          "--allow-empty",
+          "--quiet",
+          "-m",
+          "seed",
+        ],
+        { cwd: repo, encoding: "utf8" },
+      ).status,
+    ).toBe(0);
+    const added = `${repo}-worker-b`;
+    sandboxes.push(added);
+    expect(
+      spawnSync(
+        REAL_GIT,
+        [
+          "-c",
+          "user.email=loop@example.invalid",
+          "-c",
+          "user.name=loop",
+          "worktree",
+          "add",
+          "--detach",
+          "--quiet",
+          added,
+          "HEAD",
+        ],
+        { cwd: repo, encoding: "utf8" },
+      ).status,
+    ).toBe(0);
+    // **口は本物を置く**（#227）——**`task` は `./bin/loop-check-leftovers` を呼ぶ**
+    for (const name of ["task", "bin/loop-check-leftovers", "bin/loop-check-state"]) {
+      const to = join(repo, name);
+      mkdirSync(dirname(to), { recursive: true });
+      copyFileSync(join(REPO_ROOT, name), to);
+      chmodSync(to, 0o755);
+    }
+
     const done = spawnSync("./task", ["check:leftovers"], {
-      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      cwd: repo,
       encoding: "utf8",
-      env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` },
     });
     return { status: done.status ?? -1, stderr: done.stderr };
   }
