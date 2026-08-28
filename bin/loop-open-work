@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# 着手できる open PR を数える (#546)。
+#
+#   bin/loop-open-work < <open PR の一覧>
+#
+#   標準入力: 1 行 1 PR。`<PR番号><US><label をカンマで繋いだもの>`
+#   標準出力: 着手できる PR の件数（1 行）
+#
+#   exit 0 = 数えた (0 件でも 0)
+#   exit 2 = 入力を読めない / 使い方の誤り
+#
+# **人待ちの PR を数に入れない。** **`parked` + `awaiting-human` は、人の判断待ちで
+# ループの中では解けない**——**master の手順書が `blocked` の Issue を数に入れないのと
+# 同じ理由**である（**数を減らせるのは人だけ**）。
+#
+# **数に入れると、`no-work` が永久に通らない** (#546)。**人待ちの PR が 1 本あるだけで
+# 「open PR が 0 件」が成立しなくなり**、**両方の手が空いていても `loop/STOP` は
+# 置かれない**——**3 周で人を呼ぶ仕掛けが、呼ぶべき場面で働かない。**
+#
+# **`parked` だけは数に入れる。** **あれは先行 PR 待ちで、ループが解く**
+# ——**外すと、先行 PR を待っているだけの周回で「尽きた」と数え始め**、
+# **3 周で全ループが止まる。** **境目は `awaiting-human` が付いているかどうか**である。
+#
+# **数えるのはここだけ** (`AGENTS.md` §5)。**手順書へ書き写さない**——**写した側が
+# 古くなっても、どちらも「正しく見える」。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-open-work < <open PR の一覧>" >&2
+  echo "        1 行 1 PR: <PR番号><US><label をカンマで繋いだもの>" >&2
+  echo "        exit 0 = 数えた / exit 2 = 読めない" >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || usage
+
+# 列の区切り。**タブを使わない**（`bin/loop-parked-issues` と同じ理由——**IFS の空白は
+# 連続すると 1 区切りに畳まれ**、**label が 1 つも無い PR で列が左へずれる**）。
+readonly FIELD=$'\037'
+
+count=0
+
+# **最後の行に改行が無くても読む**（`bin/loop-parked-issues` と同じ）——**PR が 1 本
+# だけの周回は、まさにその 1 件である。**
+while IFS="$FIELD" read -r number labels || [[ -n $number ]]; do
+  # **空行は飛ばす。** **一覧が 0 件のとき、呼ぶ側からは空文字が来る**
+  [[ -n $number ]] || continue
+  # **読めない行を 0 件へ倒さない。** **飲み込むと「作業が尽きた」に化け**、
+  # **人待ちでもないのに人が呼ばれる**
+  if ! [[ $number =~ ^[0-9]+$ ]]; then
+    echo "[FAIL] PR 番号を読めません: $number" >&2
+    exit 2
+  fi
+
+  # **前後をカンマで囲って見る**——**前方一致で見ると、`parked-later` のような label が
+  # 付いた日に、着手できる PR が黙って数から消える。**
+  if [[ ",$labels," == *",parked,"* && ",$labels," == *",awaiting-human,"* ]]; then
+    continue
+  fi
+  ((count++))
+done
+
+printf '%s\n' "$count"
+exit 0
