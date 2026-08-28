@@ -56,6 +56,39 @@ function countingBlock(): string {
 
 type Pr = { number: number; labels: string[] };
 
+/** そのブロックが `gh` へ渡す `--jq` の式。 */
+function expressionOf(block: string): string {
+  const found = /--jq '([^']*)'/.exec(block);
+  expect(found, "`--jq` の式が見つからない").not.toBeNull();
+  return found?.[1] ?? "";
+}
+
+/**
+ * **式のとおりに 1 行を組み立てる。**
+ *
+ * **読むのは 3 つだけ**——**どの列を、どの順で、何で繋ぐか。** **`.number` と
+ * `.labels[].name` が式に出てくる順が、そのまま列の順**である（**入れ替えれば、
+ * 出力も入れ替わる**）。**`join(",")` があれば label は 1 列に畳まれる。**
+ *
+ * **どちらの列も出てこない式は落とす**——**演じられないものを、演じたことにしない。**
+ */
+function renderAs(expression: string, prs: readonly Pr[]): string {
+  const numberAt = expression.indexOf(".number");
+  const labelsAt = expression.indexOf(".labels[].name");
+  expect(numberAt, "式が PR 番号を出していない").toBeGreaterThanOrEqual(0);
+  expect(labelsAt, "式が label を出していない").toBeGreaterThanOrEqual(0);
+  const joinsLabels = expression.includes('join(",")');
+
+  return prs
+    .map((pr) => {
+      const labels = joinsLabels ? [pr.labels.join(",")] : pr.labels;
+      const columns =
+        numberAt < labelsAt ? [`${pr.number}`, ...labels] : [...labels, `${pr.number}`];
+      return columns.join(FIELD);
+    })
+    .join("\\n");
+}
+
 /**
  * そのブロックを、偽の `gh` で走らせる。
  *
@@ -70,40 +103,23 @@ function countWith(prs: readonly Pr[]): string {
     mkdirSync(join(workspace, "bin"), { recursive: true });
     copyFileSync(join(REPO_ROOT, "bin/loop-open-work"), join(workspace, "bin/loop-open-work"));
 
-    // **式のとおりに返す**（#551 のレビュー）。**書式を試験側で決め打ちすると、
-    // `--jq` を元へ戻す変異が届かない**——**この PR が直したのは「生成側と解析側の
-    // 書式が食い違う」ことなのに、その食い違いを起こせない試験になっていた。**
+    // **式から、出す列を組み立てる**（#551 のレビュー 2 周目）。**部分文字列で
+    // 分岐して決め打ちの行を返すと、列の順を入れ替える変異が素通りする**
+    // ——**本物の `gh` は式のとおりに出す**ので、**列が逆なら `bin/loop-open-work` は
+    // PR 番号を読めずに落ちる。**
     //
-    // **`gh --jq` は `gh` が持っている jq** で、**この容器には jq が無い**
-    // （`bin/loop-fixup-lines.test.ts`）——**本物を通せない**ので、**知っている 2 つの
-    // 書式だけを演じ、知らない式は落とす。**
-    const render = (labels: (pr: Pr) => string[]) =>
-      prs
-        .map((pr) => [pr.number, ...labels(pr)].join(FIELD))
-        .join("\\n")
-        .replaceAll("'", "'\\''");
-    const asFields = render((pr) => pr.labels);
-    const asComma = render((pr) => (pr.labels.length === 0 ? [] : [pr.labels.join(",")]));
-    const emit = (listed: string) => `printf '${listed === "" ? "" : `${listed}\\n`}'`;
+    // **本物の jq は通せない。** **`gh` そのものを偽物へ差し替えている**ので、
+    // **`gh` 内蔵の jq には届かない**（**`gh` が jq の導入を要求しないのは、
+    // 本物の `gh` を呼べるときの話である**）。**この容器に jq も無い**
+    // （`bin/loop-fixup-lines.test.ts`）——**なので、式のうち「どの列を、どの順で、
+    // 何で繋ぐか」だけを読んで演じる。** **読めない式は落とす**（`renderAs`）。
+    const listed = renderAs(expressionOf(countingBlock()), prs).replaceAll("'", "'\\''");
 
     writeFileSync(
       join(stub, "gh"),
-      [
-        "#!/usr/bin/env bash",
-        // **label を「取り出す」ところまで見る**（#313 と同じ形）。**`--json` に
-        // 書いてあっても、`--jq` が落としていれば、数える側は判別できない**
-        `[[ $* == *".labels[].name"* ]] || { echo "スタブ: label を取り出していない: $*" >&2; exit 1; }`,
-        `if [[ $* == *'join(",")'* ]]; then`,
-        `  ${emit(asComma)}`,
-        `elif [[ $* == *'join("\\u001f")'* ]]; then`,
-        `  ${emit(asFields)}`,
-        "else",
-        `  echo "スタブ: 知らない --jq の式: $*" >&2`,
-        "  exit 1",
-        "fi",
-        "exit 0",
-        "",
-      ].join("\n"),
+      ["#!/usr/bin/env bash", `printf '${listed === "" ? "" : `${listed}\\n`}'`, "exit 0", ""].join(
+        "\n",
+      ),
       { mode: 0o755 },
     );
     // **落ちたら停止を積む側も偽物にする**（本物を呼ぶと、試験がカウンタを動かす）
