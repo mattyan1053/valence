@@ -1626,6 +1626,73 @@ describe("bin/loop-claim", () => {
         );
       });
 
+      it("鎖の途中が惜しい形なら、その途中を名指しで言う", () => {
+        // **枝自身が厳密でも、鎖の途中が惜しい形なら親には届かない**（#545 のレビュー
+        // 2 周目）——**38 件中 35 件が惜しい形**なので、**途中が惜しいほうが普通である。**
+        //
+        // **「同じ形が 1 段深いところで再発する」**は、孫の対応で書いた言葉である
+        // ——**その対応の中でもう 1 度起きていた。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "そのうちの 1 つ（#542）", 542: "図の箱の続き（#540 の続き）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        const idle = run(["idle"]);
+
+        expect(idle.stdout.split("\n")[0], "鎖が切れているのに黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+        // **切れているのは #542 と #540 のあいだ**である——**#546 を名指ししない**
+        expect(idle.stderr, "どこで切れたかを言っていない").toMatch(
+          /#542 のタイトルは（#540 …）で終わっていますが/,
+        );
+        expect(idle.stderr, "厳密に書いてある #546 を名指ししている").not.toMatch(
+          /#546 のタイトルは/,
+        );
+      });
+
+      it("切れ目が 2 つあるなら、枝に近いほうを言う", () => {
+        // **直しに行くのは、枝から辿って最初に切れているところ**である
+        // ——**そこを直せば、次の切れ目まで鎖が伸びる。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/548-smallest" }],
+          titles: {
+            548: "さらに小さく（#546 の続き）",
+            546: "そのうちの 1 つ（#542 の続き）",
+            542: "図の箱の続き（#540）",
+          },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        const idle = run(["idle"]);
+
+        expect(idle.stderr, "枝に近い切れ目を言っていない").toMatch(/#548 のタイトルは/);
+        expect(idle.stderr, "切れ目を 2 つとも並べている").not.toMatch(/#546 のタイトルは/);
+      });
+
+      it("同じ切れ目を、枝の数だけ繰り返さない", () => {
+        // **毎回同じ行が並ぶと読まれなくなる** (#248)
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-one" }, { head: "feat/547-another" }],
+          titles: {
+            546: "ひとつめ（#542）",
+            547: "ふたつめ（#542）",
+            542: "図の箱の続き（#540 の続き）",
+          },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        const said = run(["idle"])
+          .stderr.split("\n")
+          .filter((line) => line.includes("#542 のタイトルは"));
+
+        expect(said, "同じ切れ目を繰り返している").toHaveLength(1);
+      });
+
       it("厳密に書いてあるときは、余計なことを言わない", () => {
         // **平常時に鳴る検査は読まれなくなる** (#248)
         withIdle({

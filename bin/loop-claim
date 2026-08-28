@@ -438,6 +438,34 @@ if [[ $ACTION == "idle" ]]; then
     done <<<"$merged_pr_lines"
   }
 
+  # **鎖のどこで切れたかを探す** (#545 のレビュー 2 周目)。
+  #
+  # **惜しい形まで許して辿り、`number` に届いたら、その道で最初に出てきた惜しい辺を返す**
+  # （`loose_link` / `loose_parent` へ入れる）。**1 つも無ければ、その道は厳密に繋がって
+  # いる**——**厳密な親は惜しい形の部分集合**（**同じタイトルから読むので、厳密が
+  # 当たるなら緩いほうも同じ番号で当たる**）なので、**「惜しい辺が無い＝厳密に届く」**である。
+  #
+  # **枝自身だけを見ない。** **枝が厳密でも、鎖の途中が惜しい形なら親には届かない**
+  # ——**末尾が `（#N …）` の Issue は 38 件、厳密は 3 件**なので、
+  # **途中が惜しいほうが普通**である。
+  loose_link_toward() {
+    local current="$1" number="$2" seen=" $1 "
+    loose_link=""
+    loose_parent=""
+    while [[ -n ${near_parent_of[$current]-} ]]; do
+      # **その 1 段が惜しい形なら、そこが切れ目である**（**最初の 1 つだけ覚える**）
+      if [[ -z ${parent_of[$current]-} && -z $loose_link ]]; then
+        loose_link="$current"
+        loose_parent="${near_parent_of[$current]}"
+      fi
+      current="${near_parent_of[$current]}"
+      [[ $current == "$number" ]] && return 0
+      [[ $seen == *" $current "* ]] && return 1
+      seen+="$current "
+    done
+    return 1
+  }
+
   # **惜しい書き方を、黙って落とさない** (#545 のレビュー)。
   #
   # **末尾が `（#N …）` の Issue は実際に多く**（**括弧の中に語を足した形**）、
@@ -446,13 +474,16 @@ if [[ $ACTION == "idle" ]]; then
   #
   # **数え方は変えない。** **言うだけである。**
   near_miss_note() {
-    local number="$1" branch
+    local number="$1" branch loose_link loose_parent said=" "
     load_children
     while read -r branch; do
-      [[ -n ${near_parent_of[$branch]-} ]] || continue
-      [[ -z ${parent_of[$branch]-} ]] || continue
-      chain_reaches near_parent_of "$branch" "$number" || continue
-      echo "[WARN] #$number: #$branch のタイトルは（#$number …）で終わっていますが、括弧の中に語があるので親子に数えていません" >&2
+      loose_link_toward "$branch" "$number" || continue
+      # **厳密に繋がっている道は、そもそも鳴っていない側である**——**言わない**
+      [[ -n $loose_link ]] || continue
+      # **同じ切れ目を、枝の数だけ繰り返さない**（**読まれなくなる**）
+      [[ $said == *" $loose_link "* ]] && continue
+      said+="$loose_link "
+      echo "[WARN] #$number: #$loose_link のタイトルは（#$loose_parent …）で終わっていますが、括弧の中に語があるので親子に数えていません" >&2
     done < <(branch_numbers)
   }
 
