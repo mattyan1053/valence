@@ -22,7 +22,7 @@ const SCRIPT = fileURLToPath(new URL("./loop-open-work", import.meta.url));
 /** 列の区切り。**本物と同じ**（`bin/loop-parked-issues` が使っているもの）。 */
 const FIELD = "";
 
-type Pr = { number: number; labels: string[] };
+type Pr = { number: number; branch?: string; labels: string[] };
 
 /**
  * **label も 1 つずつ列にする**（#550）。
@@ -34,7 +34,11 @@ type Pr = { number: number; labels: string[] };
  * ——**カンマよりは入りにくい**、までである。
  */
 function lines(prs: readonly Pr[]): string {
-  return prs.map((pr) => [pr.number, ...pr.labels].join(FIELD)).join("\n");
+  // **2 列目は枝である** (#558)——**同じ一覧を `bin/loop-in-progress-work` も回す**ので、
+  // **列が 1 つ増えた。** **この口は使わないが、読み飛ばす位置は合っていること。**
+  return prs
+    .map((pr) => [pr.number, pr.branch ?? `fix/999-${pr.number}`, ...pr.labels].join(FIELD))
+    .join("\n");
 }
 
 function run(input: string): { status: number; stdout: string; stderr: string } {
@@ -110,7 +114,7 @@ describe("着手できる open PR を数える", () => {
   it("最後の行に改行が無くても数える", () => {
     // **`read` は改行で終わっていない行を読むと非 0 を返す**——**そのまま条件にすると
     // 最後の 1 件が落ちる**（**PR が 1 本だけの周回は、まさにその 1 件**）
-    expect(run(`545${FIELD}`).stdout).toBe("1");
+    expect(run(`545${FIELD}fix/999-545`).stdout).toBe("1");
   });
 
   it("読めない行を、0 件へ倒さない", () => {
@@ -122,7 +126,7 @@ describe("着手できる open PR を数える", () => {
   });
 
   it("PR 番号が読めなければ落ちる", () => {
-    expect(run(`abc${FIELD}parked`).status).toBe(2);
+    expect(run(`abc${FIELD}fix/999-1${FIELD}parked`).status).toBe(2);
   });
 
   it("引数は取らない", () => {
@@ -136,6 +140,7 @@ describe("着手できる open PR を数える", () => {
     const usage = spawnSync(SCRIPT, ["545"], { encoding: "utf8" }).stderr;
 
     expect(usage, "区切りを案内していない").toContain("<label><US><label>");
+    expect(usage, "枝の列を案内していない").toContain("<枝>");
     expect(usage, "案内が前の書式のまま").not.toContain("カンマ");
   });
 });

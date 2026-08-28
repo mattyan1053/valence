@@ -934,9 +934,10 @@ gh pr edit <PR番号> --remove-label changes-requested
 
 起票するのは「手が空いたとき」だけではない。次のいずれかに当てはまれば起票する。
 
-- **着手できる作業が無い**（**着手できる open PR が 0 件**で、`backlog` / `ready` /
-  `in-progress` の Issue も無い）——**「着手できる」は人待ちを引いた数である** (#546)。
-  **数え方は `bin/loop-open-work` が持っている**（ステップ 7「作業が尽きたとき」と同じ）。
+- **着手できる作業が無い**（**着手できる open PR が 0 件**で、`backlog` / `ready` が
+  無く、**着手を進められる `in-progress` も 0 件**）——**「着手できる」は人待ちを
+  引いた数である** (#546 / #558)。**数え方は `bin/loop-open-work` と
+  `bin/loop-in-progress-work` が持っている**（ステップ 7「作業が尽きたとき」と同じ）。
   **人待ちを数に入れると、起票の口が開かないまま `no-work` だけが通り**、
   **3 周で人が呼ばれる**
 - **レビュー中に、この PR の範囲外で直すべきものを見つけた** — その PR を膨らませず、
@@ -1176,22 +1177,26 @@ gh issue edit <N> --remove-label waiting-condition
 
 ### 作業が尽きたとき
 
-**着手できる open PR が 0 件で、`ready` / `in-progress` が 0 件、かつ `backlog` に
-昇格できるものが無い**（空か、**残りが全部 `waiting-condition`**）なら、どちらのループも
-正常に動いたまま何もしない周回になる。ここは `bin/loop-stall` を通す。
+**着手できる open PR が 0 件で、`ready` が 0 件、着手を進められる `in-progress` が
+0 件、かつ `backlog` に昇格できるものが無い**（空か、**残りが全部
+`waiting-condition`**）なら、どちらのループも正常に動いたまま何もしない周回になる。
+ここは `bin/loop-stall` を通す。
 
 **「着手できる」は、人待ちを引いた数である** (#546)。**数え方は `bin/loop-open-work` が
 持っている**——**ここに書き写さない**（`AGENTS.md` §5。**写した側が古くなっても、
 どちらも正しく見える**）。
 
 ```bash
-# 開いている PR の一覧（1 行 1 件。`<PR番号><US><label><US><label>...`）
+# 開いている PR の一覧（1 行 1 件。`<PR番号><US><枝><US><label><US><label>...`）
 # **label をカンマで繋がない** (#550)——**GitHub の label 名にはカンマを入れられる**
 # ので、**繋ぐと `parked,awaiting-human` という 1 つの label が 2 つに見える**
+# **枝も取る** (#558)——**`bin/loop-in-progress-work` が Issue と結ぶのに要る**
+# （**`Closes` を書かない PR がある**。#321）。**一覧は 1 つにする**——**引き直すと、
+# 同じ周回の中に 2 つの一覧ができ、そこだけ古い値になりうる**
 # **先に変数へ受ける。** パイプで繋ぐと `$?` は数える側のものになり、
 # **取得できなかった周回が「0 件」と見分けが付かない**
-if ! open_prs="$(gh pr list --state open --limit 200 --json number,labels \
-  --jq '.[] | [(.number | tostring)] + [.labels[].name] | join("\u001f")')"; then
+if ! open_prs="$(gh pr list --state open --limit 200 --json number,headRefName,labels \
+  --jq '.[] | [(.number | tostring), .headRefName] + [.labels[].name] | join("\u001f")')"; then
   bin/loop-stall pr-lookup-failed
   exit
 fi
@@ -1210,6 +1215,38 @@ fi
 printf '%s\n' "$open_work"
 ```
 
+**着手中も、人待ちを引いた数である** (#558。**#546 の裏側**)。**人待ちの PR を持つ
+Issue は `in-progress` のまま残る**ので、**引かないと `no-work` が永久に通らない**
+——**#546 で PR の側を引いたのと、理由がそのまま同じ**である。
+
+**数え方は `bin/loop-in-progress-work` が持っている**（**人待ちの判定は
+`bin/loop-open-work` を呼んで訊く**）——**ここに書き写さない。**
+
+```bash
+# 着手中の Issue 番号（1 行 1 件）。**ステップ 6 の `$in_progress` は JSON** なので、
+# **番号だけをここで引く**——**取れなかったら「0 件」へ倒さない**（`open_prs` と同じ）
+if ! in_progress_numbers="$(gh issue list --label in-progress --limit 200 --json number \
+  --jq '.[].number')"; then
+  bin/loop-stall issue-lookup-failed
+  exit
+fi
+printf '%s\n' "$in_progress_numbers"
+```
+
+**ここでも、取ってから数える**（`open_prs` と同じ形）。
+
+```bash
+# **PR がまだ無い `in-progress` は、これまでどおり数に入る**——**実装している最中**で、
+# **外すと「作業が尽きた」と数え、3 周で全ループが止まる**
+# **引用しない**——**番号を 1 つずつ引数として渡す**
+if ! in_progress_work="$(printf '%s\n' "$open_prs" |
+  bin/loop-in-progress-work $in_progress_numbers)"; then
+  bin/loop-stall issue-lookup-failed
+  exit
+fi
+printf '%s\n' "$in_progress_work"
+```
+
 ```bash
 bin/loop-stall no-work
 ```
@@ -1221,6 +1258,10 @@ bin/loop-stall no-work
 **`blocked` だけがある状態も同じ扱いにする。** `blocked` は人の判断待ちで、
 ループの中では解けない。着手できないという点で「何も無い」と変わらないので、
 `blocked` があっても `no-work` を通す（数を減らせるのは人だけである）。
+
+**その PR を持つ Issue も同じである** (#558)。**`in-progress` のまま数に入り続けると、
+PR の側だけ引いても `no-work` は通らない**——**境目は「その Issue の open PR が、
+全部人待ちか」**である。**1 本でも普通の open PR があるなら、そちらを進められる。**
 
 **PR 側の `parked` + `awaiting-human` も同じである** (#546)。**理由がそのまま当てはまる**
 ——**人の判断待ちで、ループの中では解けない。** **`parked` だけ（先行 PR 待ち）は

@@ -54,7 +54,7 @@ function countingBlock(): string {
   return found.join("\n");
 }
 
-type Pr = { number: number; labels: string[] };
+type Pr = { number: number; branch?: string; labels: string[] };
 
 /** そのブロックが `gh` へ渡す `--jq` の式。 */
 function expressionOf(block: string): string {
@@ -75,6 +75,10 @@ function expressionOf(block: string): string {
 function renderAs(expression: string, prs: readonly Pr[]): string {
   const numberAt = expression.indexOf(".number");
   const labelsAt = expression.indexOf(".labels[].name");
+  // **枝の列も式から読む** (#558)——**`bin/loop-in-progress-work` が Issue と結ぶのに
+  // 要る**ので、**同じ一覧に 1 列増えた。** **式に無ければ出さない**
+  // （**演じられないものを、演じたことにしない**）。
+  const branchAt = expression.indexOf(".headRefName");
   expect(numberAt, "式が PR 番号を出していない").toBeGreaterThanOrEqual(0);
   expect(labelsAt, "式が label を出していない").toBeGreaterThanOrEqual(0);
   const joinsLabels = expression.includes('join(",")');
@@ -82,9 +86,18 @@ function renderAs(expression: string, prs: readonly Pr[]): string {
   return prs
     .map((pr) => {
       const labels = joinsLabels ? [pr.labels.join(",")] : pr.labels;
-      const columns =
-        numberAt < labelsAt ? [`${pr.number}`, ...labels] : [...labels, `${pr.number}`];
-      return columns.join(FIELD);
+      // **式に出てくる順が、そのまま列の順**である
+      const columns: { at: number; text: string }[] = [
+        { at: numberAt, text: `${pr.number}` },
+        ...labels.map((label) => ({ at: labelsAt, text: label })),
+      ];
+      if (branchAt >= 0) {
+        columns.push({ at: branchAt, text: pr.branch ?? `fix/999-${pr.number}` });
+      }
+      return columns
+        .sort((left, right) => left.at - right.at)
+        .map((column) => column.text)
+        .join(FIELD);
     })
     .join("\\n");
 }
@@ -215,5 +228,112 @@ describe("止まる向き", () => {
     expect(section("### 作業が尽きたとき"), "倒れる向きが書いていない").toContain(
       "人待ちが残ったまま",
     );
+  });
+});
+
+/**
+ * **人待ちの PR を持つ Issue を、着手中の数に入れない**（#558。**#546 の裏側**）。
+ *
+ * **PR の側だけ引いても `no-work` は通らない**——**その PR を持つ Issue は
+ * `in-progress` のまま数に入り続ける**（**実測: #501 / #502**）。
+ *
+ * **配線を見る。** **手順書のブロックをそのまま走らせ、本物の口を置く**
+ * ——**`bin/loop-in-progress-work` を呼んでいなければ、数は減らない。**
+ */
+describe("人待ちの PR を持つ着手中", () => {
+  /** ステップ 7 の 4 ブロック（取る / 数える を 2 組）。 */
+  function stepBlocks(): string {
+    const found = blocks(section("### 作業が尽きたとき")).filter(
+      (chunk) =>
+        chunk.includes("gh pr list") ||
+        chunk.includes("bin/loop-open-work") ||
+        chunk.includes("gh issue list") ||
+        chunk.includes("bin/loop-in-progress-work"),
+    );
+    expect(found, "取る側と数える側が 2 組そろっていない").toHaveLength(4);
+    return found.join("\n");
+  }
+
+  /** **`gh` は一覧を返すだけ**にして、**数える側は本物を置く。** */
+  function countWorkable(prs: readonly Pr[], inProgress: readonly number[]): string {
+    const workspace = mkdtempSync(join(tmpdir(), "in-progress-work-"));
+    try {
+      const stub = join(workspace, "stub");
+      mkdirSync(stub, { recursive: true });
+      mkdirSync(join(workspace, "bin"), { recursive: true });
+      for (const name of ["loop-open-work", "loop-in-progress-work"]) {
+        copyFileSync(join(REPO_ROOT, "bin", name), join(workspace, "bin", name));
+      }
+
+      const listed = renderAs(expressionOf(stepBlocks()), prs).replaceAll("'", "'\\''");
+      const numbers = inProgress.join("\\n");
+      writeFileSync(
+        join(stub, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          // **どちらの一覧かで返し分ける**——**同じ `gh` が 2 度呼ばれる**
+          'if [[ $* == *"issue list"* ]]; then',
+          `  printf '${numbers === "" ? "" : `${numbers}\\n`}'`,
+          "  exit 0",
+          "fi",
+          `printf '${listed === "" ? "" : `${listed}\\n`}'`,
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(workspace, "bin/loop-stall"),
+        ["#!/usr/bin/env bash", 'echo "stall $*" >&2', "exit 0", ""].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const result = spawnSync("bash", ["-c", stepBlocks()], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      // **最後の行が、着手を進められる件数**である
+      return result.stdout.trim().split("\n").at(-1) ?? "";
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+
+  it("人待ちの PR しか持たない Issue を、数に入れない", () => {
+    // **いまの盤面がこれ**（#501 の実装は #502 で、`parked` + `awaiting-human`）
+    const counted = countWorkable(
+      [{ number: 502, branch: "fix/501-count", labels: ["parked", "awaiting-human"] }],
+      [501],
+    );
+
+    expect(counted, "人待ちだけなのに数えている").toBe("0");
+  });
+
+  it("PR がまだ無い Issue は、これまでどおり数える", () => {
+    // **実装している最中である**——**外すと、3 周で全ループが止まる**
+    expect(countWorkable([], [501]), "実装中の Issue を数から落としている").toBe("1");
+  });
+
+  it("数え方を書き写さずに、口を名指しする", () => {
+    // **写すと、片方だけ古くなってもどちらも正しく見える**（`AGENTS.md` §5）
+    expect(section("### 作業が尽きたとき"), "数える口を名指ししていない").toContain(
+      "bin/loop-in-progress-work",
+    );
+  });
+
+  it("条件の言い回しが、着手中の側も引いている", () => {
+    // **残る側は自分の diff に出てこない**ので、**行で突き合わせる**（#546 と同じ形）
+    // ——**1 箇所だけ直すと、起票の条件が開かないまま `no-work` だけが通る。**
+    // **行で見ない**——**条件は折り返す**（**`in-progress` の節が次の行へ回る**）。
+    // **数で突き合わせる**：**条件を言っている箇所と、着手中を引いている箇所が同じ数**。
+    const text = procedureText("master");
+    const conditions = text.split("\n").filter((line) => line.includes("open PR が 0 件")).length;
+    const drawn = text.split("着手を進められる `in-progress`").length - 1;
+
+    expect(conditions, "条件がどこにも無い（見出しか言い回しが変わった）").toBeGreaterThan(1);
+    expect(drawn, "着手中から人待ちを引いていない条件がある").toBe(conditions);
   });
 });

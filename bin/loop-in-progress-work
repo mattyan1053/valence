@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# 着手を進められる in-progress の Issue を数える (#558)。
+#
+#   bin/loop-in-progress-work <Issue番号> [<Issue番号>...] < <open PR の一覧>
+#
+#   標準入力: 1 行 1 PR。`<PR番号><US><枝><US><label><US><label>...`
+#   標準出力: 着手を進められる Issue の件数（1 行）
+#
+#   exit 0 = 数えた (0 件でも 0)
+#   exit 2 = 入力を読めない / 使い方の誤り
+#
+# **#546 の裏側である。** **あちらは人待ちの PR を、着手できる数から引いた**が、
+# **その PR を持つ Issue は `in-progress` のまま数に入り続ける**
+# ——**両方の手が空いても `no-work` が通らず、人が呼ばれない**（**実測: #501 / #502**）。
+#
+# **境目は「その Issue の open PR が、全部人待ちか」**である。**1 本でも普通の open PR が
+# あるなら、そちらを進められる。**
+#
+# **PR がまだ無い `in-progress` は、これまでどおり数える。** **誰かが実装している最中**
+# であり、**外すと、実装中なのに「作業が尽きた」と数え、3 周で全ループが止まる。**
+#
+# **人待ちの判定は書き写さない** (`AGENTS.md` §5)。**`bin/loop-open-work` が持っている**
+# ——**その Issue の PR だけを渡して、進められるものが 1 本でもあるかを訊く。**
+# **境目（`parked` だけは引かない）も、そのまま効く。**
+#
+# **Issue と PR は枝の名前で結ぶ。** **`Closes` を書かない PR がある**（#321。
+# **割った PR は親を閉じない**）ので、**`closingIssuesReferences` では結べない**
+# ——**`bin/loop-claim idle` が使っているのと同じ手掛かり**である。
+#
+# **一覧は引き直さない**（`bin/loop-parked-issues` と同じ）——**呼ぶ側が既に取っている。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-in-progress-work <Issue番号> [<Issue番号>...] < <open PR の一覧>" >&2
+  echo "        1 行 1 PR: <PR番号><US><枝><US><label><US><label>..." >&2
+  echo "        exit 0 = 数えた / exit 2 = 読めない" >&2
+  exit 2
+}
+
+for issue in "$@"; do
+  [[ $issue =~ ^[0-9]+$ ]] || usage
+done
+
+# 列の区切り。**`bin/loop-open-work` と同じ**（**そのまま渡す**ので、揃っていること）。
+readonly FIELD=$'\037'
+
+OPEN_WORK="$(dirname -- "$0")/loop-open-work"
+readonly OPEN_WORK
+
+# **一覧をまるごと受ける。** **Issue ごとに絞って `bin/loop-open-work` へ渡す。**
+listed=""
+listed="$(cat)" || {
+  echo "[FAIL] open PR の一覧を読めません" >&2
+  exit 2
+}
+
+count=0
+for issue in "$@"; do
+  mine=""
+  while IFS="$FIELD" read -ra fields || ((${#fields[@]} > 0)); do
+    number="${fields[0]-}"
+    # **空行は飛ばす。** **一覧が 0 件のとき、呼ぶ側からは空文字が来る**
+    [[ -n $number ]] || continue
+    # **読めない行を 0 件へ倒さない**（`bin/loop-open-work` と同じ向き）
+    if ! [[ $number =~ ^[0-9]+$ ]]; then
+      echo "[FAIL] PR 番号を読めません: $number" >&2
+      exit 2
+    fi
+    branch="${fields[1]-}"
+    # **番号のあとに区切りが要る** (`.claude/rules/git-workflow.md`)——**前方一致で
+    # 結ぶと `fix/5011-x` が #501 の PR になる。**
+    [[ $branch =~ ^[a-z]+/${issue}- ]] || continue
+    # **区切りで繋ぎ直す。** **`${fields[*]}` は IFS の先頭文字で繋ぐ**ので、
+    # **その場だけ区切りへ差し替える**——**空白で繋いでから戻すと、空白を含む
+    # label（GitHub は許す）で列がずれる。**
+    mine+="$(
+      IFS="$FIELD"
+      printf '%s' "${fields[*]}"
+    )"$'\n'
+  done <<<"$listed"
+
+  # **PR が 1 本も無いなら、実装している最中**である——**これまでどおり数える**
+  if [[ -z $mine ]]; then
+    ((count++))
+    continue
+  fi
+
+  # **進められる PR が 1 本でもあるかを訊く**（判定は向こうが持つ）
+  if ! workable="$(printf '%s' "$mine" | "$OPEN_WORK")"; then
+    echo "[FAIL] #$issue の PR を数えられません" >&2
+    exit 2
+  fi
+  # **1 本でも進められるなら、その Issue は数に入る**
+  #
+  # **文字列で比べる。** **`(( ))` の中は `$` を書かないので、静的解析からは
+  # 「使っていない」に見える**（SC2034）——**黙らせるより、見える形で書く。**
+  [[ $workable == "0" ]] || ((count++))
+done
+
+printf '%s\n' "$count"
+exit 0
