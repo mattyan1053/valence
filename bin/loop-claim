@@ -364,6 +364,8 @@ if [[ $ACTION == "idle" ]]; then
   # **一覧は、要るときに 1 度だけ引く。** **谷に入った親が居ない周回では、
   # 往復を作らない**（`still_in_progress` と同じ判断）。
   declare -A parent_of=()
+  # **惜しい書き方**（`（#512 の続き）` など）。**親子には数えないが、鳴らすときに言う。**
+  declare -A near_parent_of=()
   children_loaded=0
   load_children() {
     ((children_loaded == 0)) || return 0
@@ -376,6 +378,17 @@ if [[ $ACTION == "idle" ]]; then
     while IFS=$'\t' read -r number title; do
       [[ $number =~ ^[0-9]+$ ]] || continue
       ((count += 1))
+      # **括弧の中に語があるものは、親子に数えない** (#545 のレビュー)。
+      # **末尾の `（#N …）` は親子とは限らない**——**`（#82 の前提）` は
+      # 「#82 がこれを待つ」**であって、**「これが #82 の一部」ではない。**
+      # **括弧の中を読み分けずに数えると、向きの逆な PR が親を黙らせる**（#322 の向き）。
+      #
+      # **惜しい形は覚えておく。** **数えなかったことを、鳴らすときに言う**ため
+      # ——**このリポジトリは実際にその形を書いている**ので、
+      # **書いた人は「末尾に置いた」と思っている。**
+      if [[ $title =~ （#([0-9]+)[^）]*）$ ]]; then
+        near_parent_of[$number]="${BASH_REMATCH[1]}"
+      fi
       [[ $title =~ （#([0-9]+)）$ ]] || continue
       parent_of[$number]="${BASH_REMATCH[1]}"
     done <<<"$lines"
@@ -387,11 +400,60 @@ if [[ $ACTION == "idle" ]]; then
   }
 
   # **その枝は、この Issue のものか。** **子 Issue の枝も、親が動いている証拠である。**
+  #
+  # **孫まで辿る** (#545 のレビュー)。**割った先をさらに割ってよい**（起票の規則）ので、
+  # **1 段だけ見ると、孫の枝で動いている親が「止まっている」に倒れる**——**同じ形が、
+  # 1 段深いところで再発する。**
+  #
+  # **輪で止める。** **タイトルは人が書く**ので、**A の子が B、B の子が A** という
+  # 書き方は実在しうる——**辿り続けると、この検出器がその周回ごと止まる**
+  # （**黙るより悪い。止まったことすら出力に現れない**）。
+  chain_reaches() {
+    local -n links="$1"
+    local current="$2" number="$3" seen=" $2 "
+    while [[ -n ${links[$current]-} ]]; do
+      current="${links[$current]}"
+      [[ $current == "$number" ]] && return 0
+      [[ $seen == *" $current "* ]] && return 1
+      seen+="$current "
+    done
+    return 1
+  }
+
   branch_belongs_to() {
-    local branch_issue="$1" number="$2"
-    [[ $branch_issue == "$number" ]] && return 0
+    [[ $1 == "$2" ]] && return 0
     load_children
-    [[ ${parent_of[$branch_issue]-} == "$number" ]]
+    chain_reaches parent_of "$1" "$2"
+  }
+
+  # 枝が名乗っている Issue の番号。**open も、最近入ったぶんも並べる。**
+  branch_numbers() {
+    local kind head rest
+    while IFS=$'\t' read -r kind head; do
+      [[ $kind == "head" ]] || continue
+      [[ $head =~ ^[a-z]+/([0-9]+)- ]] && echo "${BASH_REMATCH[1]}"
+    done <<<"$open_pr_lines"
+    while IFS=$'\t' read -r head rest; do
+      [[ $head =~ ^[a-z]+/([0-9]+)- ]] && echo "${BASH_REMATCH[1]}"
+    done <<<"$merged_pr_lines"
+  }
+
+  # **惜しい書き方を、黙って落とさない** (#545 のレビュー)。
+  #
+  # **末尾が `（#N …）` の Issue は実際に多く**（**括弧の中に語を足した形**）、
+  # **書いた人は「末尾に置いた」と思っている**——**数えていないことを言わないと、
+  # 呼ばれた人は「なぜ鳴ったか」に辿り着けない。**
+  #
+  # **数え方は変えない。** **言うだけである。**
+  near_miss_note() {
+    local number="$1" branch
+    load_children
+    while read -r branch; do
+      [[ -n ${near_parent_of[$branch]-} ]] || continue
+      [[ -z ${parent_of[$branch]-} ]] || continue
+      chain_reaches near_parent_of "$branch" "$number" || continue
+      echo "[WARN] #$number: #$branch のタイトルは（#$number …）で終わっていますが、括弧の中に語があるので親子に数えていません" >&2
+    done < <(branch_numbers)
   }
 
   # **`Closes` だけに頼らない** (#321)。**割った PR は親 Issue を閉じない**
@@ -489,6 +551,8 @@ if [[ $ACTION == "idle" ]]; then
     # **入ったばかりの子 PR も、動いている証拠である** (#512)
     moved_recently "$number" && continue
     still_in_progress "$number" || continue
+    # **鳴らす前に、惜しい書き方を言う** (#545 のレビュー)
+    near_miss_note "$number"
     printf '%s\t%s\t%s\n' "stalled" "$number" "$((now - held_taken))"
     idle_found=1
   done <<<"$in_progress"

@@ -1531,6 +1531,52 @@ describe("bin/loop-claim", () => {
         );
       });
 
+      it("孫 Issue の PR でも、親を止まっていると言わない", () => {
+        // **割った先を、さらに割ってよい**（起票の規則）——**1 段だけ辿ると、
+        // 孫の枝で動いている親が「止まっている」に倒れる。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: {
+            542: "図の箱に、PR のタイトルを出す（#540）",
+            546: "そのうちの 1 つだけ先に（#542）",
+          },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout, "孫の実装が出ているのに、親を止まっていると言う").not.toMatch(
+          /^stalled\t540\t/m,
+        );
+      });
+
+      it("親子が輪になっていても、止まらずに答える", () => {
+        // **タイトルは人が書く**ので、**A の子が B、B の子が A** は実在しうる
+        // ——**辿り続けると、この検出器がその周回ごと止まる**（**黙るより悪い**）。
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "あれの続き（#547）", 547: "これの続き（#546）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "輪の中で黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("自分を親と書いた Issue でも、止まらずに答える", () => {
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "自分の続き（#546）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "自分を指す輪で黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
       it("末尾でない（#N）では、黙らない", () => {
         // **見るのは末尾だけ**である——**途中に置かれた番号は、引き合いに出しただけ**
         // かもしれない。**錨を外すと、`（#540）の続き` まで子として数える。**
@@ -1544,6 +1590,66 @@ describe("bin/loop-claim", () => {
         expect(run(["idle"]).stdout.split("\n")[0], "末尾でない番号で黙っている").toMatch(
           /^stalled\t540\t/,
         );
+      });
+
+      it("括弧の中に語があるものは、親子に数えない", () => {
+        // **末尾の `（#N …）` は親子とは限らない**（#545 のレビュー）——
+        // **`（#82 の前提）` は「#82 がこれを待つ」**であって、**「これが #82 の一部」
+        // ではない。** **括弧の中を読み分けずに数えると、向きの逆な PR が親を黙らせる**
+        // （#322 の向き）。
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "その続き（#540 の続き）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "括弧の中に語があるのに数えている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("数えなかった惜しい書き方を、鳴らすときに言う", () => {
+        // **このリポジトリは実際にその形を書いている**（**末尾が `（#N …）` の Issue は
+        // 38 件、うち厳密に `（#N）` は 3 件**。master が数えた）——**書いた人は
+        // 「末尾に置いた」と思っている。** **数えていないことを言わないと、
+        // 呼ばれた人は「なぜ鳴ったか」に辿り着けない。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "その続き（#540 の続き）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stderr, "数えなかったことを黙っている").toMatch(
+          /#546 のタイトルは（#540 …）で終わっていますが/,
+        );
+      });
+
+      it("厳密に書いてあるときは、余計なことを言わない", () => {
+        // **平常時に鳴る検査は読まれなくなる** (#248)
+        withIdle({
+          inProgress: [{ number: 540 }],
+          mergedPrs: [{ head: "feat/542-title-in-the-box", mergedAt: iso(20000) }],
+          titles: { 542: "図の箱に、PR のタイトルを出す（#540）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stderr, "数えたものについて言っている").not.toMatch(
+          /括弧の中に語があるので/,
+        );
+      });
+
+      it("別の親の惜しい書き方では、言わない", () => {
+        // **鳴っている当の Issue のことだけを言う**——**関係ない行を足すと読まれなくなる**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "その続き（#999 の続き）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stderr, "別の親のことを言っている").not.toMatch(/#546 のタイトル/);
       });
 
       it("上限まで読んだら、見落としえることを言う", () => {
