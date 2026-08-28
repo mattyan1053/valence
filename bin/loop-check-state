@@ -4,6 +4,8 @@
 #   bin/loop-check-state running <走りの id>            走り始めた
 #   bin/loop-check-state finished <走りの id> <合否>    走り終えた
 #   bin/loop-check-state --verdict                      いまの記録を読む
+#   bin/loop-check-state --await                        走り終えるまで待って、合否を返す
+#                                                       （5 = 書き手が居ない。待っても来ない）
 #   bin/loop-check-state --durations                    積んだ所要時間を読む
 #   bin/loop-check-state --overlaps                     重なった走りを読む
 #
@@ -63,6 +65,7 @@ usage() {
   echo "使い方: bin/loop-check-state running <走りの id>          走り始めた" >&2
   echo "        bin/loop-check-state finished <走りの id> <合否>  走り終えた" >&2
   echo "        bin/loop-check-state --verdict                    いまの記録を読む" >&2
+  echo "        bin/loop-check-state --await                      走り終えるまで待つ（5 待っても来ない）" >&2
   echo "        bin/loop-check-state --durations                  積んだ所要時間を読む" >&2
   echo "        bin/loop-check-state --overlaps                   重なった走りを読む" >&2
   echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
@@ -110,6 +113,12 @@ readonly RECENT_RUNS=10
 readonly LOCK_WAIT_SEC="${LOOP_CHECK_STATE_LOCK_WAIT_SEC:-10}"
 if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
   echo "[FAIL] 設定: LOOP_CHECK_STATE_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+# `--await` が次に読むまで待つ秒数。**試験で短くできるようにしてある**（上と同じ形）
+readonly AWAIT_SEC="${LOOP_CHECK_STATE_AWAIT_SEC:-15}"
+if ! [[ $AWAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_CHECK_STATE_AWAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
   exit 2
 fi
 
@@ -162,6 +171,31 @@ started_at_of() {
   { read -r _; read -r second; } <"$record" 2>/dev/null
   [[ $second =~ ^[0-9]+$ ]] || second=""
   printf '%s' "$second"
+}
+
+# **その記録を終わらせられる側が、まだ居るか** (#555 のレビュー)。
+#
+# **`finished` を書けるのは、その走りの側だけ**である——**書き手が居なければ、
+# 待っても永久に来ない。** **殺された走りの記録は「走っている」のまま残る**
+# （**片付けるのは次の `running`** なので、**打ち直すまで残る**）。
+#
+# **`--running-elsewhere` を PID で見なかったのと矛盾しない** (#549)——**あちらの問いは
+# 「仕事が動いているか」**で、**PID が消えてもコンテナの中は走り続ける。**
+# **こちらの問いは「この記録が終わるか」**で、**終わらせられるのは書き手だけ**である。
+#
+# **分からないものは、居る側へ倒す**（`running` の片付けと同じ）——**数字でない id は
+# 生き死にを決められない。** **待つのをやめるほうへ倒すと、走っているものを見捨てる。**
+writer_alive() {
+  local record kind id
+  for record in "$STATE_DIR"/*; do
+    [[ -f $record ]] || continue
+    read -r kind _ <"$record" 2>/dev/null || continue
+    [[ $kind == "running" ]] || continue
+    id="${record##*/}"
+    [[ $id =~ ^[0-9]+$ ]] || return 0
+    kill -0 "$id" 2>/dev/null && return 0
+  done
+  return 1
 }
 
 # **id はファイル名になる。** **区切りやパスを含む値を受けない**
@@ -300,6 +334,41 @@ case "$1" in
     }
     [[ -n $overlapping ]] || exit 1
     printf '%s\n' "$overlapping"
+    ;;
+  --await)
+    [[ $# -eq 1 ]] || usage
+    # **切られた走りを、打ち直さずに拾う** (#552)。
+    #
+    # **単独の `./task check` が外側の 10 分に届くようになった**（**実測 670 / 698 秒**）。
+    # **切られても、コンテナの中は走り続ける**（#528）——**そこで打ち直すと、
+    # 同じものを 2 度走らせる**（**1 周ぶん余計**）。**付き直せば、待つだけで済む。**
+    #
+    # **速くはしない。** **切られた結果を変えるだけ**である
+    # ——**時間を判定に使わない**（#131 / #552 の「踏んではいけないところ」）。
+    #
+    # **待つ側が切られても、失うものは無い**——**もう一度打てばよい**（**走りは
+    # コンテナの中で続いている**）。
+    while :; do
+      # **書き手を先に見る** (#555 のレビュー 2 周目)。**2 つの読みのあいだで
+      # 状態は変わる**——**先に合否を見ると、「まだ走っている」と読んだ直後に
+      # 書き手が終わって消え**、**合否が出ているのに「打ち直せ」と言う。**
+      # **いちばん拾いたい「ちょうど終わった」回**が、**そこで落ちる。**
+      #
+      # **順を入れ替えると、窓が閉じる。** **書き手が居たと見たなら、そのあとの
+      # 合否がその走りの結果**である。**居なかったと見たなら、そのあとに `finished`
+      # を書ける者は居ない**ので、**次に読んだ合否が最後の答え**である。
+      alive=0
+      writer_alive && alive=1
+      # **判定は `--verdict` が持つ**（`AGENTS.md` §5。**2 箇所に持たない**）
+      "$0" --verdict
+      verdict=$?
+      ((verdict == 3)) || exit "$verdict"
+      # **書き手が居なければ、待っても来ない**（`exit 5`）。**上限を秒で置かない**
+      # ——**時間を判定に使わない**（#131 / #552）ので、**返るか返らないかを
+      # 時間で決めない。** **見るのは「終わらせられる側が居るか」**である。
+      ((alive == 1)) || exit 5
+      sleep "$AWAIT_SEC"
+    done
     ;;
   --verdict)
     [[ $# -eq 1 ]] || usage

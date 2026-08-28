@@ -53,7 +53,13 @@ function blocks(): { section: string; body: string }[] {
  * 「打つところが 1 つとは限らない」は別の話**である。
  */
 function checkBlocks(): { section: string; body: string }[] {
-  return blocks().filter((block) => block.body.includes("./task check"));
+  // **`check:` の付いた別の口を数えない** (#552)。**`./task check:leftovers` は
+  // 打つ前に見る口**、**`./task check:wait` は走っているものに付き直す口**であって、
+  // **どちらも check を走らせない**——**走らせない節に「印を見ろ」は当たらない。**
+  //
+  // **緩めているのではない。** **数えたいのは「走らせる節」**で、
+  // **走らせる節はこれまでどおり全部並ぶ**（**下の期待値がそれを押さえる**）。
+  return blocks().filter((block) => /\.\/task check(\s|$)/m.test(block.body));
 }
 
 /**
