@@ -85,6 +85,10 @@ describe("GitHub の PR 一覧をドメイン型へ変換する", () => {
         [8, "1b6d3f5a2c7e9d0418ab63cf27e5d9a4b8c10f2e"],
         [9, "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb"],
       ]),
+      titles: new Map([
+        [8, "コンテナ周りの改善"],
+        [9, "エージェント設定"],
+      ]),
     });
   });
 
@@ -156,7 +160,12 @@ describe("GitHub の PR 一覧をドメイン型へ変換する", () => {
   });
 
   it("PR が 0 件でも落ちない", () => {
-    expect(toPullRequestRefs([])).toEqual({ pullRequests: [], invalid: [], heads: new Map() });
+    expect(toPullRequestRefs([])).toEqual({
+      pullRequests: [],
+      invalid: [],
+      heads: new Map(),
+      titles: new Map(),
+    });
   });
 
   it("一覧そのものが読めなければ落とす", () => {
@@ -187,5 +196,56 @@ describe("head の commit を、番号から引ける形で持つ", () => {
     expect(pullRequests.length, "図から消えている").toBe(1);
     expect(invalid.length).toBe(0);
     expect(heads.has(8), "確かめられない commit を持っている").toBe(false);
+  });
+});
+
+/**
+ * **タイトルを、番号から引ける形で持つ**（#542）。
+ *
+ * **`PullRequestRef` へ足さない**——**あれは依存を決めるのに要る最小限**である
+ * （`heads` と同じ形）。**応答には既に入っている**ので、**問い合わせは足さない。**
+ */
+describe("タイトルを、番号から引ける形で持つ", () => {
+  it("実際の応答からタイトルを取り出す", () => {
+    const { titles } = toPullRequestRefs(stackedPullRequests);
+
+    expect(titles.get(8)).toBe("コンテナ周りの改善");
+    expect(titles.get(9)).toBe("エージェント設定");
+  });
+
+  it("タイトルが読めない PR も、依存グラフからは消さない", () => {
+    // **盤面の本体は依存の図**である（`heads` と同じ判断。#107）——**必須にすると、
+    // タイトルを読めなかった PR がまるごと消える**
+    const [first] = stackedPullRequests;
+    const withoutTitle = { ...first, title: undefined };
+
+    const { pullRequests, invalid, titles } = toPullRequestRefs([withoutTitle]);
+
+    expect(pullRequests.length, "図から消えている").toBe(1);
+    expect(invalid.length).toBe(0);
+    expect(titles.has(8), "読めていないタイトルを持っている").toBe(false);
+  });
+
+  it("タイトルの形が変わったら、黙って「無い」へ寄せない", () => {
+    // **「読めなかった」を「無かった」に化けさせない**（#543 のレビュー）——
+    // **`catch` で飲み込むと、GitHub が形を変えた日に全部の箱が `タイトル不明` になり、
+    // `invalid` にも出ない。** **`head.sha` と同じ扱いにする**（**あちらも型の誤りは
+    // `invalid` へ行く**）
+    const [first] = stackedPullRequests;
+
+    const { pullRequests, invalid } = toPullRequestRefs([{ ...first, title: 42 }]);
+
+    expect(invalid, "型が違うのに、読めたことにしている").toHaveLength(1);
+    expect(pullRequests, "読めなかった PR を、読めたことにしている").toHaveLength(0);
+  });
+
+  it("空のタイトルは、持っていないものとして扱う", () => {
+    // **空文字を持たせると、UI が「短いタイトル」として出す**——**箱に何も無い行が
+    // 「タイトル不明」と見分けられなくなる**（#542 の完了条件）
+    const [first] = stackedPullRequests;
+
+    const { titles } = toPullRequestRefs([{ ...first, title: "" }]);
+
+    expect(titles.has(8), "空のタイトルを持っている").toBe(false);
   });
 });

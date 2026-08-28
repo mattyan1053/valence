@@ -37,6 +37,7 @@ const PLAN: ReviewOrderPlan = {
   order: { ordered: [], cyclic: [] },
   invalid: [],
   heads: new Map(),
+  titles: new Map(),
   changes: new Map(),
   changesUnavailable: [],
 };

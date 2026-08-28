@@ -48,6 +48,8 @@ const stacked: PullRequestListing = {
   // **head の commit**（#331 のレビュー）。**この流れの関心ではない**が、
   // **口が返すもの**なので置く
   heads: new Map(),
+  // **タイトル**（#542）。**同じ理由で置く**
+  titles: new Map([[8, "コンテナ周りの改善"]]),
 };
 
 describe("レビュー順序を組み立てる", () => {
@@ -80,6 +82,7 @@ describe("レビュー順序を組み立てる", () => {
         pullRequests: [ref(1, "feat/b", "feat/a"), ref(2, "feat/a", "feat/b")],
         invalid: [],
         heads: new Map(),
+        titles: new Map(),
       }),
     });
 
@@ -88,7 +91,12 @@ describe("レビュー順序を組み立てる", () => {
 
   it("PR が 0 件でも落ちない", async () => {
     const plan = await planReviewOrder({
-      pullRequests: sourceReturning({ pullRequests: [], invalid: [], heads: new Map() }),
+      pullRequests: sourceReturning({
+        pullRequests: [],
+        invalid: [],
+        heads: new Map(),
+        titles: new Map(),
+      }),
       changes: NO_CHANGES,
     });
 
@@ -99,6 +107,8 @@ describe("レビュー順序を組み立てる", () => {
       invalid: [],
       // **head の commit も返す**（#331 のレビュー）——**0 件なら空の地図**
       heads: new Map(),
+      // **タイトルも同じ**（#542）
+      titles: new Map(),
       changes: new Map(),
       changesUnavailable: [],
     });

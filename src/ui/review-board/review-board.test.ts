@@ -45,6 +45,8 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
     edges: EDGES,
     order: ORDER,
     invalid: [],
+    // **既定はタイトルを返す**（#542）——**この試験群が見ているのは、そこではない**
+    titleOf: (number: number) => `#${number} のタイトル`,
     changes: new Map([
       [1, change()],
       [2, change()],

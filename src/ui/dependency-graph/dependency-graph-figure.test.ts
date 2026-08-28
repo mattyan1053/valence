@@ -21,6 +21,7 @@ import type { MergeBlock } from "../../domain/graph/merge-block";
 import type { RiskTier } from "../../domain/triage/risk-tier";
 import type { NodeMark } from "./dependency-graph-figure";
 import { DependencyGraphFigure } from "./dependency-graph-figure";
+import { estimateLabelWidth } from "./fit-label";
 import { layoutDependencyGraph } from "./graph-layout";
 
 /** **親から受け取る**（`currentColor`）か、**塗らない**（`none`）か。 */
@@ -54,8 +55,19 @@ function mark(
   tier: RiskTier | undefined,
   block: MergeBlock = { kind: "ready" },
   headKnown = true,
+  title = "依存の図を出す",
 ): NodeMark {
-  return { tier, block, headKnown };
+  return { tier, block, headKnown, title };
+}
+
+/**
+ * **タイトルが取れなかった箱。**
+ *
+ * **既定引数では作れない**——**`undefined` を渡すと既定のほうが効く**ので、
+ * **「渡していない」と「取れなかった」が同じになる**（**それは #542 が消しに来た形**）。
+ */
+function untitled(tier: RiskTier | undefined): NodeMark {
+  return { ...mark(tier), title: undefined };
 }
 
 function markupFor(
@@ -174,6 +186,30 @@ describe("箱の中で決められる", () => {
     expect(boxOf(rendered, 2), "上段の箱に、何待ちかが無い").toContain("待ち: #1");
   });
 
+  it("タイトルが、同じ箱に入る", () => {
+    // **番号だけでは「どれか」が分からない**（#542）——**GitHub で引き直すことになる**
+    const rendered = markup(new Map([[1, mark("high-risk", { kind: "ready" }, true, "色を直す")]]));
+
+    expect(boxOf(rendered, 1), "箱にタイトルが無い").toContain("色を直す");
+  });
+
+  it("タイトルが取れていない PR を、短いタイトルに見せない", () => {
+    // **空欄にすると「タイトルが空の PR」と見分けが付かない**（#505 / #541 と同じ向き）
+    const rendered = markup(new Map([[1, untitled("high-risk")]]));
+
+    expect(boxOf(rendered, 1)).toContain("タイトル不明");
+  });
+
+  it("長いタイトルは、切ったと分かる形で入る", () => {
+    // **長さは青天井**である——**そのまま置くと隣の箱と重なる**（下の「箱に収まっている」）。
+    // **黙って切ると、頭が同じ 2 本が同じ文字列になる**
+    const long = "依存グラフの箱に、番号とタイトルと危なさと何待ちかを入れる";
+    const rendered = markup(new Map([[1, mark("high-risk", { kind: "ready" }, true, long)]]));
+
+    expect(boxOf(rendered, 1), "切った印が無い").toContain("…");
+    expect(boxOf(rendered, 1), "切らずに置いている").not.toContain(long);
+  });
+
   it("危なさは、札だけでなく濃さでも出す", () => {
     // **10 本並んだとき、札より先に目へ入るのは濃さ**である——**色は使えない**（#505。
     // **テーマが決める `currentColor` しか置けない**）ので、**段は濃さで付ける。**
@@ -254,21 +290,13 @@ describe("箱の中で決められる", () => {
  * 溢れて重なる**——**読まずに拾えるように足したものが、読めなくなる。**
  *
  * **字幅の見積もりで見る。** **本当の幅はブラウザが決める**ので、**ここで測れるのは
- * 「収まらない方向へ変えたときに落ちるか」**である。**全角はほぼ 1em、半角は 0.6em** で
- * 数える（**多めに見積もらない**——**見積もりが甘いほうへ倒すと、この試験が何も
- * 言わなくなる**）。
+ * 「収まらない方向へ変えたときに落ちるか」**である。
+ *
+ * **見積もりは `fit-label` のものを使う**（#543 のレビュー）——**判定を 2 箇所に
+ * 持たない。** **写した側が狭いままだと、切る規則を直しても、この試験は古い幅で
+ * 通り続ける。** **表そのものは `fit-label.test.ts` が実フォントの字幅で留めている。**
  */
 describe("箱に収まっている", () => {
-  const HALF_WIDTH = 0.6;
-
-  function estimatedWidth(text: string, fontSize: number): number {
-    return [...text].reduce(
-      (total, character) =>
-        total + fontSize * ((character.codePointAt(0) ?? 0) > 0x2e80 ? 1 : HALF_WIDTH),
-      0,
-    );
-  }
-
   function attrsOf(rest: string): Record<string, string> {
     const attrs: Record<string, string> = {};
     for (const [, name, value] of rest.matchAll(/([a-zA-Z-]+)="([^"]*)"/g)) {
@@ -294,7 +322,7 @@ describe("箱に収まっている", () => {
     const labels: Label[] = [...inner.matchAll(/<text ([^>]*)>([^<]*)<\/text>/g)].map(
       ([, rest, text]) => {
         const attrs = attrsOf(rest ?? "");
-        const width = estimatedWidth(text ?? "", Number(attrs["font-size"]));
+        const width = estimateLabelWidth(text ?? "", Number(attrs["font-size"]));
         const x = Number(attrs.x);
         const left = attrs["text-anchor"] === "end" ? x - width : x;
         const y = Number(attrs.y);
@@ -306,14 +334,23 @@ describe("箱に収まっている", () => {
     return { frame, labels };
   }
 
-  /** **番号が 6 桁、待っている相手も 6 桁**という、いちばん長くなる形。 */
+  /**
+   * **番号が 6 桁、待っている相手も 6 桁**という、いちばん長くなる形。
+   *
+   * **タイトルは長さが青天井**なので（#542）、**切らずに置けばここで必ず落ちる**
+   * ——**この試験が、切る規則が要ることを言っている側**である。
+   */
   function longest(): string {
+    const longTitle = "依存グラフの箱に、番号とタイトルと危なさと何待ちかを入れる（#540 の続き）";
     return markupFor(
       [123456, 234567],
       [{ dependent: 234567, dependsOn: 123456 }],
       new Map([
-        [123456, mark("needs-review")],
-        [234567, mark("high-risk", { kind: "depends-on", numbers: [123456, 1, 2] })],
+        [123456, mark("needs-review", { kind: "ready" }, true, longTitle)],
+        [
+          234567,
+          mark("high-risk", { kind: "depends-on", numbers: [123456, 1, 2] }, true, longTitle),
+        ],
       ]),
     );
   }
