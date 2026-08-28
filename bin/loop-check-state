@@ -5,6 +5,7 @@
 #   bin/loop-check-state finished <走りの id> <合否>    走り終えた
 #   bin/loop-check-state --verdict                      いまの記録を読む
 #   bin/loop-check-state --await                        走り終えるまで待って、合否を返す
+#                                                       （5 = 書き手が居ない。待っても来ない）
 #   bin/loop-check-state --durations                    積んだ所要時間を読む
 #   bin/loop-check-state --overlaps                     重なった走りを読む
 #
@@ -64,7 +65,7 @@ usage() {
   echo "使い方: bin/loop-check-state running <走りの id>          走り始めた" >&2
   echo "        bin/loop-check-state finished <走りの id> <合否>  走り終えた" >&2
   echo "        bin/loop-check-state --verdict                    いまの記録を読む" >&2
-  echo "        bin/loop-check-state --await                      走り終えるまで待つ" >&2
+  echo "        bin/loop-check-state --await                      走り終えるまで待つ（5 待っても来ない）" >&2
   echo "        bin/loop-check-state --durations                  積んだ所要時間を読む" >&2
   echo "        bin/loop-check-state --overlaps                   重なった走りを読む" >&2
   echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
@@ -170,6 +171,31 @@ started_at_of() {
   { read -r _; read -r second; } <"$record" 2>/dev/null
   [[ $second =~ ^[0-9]+$ ]] || second=""
   printf '%s' "$second"
+}
+
+# **その記録を終わらせられる側が、まだ居るか** (#555 のレビュー)。
+#
+# **`finished` を書けるのは、その走りの側だけ**である——**書き手が居なければ、
+# 待っても永久に来ない。** **殺された走りの記録は「走っている」のまま残る**
+# （**片付けるのは次の `running`** なので、**打ち直すまで残る**）。
+#
+# **`--running-elsewhere` を PID で見なかったのと矛盾しない** (#549)——**あちらの問いは
+# 「仕事が動いているか」**で、**PID が消えてもコンテナの中は走り続ける。**
+# **こちらの問いは「この記録が終わるか」**で、**終わらせられるのは書き手だけ**である。
+#
+# **分からないものは、居る側へ倒す**（`running` の片付けと同じ）——**数字でない id は
+# 生き死にを決められない。** **待つのをやめるほうへ倒すと、走っているものを見捨てる。**
+writer_alive() {
+  local record kind id
+  for record in "$STATE_DIR"/*; do
+    [[ -f $record ]] || continue
+    read -r kind _ <"$record" 2>/dev/null || continue
+    [[ $kind == "running" ]] || continue
+    id="${record##*/}"
+    [[ $id =~ ^[0-9]+$ ]] || return 0
+    kill -0 "$id" 2>/dev/null && return 0
+  done
+  return 1
 }
 
 # **id はファイル名になる。** **区切りやパスを含む値を受けない**
@@ -327,6 +353,11 @@ case "$1" in
       "$0" --verdict
       verdict=$?
       ((verdict == 3)) || exit "$verdict"
+      # **書き手が居なくなったら、待っても来ない** (#555 のレビュー)。
+      # **上限を秒で置かない**——**時間を判定に使わない**（#131 / #552）ので、
+      # **返るか返らないかを時間で決めない。** **見るのは「終わらせられる側が
+      # 居るか」**である。
+      writer_alive || exit 5
       sleep "$AWAIT_SEC"
     done
     ;;

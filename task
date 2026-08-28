@@ -512,6 +512,13 @@ cmd_check_wait() {
       echo "==> 走っている check はありません（./task check を打ってください）" >&2
       return 4
       ;;
+    5)
+      # **待っても来ない** (#555 のレビュー)。**`finished` を書ける側が居ない**
+      # ——**打ち直すしかない。** **その前に残りを見る**（**中はまだ走っていることがある**）。
+      echo "==> 走っていた check の記録は残っていますが、書いた側が居ません" >&2
+      echo "    ./task check:leftovers を見てから、./task check を打ち直してください" >&2
+      return 5
+      ;;
   esac
   echo "check-exit=$status"
   return "$status"

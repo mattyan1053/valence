@@ -97,6 +97,78 @@ describe("bin/loop-check-state", () => {
       expect(await finished, "終わったのに待ち続けている").toBe(0);
     });
 
+    it("書いた側が居なくなっていたら、待たずにそう言う", () => {
+      // **`finished` を書けるのは、その走りの側だけ**である——**書き手が居なければ、
+      // 待っても永久に来ない**（**殺された走りの記録は「走っている」のまま残る**。
+      // **この口自身がそう書いている**）。
+      //
+      // **`--running-elsewhere` を PID で見なかったのと矛盾しない** (#549)——
+      // **あちらの問いは「仕事が動いているか」**で、**PID が消えてもコンテナの中は
+      // 走り続ける。** **こちらの問いは「この記録が終わるか」**で、
+      // **終わらせられるのは書き手だけ**である。
+      mkdirSync(statePath(), { recursive: true });
+      writeFileSync(join(statePath(), "999999999"), "running\n1\n");
+
+      const waiting = spawnSync(SCRIPT, ["--await"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...FAST, LOOP_CHECK_STATE_AWAIT_SEC: "1" },
+        timeout: 5000,
+      });
+
+      // **時間切れなら `status` は null**（**回り続けている**）——**それが欠陥である**
+      expect(waiting.status, "書き手が居ないのに待っている").toBe(5);
+    });
+
+    it("終わった記録は、書き手として数えない", () => {
+      // **`finished` は既に書かれている**——**その id が生きていても、
+      // 「これから書く側」ではない**（**PID は使い回される**）。
+      // **数えると、書き手が居ないのに待ち続ける**（この口が消しに来た形）。
+      mkdirSync(statePath(), { recursive: true });
+      writeFileSync(join(statePath(), `${process.pid}`), "finished 0\n1\n2\n");
+      writeFileSync(join(statePath(), "999999999"), "running\n1\n");
+
+      const waiting = spawnSync(SCRIPT, ["--await"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...FAST, LOOP_CHECK_STATE_AWAIT_SEC: "1" },
+        timeout: 5000,
+      });
+
+      expect(waiting.status, "終わった記録を書き手に数えている").toBe(5);
+    });
+
+    it("生きている走りが 1 つでもあれば、待つ", async () => {
+      // **混ざっていても、待つ側に倒す**——**終わる見込みがあるほうを見る**
+      mkdirSync(statePath(), { recursive: true });
+      writeFileSync(join(statePath(), "999999999"), "running\n1\n");
+      run(["running", "A"]);
+      const waiting = spawn(SCRIPT, ["--await"], { cwd: repo, env: FAST });
+      const finished = new Promise<number>((resolve) => {
+        waiting.on("close", (code) => resolve(code ?? -1));
+      });
+
+      await waitUntil(() => true, 50);
+      run(["finished", "A", "0"]);
+
+      expect(await finished, "生きている走りがあるのに待たなかった").toBe(0);
+    });
+
+    it("id が数字でなければ、居ないとは言わない", () => {
+      // **生き死にを決められないものを、消す側へ倒さない**（`running` の片付けと同じ）
+      run(["running", "human-run"]);
+
+      const waiting = spawnSync(SCRIPT, ["--await"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...FAST, LOOP_CHECK_STATE_AWAIT_SEC: "1" },
+        timeout: 3000,
+      });
+
+      // **待ち続けている**（外から止めるまで返らない）——**5 で返っていないこと**
+      expect(waiting.status, "分からないものを「居ない」に倒している").not.toBe(5);
+    });
+
     it("走っている check が無ければ、無いと言う", () => {
       // **「打っていない」を「緑」に化けさせない**（`--verdict` と同じ語彙）
       expect(run(["--await"], FAST).status).toBe(4);
