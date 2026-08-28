@@ -1296,7 +1296,7 @@ describe("bin/loop-claim", () => {
        * **全部の `gh` を落とさない。** **手前の呼び出しで止まると、
        * 見たかった経路まで届かない**（届いていないのに緑になる）。
        */
-      failOn?: "issue list" | "pr list" | "issue view";
+      failOn?: "issue list" | "pr list" | "issue view" | "number,title";
       /**
        * **入った子 PR**（#512）。**枝の名前と、入った時刻**である。
        *
@@ -1304,6 +1304,13 @@ describe("bin/loop-claim", () => {
        * **open な子が無い谷では、動いている証拠が一切見えなくなる。**
        */
       mergedPrs?: { head: string; mergedAt: string }[];
+      /**
+       * **Issue のタイトル**（#544）。**親子の繋がりは、ここの末尾で決まる。**
+       *
+       * **子 Issue を立てて割ると、親の番号を持つ枝が 1 本も出ない**
+       * ——**`feat/542-...` が名乗るのは子の番号**である。
+       */
+      titles?: Record<number, string>;
     }): void {
       const issues = (options.inProgress ?? [])
         .map((issue) => `${issue.number}\t${(issue.labels ?? ["in-progress"]).join(",")}`)
@@ -1318,6 +1325,10 @@ describe("bin/loop-claim", () => {
       // **入った PR は別の一覧で返る**（`--state merged`）——**open の一覧と混ぜない**
       const mergedPrs = (options.mergedPrs ?? [])
         .map((pr) => `${pr.head}\t${pr.mergedAt}`)
+        .join("\n");
+      // **タイトルの一覧は、着手中の一覧とは別の呼び方で来る**（`--json number,title`）
+      const titles = Object.entries(options.titles ?? {})
+        .map(([number, title]) => `${number}\t${title}`)
         .join("\n");
       const labelsDir = writeLabelFixtures(options);
       const refsDir = writeReferenceFixtures(options.referencedBy);
@@ -1334,6 +1345,13 @@ describe("bin/loop-claim", () => {
           'if [[ $* == *"repo view"* ]]; then',
           '  echo "owner"',
           '  echo "repo"',
+          "  exit 0",
+          "fi",
+          // **タイトルの一覧**（#544）——**着手中の一覧より先に見る**
+          // （**どちらも `issue list` で来る**）
+          'if [[ $* == *"issue list"* && $* == *"number,title"* ]]; then',
+          `  printf '%b' ${JSON.stringify(titles)}`,
+          `  [[ -n ${JSON.stringify(titles)} ]] && echo`,
           "  exit 0",
           "fi",
           'if [[ $* == *"issue list"* ]]; then',
@@ -1427,6 +1445,326 @@ describe("bin/loop-claim", () => {
       writeClaim(506, { touched: NOW, taken: NOW - 9000 });
 
       expect(run(["idle"]).status, "入ったばかりの子 PR があるのに、止まっていると言う").toBe(1);
+    });
+
+    /**
+     * **子 Issue を立てて割ると、親の番号を持つ枝が 1 本も出ない**（#544）。
+     *
+     * **割り方は 2 通りある。** **親の番号のまま割る**（#512 が塞いだ形）と、
+     * **子 Issue を立ててから割る**（手順が勧めている形）——**後者では、枝が名乗るのは
+     * 子の番号**である。**親の時計は `take` のときのまま**なので、
+     * **`IDLE_SEC` を過ぎたら必ず鳴る。**
+     *
+     * **入力は実データの形である**——**親 #540 / 子 #542 / 枝 `feat/542-...`。**
+     */
+    describe("子 Issue を立てて割った親", () => {
+      const iso = (secondsAgo: number): string =>
+        new Date((NOW - secondsAgo) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+      it("子 Issue の open PR があれば、親を止まっていると言わない", () => {
+        withIdle({
+          inProgress: [{ number: 540 }, { number: 542 }],
+          prs: [{ head: "feat/542-title-in-the-box" }],
+          titles: { 542: "図の箱に、PR のタイトルを出す（#540）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+        writeClaim(542, { touched: NOW, taken: NOW - 600 });
+
+        expect(
+          run(["idle"]).stdout,
+          "子 Issue の実装が出ているのに、親を止まっていると言う",
+        ).not.toMatch(/^stalled\t540\t/m);
+      });
+
+      it("子 Issue の PR が最近入っていれば、親を止まっていると言わない", () => {
+        withIdle({
+          inProgress: [{ number: 540 }],
+          mergedPrs: [{ head: "feat/542-title-in-the-box", mergedAt: iso(600) }],
+          titles: { 542: "図の箱に、PR のタイトルを出す（#540）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).status, "子 Issue の PR が入ったばかりなのに鳴る").toBe(1);
+      });
+
+      it("子 Issue の PR が入ってから長く経てば、これまでどおり並べる", () => {
+        // **谷を許すのは「動いているあいだ」だけ**である——**子が全部片付いて、
+        // 親に残った仕事を誰も拾っていない**なら、**人が要る。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          mergedPrs: [{ head: "feat/542-title-in-the-box", mergedAt: iso(20000) }],
+          titles: { 542: "図の箱に、PR のタイトルを出す（#540）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "止まっているのに黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("別の親の子 Issue では、黙らない", () => {
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/542-title-in-the-box" }],
+          titles: { 542: "何か別のこと（#999）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "別の親の子で黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("タイトルの途中で番号に触れただけでは、黙らない", () => {
+        // **#322 の前に戻さない**——**このリポジトリは番号を引き合いに出しながら書く**ので、
+        // **「言及したら黙る」に戻すと、開いている PR がある限りその Issue では黙る。**
+        // **見るのは末尾だけ**である。
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/542-title-in-the-box" }],
+          titles: { 542: "#540 と同じ形を、別のところで直す" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "言及しただけで黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("孫 Issue の PR でも、親を止まっていると言わない", () => {
+        // **割った先を、さらに割ってよい**（起票の規則）——**1 段だけ辿ると、
+        // 孫の枝で動いている親が「止まっている」に倒れる。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: {
+            542: "図の箱に、PR のタイトルを出す（#540）",
+            546: "そのうちの 1 つだけ先に（#542）",
+          },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout, "孫の実装が出ているのに、親を止まっていると言う").not.toMatch(
+          /^stalled\t540\t/m,
+        );
+      });
+
+      it("親子が輪になっていても、止まらずに答える", () => {
+        // **タイトルは人が書く**ので、**A の子が B、B の子が A** は実在しうる
+        // ——**辿り続けると、この検出器がその周回ごと止まる**（**黙るより悪い**）。
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "あれの続き（#547）", 547: "これの続き（#546）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "輪の中で黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("自分を親と書いた Issue でも、止まらずに答える", () => {
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "自分の続き（#546）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "自分を指す輪で黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("末尾でない（#N）では、黙らない", () => {
+        // **見るのは末尾だけ**である——**途中に置かれた番号は、引き合いに出しただけ**
+        // かもしれない。**錨を外すと、`（#540）の続き` まで子として数える。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/542-title-in-the-box" }],
+          titles: { 542: "（#540）の続きで、別のところを直す" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "末尾でない番号で黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("括弧の中に語があるものは、親子に数えない", () => {
+        // **末尾の `（#N …）` は親子とは限らない**（#545 のレビュー）——
+        // **`（#82 の前提）` は「#82 がこれを待つ」**であって、**「これが #82 の一部」
+        // ではない。** **括弧の中を読み分けずに数えると、向きの逆な PR が親を黙らせる**
+        // （#322 の向き）。
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "その続き（#540 の続き）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stdout.split("\n")[0], "括弧の中に語があるのに数えている").toMatch(
+          /^stalled\t540\t/,
+        );
+      });
+
+      it("数えなかった惜しい書き方を、鳴らすときに言う", () => {
+        // **このリポジトリは実際にその形を書いている**（**末尾が `（#N …）` の Issue は
+        // 38 件、うち厳密に `（#N）` は 3 件**。master が数えた）——**書いた人は
+        // 「末尾に置いた」と思っている。** **数えていないことを言わないと、
+        // 呼ばれた人は「なぜ鳴ったか」に辿り着けない。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "その続き（#540 の続き）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stderr, "数えなかったことを黙っている").toMatch(
+          /#546 のタイトルは（#540 …）で終わっていますが/,
+        );
+      });
+
+      it("鎖の途中が惜しい形なら、その途中を名指しで言う", () => {
+        // **枝自身が厳密でも、鎖の途中が惜しい形なら親には届かない**（#545 のレビュー
+        // 2 周目）——**38 件中 35 件が惜しい形**なので、**途中が惜しいほうが普通である。**
+        //
+        // **「同じ形が 1 段深いところで再発する」**は、孫の対応で書いた言葉である
+        // ——**その対応の中でもう 1 度起きていた。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "そのうちの 1 つ（#542）", 542: "図の箱の続き（#540 の続き）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        const idle = run(["idle"]);
+
+        expect(idle.stdout.split("\n")[0], "鎖が切れているのに黙っている").toMatch(
+          /^stalled\t540\t/,
+        );
+        // **切れているのは #542 と #540 のあいだ**である——**#546 を名指ししない**
+        expect(idle.stderr, "どこで切れたかを言っていない").toMatch(
+          /#542 のタイトルは（#540 …）で終わっていますが/,
+        );
+        expect(idle.stderr, "厳密に書いてある #546 を名指ししている").not.toMatch(
+          /#546 のタイトルは/,
+        );
+      });
+
+      it("切れ目が 2 つあるなら、枝に近いほうを言う", () => {
+        // **直しに行くのは、枝から辿って最初に切れているところ**である
+        // ——**そこを直せば、次の切れ目まで鎖が伸びる。**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/548-smallest" }],
+          titles: {
+            548: "さらに小さく（#546 の続き）",
+            546: "そのうちの 1 つ（#542 の続き）",
+            542: "図の箱の続き（#540）",
+          },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        const idle = run(["idle"]);
+
+        expect(idle.stderr, "枝に近い切れ目を言っていない").toMatch(/#548 のタイトルは/);
+        expect(idle.stderr, "切れ目を 2 つとも並べている").not.toMatch(/#546 のタイトルは/);
+      });
+
+      it("同じ切れ目を、枝の数だけ繰り返さない", () => {
+        // **毎回同じ行が並ぶと読まれなくなる** (#248)
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-one" }, { head: "feat/547-another" }],
+          titles: {
+            546: "ひとつめ（#542）",
+            547: "ふたつめ（#542）",
+            542: "図の箱の続き（#540 の続き）",
+          },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        const said = run(["idle"])
+          .stderr.split("\n")
+          .filter((line) => line.includes("#542 のタイトルは"));
+
+        expect(said, "同じ切れ目を繰り返している").toHaveLength(1);
+      });
+
+      it("厳密に書いてあるときは、余計なことを言わない", () => {
+        // **平常時に鳴る検査は読まれなくなる** (#248)
+        withIdle({
+          inProgress: [{ number: 540 }],
+          mergedPrs: [{ head: "feat/542-title-in-the-box", mergedAt: iso(20000) }],
+          titles: { 542: "図の箱に、PR のタイトルを出す（#540）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stderr, "数えたものについて言っている").not.toMatch(
+          /括弧の中に語があるので/,
+        );
+      });
+
+      it("別の親の惜しい書き方では、言わない", () => {
+        // **鳴っている当の Issue のことだけを言う**——**関係ない行を足すと読まれなくなる**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/546-even-smaller" }],
+          titles: { 546: "その続き（#999 の続き）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stderr, "別の親のことを言っている").not.toMatch(/#546 のタイトル/);
+      });
+
+      it("上限まで読んだら、見落としえることを言う", () => {
+        // **落ちた行は「無かったこと」になる** (#537)——**黙って切ると、鳴った理由が
+        // 「子を見落としたから」だと分からない。** **窓を上限まで埋めて測る**
+        // ——**埋めないと切り落としは起きない。**
+        const many: Record<number, string> = {};
+        for (let index = 0; index < 500; index += 1) {
+          many[1000 + index] = `何か（#${9000 + index}）`;
+        }
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/542-title-in-the-box" }],
+          titles: many,
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stderr, "上限まで読んだことを黙っている").toMatch(
+          /500 件までしか読んでいません/,
+        );
+      });
+
+      it("上限に届かなければ、余計なことを言わない", () => {
+        // **平常時に鳴る検査は読まれなくなる** (#248)
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/542-title-in-the-box" }],
+          titles: { 542: "図の箱に、PR のタイトルを出す（#540）" },
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).stderr, "届いていないのに言っている").not.toMatch(
+          /までしか読んでいません/,
+        );
+      });
+
+      it("タイトルの一覧を読めなければ、判定できないと言う", () => {
+        // **読めないものを「動いている」に倒すと、この検出器だけが静かに消える**
+        withIdle({
+          inProgress: [{ number: 540 }],
+          prs: [{ head: "feat/542-title-in-the-box" }],
+          titles: {},
+          failOn: "number,title",
+        });
+        writeClaim(540, { touched: NOW, taken: NOW - 30000 });
+
+        expect(run(["idle"]).status, "読めないまま答えている").toBe(2);
+      });
     });
 
     it("入った子 PR は、入った時刻で絞って訊く", () => {
