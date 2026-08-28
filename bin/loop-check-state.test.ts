@@ -54,6 +54,63 @@ describe("bin/loop-check-state", () => {
     return join(repo, ".git", "valence-check-state.d");
   }
 
+  /**
+   * **切られた走りを、打ち直さずに拾う**（#552）。
+   *
+   * **単独の `./task check` が外側の 10 分に届くようになった**（**実測 670 / 698 秒**）。
+   * **切られると、コンテナの中は走り続ける**（#528）——**そこで打ち直すと、
+   * 同じものを 2 度走らせる**（**1 周ぶん余計**）。
+   *
+   * **速くするのではなく、切られた結果を変える。** **走っているものに付き直せば、
+   * 待つだけで済む**——**待つ側が切られても、もう一度打てばよい**（**そのぶんは捨てても
+   * 何も失われない**）。
+   */
+  describe("走っている check の合否を待つ", () => {
+    /** **待つ間隔は試験で短くできる**（`LOCK_WAIT_SEC` と同じ形）。 */
+    const FAST = { ...process.env, LOOP_CHECK_STATE_AWAIT_SEC: "0" };
+
+    it("終わっていれば、そのまま合否を返す", () => {
+      run(["running", "A"]);
+      run(["finished", "A", "0"]);
+
+      expect(run(["--await"], FAST).status).toBe(0);
+    });
+
+    it("赤で終わっていれば、赤を返す", () => {
+      run(["running", "A"]);
+      run(["finished", "A", "1"]);
+
+      expect(run(["--await"], FAST).status).toBe(1);
+    });
+
+    it("走っているあいだは待ち、終わったら合否を返す", async () => {
+      // **これが本題である。** **待たずに 3 を返すだけなら、打ち直すのと変わらない。**
+      run(["running", "A"]);
+      const waiting = spawn(SCRIPT, ["--await"], { cwd: repo, env: FAST });
+      const finished = new Promise<number>((resolve) => {
+        waiting.on("close", (code) => resolve(code ?? -1));
+      });
+
+      await waitUntil(() => true, 50);
+      run(["finished", "A", "0"]);
+
+      expect(await finished, "終わったのに待ち続けている").toBe(0);
+    });
+
+    it("走っている check が無ければ、無いと言う", () => {
+      // **「打っていない」を「緑」に化けさせない**（`--verdict` と同じ語彙）
+      expect(run(["--await"], FAST).status).toBe(4);
+    });
+
+    it("待つ間隔の設定が壊れていたら、そう言う", () => {
+      // **隣の設定と同じ形**（**壊れた設定で黙って回り続けない**）
+      const broken = run(["--await"], { ...process.env, LOOP_CHECK_STATE_AWAIT_SEC: "abc" });
+
+      expect(broken.status).toBe(2);
+      expect(broken.stderr).toContain("LOOP_CHECK_STATE_AWAIT_SEC");
+    });
+  });
+
   it("記録が無ければ、4 を返す", () => {
     // **「無い」と「赤」を混ぜない**——**打っていない人を止める口ではない**
     expect(run(["--verdict"]).status).toBe(4);

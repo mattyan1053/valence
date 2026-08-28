@@ -486,6 +486,37 @@ check_leftovers() {
 # 前の走りの残りと、別の作業場の check を見る (./task check の前に打つ)
 cmd_check_leftovers() { check_leftovers; }
 
+# **切られた `./task check` に付き直す** (#552)。
+#
+# **単独でも外側の 10 分に届くようになった**（**実測 670 / 698 秒**）。**切られても
+# コンテナの中は走り続ける**（#528）——**そこで打ち直すと、同じものを 2 度走らせる**
+# （**1 周ぶん余計**）。**付き直せば、待つだけで済む。**
+#
+# **待つ側が切られても、失うものは無い**——**もう一度打てばよい。**
+#
+# **印は `./task check` と同じ形で出す**——**読む側の見方を変えない**
+# （**`$status` と末尾の印の両方を見る**）。
+#
+# **説明は定義の直前の 1 行である**（`cmd_help` がそこを拾う）。
+# 走っている check に付き直して、合否を待つ (切られたら打ち直さずにこれ)
+cmd_check_wait() {
+  local status=0
+  ./bin/loop-check-state --await || status=$?
+  # **「走っている check が無い」を合否に化けさせない**（`--verdict` と同じ語彙）
+  case "$status" in
+    2)
+      echo "==> check の記録を読めません" >&2
+      return 2
+      ;;
+    4)
+      echo "==> 走っている check はありません（./task check を打ってください）" >&2
+      return 4
+      ;;
+  esac
+  echo "check-exit=$status"
+  return "$status"
+}
+
 # lint (Biome + bash) + typecheck + 依存方向 + テスト をまとめて実行する
 cmd_check() {
   # **走っていることを、走る前に記録する** (#375)。**印は終わったときにしか出ない**

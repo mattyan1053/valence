@@ -4,6 +4,7 @@
 #   bin/loop-check-state running <走りの id>            走り始めた
 #   bin/loop-check-state finished <走りの id> <合否>    走り終えた
 #   bin/loop-check-state --verdict                      いまの記録を読む
+#   bin/loop-check-state --await                        走り終えるまで待って、合否を返す
 #   bin/loop-check-state --durations                    積んだ所要時間を読む
 #   bin/loop-check-state --overlaps                     重なった走りを読む
 #
@@ -63,6 +64,7 @@ usage() {
   echo "使い方: bin/loop-check-state running <走りの id>          走り始めた" >&2
   echo "        bin/loop-check-state finished <走りの id> <合否>  走り終えた" >&2
   echo "        bin/loop-check-state --verdict                    いまの記録を読む" >&2
+  echo "        bin/loop-check-state --await                      走り終えるまで待つ" >&2
   echo "        bin/loop-check-state --durations                  積んだ所要時間を読む" >&2
   echo "        bin/loop-check-state --overlaps                   重なった走りを読む" >&2
   echo "        --verdict: 0 緑 / 1 赤 / 2 読めない / 3 走っている / 4 記録が無い" >&2
@@ -110,6 +112,12 @@ readonly RECENT_RUNS=10
 readonly LOCK_WAIT_SEC="${LOOP_CHECK_STATE_LOCK_WAIT_SEC:-10}"
 if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
   echo "[FAIL] 設定: LOOP_CHECK_STATE_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+# `--await` が次に読むまで待つ秒数。**試験で短くできるようにしてある**（上と同じ形）
+readonly AWAIT_SEC="${LOOP_CHECK_STATE_AWAIT_SEC:-15}"
+if ! [[ $AWAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_CHECK_STATE_AWAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
   exit 2
 fi
 
@@ -300,6 +308,27 @@ case "$1" in
     }
     [[ -n $overlapping ]] || exit 1
     printf '%s\n' "$overlapping"
+    ;;
+  --await)
+    [[ $# -eq 1 ]] || usage
+    # **切られた走りを、打ち直さずに拾う** (#552)。
+    #
+    # **単独の `./task check` が外側の 10 分に届くようになった**（**実測 670 / 698 秒**）。
+    # **切られても、コンテナの中は走り続ける**（#528）——**そこで打ち直すと、
+    # 同じものを 2 度走らせる**（**1 周ぶん余計**）。**付き直せば、待つだけで済む。**
+    #
+    # **速くはしない。** **切られた結果を変えるだけ**である
+    # ——**時間を判定に使わない**（#131 / #552 の「踏んではいけないところ」）。
+    #
+    # **待つ側が切られても、失うものは無い**——**もう一度打てばよい**（**走りは
+    # コンテナの中で続いている**）。
+    while :; do
+      # **判定は `--verdict` が持つ**（`AGENTS.md` §5。**2 箇所に持たない**）
+      "$0" --verdict
+      verdict=$?
+      ((verdict == 3)) || exit "$verdict"
+      sleep "$AWAIT_SEC"
+    done
     ;;
   --verdict)
     [[ $# -eq 1 ]] || usage
