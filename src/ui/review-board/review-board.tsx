@@ -65,6 +65,15 @@ export type ReviewBoardProps = {
    * **任意にしない。** **どちらへ倒しても嘘になる**（`NodeMark.headKnown`）。
    */
   readonly headKnown: (pullRequestNumber: number) => boolean;
+  /**
+   * **その PR のタイトル**（#542）。**取れていないなら `undefined`。**
+   *
+   * **盤面はこれを持っていない**（`changes` は判定材料である）ので、**渡す側から受ける。**
+   *
+   * **任意にしない。** **渡し忘れると、どの箱も「タイトル不明」になる**
+   * ——**取れているのに取れていないと言う**（`NodeMark.title`）。
+   */
+  readonly titleOf: (pullRequestNumber: number) => string | undefined;
 };
 
 export function ReviewBoard({
@@ -76,6 +85,7 @@ export function ReviewBoard({
   renderActions,
   renderStatus,
   headKnown,
+  titleOf,
 }: ReviewBoardProps) {
   return (
     <DependencyGraphView
@@ -92,6 +102,7 @@ export function ReviewBoard({
         return change === undefined ? undefined : classifyRiskTier(change);
       }}
       headKnown={headKnown}
+      titleOf={titleOf}
       renderAside={(number) => {
         const change = changes.get(number);
         // **材料が無い PR を黙って落とさない。** 行は残し、

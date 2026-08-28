@@ -72,7 +72,7 @@ function listing(
 ): PullRequestSource {
   return {
     async listPullRequests() {
-      return { pullRequests, invalid, heads: new Map() };
+      return { pullRequests, invalid, heads: new Map(), titles: new Map() };
     },
   };
 }

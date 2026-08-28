@@ -53,6 +53,8 @@ function props(overrides: Partial<DependencyGraphViewProps> = {}): DependencyGra
     invalid: [],
     // **既定は「分かっている」**——**この試験群が見ているのは、そこではない**
     headKnown: () => true,
+    // **既定はタイトルを返す**（#542）。**同じく、ここで見るところではない**
+    titleOf: (number: number) => `#${number} のタイトル`,
     ...overrides,
   };
 }
@@ -290,6 +292,14 @@ describe("図の箱に、何待ちかを載せる", () => {
 
     expect(boxOf(markup, 1)).toContain("commit 不明");
     expect(boxOf(markup, 1), "commit が分からないのに押せると言っている").not.toContain("押せる");
+  });
+
+  it("渡されたタイトルが、その箱に出る", () => {
+    // **番号だけの箱では「どれか」が分からない**（#542）——**GitHub で引き直すことになる**
+    const markup = render(props({ titleOf: (number) => (number === 1 ? "色を直す" : undefined) }));
+
+    expect(boxOf(markup, 1), "箱にタイトルが無い").toContain("色を直す");
+    expect(boxOf(markup, 2), "取れていないタイトルを、空欄で出している").toContain("タイトル不明");
   });
 
   it("渡された危なさが、その箱に出る", () => {

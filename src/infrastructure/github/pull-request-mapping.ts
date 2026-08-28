@@ -52,6 +52,15 @@ const pullRequestSchema = z.object({
   number: z.number().int().positive(),
   base: branchRefSchema,
   head: headRefSchema,
+  /**
+   * **タイトルも読む**（#542）。**必須にしない**——**`head.sha` と同じ理由**で、
+   * **読めなかった PR が依存グラフからまるごと消える**のを避ける。
+   *
+   * **空文字を通さない**（`min(1)`）——**通すと、表示の側で「短いタイトル」と
+   * 「取れなかった」が見分けられなくなる。** **`min(1)` に落ちたぶんは
+   * `invalid` へ行かせない**ので、`catch` で「無い」へ寄せる。
+   */
+  title: z.string().min(1).optional().catch(undefined),
 });
 
 /**
@@ -71,6 +80,8 @@ export function toPullRequestRefs(response: unknown): PullRequestListing {
   // **番号から引ける形で持つ**（`changes` と同じ形）——**依存を決める型
   // （`PullRequestRef`）へ足さない。** **あれは「依存を決めるのに要る最小限」**である
   const heads = new Map<number, string>();
+  // **タイトルも同じ形で持つ**（#542）——**`PullRequestRef` は依存を決める型のまま**
+  const titles = new Map<number, string>();
   for (const [index, item] of listed.data.entries()) {
     const parsed = pullRequestSchema.safeParse(item);
     if (!parsed.success) {
@@ -81,8 +92,11 @@ export function toPullRequestRefs(response: unknown): PullRequestListing {
     if (parsed.data.head.sha !== undefined) {
       heads.set(parsed.data.number, parsed.data.head.sha);
     }
+    if (parsed.data.title !== undefined) {
+      titles.set(parsed.data.number, parsed.data.title);
+    }
   }
-  return { pullRequests, invalid, heads };
+  return { pullRequests, invalid, heads, titles };
 }
 
 function toRef(pullRequest: z.infer<typeof pullRequestSchema>): PullRequestRef {

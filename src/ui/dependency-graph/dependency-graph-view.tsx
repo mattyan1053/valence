@@ -70,6 +70,13 @@ export type DependencyGraphViewProps = {
    * **任意にしない。** **どちらへ倒しても嘘になる**（`NodeMark.headKnown`）。
    */
   readonly headKnown: (pullRequestNumber: number) => boolean;
+  /**
+   * **その PR のタイトル**（#542）。**取れていないなら `undefined`。**
+   *
+   * **任意にしない。** **渡し忘れると、どの箱も「タイトル不明」になる**
+   * ——**取れているのに取れていないと言う**のは、`invalid` と同じ嘘である。
+   */
+  readonly titleOf: (pullRequestNumber: number) => string | undefined;
 };
 
 /**
@@ -140,6 +147,7 @@ export function DependencyGraphView({
   renderAside,
   tierOf,
   headKnown,
+  titleOf,
 }: DependencyGraphViewProps) {
   const byNumber = new Map(pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]));
   const dependsOn = dependsOnIndex(edges);
@@ -194,6 +202,8 @@ export function DependencyGraphView({
               // **札の広さを、判定に合わせる**（#541 のレビュー）——**`MergeBlock` は
               // 依存の順序しか知らない**ので、**押せるかどうかはここで足す。**
               headKnown: headKnown(number),
+              // **番号だけでは「どれか」が分からない**（#542）
+              title: titleOf(number),
             })}
           />
           <ol>{rowsFor(figured)}</ol>

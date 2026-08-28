@@ -299,6 +299,7 @@ describe("commit が分からない PR", () => {
               changes: new Map(),
               changesUnavailable: [],
               heads: new Map([[1, "abc1234"]]),
+              titles: new Map([[1, "依存グラフを図にする"]]),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
           }),
@@ -344,5 +345,18 @@ describe("commit が分からない PR", () => {
 
     expect(mergeDisabled(markup, 1), "押せるはずのボタンが無効になっている").toBe(false);
     expect(boxOf(markup, 1)).toContain("押せる");
+  });
+
+  /**
+   * **盤面が持っているタイトルが、箱まで届く**（#542）。
+   *
+   * **画面の側で渡し忘れると、どの箱も「タイトル不明」になる**——**取れているのに
+   * 取れていないと言う**ので、**配線をここで押さえる。**
+   */
+  it("取れているタイトルが、箱に出る", async () => {
+    const markup = await board();
+
+    expect(boxOf(markup, 1), "箱にタイトルが届いていない").toContain("依存グラフを図にする");
+    expect(boxOf(markup, 2), "取れていないタイトルを、空欄で出している").toContain("タイトル不明");
   });
 });

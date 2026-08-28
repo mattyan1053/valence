@@ -226,6 +226,9 @@ export async function renderRepositoryBoard(
             // へ渡している `headSha` と、同じものを見る**（**無効なボタンの隣に
             // 「押せる」と出さない**）
             headKnown={(number) => result.plan.heads.get(number) !== undefined}
+            // **番号だけの箱では「どれか」が分からない**（#542）——**取れなかったぶんは
+            // `undefined` のまま渡す**（**空文字にすると「短いタイトル」に見える**）
+            titleOf={(number) => result.plan.titles.get(number)}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

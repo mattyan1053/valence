@@ -54,8 +54,19 @@ function mark(
   tier: RiskTier | undefined,
   block: MergeBlock = { kind: "ready" },
   headKnown = true,
+  title = "依存の図を出す",
 ): NodeMark {
-  return { tier, block, headKnown };
+  return { tier, block, headKnown, title };
+}
+
+/**
+ * **タイトルが取れなかった箱。**
+ *
+ * **既定引数では作れない**——**`undefined` を渡すと既定のほうが効く**ので、
+ * **「渡していない」と「取れなかった」が同じになる**（**それは #542 が消しに来た形**）。
+ */
+function untitled(tier: RiskTier | undefined): NodeMark {
+  return { ...mark(tier), title: undefined };
 }
 
 function markupFor(
@@ -172,6 +183,30 @@ describe("箱の中で決められる", () => {
     expect(boxOf(rendered, 1), "土台の箱に、押せるかどうかが無い").toContain("押せる");
     expect(boxOf(rendered, 2), "上段の箱に危なさが無い").toContain("すぐ");
     expect(boxOf(rendered, 2), "上段の箱に、何待ちかが無い").toContain("待ち: #1");
+  });
+
+  it("タイトルが、同じ箱に入る", () => {
+    // **番号だけでは「どれか」が分からない**（#542）——**GitHub で引き直すことになる**
+    const rendered = markup(new Map([[1, mark("high-risk", { kind: "ready" }, true, "色を直す")]]));
+
+    expect(boxOf(rendered, 1), "箱にタイトルが無い").toContain("色を直す");
+  });
+
+  it("タイトルが取れていない PR を、短いタイトルに見せない", () => {
+    // **空欄にすると「タイトルが空の PR」と見分けが付かない**（#505 / #541 と同じ向き）
+    const rendered = markup(new Map([[1, untitled("high-risk")]]));
+
+    expect(boxOf(rendered, 1)).toContain("タイトル不明");
+  });
+
+  it("長いタイトルは、切ったと分かる形で入る", () => {
+    // **長さは青天井**である——**そのまま置くと隣の箱と重なる**（下の「箱に収まっている」）。
+    // **黙って切ると、頭が同じ 2 本が同じ文字列になる**
+    const long = "依存グラフの箱に、番号とタイトルと危なさと何待ちかを入れる";
+    const rendered = markup(new Map([[1, mark("high-risk", { kind: "ready" }, true, long)]]));
+
+    expect(boxOf(rendered, 1), "切った印が無い").toContain("…");
+    expect(boxOf(rendered, 1), "切らずに置いている").not.toContain(long);
   });
 
   it("危なさは、札だけでなく濃さでも出す", () => {
@@ -306,14 +341,23 @@ describe("箱に収まっている", () => {
     return { frame, labels };
   }
 
-  /** **番号が 6 桁、待っている相手も 6 桁**という、いちばん長くなる形。 */
+  /**
+   * **番号が 6 桁、待っている相手も 6 桁**という、いちばん長くなる形。
+   *
+   * **タイトルは長さが青天井**なので（#542）、**切らずに置けばここで必ず落ちる**
+   * ——**この試験が、切る規則が要ることを言っている側**である。
+   */
   function longest(): string {
+    const longTitle = "依存グラフの箱に、番号とタイトルと危なさと何待ちかを入れる（#540 の続き）";
     return markupFor(
       [123456, 234567],
       [{ dependent: 234567, dependsOn: 123456 }],
       new Map([
-        [123456, mark("needs-review")],
-        [234567, mark("high-risk", { kind: "depends-on", numbers: [123456, 1, 2] })],
+        [123456, mark("needs-review", { kind: "ready" }, true, longTitle)],
+        [
+          234567,
+          mark("high-risk", { kind: "depends-on", numbers: [123456, 1, 2] }, true, longTitle),
+        ],
       ]),
     );
   }

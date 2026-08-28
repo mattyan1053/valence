@@ -36,6 +36,16 @@ export type PullRequestListing = {
    * **`PullRequestRef` へ足さない**——**あれは依存を決めるのに要る最小限**である。
    */
   readonly heads: ReadonlyMap<number, string>;
+  /**
+   * PR 番号から引けるタイトル（#542）。
+   *
+   * **番号だけでは「どれか」が分からない**ので、**図の箱まで運ぶ。**
+   * **`heads` と同じ形で持つ**——**`PullRequestRef` へは足さない。**
+   *
+   * **読めなかった PR は入らない。** **空文字も入れない**——**入れると、
+   * 表示の側で「短いタイトル」と「取れなかった」が見分けられない。**
+   */
+  readonly titles: ReadonlyMap<number, string>;
 };
 
 export type PullRequestSource = {

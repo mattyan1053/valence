@@ -11,13 +11,14 @@
  * 図に出ない**ので、**その件数を図の脇に書く**——**欠けた図が完全な図の顔で出るのは、
  * このリポジトリが繰り返し塞いできた形**である。
  *
- * **箱には、決めるのに要ることを入れる**（#540）。**番号だけの箱は、読めても
+ * **箱には、決めるのに要ることを入れる**（#540 / #542）。**番号だけの箱は、読めても
  * 決められない**——**危なさも「何待ちか」も脇の文章にしか無いと、10 本並んだとき
  * 全部読むまで順番が決まらない。** **判定はしない**（下の `NodeMark` を受けるだけ）。
  */
 
 import type { MergeBlock } from "../../domain/graph/merge-block";
 import type { RiskTier } from "../../domain/triage/risk-tier";
+import { fitLabel } from "./fit-label";
 import type { GraphLayout } from "./graph-layout";
 
 /** 図に出ていないもの。**0 件なら何も言わない。** */
@@ -56,6 +57,15 @@ export type NodeMark = {
    * どの PR も「commit 不明」になる**——**どちらへ倒しても嘘になる。**
    */
   readonly headKnown: boolean;
+  /**
+   * その PR のタイトル（#542）。**取れていないなら `undefined`。**
+   *
+   * **番号だけでは「どれか」が分からない**ので、**箱まで運ぶ。**
+   *
+   * **任意の項目にしない。** **書かない＝「タイトルが無い PR」に倒れる**
+   * ——**取れなかったことは、取れなかったと分かる形で出す**（`tier` と同じ理由）。
+   */
+  readonly title: string | undefined;
 };
 
 /**
@@ -86,6 +96,23 @@ const TIER_WEIGHT: Record<RiskTier, number> = {
 
 /** **材料が届いていない。** **空欄にすると `fast-track` と見分けが付かない。** */
 const UNKNOWN_LABEL = "未判定";
+
+/**
+ * **タイトルが取れていない**（#542）。
+ *
+ * **空欄にしない**——**「タイトルが空の PR」と見分けが付かない**（`UNKNOWN_LABEL` と
+ * 同じ向き）。**取れない形は実在する**（`pull-request-mapping.ts` は必須にしていない）。
+ */
+const UNKNOWN_TITLE = "タイトル不明";
+
+/** 箱の左の余白。**危なさの帯（幅 5）を避けた位置**である。 */
+const TEXT_INSET = 16;
+
+/** 箱の右の余白。 */
+const TEXT_RIGHT_INSET = 10;
+
+/** タイトルの文字の大きさ。**切る幅を数えるのにも使う。** */
+const TITLE_FONT_SIZE = 11;
 
 /**
  * **何を待っているか。** **番号まで出す**——**「押せない」だけでは次の手が分からない。**
@@ -155,7 +182,7 @@ export function DependencyGraphFigure({
       <div style={{ overflowX: "auto" }}>
         <svg
           role="img"
-          aria-label="PR の依存グラフ。左が土台で、右へ行くほど上に積まれている。各箱に番号・危なさ・何待ちかが入っている"
+          aria-label="PR の依存グラフ。左が土台で、右へ行くほど上に積まれている。各箱に番号・タイトル・危なさ・何待ちかが入っている"
           viewBox={`0 0 ${layout.width} ${layout.height}`}
           width={layout.width}
           height={layout.height}
@@ -209,7 +236,7 @@ export function DependencyGraphFigure({
                  `currentColor` で追随し**、**四角は見えるのに文字が見えなかった。**
                  */}
                 <text
-                  x={node.x + 16}
+                  x={node.x + TEXT_INSET}
                   y={node.y + 18}
                   dominantBaseline="middle"
                   fill="currentColor"
@@ -219,7 +246,7 @@ export function DependencyGraphFigure({
                   #{node.number}
                 </text>
                 <text
-                  x={node.x + layout.nodeWidth - 10}
+                  x={node.x + layout.nodeWidth - TEXT_RIGHT_INSET}
                   y={node.y + 18}
                   textAnchor="end"
                   dominantBaseline="middle"
@@ -228,9 +255,28 @@ export function DependencyGraphFigure({
                 >
                   {tier === undefined ? UNKNOWN_LABEL : TIER_LABEL[tier]}
                 </text>
+                {/*
+                 **タイトルは切る**（#542）。**長さが青天井**なので、**そのまま置くと
+                 隣の箱と重なって、どちらも読めなくなる**——**切ったことは印で出す。**
+                 **幅は箱から数える**ので、**箱を狭めた日にも付いてくる。**
+                 */}
                 <text
-                  x={node.x + 16}
+                  x={node.x + TEXT_INSET}
                   y={node.y + 38}
+                  dominantBaseline="middle"
+                  fill="currentColor"
+                  fontSize={TITLE_FONT_SIZE}
+                >
+                  {mark.title === undefined
+                    ? UNKNOWN_TITLE
+                    : fitLabel(mark.title, {
+                        maxWidth: layout.nodeWidth - TEXT_INSET - TEXT_RIGHT_INSET,
+                        fontSize: TITLE_FONT_SIZE,
+                      })}
+                </text>
+                <text
+                  x={node.x + TEXT_INSET}
+                  y={node.y + 58}
                   dominantBaseline="middle"
                   fill="currentColor"
                   fontSize={11}
@@ -243,7 +289,7 @@ export function DependencyGraphFigure({
         </svg>
       </div>
       <figcaption>
-        左が土台、右へ行くほど上に積まれている。箱には番号・危なさ・何待ちかが入っている。
+        左が土台、右へ行くほど上に積まれている。箱には番号・タイトル・危なさ・何待ちかが入っている。
         <MissingNote missing={missing} />
       </figcaption>
     </figure>

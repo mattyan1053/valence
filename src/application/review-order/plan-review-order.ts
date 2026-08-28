@@ -36,6 +36,13 @@ export type ReviewOrderPlan = {
    * push されると、利用者が確かめていない head がマージされる。**
    */
   readonly heads: ReadonlyMap<number, string>;
+  /**
+   * PR 番号から引けるタイトル（#542）。
+   *
+   * **番号だけでは「どれか」が分からない**ので、**盤面まで運ぶ。**
+   * **取れなかった PR は入らない**（`heads` と同じ）。
+   */
+  readonly titles: ReadonlyMap<number, string>;
 };
 
 export type ReviewOrderSources = {
@@ -75,7 +82,7 @@ export async function planReviewOrder(
   sources: ReviewOrderSources,
   options: ReviewOrderOptions = {},
 ): Promise<ReviewOrderPlan> {
-  const { pullRequests, invalid, heads } = await sources.pullRequests.listPullRequests();
+  const { pullRequests, invalid, heads, titles } = await sources.pullRequests.listPullRequests();
   const edges = buildDependencyEdges(pullRequests);
   const numbers = pullRequests.map((pullRequest) => pullRequest.number);
   // **合図はここで作る。** **一覧を取り終えてから数え始める**（#316 のレビュー）
@@ -87,6 +94,7 @@ export async function planReviewOrder(
     order: orderByDependency(pullRequests, edges),
     invalid,
     heads,
+    titles,
     ...changes,
   };
 }

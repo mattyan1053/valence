@@ -50,7 +50,9 @@ export type GraphLayout = {
  * 「読まずに拾える」ために足したものが読めなくなる。**
  */
 const NODE_WIDTH = 176;
-const NODE_HEIGHT = 54;
+// **3 段（番号と危なさ／タイトル／何待ちか）が入る高さ**（#542）
+// ——**足したぶん高くしないと、書いたものが重なって読めなくなる**
+const NODE_HEIGHT = 72;
 const COLUMN_GAP = 44;
 const ROW_GAP = 12;
 
