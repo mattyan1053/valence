@@ -73,6 +73,21 @@ describe("箱に入る長さへ切る", () => {
     }
   });
 
+  it("gitmoji の付いたタイトルを、狭く見積もらない", () => {
+    // **このリポジトリの PR タイトルに実際に出る文字**である（#543 のレビュー）
+    // ——**`✨ ♻ ✅ ⬆ §` はどれも `U+2E80` 未満**なので、**全角の側に入らない。**
+    // **`0.62em` で数えると、絵文字が並んだタイトルが箱に「入る」と読まれる。**
+    for (const character of "✨♻✅⬆§") {
+      expect(
+        estimateLabelWidth(character, 100),
+        `${character} を半角として数えている`,
+      ).toBeGreaterThanOrEqual(100);
+    }
+
+    const title = "✨".repeat(15);
+    expect(fitLabel(title, { maxWidth: 150, fontSize: 11 })).not.toBe(title);
+  });
+
   it("いちばん広い半角が並んでも、切らずには返さない", () => {
     // **一律 0.6em で数えると、`W` が 22 個で 145px と読み**、**150px の箱に
     // そのまま入れてしまう**——**実際は 200px を越えて隣の箱と重なる**（#543 のレビュー）
@@ -106,10 +121,12 @@ describe("箱に入る長さへ切る", () => {
 
     // **半分だけ残った単位は、それ自身では文字にならない**
     // （**`\ud83d` を `toContain` で見ると、割れていない対でも当たる**）
+    const kept = [...fitted].filter((character) => character !== ELLIPSIS);
+    expect(kept, "1 文字も残っていない").not.toEqual([]);
     expect(
-      [...fitted].filter((character) => character !== ELLIPSIS),
-      "文字が割れている",
-    ).toEqual(Array.from({ length: 3 }, () => "🐛"));
+      kept.every((character) => character === "🐛"),
+      `割れている: ${fitted}`,
+    ).toBe(true);
   });
 });
 

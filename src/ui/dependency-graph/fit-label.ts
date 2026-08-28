@@ -19,8 +19,15 @@ export type FitLabelOptions = {
   readonly fontSize: number;
 };
 
-/** **全角の境目。** これより上は 1em として数える（**和文はほぼ 1em ちょうど**）。 */
-const FULL_WIDTH_FROM = 0x2e80;
+/**
+ * **半角の表が当てはまる範囲。** **ASCII の外は、すべて 1em として数える**
+ * （#543 のレビュー）——**`✨ ♻ ✅ ⬆ §` は `U+2E80` 未満**だが、**このリポジトリの
+ * PR タイトルに実際に出る**（**gitmoji の件名**）。
+ *
+ * **`é` `ü`（Arial で 0.556em）まで 1em になり、必要以上に切る**——**そちらを取った。**
+ * **言語ごとに表を増やすのは、この道具の範囲を越える**（**この PR で決めたのはここまで**）。
+ */
+const ASCII_MAX = 0x7f;
 
 /**
  * 半角の字幅（em）。**Arial の字幅を上限側へ丸めたもの**である。
@@ -43,7 +50,7 @@ const WIDE = new Set([..."@WMmw%&"]);
 const NARROW = new Set([..."iljItfr.,;:'\"!|()[]{} -"]);
 
 function characterWidth(character: string, fontSize: number): number {
-  if ((character.codePointAt(0) ?? 0) > FULL_WIDTH_FROM) {
+  if ((character.codePointAt(0) ?? 0) > ASCII_MAX) {
     return fontSize;
   }
   if (WIDE.has(character)) {
