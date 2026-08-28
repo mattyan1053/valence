@@ -453,7 +453,10 @@ describe("作業場を並べられないとき", () => {
    *
    * **砂場は本物の worktree を触らない**——**自分の repo に自分で足す。**
    */
-  function runTask(failWorktreeList: boolean): {
+  function runTask(
+    failWorktreeList: boolean,
+    busy = false,
+  ): {
     status: number;
     stderr: string;
     asked: string;
@@ -480,7 +483,17 @@ describe("作業場を並べられないとき", () => {
       [
         "#!/usr/bin/env bash",
         `printf '%s\\n' "$*" >>${JSON.stringify(asked)}`,
-        'printf ""',
+        // **`busy` のときは、足した作業場だけを走っていることにする**
+        // （#557 のレビュー 2 周目）——**警告を出させないと、渡した場所を測れない。**
+        ...(busy
+          ? [
+              'if [[ $1 == "ps" ]]; then',
+              '  if [[ $* == *"-worker-b"* ]]; then echo "abc123"; fi',
+              "  exit 0",
+              "fi",
+              `if [[ $1 == "top" ]]; then printf '%s\\n' ${JSON.stringify(HEADER)} "u 1 1 sh -c vitest run"; exit 0; fi`,
+            ]
+          : ['printf ""']),
         "exit 0",
       ].join("\n"),
       { mode: 0o755 },
@@ -583,6 +596,17 @@ describe("作業場を並べられないとき", () => {
       [...projects].filter((project) => project.endsWith("-worker-b")),
       "足した作業場を見に行っていない",
     ).toHaveLength(1);
+  });
+
+  it("見つけたら、その作業場の場所を言う", () => {
+    // **名前だけでは足りない** (#557 のレビュー 2 周目)——**第 3 引数に `$path` ではなく
+    // `$here` を渡す退行でも、名前の側は通る。** **そのとき出るのは「別の作業場で
+    // 走っています: <自分の場所>」**で、**待つ相手が特定できない**（#549 でこちらが
+    // 満たした条件が、そこで消える）。
+    const done = runTask(false, true);
+
+    expect(done.stderr, "走っていることを言っていない").toContain("別の作業場で走っています");
+    expect(done.stderr, "足した作業場の場所を言っていない").toContain(done.added);
   });
 
   it("並べられたときは、余計なことを言わない", () => {

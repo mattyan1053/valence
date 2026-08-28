@@ -1247,9 +1247,13 @@ describe("居るはずの作業場を、記録が無くても数える", () => {
  * **本物のリポジトリの worktree は触らない**（**走っている作業場と競る**。#186）。
  */
 describe("作業場を並べる口", () => {
+  /** **`listing()` が作った砂場の場所**（**本体の作業場**）。 */
+  let sandboxRepo = "";
+
   /** master と worker が 1 つずつ居る砂場。**worktree は自分で置く。** */
   function listing(): string[] {
     const dir = mkdtempSync(join(tmpdir(), "worker-paths-"));
+    sandboxRepo = dir;
     sandboxes.push(dir);
     expect(spawnSync("git", ["init", "--quiet", "-b", "main", dir]).status).toBe(0);
     const git = (...args: string[]) =>
@@ -1293,13 +1297,19 @@ describe("作業場を並べる口", () => {
   });
 
   it("いま登録されている作業場から並べる", () => {
-    // **`git worktree list` が正**である（`./task loop:stop-paths` と同じ口）
-    // ——**足した worker が出ること**まで見る（**「1 つ以上」だけだと、
-    // 本体だけ出しても通る**）。
+    // **`git worktree list` が正**である（`./task loop:stop-paths` と同じ口）。
+    //
+    // **両側を見る** (#557 のレビュー 2 周目)。**足した worker だけを見ると、
+    // 一覧の 1 件目（clone 本体）を落とす退行が通る**——**本体も worker として
+    // 周回する**（**この作業場がまさに本体**）ので、**消えると `bin/loop-cadence` は
+    // その停止を検出できない。** **「1 つ以上」から締めた反対側が、そこで緩んでいた。**
+    const listed = listing();
+
     expect(
-      listing().filter((path) => path.endsWith("-worker-b")),
+      listed.filter((path) => path.endsWith("-worker-b")),
       "足した worker が出ない",
     ).toHaveLength(1);
+    expect(listed, "本体の作業場が出ない").toContain(sandboxRepo);
   });
 });
 
