@@ -54,7 +54,10 @@ function countingBlock(): string {
   return found.join("\n");
 }
 
-type Pr = { number: number; labels: string[] };
+type Pr = { number: number; branch?: string; author?: string; labels: string[] };
+
+/** ループが認証しているアカウント。**既定はこれ**（**中から出た PR**）。 */
+const LOOP_ACCOUNT = "loop-account";
 
 /** そのブロックが `gh` へ渡す `--jq` の式。 */
 function expressionOf(block: string): string {
@@ -75,16 +78,36 @@ function expressionOf(block: string): string {
 function renderAs(expression: string, prs: readonly Pr[]): string {
   const numberAt = expression.indexOf(".number");
   const labelsAt = expression.indexOf(".labels[].name");
+  // **枝の列も式から読む** (#558)——**`bin/loop-in-progress-work` が Issue と結ぶのに
+  // 要る**ので、**同じ一覧に 1 列増えた。** **式に無ければ出さない**
+  // （**演じられないものを、演じたことにしない**）。
+  const branchAt = expression.indexOf(".headRefName");
+  // **著者の列も式から読む** (#559 のレビュー)——**ループの外から出た PR を
+  // 実装として数えないために要る。** **枝と違って、無ければ落とす**
+  // ——**列が出ていなければ、その隣の列が著者として読まれる**ので、
+  // **演じずに黙って進むと、判定が当たっていないまま緑になる。**
+  const authorAt = expression.indexOf(".author.login");
   expect(numberAt, "式が PR 番号を出していない").toBeGreaterThanOrEqual(0);
   expect(labelsAt, "式が label を出していない").toBeGreaterThanOrEqual(0);
+  expect(authorAt, "式が著者を出していない").toBeGreaterThanOrEqual(0);
   const joinsLabels = expression.includes('join(",")');
 
   return prs
     .map((pr) => {
       const labels = joinsLabels ? [pr.labels.join(",")] : pr.labels;
-      const columns =
-        numberAt < labelsAt ? [`${pr.number}`, ...labels] : [...labels, `${pr.number}`];
-      return columns.join(FIELD);
+      // **式に出てくる順が、そのまま列の順**である
+      const columns: { at: number; text: string }[] = [
+        { at: numberAt, text: `${pr.number}` },
+        ...labels.map((label) => ({ at: labelsAt, text: label })),
+      ];
+      if (branchAt >= 0) {
+        columns.push({ at: branchAt, text: pr.branch ?? `fix/999-${pr.number}` });
+      }
+      columns.push({ at: authorAt, text: pr.author ?? LOOP_ACCOUNT });
+      return columns
+        .sort((left, right) => left.at - right.at)
+        .map((column) => column.text)
+        .join(FIELD);
     })
     .join("\\n");
 }
@@ -117,9 +140,14 @@ function countWith(prs: readonly Pr[]): string {
 
     writeFileSync(
       join(stub, "gh"),
-      ["#!/usr/bin/env bash", `printf '${listed === "" ? "" : `${listed}\\n`}'`, "exit 0", ""].join(
-        "\n",
-      ),
+      [
+        "#!/usr/bin/env bash",
+        // **著者の判定に要る一手**（`bin/loop-outside-author` が訊く）——**一覧とは別**
+        `if [[ $* == *"api user"* ]]; then printf '%s\\n' '${LOOP_ACCOUNT}'; exit 0; fi`,
+        `printf '${listed === "" ? "" : `${listed}\\n`}'`,
+        "exit 0",
+        "",
+      ].join("\n"),
       { mode: 0o755 },
     );
     // **落ちたら停止を積む側も偽物にする**（本物を呼ぶと、試験がカウンタを動かす）
@@ -215,5 +243,164 @@ describe("止まる向き", () => {
     expect(section("### 作業が尽きたとき"), "倒れる向きが書いていない").toContain(
       "人待ちが残ったまま",
     );
+  });
+});
+
+/**
+ * **人待ちの PR を持つ Issue を、着手中の数に入れない**（#558。**#546 の裏側**）。
+ *
+ * **PR の側だけ引いても `no-work` は通らない**——**その PR を持つ Issue は
+ * `in-progress` のまま数に入り続ける**（**実測: #501 / #502**）。
+ *
+ * **配線を見る。** **手順書のブロックをそのまま走らせ、本物の口を置く**
+ * ——**`bin/loop-in-progress-work` を呼んでいなければ、数は減らない。**
+ */
+describe("人待ちの PR を持つ着手中", () => {
+  /** ステップ 7 の 4 ブロック（取る / 数える を 2 組）。 */
+  function stepBlocks(): string {
+    const found = blocks(section("### 作業が尽きたとき")).filter(
+      (chunk) =>
+        chunk.includes("gh pr list") ||
+        chunk.includes("bin/loop-open-work") ||
+        chunk.includes("gh issue list") ||
+        chunk.includes("bin/loop-in-progress-work"),
+    );
+    expect(found, "取る側と数える側が 2 組そろっていない").toHaveLength(4);
+    return found.join("\n");
+  }
+
+  /** **`gh` は一覧を返すだけ**にして、**数える側は本物を置く。** */
+  function countWorkable(
+    prs: readonly Pr[],
+    inProgress: readonly number[],
+    /** `<番号> <TAB> <タイトル>`。**親子は末尾で結ぶ**ので、ここでは表題ごと渡す。 */
+    issues: readonly string[] = [],
+  ): string {
+    const workspace = mkdtempSync(join(tmpdir(), "in-progress-work-"));
+    try {
+      const stub = join(workspace, "stub");
+      mkdirSync(stub, { recursive: true });
+      mkdirSync(join(workspace, "bin"), { recursive: true });
+      // **親子を引く口も要る** (#559 のレビュー)——**数える側が呼ぶ**
+      for (const name of [
+        "loop-open-work",
+        "loop-in-progress-work",
+        "loop-issue-descendants",
+        "loop-outside-author",
+      ]) {
+        copyFileSync(join(REPO_ROOT, "bin", name), join(workspace, "bin", name));
+      }
+
+      const listed = renderAs(expressionOf(stepBlocks()), prs).replaceAll("'", "'\\''");
+      const numbers = inProgress.join("\\n");
+      const titles = issues.join("\\n").replaceAll("'", "'\\''");
+      writeFileSync(
+        join(stub, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          // **どの一覧かで返し分ける**——**同じ `gh` が 3 度呼ばれる**
+          // **親子を引くほうが先**（`--state all`）——**下の枝は `issue list` を
+          // すべて拾う**ので、**順を入れ替えると番号の一覧がそちらへ流れる。**
+          'if [[ $* == *"--state all"* ]]; then',
+          `  printf '${titles === "" ? "" : `${titles}\\n`}'`,
+          "  exit 0",
+          "fi",
+          // **著者の判定に要る一手**（`bin/loop-outside-author` が訊く）——**一覧とは別**
+          `if [[ $* == *"api user"* ]]; then printf '%s\\n' '${LOOP_ACCOUNT}'; exit 0; fi`,
+          'if [[ $* == *"issue list"* ]]; then',
+          `  printf '${numbers === "" ? "" : `${numbers}\\n`}'`,
+          "  exit 0",
+          "fi",
+          `printf '${listed === "" ? "" : `${listed}\\n`}'`,
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(workspace, "bin/loop-stall"),
+        ["#!/usr/bin/env bash", 'echo "stall $*" >&2', "exit 0", ""].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const result = spawnSync("bash", ["-c", stepBlocks()], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      // **最後の行が、着手を進められる件数**である
+      return result.stdout.trim().split("\n").at(-1) ?? "";
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+
+  it("人待ちの PR しか持たない Issue を、数に入れない", () => {
+    // **いまの盤面がこれ**（#501 の実装は #502 で、`parked` + `awaiting-human`）
+    const counted = countWorkable(
+      [{ number: 502, branch: "fix/501-count", labels: ["parked", "awaiting-human"] }],
+      [501],
+    );
+
+    expect(counted, "人待ちだけなのに数えている").toBe("0");
+  });
+
+  it("割った子の PR しか無い親を、数に入れない", () => {
+    // **枝が名乗るのは子の番号**なので、**親の番号を持つ枝は 1 本も出ない**
+    // ——**結べないと「PR がまだ無い＝実装中」へ倒れ、この口が消しに来た状態が残る。**
+    // **実データの形である**（親 #540 / 子 #542「…（#540）」/ 枝 `feat/542-x`）。
+    const counted = countWorkable(
+      [{ number: 543, branch: "feat/542-x", labels: ["parked", "awaiting-human"] }],
+      [540],
+      ["542\t子の話（#540）"],
+    );
+
+    expect(counted, "割った親に結べていない").toBe("0");
+  });
+
+  it("ループの外の著者の PR を、実装として数えない", () => {
+    // **枝の名前は誰でも付けられる** (#559 のレビュー)——**fork から `fix/501-...` で
+    // 出た `parked` + `awaiting-human` の PR が #501 の「唯一の PR」になると、
+    // その Issue は数から落ちる**（**外の人に triage 権限は無い**ので、#70）。
+    const counted = countWorkable(
+      [
+        {
+          number: 900,
+          branch: "fix/501-x",
+          author: "outsider",
+          labels: ["parked", "awaiting-human"],
+        },
+      ],
+      [501],
+    );
+
+    expect(counted, "外の PR を実装として数えている").toBe("1");
+  });
+
+  it("PR がまだ無い Issue は、これまでどおり数える", () => {
+    // **実装している最中である**——**外すと、3 周で全ループが止まる**
+    expect(countWorkable([], [501]), "実装中の Issue を数から落としている").toBe("1");
+  });
+
+  it("数え方を書き写さずに、口を名指しする", () => {
+    // **写すと、片方だけ古くなってもどちらも正しく見える**（`AGENTS.md` §5）
+    expect(section("### 作業が尽きたとき"), "数える口を名指ししていない").toContain(
+      "bin/loop-in-progress-work",
+    );
+  });
+
+  it("条件の言い回しが、着手中の側も引いている", () => {
+    // **残る側は自分の diff に出てこない**ので、**行で突き合わせる**（#546 と同じ形）
+    // ——**1 箇所だけ直すと、起票の条件が開かないまま `no-work` だけが通る。**
+    // **行で見ない**——**条件は折り返す**（**`in-progress` の節が次の行へ回る**）。
+    // **数で突き合わせる**：**条件を言っている箇所と、着手中を引いている箇所が同じ数**。
+    const text = procedureText("master");
+    const conditions = text.split("\n").filter((line) => line.includes("open PR が 0 件")).length;
+    const drawn = text.split("着手を進められる `in-progress`").length - 1;
+
+    expect(conditions, "条件がどこにも無い（見出しか言い回しが変わった）").toBeGreaterThan(1);
+    expect(drawn, "着手中から人待ちを引いていない条件がある").toBe(conditions);
   });
 });

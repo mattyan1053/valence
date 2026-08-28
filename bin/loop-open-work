@@ -3,7 +3,7 @@
 #
 #   bin/loop-open-work < <open PR の一覧>
 #
-#   標準入力: 1 行 1 PR。`<PR番号><US><label><US><label>...`
+#   標準入力: 1 行 1 PR。`<PR番号><US><枝><US><著者><US><label><US><label>...`
 #   標準出力: 着手できる PR の件数（1 行）
 #
 #   exit 0 = 数えた (0 件でも 0)
@@ -29,7 +29,7 @@ set -uo pipefail
 
 usage() {
   echo "使い方: bin/loop-open-work < <open PR の一覧>" >&2
-  echo "        1 行 1 PR: <PR番号><US><label><US><label>..." >&2
+  echo "        1 行 1 PR: <PR番号><US><枝><US><著者><US><label><US><label>..." >&2
   echo "        exit 0 = 数えた / exit 2 = 読めない" >&2
   exit 2
 }
@@ -75,11 +75,20 @@ while IFS="$FIELD" read -ra fields || ((${#fields[@]} > 0)); do
     exit 2
   fi
 
+  # **2 列目は枝、3 列目は著者である**（#558 / #559 のレビュー）。**label として
+  # 読まない**——**この口はどちらも使わないが、`bin/loop-in-progress-work` が
+  # 「その Issue の PR か」「ループの外から出た PR か」を決めるのに要る**ので、
+  # **同じ一覧を回す**（**引き直すと、同じ周回に 2 つの一覧ができる**。
+  # `bin/loop-parked-issues` と同じ）。
+  #
+  # **ログイン名は label と同じ字種である**——**読み飛ばす位置がずれると、
+  # `parked` という名前のアカウントの PR が人待ちに化ける。**
+  #
   # **1 つずつ、まるごと比べる**——**繋いでから部分一致で見ると、`parked-later` や
   # `parked,awaiting-human` という名前の label で判定が狂う。**
   parked=0
   human=0
-  for label in "${fields[@]:1}"; do
+  for label in "${fields[@]:3}"; do
     [[ $label == "parked" ]] && parked=1
     [[ $label == "awaiting-human" ]] && human=1
   done

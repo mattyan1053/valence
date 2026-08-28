@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# 着手を進められる in-progress の Issue を数える (#558)。
+#
+#   bin/loop-in-progress-work <Issue番号> [<Issue番号>...] < <open PR の一覧>
+#
+#   標準入力: 1 行 1 PR。`<PR番号><US><枝><US><著者><US><label><US><label>...`
+#   標準出力: 着手を進められる Issue の件数（1 行）
+#
+#   exit 0 = 数えた (0 件でも 0)
+#   exit 2 = 入力を読めない / 使い方の誤り
+#
+# **#546 の裏側である。** **あちらは人待ちの PR を、着手できる数から引いた**が、
+# **その PR を持つ Issue は `in-progress` のまま数に入り続ける**
+# ——**両方の手が空いても `no-work` が通らず、人が呼ばれない**（**実測: #501 / #502**）。
+#
+# **境目は「その Issue の open PR が、全部人待ちか」**である。**1 本でも普通の open PR が
+# あるなら、そちらを進められる。**
+#
+# **PR がまだ無い `in-progress` は、これまでどおり数える。** **誰かが実装している最中**
+# であり、**外すと、実装中なのに「作業が尽きた」と数え、3 周で全ループが止まる。**
+#
+# **人待ちの判定は書き写さない** (`AGENTS.md` §5)。**`bin/loop-open-work` が持っている**
+# ——**その Issue の PR だけを渡して、進められるものが 1 本でもあるかを訊く。**
+# **境目（`parked` だけは引かない）も、そのまま効く。**
+#
+# **Issue と PR は枝の名前で結ぶ。** **`Closes` を書かない PR がある**（#321。
+# **割った PR は親を閉じない**）ので、**`closingIssuesReferences` では結べない**
+# ——**`bin/loop-claim idle` が使っているのと同じ手掛かり**である。
+#
+# **割った親にも結ぶ** (#559 のレビュー)。**子 Issue を立てて割ると、枝が名乗るのは
+# 子の番号**なので、**親の番号を持つ枝が 1 本も出ない**——**そのままだと
+# 「PR がまだ無い＝実装中」として数え、この口が消しに来た状態が残る。**
+#
+# **親子は書き写さない** (`AGENTS.md` §5)。**`bin/loop-issue-descendants` が持っている**
+# ——**タイトルの末尾で結び、孫まで辿り、輪で止まる**（#544 / #545）。
+#
+# **ループの外から出た PR は、この Issue の実装ではない** (#559 のレビュー)。
+# **枝の名前は誰でも付けられる**ので、**fork から `fix/501-...` で出た
+# `parked` + `awaiting-human` の PR が、#501 の「唯一の PR」になりうる**
+# ——**その Issue は数から落ち**、**ほかに作業が無ければ 3 周で全ループが止まる。**
+# **外の人に triage 権限は無い**ので、**自分では `parked` を外せない**（#70）。
+#
+# **著者の判定は書き写さない** (`AGENTS.md` §5)。**`bin/loop-outside-author` が
+# 持っている**——**`bin/loop-parked-issues` が使っているのと同じ境目**である。
+# **名前で訊く**（`--author`）——**番号で訊くと向こうが `gh pr view` を打ち、
+# 「一覧は引き直さない」が崩れる。**
+#
+# **判らないときは、作業が残っている側へ倒す。** **倒す先で壊れ方が違う**——
+# **中へ倒すと、その Issue が数から落ち、`no-work` が通って全ループが止まる。**
+# **外へ倒すと、数が 1 多いだけ**である（**人が呼ばれるのが遅れる**）。
+# **`bin/loop-parked-issues` は「これまでどおり数える」側へ倒している**が、
+# **同じ言葉ではない**——**どちらも「ループが止まらない側」であって、
+# 「中と読む側」ではない。**
+#
+# **一覧は引き直さない**（`bin/loop-parked-issues` と同じ）——**呼ぶ側が既に取っている。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-in-progress-work <Issue番号> [<Issue番号>...] < <open PR の一覧>" >&2
+  echo "        1 行 1 PR: <PR番号><US><枝><US><著者><US><label><US><label>..." >&2
+  echo "        exit 0 = 数えた / exit 2 = 読めない" >&2
+  exit 2
+}
+
+for issue in "$@"; do
+  [[ $issue =~ ^[0-9]+$ ]] || usage
+done
+
+# 列の区切り。**`bin/loop-open-work` と同じ**（**そのまま渡す**ので、揃っていること）。
+readonly FIELD=$'\037'
+
+# **隣の口は、外部コマンドを使わずに指す。** **`dirname` を呼ぶと、最小の PATH で
+# 走らせる試験が「その口が無い」で落ちる**——**`$0` から切り出せば済む。**
+HERE="${0%/*}"
+[[ $HERE != "$0" ]] || HERE="."
+readonly HERE
+readonly OPEN_WORK="$HERE/loop-open-work"
+readonly OUTSIDE_AUTHOR="$HERE/loop-outside-author"
+readonly DESCENDANTS="$HERE/loop-issue-descendants"
+
+# **一覧をまるごと受ける。** **Issue ごとに絞って `bin/loop-open-work` へ渡す。**
+listed=""
+listed="$(cat)" || {
+  echo "[FAIL] open PR の一覧を読めません" >&2
+  exit 2
+}
+
+# **割った親の子孫を、1 度だけ引く**（#559 のレビュー）。**訊く先は 1 つ**なので、
+# **親子の規則がそこにしか無い**（**写していない**）。
+declare -A tree=()
+# 著者ごとの答え（`bin/loop-outside-author` の終了コード）。**同じ問いを 2 度訊かない。**
+declare -A inside=()
+if (($# > 0)); then
+  if ! descendants="$("$DESCENDANTS" "$@")"; then
+    echo "[FAIL] 割った親の子孫を並べられません" >&2
+    exit 2
+  fi
+  while IFS=$'\t' read -r kind parent child; do
+    # **`reaches` の行だけを見る**——**辺（`parent` / `near`）は鳴らす側の話**である
+    [[ $kind == "reaches" ]] || continue
+    [[ $parent =~ ^[0-9]+$ && $child =~ ^[0-9]+$ ]] || continue
+    tree[$parent]+=" $child"
+  done <<<"$descendants"
+fi
+
+count=0
+for issue in "$@"; do
+  mine=""
+  while IFS="$FIELD" read -ra fields || ((${#fields[@]} > 0)); do
+    number="${fields[0]-}"
+    # **空行は飛ばす。** **一覧が 0 件のとき、呼ぶ側からは空文字が来る**
+    [[ -n $number ]] || continue
+    # **読めない行を 0 件へ倒さない**（`bin/loop-open-work` と同じ向き）
+    if ! [[ $number =~ ^[0-9]+$ ]]; then
+      echo "[FAIL] PR 番号を読めません: $number" >&2
+      exit 2
+    fi
+    branch="${fields[1]-}"
+    author="${fields[2]-}"
+    # **番号のあとに区切りが要る** (`.claude/rules/git-workflow.md`)——**前方一致で
+    # 結ぶと `fix/5011-x` が #501 の PR になる。**
+    [[ $branch =~ ^[a-z]+/([0-9]+)- ]] || continue
+    named="${BASH_REMATCH[1]}"
+    # **空の著者を添字にしない** (#559 のレビュー 3 周目)。**bash は空文字を
+    # 連想配列の添字にできず**、**`set -e` が無くてもその場で `for` ごと抜ける**
+    # ——**残りの Issue は数えられないまま、`count` がそこまでの値で出る。**
+    # **先頭で踏めば 0 件**であり、**実装中の Issue まで「作業なし」になって、
+    # 3 周で全ループが止まる。** **削除済みアカウントの PR で `.author.login` は
+    # 空になる。**
+    #
+    # **倒す先は下と同じ**（判らない = 外す）**だが、届く前に落ちる**
+    # ——**守りたい行はあるのに、そこへ入力が来ない形**である。
+    if [[ -z $author ]]; then
+      echo "[WARN] PR #$number の著者が空です（この PR は数えません）" >&2
+      continue
+    fi
+    # **外から出た PR は、この Issue の実装ではない**——**同じ著者は 1 度しか訊かない**
+    if [[ -z ${inside[$author]-} ]]; then
+      "$OUTSIDE_AUTHOR" --author "$author" >/dev/null 2>&1
+      inside[$author]="$?"
+    fi
+    # **1（ループのアカウント）だけが「中」**——**0（外）も 2（判らない）も外す**
+    [[ ${inside[$author]} == "1" ]] || continue
+    # **その Issue そのものか、割った子孫か**（#559 のレビュー）
+    [[ $named == "$issue" || " ${tree[$issue]-} " == *" $named "* ]] || continue
+    # **区切りで繋ぎ直す。** **`${fields[*]}` は IFS の先頭文字で繋ぐ**ので、
+    # **その場だけ区切りへ差し替える**——**空白で繋いでから戻すと、空白を含む
+    # label（GitHub は許す）で列がずれる。**
+    mine+="$(
+      IFS="$FIELD"
+      printf '%s' "${fields[*]}"
+    )"$'\n'
+  done <<<"$listed"
+
+  # **PR が 1 本も無いなら、実装している最中**である——**これまでどおり数える**
+  if [[ -z $mine ]]; then
+    ((count++))
+    continue
+  fi
+
+  # **進められる PR が 1 本でもあるかを訊く**（判定は向こうが持つ）
+  if ! workable="$(printf '%s' "$mine" | "$OPEN_WORK")"; then
+    echo "[FAIL] #$issue の PR を数えられません" >&2
+    exit 2
+  fi
+  # **1 本でも進められるなら、その Issue は数に入る**
+  #
+  # **文字列で比べる。** **`(( ))` の中は `$` を書かないので、静的解析からは
+  # 「使っていない」に見える**（SC2034）——**黙らせるより、見える形で書く。**
+  [[ $workable == "0" ]] || ((count++))
+done
+
+printf '%s\n' "$count"
+exit 0

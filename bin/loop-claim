@@ -81,14 +81,8 @@ readonly TTL_SEC="${LOOP_CLAIM_TTL_SEC:-1800}"
 # **人が呼ばれるのは、さらに master 2 周ぶん後**である。
 readonly IDLE_SEC="${LOOP_CLAIM_IDLE_SEC:-7200}"
 
-# 親子の繋がりを探すときに読む Issue の数 (#544)。
-#
-# **設定にしない。** **切り詰めても伸ばしても、倒れる向きは同じ**（**見落とした子は
-# 「動いていない」側になり、親が鳴る**）ので、**調整する理由が無い。**
-#
-# **上限に届いたら言う。** **落ちた行は「無かったこと」になる**ので、
-# **黙って切ると、鳴った理由が「子を見落としたから」だと分からなくなる。**
-readonly CHILD_LIMIT=500
+# **親子を探すときの上限は、`bin/loop-issue-descendants` が持つ** (#559 のレビュー)
+# ——**引く側がここではなくなった**ので、**設定もそちらへ移した。**
 
 usage() {
   echo "使い方: bin/loop-claim take <Issue番号>     ready の Issue を取る" >&2
@@ -280,6 +274,13 @@ if [[ $ACTION == "idle" ]]; then
     echo "[FAIL] 着手中の Issue を読めません" >&2
     exit 2
   fi
+  # **子孫を訊く先**（#559 のレビュー）。**まとめて 1 度だけ引く**ので、
+  # **先に番号だけ控える**（**判定は `bin/loop-issue-descendants` が持つ**）。
+  idle_candidates=()
+  while IFS=$'\t' read -r candidate _; do
+    [[ $candidate =~ ^[0-9]+$ ]] || continue
+    idle_candidates+=("$candidate")
+  done <<<"$in_progress"
   # **閉じる Issue は GitHub に訊く**（`audit` と同じ理由）。**本文を自分で解析すると、
   # `close` / `fixes` / `resolved` の書き分けを写すことになり、写した規則は必ずずれる。**
   #
@@ -363,39 +364,40 @@ if [[ $ACTION == "idle" ]]; then
   #
   # **一覧は、要るときに 1 度だけ引く。** **谷に入った親が居ない周回では、
   # 往復を作らない**（`still_in_progress` と同じ判断）。
+  # **親子は `bin/loop-issue-descendants` が持っている** (#559 のレビュー)。
+  # **同じ問いを `bin/loop-in-progress-work` も持つ**ので、**書き写すと、片方だけ
+  # 直したときに食い違う**——**タイトルの末尾で結び、孫まで辿り、輪で止まるのは、
+  # 向こう 1 箇所**である。
+  declare -A descendants_of=()
+  # **厳密な辺**。**鎖のどこで切れたかを言うのに要る**（#545)——**規則は向こうが持つ**
   declare -A parent_of=()
   # **惜しい書き方**（`（#512 の続き）` など）。**親子には数えないが、鳴らすときに言う。**
+  # **こちらは鳴らす側の話**なので、**ここに残す**（**問いが違う**）。
   declare -A near_parent_of=()
   children_loaded=0
   load_children() {
     ((children_loaded == 0)) || return 0
-    local lines number title count=0
-    if ! lines="$(gh issue list --state all --limit "$CHILD_LIMIT" --json number,title \
-      --jq '.[] | "\(.number)\t\(.title)"')"; then
-      echo "[FAIL] 親子を突き合わせる Issue の一覧を読めません" >&2
+    local listed kind left right here
+    # **隣の口は `$0` から指す**——**`dirname` を呼ぶと、最小の PATH で走らせる
+    # 試験が「その口が無い」で落ちる**（**実際に落ちた**）。
+    here="${0%/*}"
+    [[ $here != "$0" ]] || here="."
+    # **1 度で、辺も辿った結果も受ける**——**分けて 2 度引かない**
+    if ! listed="$("$here/loop-issue-descendants" ${idle_candidates[@]+"${idle_candidates[@]}"})"; then
+      echo "[FAIL] 親子を突き合わせる一覧を読めません" >&2
       exit 2
     fi
-    while IFS=$'\t' read -r number title; do
-      [[ $number =~ ^[0-9]+$ ]] || continue
-      ((count += 1))
-      # **括弧の中に語があるものは、親子に数えない** (#545 のレビュー)。
-      # **末尾の `（#N …）` は親子とは限らない**——**`（#82 の前提）` は
-      # 「#82 がこれを待つ」**であって、**「これが #82 の一部」ではない。**
-      # **括弧の中を読み分けずに数えると、向きの逆な PR が親を黙らせる**（#322 の向き）。
-      #
-      # **惜しい形は覚えておく。** **数えなかったことを、鳴らすときに言う**ため
-      # ——**このリポジトリは実際にその形を書いている**ので、
-      # **書いた人は「末尾に置いた」と思っている。**
-      if [[ $title =~ （#([0-9]+)[^）]*）$ ]]; then
-        near_parent_of[$number]="${BASH_REMATCH[1]}"
-      fi
-      [[ $title =~ （#([0-9]+)）$ ]] || continue
-      parent_of[$number]="${BASH_REMATCH[1]}"
-    done <<<"$lines"
-    # **上限に届いたら言う** (#537)。**落ちた行は「無かったこと」になる**ので、
-    # **黙って切ると、鳴った理由が「子を見落としたから」だと分からない。**
-    ((count < CHILD_LIMIT)) ||
-      echo "[WARN] Issue を $CHILD_LIMIT 件までしか読んでいません（古い子 Issue を見落としえます）" >&2
+    while IFS=$'\t' read -r kind left right; do
+      [[ $left =~ ^[0-9]+$ && $right =~ ^[0-9]+$ ]] || continue
+      case "$kind" in
+        # **厳密な辺**（`（#N）`）。**鎖が切れた場所を言うのに要る**
+        parent) parent_of[$left]="$right" ;;
+        # **惜しい辺**（`（#N …）`）。**親子には数えないが、鳴らすときに言う**
+        near) near_parent_of[$left]="$right" ;;
+        # **その親から辿れるもの**（**孫まで。輪では止まる**）
+        reaches) descendants_of[$left]+=" $right" ;;
+      esac
+    done <<<"$listed"
     children_loaded=1
   }
 
@@ -408,22 +410,10 @@ if [[ $ACTION == "idle" ]]; then
   # **輪で止める。** **タイトルは人が書く**ので、**A の子が B、B の子が A** という
   # 書き方は実在しうる——**辿り続けると、この検出器がその周回ごと止まる**
   # （**黙るより悪い。止まったことすら出力に現れない**）。
-  chain_reaches() {
-    local -n links="$1"
-    local current="$2" number="$3" seen=" $2 "
-    while [[ -n ${links[$current]-} ]]; do
-      current="${links[$current]}"
-      [[ $current == "$number" ]] && return 0
-      [[ $seen == *" $current "* ]] && return 1
-      seen+="$current "
-    done
-    return 1
-  }
-
   branch_belongs_to() {
     [[ $1 == "$2" ]] && return 0
     load_children
-    chain_reaches parent_of "$1" "$2"
+    [[ " ${descendants_of[$2]-} " == *" $1 "* ]]
   }
 
   # 枝が名乗っている Issue の番号。**open も、最近入ったぶんも並べる。**

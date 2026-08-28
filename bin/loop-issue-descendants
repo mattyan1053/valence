@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# 割った親から、その子孫の Issue を並べる (#559 のレビュー。判定は #544 / #545)。
+#
+#   bin/loop-issue-descendants [<Issue番号>...]
+#
+#   標準出力（種別つき。1 行 1 件）:
+#     parent  <TAB> <子> <TAB> <親>        厳密に結べる辺
+#     near    <TAB> <子> <TAB> <惜しい親>   括弧の中に語がある辺（親子には数えない）
+#     reaches <TAB> <親> <TAB> <子孫>       訊かれた親から辿れるもの（親自身は出さない）
+#
+#   **引数が無ければ `reaches` は出ない**（辺だけ出す）。**0 件でも exit 0。**
+#
+#   exit 0 = 並べた / exit 2 = 読めない・使い方の誤り
+#
+# **親子はここでだけ決める** (`AGENTS.md` §5)。**`bin/loop-claim idle`（止まっている
+# 親を鳴らさない）と `bin/loop-in-progress-work`（人待ちの子 PR を親から引く）が、
+# 同じ問いを持っている**——**書き写すと、片方だけ直したときに食い違う。**
+#
+# **見るのは子 Issue のタイトルの末尾だけ**である (#544)。**本文の言及では決めない**
+# （#322）——**このリポジトリは理由を厚く書く**ので、**`#540` と書かれた Issue は
+# いくらでも出る。** **末尾は位置が決まっている**ので、**引き合いに出したついでには
+# 当たらない。** **規則は `.claude/rules/git-workflow.md` にある。**
+#
+# **括弧の中に語があるものは、親子に数えない** (#545 のレビュー)。**末尾の
+# `（#N …）` は親子とは限らない**——**`（#82 の前提）` は「#82 がこれを待つ」**であって、
+# **「これが #82 の一部」ではない。** **読み分けずに数えると、向きの逆な Issue が
+# 親にぶら下がる。**
+#
+# **孫まで辿る** (#545 のレビュー)。**割った先をさらに割ってよい**（起票の規則）ので、
+# **1 段だけ見ると、同じ形が 1 段深いところで再発する。**
+#
+# **輪で止める。** **タイトルは人が書く**ので、**A の子が B、B の子が A** という
+# 書き方は実在しうる——**辿り続けると、呼んだ側がその周回ごと止まる。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-issue-descendants [<Issue番号>...]" >&2
+  echo "        出力: parent/near/reaches <TAB> <番号> <TAB> <番号>" >&2
+  echo "        exit 0 = 並べた / exit 2 = 読めない" >&2
+  exit 2
+}
+
+for parent in "$@"; do
+  [[ $parent =~ ^[0-9]+$ ]] || usage
+done
+
+# 親子を突き合わせるために読む Issue の数 (#544)。
+#
+# **上限に届いたら言う。** **落ちた行は「無かったこと」になる**ので、
+# **黙って切ると、結べなかった理由が分からない。**
+readonly CHILD_LIMIT=500
+
+if ! listed="$(gh issue list --state all --limit "$CHILD_LIMIT" --json number,title \
+  --jq '.[] | "\(.number)\t\(.title)"')"; then
+  echo "[FAIL] 親子を突き合わせる Issue の一覧を読めません" >&2
+  exit 2
+fi
+
+declare -A parent_of=()
+count=0
+while IFS=$'\t' read -r number title; do
+  [[ $number =~ ^[0-9]+$ ]] || continue
+  ((count += 1))
+  # **惜しい形も出す** (#545 のレビュー)。**親子には数えないが、鳴らす側が
+  # 「どこで切れたか」を言うのに要る**——**このリポジトリは実際にその形を書いている**
+  # ので、**書いた人は「末尾に置いた」と思っている。**
+  if [[ $title =~ （#([0-9]+)[^）]*）$ ]]; then
+    printf 'near\t%s\t%s\n' "$number" "${BASH_REMATCH[1]}"
+  fi
+  [[ $title =~ （#([0-9]+)）$ ]] || continue
+  parent_of[$number]="${BASH_REMATCH[1]}"
+  printf 'parent\t%s\t%s\n' "$number" "${BASH_REMATCH[1]}"
+done <<<"$listed"
+
+((count < CHILD_LIMIT)) ||
+  echo "[WARN] Issue を $CHILD_LIMIT 件までしか読んでいません（古い子 Issue を見落としえます）" >&2
+
+# **その Issue から辿って、この親に届くか。** **輪で止める。**
+reaches() {
+  local current="$1" parent="$2" seen=" $1 "
+  while [[ -n ${parent_of[$current]-} ]]; do
+    current="${parent_of[$current]}"
+    [[ $current == "$parent" ]] && return 0
+    [[ $seen == *" $current "* ]] && return 1
+    seen+="$current "
+  done
+  return 1
+}
+
+for parent in "$@"; do
+  for child in "${!parent_of[@]}"; do
+    reaches "$child" "$parent" || continue
+    printf 'reaches\t%s\t%s\n' "$parent" "$child"
+  done
+done
+exit 0

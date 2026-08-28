@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # その PR の著者が、ループの外にいるか。
 #
+#   bin/loop-outside-author <PR番号>
+#   bin/loop-outside-author --author <ログイン名>
+#
 #   exit 0 = 外にいる (著者名を stdout に出す。人待ちへ倒す)
 #   exit 1 = ループが使っているアカウントである (これまでどおり)
 #   exit 2 = 読めない / 使い方の誤り
+#
+# **名前で訊く口がある** (#559 のレビュー)。**一覧を持っている側は、番号ではなく
+# 著者名を持っている**——**`bin/loop-in-progress-work` は「一覧は引き直さない」設計**
+# なので、**番号から `gh pr view` を打たせると、その設計が崩れる。**
+# **判定は分けない**——**アカウントの比べ方も、判定不能の倒し方も、この 1 本が持つ。**
 #
 # **ループの外にいる著者は、次に呼ばれるまで動かない** (#70)。master は対応待ちの停止を
 # 積むが、**SHA が変わらないので識別子も変わらず、3 周で `loop/STOP`** に達する——
@@ -29,13 +37,24 @@ readonly LOGIN_RE='^[A-Za-z0-9-]{1,39}(\[bot\])?$'
 
 usage() {
   echo "使い方: bin/loop-outside-author <PR番号>" >&2
+  echo "        bin/loop-outside-author --author <ログイン名>" >&2
   echo "        exit 0 = ループの外の著者 / exit 1 = ループのアカウント / exit 2 = 読めない" >&2
   exit 2
 }
 
-[[ $# -eq 1 ]] || usage
-[[ $1 =~ ^[0-9]+$ ]] || usage
-readonly PR="$1"
+# **どちらの訊き方でも、要るのは著者名 1 つ**である。
+# **名前で訊かれたら PR を引かない**（引く材料も無い）。
+if [[ ${1-} == "--author" ]]; then
+  [[ $# -eq 2 ]] || usage
+  given="${2-}"
+  PR=""
+else
+  [[ $# -eq 1 ]] || usage
+  [[ $1 =~ ^[0-9]+$ ]] || usage
+  given=""
+  PR="$1"
+fi
+readonly PR given
 
 if ! account="$(gh api user --jq '.login' 2>/dev/null)" || ! [[ $account =~ $LOGIN_RE ]]; then
   echo "[FAIL] ループが使っているアカウントを読み取れません" >&2
@@ -43,9 +62,17 @@ if ! account="$(gh api user --jq '.login' 2>/dev/null)" || ! [[ $account =~ $LOG
   exit 2
 fi
 
-if ! author="$(gh pr view "$PR" --json author --jq '.author.login' 2>/dev/null)" \
-  || ! [[ $author =~ $LOGIN_RE ]]; then
-  echo "[FAIL] PR #$PR の著者を読み取れません（返ってきた値: ${author:-空}）" >&2
+if [[ -n $PR ]]; then
+  if ! author="$(gh pr view "$PR" --json author --jq '.author.login' 2>/dev/null)"; then
+    echo "[FAIL] PR #$PR の著者を読み取れません" >&2
+    exit 2
+  fi
+else
+  author="$given"
+fi
+
+if ! [[ $author =~ $LOGIN_RE ]]; then
+  echo "[FAIL] 著者の名前がアカウント名の形をしていません（返ってきた値: ${author:-空}）" >&2
   exit 2
 fi
 

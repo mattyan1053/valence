@@ -120,6 +120,52 @@ describe("bin/loop-outside-author", () => {
     expect(run().status).toBe(2);
   });
 
+  /**
+   * **名前だけで訊く口** (#559 のレビュー)。
+   *
+   * **一覧を持っている側は、PR 番号ではなく著者名を持っている**——**`bin/loop-open-work`
+   * へ渡す一覧に著者の列がある**ので、**そこから訊けば `gh` を引き直さずに済む。**
+   * **判定は写さない**——**アカウントの比べ方も、判定不能の倒し方も、ここが持つ。**
+   */
+  describe("--author（名前で訊く）", () => {
+    it("ループのアカウントの名前は、外ではない", () => {
+      withGh({ account: "loop-account" });
+
+      expect(run(["--author", "loop-account"]).status, "自分たちを外にしている").toBe(1);
+    });
+
+    it("別のアカウントの名前は、外である", () => {
+      withGh({ account: "loop-account" });
+      const result = run(["--author", "someone-else"]);
+
+      expect(result.status).toBe(0);
+      expect(result.stdout, "誰の PR かが出ていない").toContain("someone-else");
+    });
+
+    it("PR を引き直さない", () => {
+      // **番号を知らない口から呼ばれる**ので、**`gh pr view` を打つ余地が無い**
+      // ——**打っていたら、ここで落ちる。**
+      withGh({ account: "loop-account", fails: "pr view" });
+
+      expect(run(["--author", "someone-else"]).status, "PR を引き直している").toBe(0);
+    });
+
+    it("アカウントを読めなければ、どちらとも言わない", () => {
+      // **判定不能を「外」に倒さない**（番号で訊く側と同じ向き）
+      withGh({ account: "loop-account", fails: "api user" });
+
+      expect(run(["--author", "someone-else"]).status).toBe(2);
+    });
+
+    it("名前の形をしていないものは受けない", () => {
+      withGh({ account: "loop-account" });
+
+      expect(run(["--author", "someone else; rm -rf /"]).status).toBe(2);
+      expect(run(["--author"]).status, "名前が無いのに通している").toBe(2);
+      expect(run(["--author", "a", "b"]).status, "余った引数を黙って捨てている").toBe(2);
+    });
+  });
+
   it("使い方の誤りは 2", () => {
     withGh({ account: "loop-account", author: "someone-else" });
 
