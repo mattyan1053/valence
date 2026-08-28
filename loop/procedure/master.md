@@ -1143,9 +1143,37 @@ gh issue edit <N> --remove-label waiting-condition
 
 ### 作業が尽きたとき
 
-**open PR が 0 件で、`ready` / `in-progress` が 0 件、かつ `backlog` に昇格できるものが
-無い**（空か、**残りが全部 `waiting-condition`**）なら、どちらのループも正常に動いたまま
-何もしない周回になる。ここは `bin/loop-stall` を通す。
+**着手できる open PR が 0 件で、`ready` / `in-progress` が 0 件、かつ `backlog` に
+昇格できるものが無い**（空か、**残りが全部 `waiting-condition`**）なら、どちらのループも
+正常に動いたまま何もしない周回になる。ここは `bin/loop-stall` を通す。
+
+**「着手できる」は、人待ちを引いた数である** (#546)。**数え方は `bin/loop-open-work` が
+持っている**——**ここに書き写さない**（`AGENTS.md` §5。**写した側が古くなっても、
+どちらも正しく見える**）。
+
+```bash
+# 開いている PR の一覧（1 行 1 件。`<PR番号><US><label>`）
+# **先に変数へ受ける。** パイプで繋ぐと `$?` は数える側のものになり、
+# **取得できなかった周回が「0 件」と見分けが付かない**
+if ! open_prs="$(gh pr list --state open --limit 200 --json number,labels \
+  --jq '.[] | "\(.number)\u001f\([.labels[].name] | join(","))"')"; then
+  bin/loop-stall pr-lookup-failed
+  exit
+fi
+printf '%s\n' "$open_prs"
+```
+
+**取ってから数える**（`bin/loop-parked-issues` と同じ形）。**取る側と数える側を 1 つの
+ブロックに畳まない**——**取れた一覧をそのまま出しておけば、数え方が変わっても
+「何を見て決めたか」は残る。**
+
+```bash
+if ! open_work="$(printf '%s\n' "$open_prs" | bin/loop-open-work)"; then
+  bin/loop-stall pr-lookup-failed
+  exit
+fi
+printf '%s\n' "$open_work"
+```
 
 ```bash
 bin/loop-stall no-work
@@ -1158,6 +1186,16 @@ bin/loop-stall no-work
 **`blocked` だけがある状態も同じ扱いにする。** `blocked` は人の判断待ちで、
 ループの中では解けない。着手できないという点で「何も無い」と変わらないので、
 `blocked` があっても `no-work` を通す（数を減らせるのは人だけである）。
+
+**PR 側の `parked` + `awaiting-human` も同じである** (#546)。**理由がそのまま当てはまる**
+——**人の判断待ちで、ループの中では解けない。** **`parked` だけ（先行 PR 待ち）は
+引かない**——**あれはループが解く**ので、**引くと、先行 PR を待っているだけの周回で
+「尽きた」と数え始める。** **境目は `awaiting-human` が付いているかどうか**である。
+
+**倒れる向きを知っておく。** **`no-work` は 3 周で `loop/STOP` を置く**ので、
+**人待ちが残ったまま 3 周すれば、その時点で全ループが止まる**——**狙いどおりだが、
+盤面を見た人には「詰まっていないのに止まった」と映る。** **止まったときに読むのは
+`loop/STOP` の 1 行なので、そこに `no-work` と出る**（**人待ちの件数までは出ない**）。
 
 **空回りそのものは異常ではない。** 人がすぐ Issue を足すつもりで席を外しているだけかも
 しれないので、1 周目では止めない。3 周続いたら `loop/STOP` が置かれ、人を呼ぶ。
