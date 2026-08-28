@@ -453,13 +453,23 @@ check_leftovers() {
   # **並べるのも、名前を作るのもここ**（`AGENTS.md` §5。**正規化を 2 箇所に持たない**）。
   # **落とさない。言うだけ**——**返り値は自分の作業場のぶんのままにする**
   # （**他人の持ち物で、こちらの合否を決めない**。#186）。
-  local here path name
-  if here="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  #
+  # **並べられなかったときに黙らない** (#549 のレビュー 2 周目)。**プロセス置換の中の
+  # 失敗は呼ぶ側へ届かない**ので、**`done < <(git worktree list …)` はループが 0 回で
+  # 終わるだけ**——**「他所は走っていない」と読める。** **先に受けてから回す。**
+  #
+  # **倒れる先は「言うだけ」**である——**自分の作業場の合否を、他所の事情で塗り替えない**
+  # （#186。**この関数の他の行と同じ判断**）。
+  local here path name worktrees
+  if here="$(git rev-parse --show-toplevel 2>/dev/null)" &&
+    worktrees="$(git worktree list --porcelain 2>/dev/null)"; then
     while IFS= read -r path; do
       [[ -n $path && $path != "$here" ]] || continue
       name="$(normalize_workspace_name "$(basename -- "$path")")"
       ./bin/loop-check-leftovers --elsewhere "$name" "$path" || true
-    done < <(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+    done < <(printf '%s\n' "$worktrees" | sed -n 's/^worktree //p')
+  else
+    echo "[WARN] 作業場を並べられないので、別の作業場が走っているかを判定できません" >&2
   fi
   return "$status"
 }

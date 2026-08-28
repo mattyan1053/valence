@@ -78,7 +78,13 @@ container="${container%%$'\n'*}"
 [[ -n $container ]] || exit 0
 
 if ! processes="$(docker top "$container" 2>/dev/null)"; then
-  echo "[WARN] コンテナの中を読めないので、残った走りがあるかを判定できません" >&2
+  # **ここも言い分ける** (#549 のレビュー 2 周目)。**`--elsewhere` は複数の作業場を
+  # 回る**ので、**場所なしで出るとどれのことか分からない**——**`ps` の側だけでは半分。**
+  if [[ -n $WHERE ]]; then
+    echo "[WARN] 別の作業場のコンテナの中を読めないので、走っているかを判定できません: $WHERE" >&2
+  else
+    echo "[WARN] コンテナの中を読めないので、残った走りがあるかを判定できません" >&2
+  fi
   exit 2
 fi
 
