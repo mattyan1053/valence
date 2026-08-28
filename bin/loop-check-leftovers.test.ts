@@ -343,6 +343,28 @@ describe("bin/loop-check-leftovers --elsewhere", () => {
     expect(found.stderr, "待てることを言っていない").toContain("待つか");
   });
 
+  it("引けなかったときも、どの作業場の話かを言う", () => {
+    // **成功したときは言い分けてあるのに、判定できないときだけ道が共通だった**
+    // （#549 のレビュー）——**「この作業場の」と読むと、自分のコンテナを疑いに行く。**
+    const dir = mkdtempSync(join(tmpdir(), "leftovers-elsewhere-fail-"));
+    sandboxes.push(dir);
+    writeFileSync(join(dir, "docker"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+    chmodSync(join(dir, "docker"), 0o755);
+    const found = spawnSync(
+      SCRIPT,
+      ["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"],
+      {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      },
+    );
+
+    expect(found.status, "判定できないと言っていない").toBe(2);
+    expect(found.stderr, "自分の作業場の話に見える").not.toContain("この作業場の");
+    expect(found.stderr, "どの作業場か分からない").toContain("/home/x/valence-worker-b");
+  });
+
   it("場所を渡さなければ、使い方を出す", () => {
     // **どの作業場かを言えないなら、この口は役に立たない**
     expect(withDocker(BUSY)(["--elsewhere", "valence-worker-b"]).status).toBe(2);

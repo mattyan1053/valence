@@ -63,7 +63,13 @@ fi
 if ! container="$(docker ps -q \
   --filter "label=com.docker.compose.project=$WORKSPACE" \
   --filter "label=com.docker.compose.service=app" 2>/dev/null)"; then
-  echo "[WARN] この作業場のコンテナを引けないので、残った走りがあるかを判定できません" >&2
+  # **どの作業場の話かを、失敗の側でも言い分ける** (#549 のレビュー)。**成功したときは
+  # 分けてあるのに、ここが共通だと「この作業場の」と読んで自分のコンテナを疑いに行く。**
+  if [[ -n $WHERE ]]; then
+    echo "[WARN] 別の作業場のコンテナを引けないので、走っているかを判定できません: $WHERE" >&2
+  else
+    echo "[WARN] この作業場のコンテナを引けないので、残った走りがあるかを判定できません" >&2
+  fi
   exit 2
 fi
 
