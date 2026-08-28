@@ -73,6 +73,14 @@ export function ReviewBoard({
       edges={edges}
       order={order}
       invalid={invalid}
+      // **図の箱にも危なさを載せる**（#540）。**脇の文章にしか無いと、
+      // 10 本並んだとき全部読むまで順番が決まらない**——**判定は同じ
+      // `classifyRiskTier`** なので、**箱と脇で食い違わない。**
+      tierOf={(number) => {
+        const change = changes.get(number);
+        // **材料が無いことを「危なくない」に倒さない**（下の行と同じ判断）
+        return change === undefined ? undefined : classifyRiskTier(change);
+      }}
       renderAside={(number) => {
         const change = changes.get(number);
         // **材料が無い PR を黙って落とさない。** 行は残し、

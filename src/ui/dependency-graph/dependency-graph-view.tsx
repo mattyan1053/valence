@@ -16,6 +16,8 @@
 import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
+import { mergeBlockFor } from "../../domain/graph/merge-block";
+import type { RiskTier } from "../../domain/triage/risk-tier";
 import { DependencyGraphFigure } from "./dependency-graph-figure";
 import { layoutDependencyGraph } from "./graph-layout";
 
@@ -47,6 +49,17 @@ export type DependencyGraphViewProps = {
    * 作り直すと、片方だけ直して**画面から PR が消える**穴が復活する。
    */
   readonly renderAside?: (pullRequestNumber: number) => ReactNode;
+  /**
+   * 図の箱に載せる危なさ（#540）。**材料が届いていない PR は `undefined`。**
+   *
+   * **Tier そのものではなく、Tier を返す口で受ける。** **判定材料（`ChangeSummary`）は
+   * この部品の関心ではない**——**持たせると、依存グラフが triage を知ることになる。**
+   *
+   * **任意でよい。** **渡さなければ「未判定」と出るだけ**で、
+   * **「抜けが無い」と言い切る類の値ではない**（`invalid` とは違う）。
+   * **「危なくない」へは倒れない**ので、渡し忘れは画面に出る。
+   */
+  readonly tierOf?: (pullRequestNumber: number) => RiskTier | undefined;
 };
 
 function dependsOnOf(edges: readonly DependencyEdge[], number: number): readonly number[] {
@@ -100,6 +113,7 @@ export function DependencyGraphView({
   order,
   invalid,
   renderAside,
+  tierOf,
 }: DependencyGraphViewProps) {
   const byNumber = new Map(pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]));
   const rowsFor = (numbers: readonly number[]) =>
@@ -140,6 +154,13 @@ export function DependencyGraphView({
               edges,
             })}
             missing={{ unordered: order.cyclic.length, unreadable: invalid.length }}
+            // **「何待ちか」を書き写さない**（#540）。**Merge ボタンと同じ
+            // `mergeBlockFor` を、同じ入力で呼ぶ**——**書き写すと、押せないボタンの
+            // 隣に「押せる」と出る**（#345 が閉じた形が、図の側で開く）。
+            markOf={(number) => ({
+              tier: tierOf?.(number),
+              block: mergeBlockFor(number, edges, order, invalid.length),
+            })}
           />
           <ol>{rowsFor([...order.ordered, ...unplaced])}</ol>
         </>
