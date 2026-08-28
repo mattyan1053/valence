@@ -142,6 +142,36 @@ describe("人待ちの PR しか無いとき", () => {
   });
 });
 
+describe("同じ条件が、ほかにも書いてある", () => {
+  /** **「open PR が 0 件」と言っている行を、全部並べる。** */
+  function conditionLines(): string[] {
+    return procedureText("master")
+      .split("\n")
+      .filter((line) => line.includes("open PR が 0 件"));
+  }
+
+  it("どの行も、人待ちを引いた数で言っている", () => {
+    // **名指ししない**（#166）——**1 箇所だけ直して、同じ条件が別の節に残っていた**
+    // （**起票の条件が開かないまま `no-work` だけ通り、3 周で人が呼ばれる**）。
+    // **残る側は自分の diff に出てこない**ので、**行を数えて突き合わせる。**
+    const found = conditionLines();
+
+    expect(found.length, "条件がどこにも無い（見出しか言い回しが変わった）").toBeGreaterThan(1);
+    for (const line of found) {
+      expect(line, `人待ちを引いていない: ${line.trim()}`).toContain("着手できる open PR が 0 件");
+    }
+  });
+
+  it("どの節も、数え方を書き写さずに口を名指しする", () => {
+    // **写すと、片方だけ古くなってもどちらも正しく見える**（`AGENTS.md` §5）
+    for (const heading of ["## 5. 作業を割って Issue にする", "### 作業が尽きたとき"]) {
+      expect(section(heading), `${heading}: 数える口を名指ししていない`).toContain(
+        "bin/loop-open-work",
+      );
+    }
+  });
+});
+
 describe("止まる向き", () => {
   // **口を名指ししているか**は、上の `countingBlock()` が見ている（**そこが本物の配線**）
   // ——**同じことを散文で 2 度見ない**（**片方は必ず通るので、測れていない**）
