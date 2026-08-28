@@ -44,6 +44,18 @@ export type NodeMark = {
   readonly tier: RiskTier | undefined;
   /** いま押せるか、何を待っているか。 */
   readonly block: MergeBlock;
+  /**
+   * **見せている commit が分かっているか**（#541 のレビュー）。
+   *
+   * **`MergeBlock` が答えているのは依存の順序だけ**である。**`head.sha` が欠けた PR は
+   * 図に残る**（`pull-request-mapping.ts`）が、**`MergeButton` はそれを無効にする**
+   * ——**確かめられない対象をマージさせない**ため。**渡さないと、無効なボタンの隣に
+   * 「押せる」と出る。**
+   *
+   * **任意にしない。** **既定を `true` にすると言い過ぎ**、**`false` にすると
+   * どの PR も「commit 不明」になる**——**どちらへ倒しても嘘になる。**
+   */
+  readonly headKnown: boolean;
 };
 
 /**
@@ -75,11 +87,18 @@ const TIER_WEIGHT: Record<RiskTier, number> = {
 /** **材料が届いていない。** **空欄にすると `fast-track` と見分けが付かない。** */
 const UNKNOWN_LABEL = "未判定";
 
-/** **何を待っているか。** **番号まで出す**——**「押せない」だけでは次の手が分からない。** */
-function blockLabel(block: MergeBlock): string {
+/**
+ * **何を待っているか。** **番号まで出す**——**「押せない」だけでは次の手が分からない。**
+ *
+ * **「押せる」と言うのは、ボタンが押せるときだけ**である（#541 のレビュー）。
+ * **依存が残っているほうを先に出す**——**そちらは先に入れれば解ける**が、
+ * **commit が分からないのは、盤面を読み込み直すまで変わらない。**
+ */
+function markLabel({ block, headKnown }: NodeMark): string {
   switch (block.kind) {
     case "ready":
-      return "押せる";
+      // **ボタンと同じ条件**（`MergeButton` の `headSha === undefined`）
+      return headKnown ? "押せる" : "commit 不明";
     case "depends-on": {
       const [first, ...rest] = block.numbers;
       // **`mergeBlockFor` は空なら `ready` を返す**ので実際には来ないが、**型は許す**
@@ -154,7 +173,8 @@ export function DependencyGraphFigure({
             />
           ))}
           {layout.nodes.map((node) => {
-            const { tier, block } = markOf(node.number);
+            const mark = markOf(node.number);
+            const { tier } = mark;
             return (
               <g key={node.number}>
                 <rect
@@ -215,7 +235,7 @@ export function DependencyGraphFigure({
                   fill="currentColor"
                   fontSize={11}
                 >
-                  {blockLabel(block)}
+                  {markLabel(mark)}
                 </text>
               </g>
             );

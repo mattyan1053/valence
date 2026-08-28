@@ -46,8 +46,16 @@ const FILLABLE = new Set(["rect", "text", "circle", "ellipse", "path", "polygon"
 
 type Painted = { readonly tag: string; readonly attrs: Readonly<Record<string, string>> };
 
-function mark(tier: RiskTier | undefined, block: MergeBlock = { kind: "ready" }): NodeMark {
-  return { tier, block };
+/**
+ * **`headKnown` の既定は「分かっている」**。**実装には既定を置いていない**
+ * （**どちらへ倒しても嘘になる**）——**ここは、そこを見ない試験の書き味のためである。**
+ */
+function mark(
+  tier: RiskTier | undefined,
+  block: MergeBlock = { kind: "ready" },
+  headKnown = true,
+): NodeMark {
+  return { tier, block, headKnown };
 }
 
 function markupFor(
@@ -198,6 +206,25 @@ describe("箱の中で決められる", () => {
     );
 
     expect(boxOf(rendered, 2)).toContain("待ち: #1 ほか1 件");
+  });
+
+  it("commit が分からない PR を、押せるとは言わない", () => {
+    // **`head.sha` が欠けた PR は図に残る**が、**`MergeButton` は無効になる**
+    // ——**札のほうが判定より広いと、無効なボタンの隣で「押せる」と言う**（#541 のレビュー）
+    const rendered = markup(new Map([[1, mark("needs-review", { kind: "ready" }, false)]]));
+
+    expect(boxOf(rendered, 1)).toContain("commit 不明");
+    expect(boxOf(rendered, 1), "無効なボタンの隣で「押せる」と言っている").not.toContain("押せる");
+  });
+
+  it("依存が残っているなら、そちらを先に出す", () => {
+    // **依存は先に入れれば解ける**が、**commit が分からないのは盤面を読み込み直すまで
+    // 変わらない**——**次の手があるほうを出す**
+    const rendered = markup(
+      new Map([[2, mark("needs-review", { kind: "depends-on", numbers: [1] }, false)]]),
+    );
+
+    expect(boxOf(rendered, 2)).toContain("待ち: #1");
   });
 
   it("順序が決まらないものを、押せるに倒さない", () => {

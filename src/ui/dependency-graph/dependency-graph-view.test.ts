@@ -51,6 +51,8 @@ function props(overrides: Partial<DependencyGraphViewProps> = {}): DependencyGra
     edges: STACK_EDGES,
     order: STACK_ORDER,
     invalid: [],
+    // **既定は「分かっている」**——**この試験群が見ているのは、そこではない**
+    headKnown: () => true,
     ...overrides,
   };
 }
@@ -279,6 +281,15 @@ describe("図の箱に、何待ちかを載せる", () => {
     const markup = render(props());
 
     expect(boxOf(markup, 1)).toContain("未判定");
+  });
+
+  it("commit が分からない PR は、押せるとは出ない", () => {
+    // **`MergeBlock` は依存の順序しか知らない**（#541 のレビュー）
+    // ——**押せるかどうかは、渡す側から受ける**
+    const markup = render(props({ headKnown: (number) => number !== 1 }));
+
+    expect(boxOf(markup, 1)).toContain("commit 不明");
+    expect(boxOf(markup, 1), "commit が分からないのに押せると言っている").not.toContain("押せる");
   });
 
   it("渡された危なさが、その箱に出る", () => {

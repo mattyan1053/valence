@@ -60,6 +60,16 @@ export type DependencyGraphViewProps = {
    * **「危なくない」へは倒れない**ので、渡し忘れは画面に出る。
    */
   readonly tierOf?: (pullRequestNumber: number) => RiskTier | undefined;
+  /**
+   * **その PR の head の commit が分かっているか**（#541 のレビュー）。
+   *
+   * **`MergeBlock` は依存の順序しか知らない**ので、**これを渡さないと、
+   * 無効な Merge ボタンの隣に「押せる」と出る**（**`head.sha` が欠けた PR は
+   * 図に残る**）。
+   *
+   * **任意にしない。** **どちらへ倒しても嘘になる**（`NodeMark.headKnown`）。
+   */
+  readonly headKnown: (pullRequestNumber: number) => boolean;
 };
 
 /**
@@ -129,6 +139,7 @@ export function DependencyGraphView({
   invalid,
   renderAside,
   tierOf,
+  headKnown,
 }: DependencyGraphViewProps) {
   const byNumber = new Map(pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]));
   const dependsOn = dependsOnIndex(edges);
@@ -180,6 +191,9 @@ export function DependencyGraphView({
               tier: tierOf?.(number),
               // **知らない番号を「押せる」へ倒さない**（`mergeBlockFor` と同じ判断）
               block: blocks.get(number) ?? { kind: "not-orderable" },
+              // **札の広さを、判定に合わせる**（#541 のレビュー）——**`MergeBlock` は
+              // 依存の順序しか知らない**ので、**押せるかどうかはここで足す。**
+              headKnown: headKnown(number),
             })}
           />
           <ol>{rowsFor(figured)}</ol>

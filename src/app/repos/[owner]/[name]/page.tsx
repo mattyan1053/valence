@@ -222,6 +222,10 @@ export async function renderRepositoryBoard(
             order={result.plan.order}
             invalid={result.plan.invalid}
             changes={result.plan.changes}
+            // **図の札を、ボタンと同じ条件にする**（#541 のレビュー）——**`MergeButton`
+            // へ渡している `headSha` と、同じものを見る**（**無効なボタンの隣に
+            // 「押せる」と出さない**）
+            headKnown={(number) => result.plan.heads.get(number) !== undefined}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

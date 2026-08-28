@@ -49,6 +49,8 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
       [1, change()],
       [2, change()],
     ]),
+    // **既定は「分かっている」**——**この試験群が見ているのは、そこではない**
+    headKnown: () => true,
     ...overrides,
   };
 }

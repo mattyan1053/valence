@@ -56,6 +56,15 @@ export type ReviewBoardProps = {
    * **「抜けが無い」と言い切る類の値ではない**（`invalid` とは違う）。
    */
   readonly renderStatus?: (pullRequestNumber: number) => ReactNode;
+  /**
+   * **その PR の head の commit が分かっているか**（#541 のレビュー）。
+   *
+   * **盤面はこれを持っていない**（`changes` は判定材料で、commit ではない）ので、
+   * **渡す側から受ける**——**`MergeButton` へ渡している `headSha` と、同じもの**である。
+   *
+   * **任意にしない。** **どちらへ倒しても嘘になる**（`NodeMark.headKnown`）。
+   */
+  readonly headKnown: (pullRequestNumber: number) => boolean;
 };
 
 export function ReviewBoard({
@@ -66,6 +75,7 @@ export function ReviewBoard({
   changes,
   renderActions,
   renderStatus,
+  headKnown,
 }: ReviewBoardProps) {
   return (
     <DependencyGraphView
@@ -81,6 +91,7 @@ export function ReviewBoard({
         // **材料が無いことを「危なくない」に倒さない**（下の行と同じ判断）
         return change === undefined ? undefined : classifyRiskTier(change);
       }}
+      headKnown={headKnown}
       renderAside={(number) => {
         const change = changes.get(number);
         // **材料が無い PR を黙って落とさない。** 行は残し、
