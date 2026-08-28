@@ -435,7 +435,26 @@ lease_record_intruders() {
 # **名前の正規化はここ 1 箇所が持つ**（`workspace_name`）——**呼ぶ側で組み立てない。**
 #
 # **`cmd_*` ではない**ので、`./task help` には出ない（**出るのは下の口**）。
-check_leftovers() { ./bin/loop-check-leftovers "$(workspace_name)"; }
+# **この作業場に残っているものと、別の作業場が走っていることは、別の口が見る。**
+#
+# **どちらも「打つ前に知りたいこと」**なので、**打つ側は 1 つ打てば済む形にする。**
+# **落とさない。言うだけである**——**待つかどうかは打った側が決める。**
+check_leftovers() {
+  local status=0
+  ./bin/loop-check-leftovers "$(workspace_name)" || status=$?
+  # **別の作業場と重なると、両方が倍かかる** (#547 で実測。**単独 442〜559 秒に対し、
+  # 重なると 1200 秒前後**)——**道具の 10 分制限を越え、切られた `vitest` が残る。**
+  #
+  # **後から読む口（`--overlaps`）では間に合わない**ので、**打つ前に言う。**
+  # **返り値は変えない**——**「残っている」を報せる口の合否を、こちらで塗り替えない。**
+  local elsewhere
+  if elsewhere="$(./bin/loop-check-state --running-elsewhere)"; then
+    echo "[WARN] 別の作業場で check が走っています（重なると両方が倍かかります）" >&2
+    printf '%s\n' "$elsewhere" | sed 's/^/       /' >&2
+    echo "       待つか、重なることを承知で打つかは、打った側が決めます" >&2
+  fi
+  return "$status"
+}
 
 # **`./task check` の中だけに置くと、報せが消える** (#529 のレビュー 3 周目)。
 # **手順書は `./task check >"$log" 2>&1` で受け、緑なら `cat` せずに消す**
@@ -446,7 +465,7 @@ check_leftovers() { ./bin/loop-check-leftovers "$(workspace_name)"; }
 # 呼び出しは残す**——**手順書を通らずに直接打つ人には、そちらしか無い。**
 #
 # **説明は定義の直前の 1 行である**（`cmd_help` がそこを拾う）。
-# 前の走りがこの作業場に残っていないか見る (./task check の前に打つ)
+# 前の走りの残りと、別の作業場の check を見る (./task check の前に打つ)
 cmd_check_leftovers() { check_leftovers; }
 
 # lint (Biome + bash) + typecheck + 依存方向 + テスト をまとめて実行する
