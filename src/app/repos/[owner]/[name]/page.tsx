@@ -15,7 +15,8 @@ import {
   reportBoardActionUnavailable,
   repositoryBoardForCurrentUser,
 } from "../../../../composition/auth";
-import { mergeBlockFor } from "../../../../domain/graph/merge-block";
+import type { MergeBlock } from "../../../../domain/graph/merge-block";
+import { mergeBlocksFor } from "../../../../domain/graph/merge-block";
 import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge";
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
@@ -118,7 +119,7 @@ export function approvalDisplay(
  * **判定そのものは `mergeBlockFor` が持つ**——**ここは詰め替えるだけ**である
  * （**POST の口も同じ関数を通る**ので、**画面と食い違わない**）。
  */
-export function mergeButtonBlock(block: ReturnType<typeof mergeBlockFor>): {
+export function mergeButtonBlock(block: MergeBlock): {
   readonly blockedBy?: readonly number[];
   readonly notOrderable?: boolean;
 } {
@@ -190,6 +191,19 @@ export async function renderRepositoryBoard(
     notFound();
   }
 
+  // **行ごとに判定を呼ばない**（#541 のレビュー）——**呼ぶたびに辺と順序をなめ直す**ので、
+  // **本数の 2 乗**になる。**判定は変わらない**（**`mergeBlocksFor` は `mergeBlockFor` と
+  // 同じ規則を、索引を 1 度だけ作って配る**）。
+  const blocks =
+    result.kind === "board"
+      ? mergeBlocksFor(
+          result.plan.pullRequests.map((pullRequest) => pullRequest.number),
+          result.plan.edges,
+          result.plan.order,
+          result.plan.invalid.length,
+        )
+      : undefined;
+
   return (
     <main className="mx-auto flex max-w-4xl flex-1 flex-col gap-4 px-6 py-12">
       <h1 className="font-mono text-2xl font-bold tracking-tight">
@@ -231,14 +245,8 @@ export async function renderRepositoryBoard(
                   // ——**辺が作られないので「依存なし」を信じられない。**
                   // **画面でも止める**（POST でも止まるが、**押しても断られると
                   // 分かっているものを押させるのは、理由が伝わる形ではない**）
-                  {...mergeButtonBlock(
-                    mergeBlockFor(
-                      number,
-                      result.plan.edges,
-                      result.plan.order,
-                      result.plan.invalid.length,
-                    ),
-                  )}
+                  // **知らない番号を「押せる」へ倒さない**（`mergeBlockFor` と同じ判断）
+                  {...mergeButtonBlock(blocks?.get(number) ?? { kind: "not-orderable" })}
                 />
               </>
             )}

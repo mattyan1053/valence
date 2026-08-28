@@ -3,7 +3,7 @@ import type { DependencyEdge, PullRequestRef } from "./dependency-graph";
 import { buildDependencyEdges } from "./dependency-graph";
 import type { DependencyOrder } from "./dependency-order";
 import { orderByDependency } from "./dependency-order";
-import { mergeBlockFor } from "./merge-block";
+import { mergeBlockFor, mergeBlocksFor } from "./merge-block";
 
 function pr(number: number, base: string, head: string): PullRequestRef {
   return {
@@ -94,5 +94,92 @@ describe("読めなかった PR があれば、順序を判定できたと言わ
     // **どちらも「押させない」**である——**先に入れる番号を名指しできるなら、
     // そちらのほうが役に立つ**
     expect(blockFor(STACK, 9, 1).kind).toBe("not-orderable");
+  });
+});
+
+/**
+ * **一覧ぶんをまとめて判定する**（#541 のレビュー）。
+ *
+ * **1 件ずつ呼ぶと、辺と順序を毎回なめ直す**——**盤面は全部の行について呼ぶ**ので、
+ * **本数の 2 乗**になる。**判定は変えず、索引を 1 度だけ作る。**
+ */
+describe("一覧ぶんをまとめて判定する", () => {
+  function blocksFor(pullRequests: readonly PullRequestRef[], unreadable = 0) {
+    const edges = buildDependencyEdges(pullRequests);
+    return mergeBlocksFor(
+      pullRequests.map((pullRequest) => pullRequest.number),
+      edges,
+      orderByDependency(pullRequests, edges),
+      unreadable,
+    );
+  }
+
+  it("1 件ずつ訊いたのと、同じ答えを返す", () => {
+    // **速さのために規則を書き写さない**——**答えが割れたら、画面の中で食い違う**
+    const pullRequests = [
+      ...STACK,
+      pr(10, "feat/b", "feat/c"),
+      pr(11, "main", "feat/x"),
+      pr(12, "feat/y", "feat/z"),
+    ];
+    const blocks = blocksFor(pullRequests);
+
+    for (const pullRequest of pullRequests) {
+      expect(blocks.get(pullRequest.number), `#${pullRequest.number} の答えが割れている`).toEqual(
+        blockFor(pullRequests, pullRequest.number),
+      );
+    }
+  });
+
+  it("読めなかった PR があるときも、1 件ずつ訊いたのと同じ答えを返す", () => {
+    expect(blocksFor(STACK, 1).get(8)).toEqual(blockFor(STACK, 8, 1));
+  });
+
+  it("訊いていない番号は返らない", () => {
+    const edges = buildDependencyEdges(STACK);
+
+    expect([...mergeBlocksFor([8], edges, orderByDependency(STACK, edges), 0).keys()]).toEqual([8]);
+  });
+
+  it("本数が増えても、2 乗にならない", () => {
+    // **1 件ずつ呼ぶ形では、10000 件で辺と順序を 10000 回なめ直す**——**秒の単位になる。**
+    // **描画を挟まず、判定だけを測る**（#541 のレビュー）——**React を通すと、
+    // 線形なぶんに埋もれて、2 乗の側が見えない。**
+    // **辺と順序は手で置く。** **`buildDependencyEdges` / `orderByDependency` の速さは
+    // ここの関心ではない**——**それぞれ 1 度しか呼ばれない**のに対し、
+    // **この判定は行の数だけ呼ばれる。**
+    const size = 10000;
+    const numbers = Array.from({ length: size }, (_, index) => index + 1);
+    const edges: DependencyEdge[] = numbers
+      .slice(1)
+      .map((number) => ({ dependent: number, dependsOn: number - 1 }));
+    const order: DependencyOrder = { ordered: numbers, cyclic: [] };
+
+    const started = process.hrtime.bigint();
+    const blocks = mergeBlocksFor(numbers, edges, order, 0);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(blocks.size).toBe(size);
+    expect(elapsedMs, `判定に ${elapsedMs}ms かかっている`).toBeLessThan(500);
+  });
+});
+
+describe("何を先に入れるかの並び", () => {
+  it("辺の並びのまま返す", () => {
+    // **画面にそのまま出る**（`待ち: #8 ほか1 件` / Merge ボタンの脇）——**呼ぶたびに
+    // 変わると、読み手には理由の分からない揺れになる。**
+    //
+    // **辺は手で置く。** **`buildDependencyEdges` は 1 つの PR に 1 本しか辺を作らない**
+    // （**base に一致する head は 1 つ**）ので、**並びが問われる形はそこからは出てこない。**
+    const edges: DependencyEdge[] = [
+      { dependent: 9, dependsOn: 8 },
+      { dependent: 9, dependsOn: 7 },
+    ];
+    const order: DependencyOrder = { ordered: [7, 8, 9], cyclic: [] };
+    const expected = { kind: "depends-on", numbers: [8, 7] };
+
+    expect(mergeBlocksFor([9], edges, order, 0).get(9)).toEqual(expected);
+    // **1 件ずつ訊いても同じ並び**である（**索引を作ったことで変わっていない**）
+    expect(mergeBlockFor(9, edges, order, 0)).toEqual(expected);
   });
 });
