@@ -226,6 +226,19 @@ describe("タイトルを、番号から引ける形で持つ", () => {
     expect(titles.has(8), "読めていないタイトルを持っている").toBe(false);
   });
 
+  it("タイトルの形が変わったら、黙って「無い」へ寄せない", () => {
+    // **「読めなかった」を「無かった」に化けさせない**（#543 のレビュー）——
+    // **`catch` で飲み込むと、GitHub が形を変えた日に全部の箱が `タイトル不明` になり、
+    // `invalid` にも出ない。** **`head.sha` と同じ扱いにする**（**あちらも型の誤りは
+    // `invalid` へ行く**）
+    const [first] = stackedPullRequests;
+
+    const { pullRequests, invalid } = toPullRequestRefs([{ ...first, title: 42 }]);
+
+    expect(invalid, "型が違うのに、読めたことにしている").toHaveLength(1);
+    expect(pullRequests, "読めなかった PR を、読めたことにしている").toHaveLength(0);
+  });
+
   it("空のタイトルは、持っていないものとして扱う", () => {
     // **空文字を持たせると、UI が「短いタイトル」として出す**——**箱に何も無い行が
     // 「タイトル不明」と見分けられなくなる**（#542 の完了条件）
