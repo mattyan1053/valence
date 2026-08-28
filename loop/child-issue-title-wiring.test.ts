@@ -16,7 +16,7 @@ function read(path: string): string {
  * ——**枝が名乗るのは子の番号**なので、**末尾が無い子 Issue を立てられた時点で、
  * 親は必ず「止まっている」に倒れる。**
  *
- * **読む側の試験は `bin/loop-claim.test.ts` にある。** **ここが見るのは、
+ * **読む側の試験は `bin/loop-issue-descendants.test.ts` にある。** **ここが見るのは、
  * 書く側がそれを知っているか**である——**規則にした以上、書く側も直っていないと、
  * 直したはずの誤報がそのまま戻る。**
  *
@@ -63,16 +63,20 @@ describe("子 Issue のタイトルの末尾", () => {
 
   it("読む側は、括弧の中に語がある形を数えない", () => {
     // **緩めると、向きの逆な関係まで親子になる**（`（#82 の前提）`。#322 の向き）
-    const claim = read("bin/loop-claim");
+    // **読む側は 1 本しかない** (#559 のレビュー)——**`bin/loop-claim` も
+    // `bin/loop-in-progress-work` も、これを呼んで結果を受け取る。**
+    const reader = read("bin/loop-issue-descendants");
 
-    expect(claim, "親子に数える形が緩んでいる").toContain("（#([0-9]+)）$");
+    expect(reader, "親子に数える形が緩んでいる").toContain("（#([0-9]+)）$");
     // **惜しい形は、数えないが覚えておく**——**鳴らすときに言うため**
-    expect(claim, "惜しい形を覚えていない").toContain("（#([0-9]+)[^）]*）$");
+    expect(reader, "惜しい形を覚えていない").toContain("（#([0-9]+)[^）]*）$");
   });
 
   it("読む側は、末尾だけを見る", () => {
     // **書いてある位置と、実際に見ている位置がずれていないこと**
     // ——**錨（`$`）が外れると、引き合いに出しただけの番号まで親子になる**（#322）。
-    expect(read("bin/loop-claim"), "末尾に錨を置いていない").toContain("（#([0-9]+)）$");
+    expect(read("bin/loop-issue-descendants"), "末尾に錨を置いていない").toContain(
+      "（#([0-9]+)）$",
+    );
   });
 });

@@ -27,6 +27,13 @@
 # **割った PR は親を閉じない**）ので、**`closingIssuesReferences` では結べない**
 # ——**`bin/loop-claim idle` が使っているのと同じ手掛かり**である。
 #
+# **割った親にも結ぶ** (#559 のレビュー)。**子 Issue を立てて割ると、枝が名乗るのは
+# 子の番号**なので、**親の番号を持つ枝が 1 本も出ない**——**そのままだと
+# 「PR がまだ無い＝実装中」として数え、この口が消しに来た状態が残る。**
+#
+# **親子は書き写さない** (`AGENTS.md` §5)。**`bin/loop-issue-descendants` が持っている**
+# ——**タイトルの末尾で結び、孫まで辿り、輪で止まる**（#544 / #545）。
+#
 # **一覧は引き直さない**（`bin/loop-parked-issues` と同じ）——**呼ぶ側が既に取っている。**
 #
 # -e は使わない。理由を最後まで集めてから 1 回で報告する。
@@ -46,8 +53,13 @@ done
 # 列の区切り。**`bin/loop-open-work` と同じ**（**そのまま渡す**ので、揃っていること）。
 readonly FIELD=$'\037'
 
-OPEN_WORK="$(dirname -- "$0")/loop-open-work"
-readonly OPEN_WORK
+# **隣の口は、外部コマンドを使わずに指す。** **`dirname` を呼ぶと、最小の PATH で
+# 走らせる試験が「その口が無い」で落ちる**——**`$0` から切り出せば済む。**
+HERE="${0%/*}"
+[[ $HERE != "$0" ]] || HERE="."
+readonly HERE
+readonly OPEN_WORK="$HERE/loop-open-work"
+readonly DESCENDANTS="$HERE/loop-issue-descendants"
 
 # **一覧をまるごと受ける。** **Issue ごとに絞って `bin/loop-open-work` へ渡す。**
 listed=""
@@ -55,6 +67,22 @@ listed="$(cat)" || {
   echo "[FAIL] open PR の一覧を読めません" >&2
   exit 2
 }
+
+# **割った親の子孫を、1 度だけ引く**（#559 のレビュー）。**訊く先は 1 つ**なので、
+# **親子の規則がそこにしか無い**（**写していない**）。
+declare -A tree=()
+if (($# > 0)); then
+  if ! descendants="$("$DESCENDANTS" "$@")"; then
+    echo "[FAIL] 割った親の子孫を並べられません" >&2
+    exit 2
+  fi
+  while IFS=$'\t' read -r kind parent child; do
+    # **`reaches` の行だけを見る**——**辺（`parent` / `near`）は鳴らす側の話**である
+    [[ $kind == "reaches" ]] || continue
+    [[ $parent =~ ^[0-9]+$ && $child =~ ^[0-9]+$ ]] || continue
+    tree[$parent]+=" $child"
+  done <<<"$descendants"
+fi
 
 count=0
 for issue in "$@"; do
@@ -71,7 +99,10 @@ for issue in "$@"; do
     branch="${fields[1]-}"
     # **番号のあとに区切りが要る** (`.claude/rules/git-workflow.md`)——**前方一致で
     # 結ぶと `fix/5011-x` が #501 の PR になる。**
-    [[ $branch =~ ^[a-z]+/${issue}- ]] || continue
+    [[ $branch =~ ^[a-z]+/([0-9]+)- ]] || continue
+    named="${BASH_REMATCH[1]}"
+    # **その Issue そのものか、割った子孫か**（#559 のレビュー）
+    [[ $named == "$issue" || " ${tree[$issue]-} " == *" $named "* ]] || continue
     # **区切りで繋ぎ直す。** **`${fields[*]}` は IFS の先頭文字で繋ぐ**ので、
     # **その場だけ区切りへ差し替える**——**空白で繋いでから戻すと、空白を含む
     # label（GitHub は許す）で列がずれる。**

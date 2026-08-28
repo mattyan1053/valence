@@ -1,6 +1,9 @@
 import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-in-progress-work", import.meta.url));
 
@@ -13,8 +16,41 @@ function lines(prs: readonly Pr[]): string {
   return prs.map((pr) => [pr.number, pr.branch, ...(pr.labels ?? [])].join(FIELD)).join("\n");
 }
 
-function run(issues: readonly number[], input: string) {
-  const done = spawnSync(SCRIPT, issues.map(String), { input, encoding: "utf8" });
+const sandboxes: string[] = [];
+
+afterEach(() => {
+  for (const dir of sandboxes.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * **Issue のタイトルは `gh` から来る**（`bin/loop-issue-descendants` が引く）。
+ *
+ * **身代わりを置く**——**この機械の実物の Issue で合否を決めない**（#556 と同じ理由）。
+ */
+function run(issues: readonly number[], input: string, titles: Record<number, string> = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "in-progress-work-"));
+  sandboxes.push(dir);
+  const listed = Object.entries(titles)
+    .map(([number, title]) => `${number}\t${title}`)
+    .join("\n");
+  writeFileSync(
+    join(dir, "gh"),
+    [
+      "#!/usr/bin/env bash",
+      // **`%b` で出す**——**`%s` だと `\\t` が literal のまま渡り、列が割れない**
+      `printf '%b' ${JSON.stringify(listed === "" ? "" : `${listed}\n`)}`,
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  chmodSync(join(dir, "gh"), 0o755);
+  const done = spawnSync(SCRIPT, issues.map(String), {
+    input,
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+  });
   return { status: done.status ?? -1, stdout: done.stdout.trim(), stderr: done.stderr };
 }
 
@@ -92,6 +128,44 @@ describe("着手を進められる in-progress を数える", () => {
     );
 
     expect(listed.stdout).toBe("1");
+  });
+
+  it("割った親にも、子 Issue の PR で結ぶ", () => {
+    // **子 Issue を立てて割ると、枝が名乗るのは子の番号**（#544）——**親の番号を持つ
+    // 枝が 1 本も出ない。** **そのままだと「PR がまだ無い＝実装中」として数え、
+    // この口が消しに来た状態が残る。** **実データの形**（親 #540 / 子 #542）。
+    const listed = run([540], lines([{ number: 543, branch: "feat/542-title", labels: WAITING }]), {
+      542: "図の箱に、PR のタイトルを出す（#540）",
+    });
+
+    expect(listed.stdout, "割った親に結べていない").toBe("0");
+  });
+
+  it("孫の PR でも、親に結ぶ", () => {
+    // **割った先を、さらに割ってよい**（起票の規則）——**判定は
+    // `bin/loop-issue-descendants` が持っている**ので、**そこがそのまま効く**
+    const listed = run([540], lines([{ number: 547, branch: "feat/546-x", labels: WAITING }]), {
+      542: "そのうちの 1 つ（#540）",
+      546: "さらに小さく（#542）",
+    });
+
+    expect(listed.stdout, "孫の PR で親に結べていない").toBe("0");
+  });
+
+  it("親子を並べられなければ、0 件へ倒さない", () => {
+    // **読めないものを「子が無い」に倒すと、進められない Issue を数え続ける**
+    const dir = mkdtempSync(join(tmpdir(), "in-progress-work-fail-"));
+    sandboxes.push(dir);
+    writeFileSync(join(dir, "gh"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+    chmodSync(join(dir, "gh"), 0o755);
+
+    const done = spawnSync(SCRIPT, ["540"], {
+      input: "",
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+    });
+
+    expect(done.status, "読めないまま数えている").toBe(2);
   });
 
   it("空白を含む label があっても、列がずれない", () => {

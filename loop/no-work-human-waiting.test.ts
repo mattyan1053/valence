@@ -255,23 +255,36 @@ describe("人待ちの PR を持つ着手中", () => {
   }
 
   /** **`gh` は一覧を返すだけ**にして、**数える側は本物を置く。** */
-  function countWorkable(prs: readonly Pr[], inProgress: readonly number[]): string {
+  function countWorkable(
+    prs: readonly Pr[],
+    inProgress: readonly number[],
+    /** `<番号> <TAB> <タイトル>`。**親子は末尾で結ぶ**ので、ここでは表題ごと渡す。 */
+    issues: readonly string[] = [],
+  ): string {
     const workspace = mkdtempSync(join(tmpdir(), "in-progress-work-"));
     try {
       const stub = join(workspace, "stub");
       mkdirSync(stub, { recursive: true });
       mkdirSync(join(workspace, "bin"), { recursive: true });
-      for (const name of ["loop-open-work", "loop-in-progress-work"]) {
+      // **親子を引く口も要る** (#559 のレビュー)——**数える側が呼ぶ**
+      for (const name of ["loop-open-work", "loop-in-progress-work", "loop-issue-descendants"]) {
         copyFileSync(join(REPO_ROOT, "bin", name), join(workspace, "bin", name));
       }
 
       const listed = renderAs(expressionOf(stepBlocks()), prs).replaceAll("'", "'\\''");
       const numbers = inProgress.join("\\n");
+      const titles = issues.join("\\n").replaceAll("'", "'\\''");
       writeFileSync(
         join(stub, "gh"),
         [
           "#!/usr/bin/env bash",
-          // **どちらの一覧かで返し分ける**——**同じ `gh` が 2 度呼ばれる**
+          // **どの一覧かで返し分ける**——**同じ `gh` が 3 度呼ばれる**
+          // **親子を引くほうが先**（`--state all`）——**下の枝は `issue list` を
+          // すべて拾う**ので、**順を入れ替えると番号の一覧がそちらへ流れる。**
+          'if [[ $* == *"--state all"* ]]; then',
+          `  printf '${titles === "" ? "" : `${titles}\\n`}'`,
+          "  exit 0",
+          "fi",
           'if [[ $* == *"issue list"* ]]; then',
           `  printf '${numbers === "" ? "" : `${numbers}\\n`}'`,
           "  exit 0",
@@ -310,6 +323,19 @@ describe("人待ちの PR を持つ着手中", () => {
     );
 
     expect(counted, "人待ちだけなのに数えている").toBe("0");
+  });
+
+  it("割った子の PR しか無い親を、数に入れない", () => {
+    // **枝が名乗るのは子の番号**なので、**親の番号を持つ枝は 1 本も出ない**
+    // ——**結べないと「PR がまだ無い＝実装中」へ倒れ、この口が消しに来た状態が残る。**
+    // **実データの形である**（親 #540 / 子 #542「…（#540）」/ 枝 `feat/542-x`）。
+    const counted = countWorkable(
+      [{ number: 543, branch: "feat/542-x", labels: ["parked", "awaiting-human"] }],
+      [540],
+      ["542\t子の話（#540）"],
+    );
+
+    expect(counted, "割った親に結べていない").toBe("0");
   });
 
   it("PR がまだ無い Issue は、これまでどおり数える", () => {
