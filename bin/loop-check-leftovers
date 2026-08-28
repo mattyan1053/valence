@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # **切られた走りが、この作業場に残っていないか** (#528)。
 #
-#   bin/loop-check-leftovers <作業場の名前>
+#   bin/loop-check-leftovers <作業場の名前>              自分の作業場
+#   bin/loop-check-leftovers --elsewhere <名前> <場所>   別の作業場（言い方が変わる）
 #
 #   exit 0 = 残っていない
 #   exit 1 = 残っている（何が残っているかを標準エラーへ出す）
@@ -13,9 +14,20 @@
 # （#509 で測った形。**あのときは load 41.8 で vitest が時間切れになった**）。
 # **実測 2 件**（2026-08-26 / 2026-08-27。**どちらも同じ作業場**）。
 #
-# **見るのは自分の作業場だけ**である (#186)。**別の作業場は別のコンテナ**
-# （compose の project は作業場ごと）——**そこを覗きに行かない。**
-# **名前は `task` から渡す**（`AGENTS.md` §5。**正規化を 2 箇所に持たない**）。
+# **別の作業場も見る**（#549 のレビュー。**P1**）。**`./task check` が 2 本重なると、
+# 両方が倍かかる**（#547 で実測。**単独 442〜796 秒に対し、重なると 1200 秒前後**）
+# ——**打つ前に分かれば、待てる。**
+#
+# **PID では見えない。** **外側の上限で切られると、呼び出し側の PID は消えても
+# コンテナの中の `pnpm check` は走り続ける**（**このスクリプトの前提そのもの**）
+# ——**まさに重なるときに、記録の PID は死んでいる。**
+#
+# **#186 が止めたのは、合否や分岐が他人の持ち物で決まること**である
+# ——**ここは見るだけ**で、**落としもしないし、返り値も呼ぶ側の合否に混ぜない。**
+# **言い方は分ける**（**「落としてから打ち直すこと」は自分の作業場への指示**）。
+#
+# **どの作業場を見るかは `task` が決める**（`AGENTS.md` §5。**正規化も、
+# 並べるのも 1 箇所**）——**このスクリプトは渡されたものを見るだけである。**
 #
 # **落とさない。** **踏んだ 2 回とも、気づけば人が落とせている**——**言えば足りる。**
 # **`./task test:watch` のように、人が意図して長く走らせているもの**もあるので、
@@ -30,19 +42,34 @@ set -uo pipefail
 
 usage() {
   echo "使い方: bin/loop-check-leftovers <作業場の名前>" >&2
+  echo "        bin/loop-check-leftovers --elsewhere <名前> <場所>" >&2
   echo "        exit 0 残っていない / exit 1 残っている / exit 2 判定できない" >&2
   exit 2
 }
 
-[[ $# -eq 1 && -n ${1-} ]] || usage
-readonly WORKSPACE="$1"
+if [[ ${1-} == "--elsewhere" ]]; then
+  [[ $# -eq 3 && -n ${2-} && -n ${3-} ]] || usage
+  readonly WORKSPACE="$2"
+  # **どの作業場かを言えないなら、この口は役に立たない**——**待つ相手が分からない。**
+  readonly WHERE="$3"
+else
+  [[ $# -eq 1 && -n ${1-} ]] || usage
+  readonly WORKSPACE="$1"
+  readonly WHERE=""
+fi
 
 # **compose がコンテナに付ける label で引く**（`task` の `warn_stale_containers` と
 # 同じ引き方）——**`compose ps` より速く、project を名指しできる。**
 if ! container="$(docker ps -q \
   --filter "label=com.docker.compose.project=$WORKSPACE" \
   --filter "label=com.docker.compose.service=app" 2>/dev/null)"; then
-  echo "[WARN] この作業場のコンテナを引けないので、残った走りがあるかを判定できません" >&2
+  # **どの作業場の話かを、失敗の側でも言い分ける** (#549 のレビュー)。**成功したときは
+  # 分けてあるのに、ここが共通だと「この作業場の」と読んで自分のコンテナを疑いに行く。**
+  if [[ -n $WHERE ]]; then
+    echo "[WARN] 別の作業場のコンテナを引けないので、走っているかを判定できません: $WHERE" >&2
+  else
+    echo "[WARN] この作業場のコンテナを引けないので、残った走りがあるかを判定できません" >&2
+  fi
   exit 2
 fi
 
@@ -51,7 +78,13 @@ container="${container%%$'\n'*}"
 [[ -n $container ]] || exit 0
 
 if ! processes="$(docker top "$container" 2>/dev/null)"; then
-  echo "[WARN] コンテナの中を読めないので、残った走りがあるかを判定できません" >&2
+  # **ここも言い分ける** (#549 のレビュー 2 周目)。**`--elsewhere` は複数の作業場を
+  # 回る**ので、**場所なしで出るとどれのことか分からない**——**`ps` の側だけでは半分。**
+  if [[ -n $WHERE ]]; then
+    echo "[WARN] 別の作業場のコンテナの中を読めないので、走っているかを判定できません: $WHERE" >&2
+  else
+    echo "[WARN] コンテナの中を読めないので、残った走りがあるかを判定できません" >&2
+  fi
   exit 2
 fi
 
@@ -68,6 +101,14 @@ fi
 leftovers="$(printf '%s\n' "$processes" | grep -E "pnpm (check|test)( |$)|vitest run" || true)"
 
 [[ -n $leftovers ]] || exit 0
+
+if [[ -n $WHERE ]]; then
+  echo "[WARN] 別の作業場で走っています（重なると両方が倍かかります）: $WHERE" >&2
+  printf '%s\n' "$leftovers" >&2
+  echo "       待つか、重なることを承知で打つかは、打った側が決めます" >&2
+  echo "       他の作業場のものは触らないこと（見ているだけです）" >&2
+  exit 1
+fi
 
 echo "[WARN] この作業場に、前の走りが残っています（次の ./task check と重なります）" >&2
 printf '%s\n' "$leftovers" >&2

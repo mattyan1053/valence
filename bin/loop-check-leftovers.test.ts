@@ -208,12 +208,46 @@ describe("`./task check` が、打つ前に見る", () => {
 
   it("作業場の名前を組み立てるのは、1 箇所である", () => {
     // **正規化は `task` が持つ**（`AGENTS.md` §5）——**呼ぶ側で組み立てない。**
-    // **口が 2 つある**（`./task check` の中と、`./task check:leftovers`）ので、
-    // **名前を渡すところが増えると、片方だけ直して食い違う。**
+    // **渡す先が増えた**（自分の作業場と、別の作業場。#549 のレビュー）ので、
+    // **数で見ない**——**どの呼び方も、同じ正規化を通っていること**を見る。
     const calls = runner.split("\n").filter((row) => row.includes("./bin/loop-check-leftovers"));
+    const looking = runner.slice(runner.indexOf("check_leftovers() {")).split("\n}\n")[0] ?? "";
 
-    expect(calls, "渡すところが 1 箇所ではない").toHaveLength(1);
-    expect(calls[0], "作業場を渡していない").toContain('"$(workspace_name)"');
+    expect(calls.length, "渡すところが無い").toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call, `正規化を通さずに名前を渡している: ${call}`).toMatch(
+        /"\$\(workspace_name\)"|"\$name"/,
+      );
+    }
+    expect(looking, "別の作業場の名前を正規化していない").toContain(
+      'name="$(normalize_workspace_name',
+    );
+  });
+
+  it("別の作業場も見る", () => {
+    // **PID では見えない** (#549 のレビュー)。**外側の上限で切られると、呼び出し側の
+    // PID は消えてもコンテナの中は走り続ける**——**まさに重なるときに見えなくなる。**
+    // **重なりが、2 倍の正体である**（#547 で実測）。
+    const looking = runner.slice(runner.indexOf("check_leftovers() {")).split("\n}\n")[0] ?? "";
+
+    expect(looking, "別の作業場を見ていない").toContain("--elsewhere");
+    expect(looking, "作業場を並べていない").toContain("git worktree list");
+  });
+
+  it("自分の作業場を、別の作業場として数えない", () => {
+    // **自分のぶんは、上の口が既に見ている**——**二重に鳴ると読まれなくなる** (#248)
+    const looking = runner.slice(runner.indexOf("check_leftovers() {")).split("\n}\n")[0] ?? "";
+
+    expect(looking, "自分の作業場を外していない").toContain('$path != "$here"');
+  });
+
+  it("別の作業場のことで、こちらの合否を変えない", () => {
+    // **他人の持ち物で、こちらの分岐を決めない** (#186)——**見るだけ**である
+    const looking = runner.slice(runner.indexOf("check_leftovers() {")).split("\n}\n")[0] ?? "";
+    const line = looking.split("\n").find((row) => row.includes("--elsewhere")) ?? "";
+
+    expect(line, "落ちる側になっている").toContain("|| true");
+    expect(looking, "返り値を塗り替えている").toContain('return "$status"');
   });
 
   it("単独で打てる口がある", () => {
@@ -228,5 +262,221 @@ describe("`./task check` が、打つ前に見る", () => {
     const line = check.split("\n").find((row) => row.includes("check_leftovers")) ?? "";
 
     expect(line, "落ちる側になっている").toContain("|| true");
+  });
+});
+
+/**
+ * **別の作業場で走っているものも見る**（#549 のレビュー。**P1**）。
+ *
+ * **`./task check` が 2 本重なると、両方が倍かかる**（#547 で実測。**単独 442〜796 秒に
+ * 対し、重なると 1200 秒前後**）——**打つ前に分かれば、待てる。**
+ *
+ * **PID では見えない。** **外側の上限で切られると、呼び出し側の PID は消えても
+ * コンテナの中の `pnpm check` は走り続ける**（**この試験ファイルの前提そのもの**）
+ * ——**まさに重なるときに、記録の PID は死んでいる。**
+ *
+ * **見るだけである。** **落とさないし、触らない**（#186 が止めたのは、
+ * **合否や分岐が他人の持ち物で決まること**——**ここは言うだけ**である）。
+ */
+describe("bin/loop-check-leftovers --elsewhere", () => {
+  const sandboxes: string[] = [];
+
+  afterEach(() => {
+    for (const dir of sandboxes.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function withDocker(top: string[]): (args: string[]) => {
+    status: number;
+    stdout: string;
+    stderr: string;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "leftovers-elsewhere-"));
+    sandboxes.push(dir);
+    writeFileSync(
+      join(dir, "docker"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "ps" ]]; then echo "abc123"; exit 0; fi',
+        `if [[ $1 == "top" ]]; then printf '%s\\n' ${top.map((line) => JSON.stringify(line)).join(" ")}; exit 0; fi`,
+        "exit 2",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    chmodSync(join(dir, "docker"), 0o755);
+    return (args) => {
+      const result = spawnSync(SCRIPT, args, {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    };
+  }
+
+  const BUSY = [HEADER, "u 3632112 3632069 sh -c vitest run --project '!db'"];
+  const IDLE = [HEADER, "u 9129 9034 node /usr/local/bin/pnpm dev"];
+
+  it("走っていれば、どの作業場かと、何が走っているかを言う", () => {
+    const found = withDocker(BUSY)(["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"]);
+
+    expect(found.status, "走っているのに 0 を返している").toBe(1);
+    expect(found.stderr, "どの作業場か分からない").toContain("/home/x/valence-worker-b");
+    expect(found.stderr, "何が走っているかが出ない").toContain("vitest run");
+  });
+
+  it("走っていなければ、何も言わない", () => {
+    // **平常時に鳴る検査は読まれなくなる** (#248)
+    const quiet = withDocker(IDLE)(["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"]);
+
+    expect(quiet.status).toBe(0);
+    expect(quiet.stderr).toBe("");
+  });
+
+  it("自分の作業場向けの言い方をしない", () => {
+    // **「落としてから打ち直すこと」は自分の作業場への指示**である
+    // ——**他人のものを落とさせない**（#186）。
+    const found = withDocker(BUSY)(["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"]);
+
+    expect(found.stderr, "他所のものを落とせと言っている").not.toContain("落としてから");
+    expect(found.stderr, "待てることを言っていない").toContain("待つか");
+  });
+
+  it("引けなかったときも、どの作業場の話かを言う", () => {
+    // **成功したときは言い分けてあるのに、判定できないときだけ道が共通だった**
+    // （#549 のレビュー）——**「この作業場の」と読むと、自分のコンテナを疑いに行く。**
+    const dir = mkdtempSync(join(tmpdir(), "leftovers-elsewhere-fail-"));
+    sandboxes.push(dir);
+    writeFileSync(join(dir, "docker"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+    chmodSync(join(dir, "docker"), 0o755);
+    const found = spawnSync(
+      SCRIPT,
+      ["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"],
+      {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      },
+    );
+
+    expect(found.status, "判定できないと言っていない").toBe(2);
+    expect(found.stderr, "自分の作業場の話に見える").not.toContain("この作業場の");
+    expect(found.stderr, "どの作業場か分からない").toContain("/home/x/valence-worker-b");
+  });
+
+  it("中を読めなかったときも、どの作業場の話かを言う", () => {
+    // **`--elsewhere` は複数の作業場を回る** (#549 のレビュー 2 周目)——**場所なしで
+    // 出ると、どれのことか分からない。** **`ps` の側だけ言い分けても半分**である。
+    //
+    // **`ps` は通り、`top` だけ落ちる道**を通す（**引いた直後にコンテナが止まる**）
+    // ——**`docker` をまるごと落とすと、この道は 1 度も通らない。**
+    const dir = mkdtempSync(join(tmpdir(), "leftovers-top-fail-"));
+    sandboxes.push(dir);
+    writeFileSync(
+      join(dir, "docker"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "ps" ]]; then echo "abc123"; exit 0; fi',
+        'if [[ $1 == "top" ]]; then exit 1; fi',
+        "exit 2",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    chmodSync(join(dir, "docker"), 0o755);
+    const found = spawnSync(
+      SCRIPT,
+      ["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"],
+      {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      },
+    );
+
+    expect(found.status, "判定できないと言っていない").toBe(2);
+    expect(found.stderr, "どの作業場か分からない").toContain("/home/x/valence-worker-b");
+  });
+
+  it("場所を渡さなければ、使い方を出す", () => {
+    // **どの作業場かを言えないなら、この口は役に立たない**
+    expect(withDocker(BUSY)(["--elsewhere", "valence-worker-b"]).status).toBe(2);
+  });
+
+  it("これまでの呼び方は、これまでどおり", () => {
+    // **自分の作業場の口を壊さない**（**呼ぶところが 2 つになる**）
+    const found = withDocker(BUSY)(["valence"]);
+
+    expect(found.status).toBe(1);
+    expect(found.stderr, "自分の作業場への指示が消えている").toContain("落としてから");
+  });
+});
+
+/**
+ * **作業場を並べられなかったとき、黙って「他所なし」に倒さない**（#549 のレビュー 2 周目）。
+ *
+ * **プロセス置換の中の失敗は、呼ぶ側へ届かない**——**`done < <(git worktree list …)` は、
+ * `git` が落ちてもループが 0 回で終わるだけ**である。**この PR が立てた原則**
+ * （**読めなければ「判定できない」と言う**）**が、その 1 行にだけ適用されていなかった。**
+ *
+ * **倒れる先は「言うだけ」**にした——**自分の作業場の合否を、他所の事情で塗り替えない**
+ * （#186。**この関数の他の行と同じ判断**である）。
+ */
+describe("作業場を並べられないとき", () => {
+  const sandboxes: string[] = [];
+
+  afterEach(() => {
+    for (const dir of sandboxes.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** 実物の `git`。**並べるところ以外は、そのまま通す**（**過剰に身代わりを置かない**）。 */
+  const REAL_GIT = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+
+  /** **実物の `./task` を、身代わりの `git` / `docker` で走らせる。** */
+  function runTask(failWorktreeList: boolean): { status: number; stderr: string } {
+    const dir = mkdtempSync(join(tmpdir(), "worktree-list-"));
+    sandboxes.push(dir);
+    writeFileSync(
+      join(dir, "git"),
+      [
+        "#!/usr/bin/env bash",
+        ...(failWorktreeList ? ['if [[ $* == *"worktree list"* ]]; then exit 1; fi'] : []),
+        `exec ${REAL_GIT} "$@"`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    chmodSync(join(dir, "git"), 0o755);
+    // **コンテナは見に行かせない**——**見たいのは並べるところ**である
+    writeFileSync(join(dir, "docker"), '#!/usr/bin/env bash\nprintf ""\nexit 0\n', { mode: 0o755 });
+    chmodSync(join(dir, "docker"), 0o755);
+    const done = spawnSync("./task", ["check:leftovers"], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+    });
+    return { status: done.status ?? -1, stderr: done.stderr };
+  }
+
+  it("並べられなければ、そう言う", () => {
+    const done = runTask(true);
+
+    expect(done.stderr, "並べられなかったことを黙っている").toMatch(/作業場を並べられない/);
+  });
+
+  it("並べられなくても、自分の作業場の合否は変えない", () => {
+    // **他所の事情で、こちらの合否を塗り替えない** (#186)——**身代わりの docker は
+    // 「残っていない」を返す**ので、**0 のままであること。**
+    const done = runTask(true);
+
+    expect(done.status, "他所の事情で合否が変わっている").toBe(0);
+  });
+
+  it("並べられたときは、余計なことを言わない", () => {
+    // **平常時に鳴る検査は読まれなくなる** (#248)
+    const done = runTask(false);
+
+    expect(done.stderr, "並べられたのに言っている").not.toMatch(/作業場を並べられない/);
   });
 });
