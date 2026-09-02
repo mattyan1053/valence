@@ -9,7 +9,7 @@
  * **後始末に頼らない。** `finally` も `trap` も、**打ち切られた経路では走らない**
  * （vitest はワーカーごと落とす）。**外から掛ける安全装置**が要る。
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
@@ -131,6 +131,36 @@ export function processCount(marker: string): number {
   }
   return found;
 }
+
+/**
+ * **ロックが空いているか。** **上限つきで待つ** (#579)。
+ *
+ * **シグナルを送った直後に見ない。** **打ち切りが返るのは「撃った時点」**で、
+ * **受けた側が実際に `flock` を手放すまでには間がある**——**そこで待たずに見ると、
+ * 落とせているのに「残っている」と答える**（**#577 で関係の無い PR が落ちた**）。
+ * **#572 で `kill -0` を捨てたのと同じ形**である。
+ *
+ * **総当たりで待たない**（このファイルの `sleepSync` と同じ理由）——**`flock -w` は
+ * カーネル側で待つ**ので、**プロセスは 1 回しか起こさない。**
+ *
+ * **緩めない。** **待っても手放さなければ `false` を返す**——**「待った」ことで
+ * 握られたままを見逃さない。**
+ */
+export function lockIsFree(lock: string, waitSeconds = RELEASE_WAIT_SEC): boolean {
+  return (
+    spawnSync("/usr/bin/flock", ["-w", String(waitSeconds), lock, "-c", "true"], {
+      encoding: "utf8",
+    }).status === 0
+  );
+}
+
+/**
+ * 手放すのを待つ上限（秒）。
+ *
+ * **この機械はプロセス起動 1 回が 219–1004 ms**（実測。このファイルの `sleepSync`）
+ * なので、**手放すまでの間もその桁**である。**5 秒は、その 5 倍以上**にあたる。
+ */
+const RELEASE_WAIT_SEC = 5;
 
 /**
  * ロックを握らせる。**握れたことを確かめてから返る。**
