@@ -2559,12 +2559,18 @@ describe("手放すまでの間を、待って見る（#579）", () => {
       stdio: "ignore",
     });
     group.unref();
-    expect(
-      waitUntil(() => existsSync(innerPid), 10_000),
-      "保持側が握っていない",
-    ).toBe(true);
 
+    // **起動確認も `try` の内側に置く** (#580 のレビュー 2 周目)。**外に出すと、
+    // 起動が遅れて時間切れになったときに例外がここで飛び**、**`finally` に入らない**
+    // ——**`afterEach` は sandbox を消すだけ**なので、**`sleep 30` まで進んだ保持側が
+    // 最大 30 秒残る。** **この PR は走りの残りを片付ける系列**（#571 / #574 / #579）
+    // なので、**その試験が残りを積むのは、直そうとしているものと同じ形**である。
+    // **出るのは負荷が高いときだけ**で、**flake が出るのと同じ条件**でもある。
     try {
+      expect(
+        waitUntil(() => existsSync(innerPid), 10_000),
+        "保持側が握っていない",
+      ).toBe(true);
       // **内側だけを撃つ**——**グループへ撃つと `flock` ごと倒れ、その場で空く**
       process.kill(Number(readFileSync(innerPid, "utf8").trim()), "SIGTERM");
       expect(lockIsFree(lock), "待てば空くのに「残っている」と答えている").toBe(true);
