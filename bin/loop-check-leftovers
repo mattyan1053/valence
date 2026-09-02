@@ -3,9 +3,10 @@
 #
 #   bin/loop-check-leftovers <作業場の名前>              自分の作業場
 #   bin/loop-check-leftovers --elsewhere <名前> <場所>   別の作業場（言い方が変わる）
+#   bin/loop-check-leftovers --pids <作業場の名前>       落とす側へ番号を渡す (#571)
 #
 #   exit 0 = 残っていない
-#   exit 1 = 残っている（何が残っているかを標準エラーへ出す）
+#   exit 1 = 残っている（何が残っているかを標準エラーへ出す。--pids は番号を標準出力へ）
 #   exit 2 = 判定できない（使い方の誤り / docker を引けない）
 #
 # **`./task check` が呼び出し側の上限で切られると、コンテナの中の `pnpm check` は
@@ -29,7 +30,16 @@
 # **どの作業場を見るかは `task` が決める**（`AGENTS.md` §5。**正規化も、
 # 並べるのも 1 箇所**）——**このスクリプトは渡されたものを見るだけである。**
 #
-# **落とさない。** **踏んだ 2 回とも、気づけば人が落とせている**——**言えば足りる。**
+# **ここは落とさない。落とすのは `bin/loop-check-kill` である** (#571)。
+# **判定はこちらが持つ**——**「何がその走りのぶんか」を落とす側にも書くと、
+# `test:watch` を数えない規則が 2 箇所になる**（`AGENTS.md` §5）。
+# **`--pids` は、その判定の結果だけを渡す口**である。
+#
+# **子まで出す。** **親（`pnpm check`）だけを落とすと `vitest` が残る**
+# ——**実測で 2 回打っている**（#571）。**`sh -c pnpm lint && …` は語では当たらない**
+# ので、**`docker top` の PPID から辿る**（**同じ表の中で済む**）。
+#
+# **踏んだ 2 回とも、気づけば人が落とせている**——**当時は言えば足りた。**
 # **`./task test:watch` のように、人が意図して長く走らせているもの**もあるので、
 # **殺す側へ倒すと、正しく走っているものを止める**（`task` の `heartbeat()` の
 # 但し書きと同じ判断——**「殺す」は新しい失敗モードを持ち込む**）。
@@ -43,19 +53,29 @@ set -uo pipefail
 usage() {
   echo "使い方: bin/loop-check-leftovers <作業場の名前>" >&2
   echo "        bin/loop-check-leftovers --elsewhere <名前> <場所>" >&2
+  echo "        bin/loop-check-leftovers --pids <作業場の名前>" >&2
   echo "        exit 0 残っていない / exit 1 残っている / exit 2 判定できない" >&2
   exit 2
 }
 
-if [[ ${1-} == "--elsewhere" ]]; then
+# **`--pids` は自分の作業場だけ** (#571)。**`--elsewhere` と混ぜない**——
+# **他の作業場のものを落とす口を、ここから生やさない**（#186）。
+if [[ ${1-} == "--pids" ]]; then
+  [[ $# -eq 2 && -n ${2-} && ${2-} != --* ]] || usage
+  readonly WORKSPACE="$2"
+  readonly WHERE=""
+  readonly PIDS_ONLY=1
+elif [[ ${1-} == "--elsewhere" ]]; then
   [[ $# -eq 3 && -n ${2-} && -n ${3-} ]] || usage
   readonly WORKSPACE="$2"
   # **どの作業場かを言えないなら、この口は役に立たない**——**待つ相手が分からない。**
   readonly WHERE="$3"
+  readonly PIDS_ONLY=0
 else
   [[ $# -eq 1 && -n ${1-} ]] || usage
   readonly WORKSPACE="$1"
   readonly WHERE=""
+  readonly PIDS_ONLY=0
 fi
 
 # **compose がコンテナに付ける label で引く**（`task` の `warn_stale_containers` と
@@ -102,6 +122,33 @@ leftovers="$(printf '%s\n' "$processes" | grep -E "pnpm (check|test)( |$)|vitest
 
 [[ -n $leftovers ]] || exit 0
 
+# **番号だけを渡す口** (#571)。**落とす側は判定を持たない。**
+#
+# **`docker top` の列は UID PID PPID CMD** である——**2 列目が番号、3 列目が親。**
+# **当たった行から下を全部集める**（**`sh -c pnpm lint && …` は語では当たらない**）。
+if ((PIDS_ONLY)); then
+  declare -A wanted=()
+  while read -r _uid pid _rest; do
+    [[ -n $pid ]] && wanted["$pid"]=1
+  done < <(printf '%s\n' "$leftovers")
+
+  # **親が集合に入るまで繰り返す**——**表の順序に頼らない**（**子が先に並ぶことがある**）
+  while :; do
+    added=0
+    while read -r _uid pid ppid _rest; do
+      [[ -n $pid && -n $ppid ]] || continue
+      [[ -n ${wanted[$pid]-} ]] && continue
+      [[ -n ${wanted[$ppid]-} ]] || continue
+      wanted["$pid"]=1
+      added=1
+    done < <(printf '%s\n' "$processes" | tail -n +2)
+    ((added)) || break
+  done
+
+  printf '%s\n' "${!wanted[@]}"
+  exit 1
+fi
+
 if [[ -n $WHERE ]]; then
   echo "[WARN] 別の作業場で走っています（重なると両方が倍かかります）: $WHERE" >&2
   printf '%s\n' "$leftovers" >&2
@@ -112,6 +159,6 @@ fi
 
 echo "[WARN] この作業場に、前の走りが残っています（次の ./task check と重なります）" >&2
 printf '%s\n' "$leftovers" >&2
-echo "       切られた ./task check の残りなら、落としてから打ち直すこと" >&2
+echo "       切られた ./task check の残りなら、./task check:kill で落としてから打ち直すこと" >&2
 echo "       他の作業場のものは触らないこと（見ているのはこの作業場のコンテナだけ）" >&2
 exit 1

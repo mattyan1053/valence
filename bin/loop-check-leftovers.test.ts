@@ -616,3 +616,117 @@ describe("作業場を並べられないとき", () => {
     expect(done.stderr, "並べられたのに言っている").not.toMatch(/作業場を並べられない/);
   });
 });
+
+describe("bin/loop-check-leftovers --pids", () => {
+  /**
+   * **落とす側が、同じ判定を持たないようにする**（#571。`AGENTS.md` §5）。
+   *
+   * **「何がその走りのぶんか」はこのスクリプトが決める**——**落とす側が
+   * `docker top` を引き直すと、`test:watch` を数えない規則が 2 箇所になる。**
+   *
+   * **子まで出す。** **親（`pnpm check`）だけを落とすと `vitest` が残る**
+   * （**worker-2 の実測。2 回打っている**）——**残ったものは、次の走りと重なる。**
+   */
+  const sandboxes: string[] = [];
+
+  afterEach(() => {
+    for (const dir of sandboxes.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function withDocker(top: string[]): (args?: string[]) => {
+    status: number;
+    stdout: string;
+    stderr: string;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "leftover-pids-"));
+    sandboxes.push(dir);
+    writeFileSync(
+      join(dir, "docker"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "ps" ]]; then printf "%s\\n" abc123; exit 0; fi',
+        'if [[ $1 == "top" ]]; then',
+        `  printf '%s\\n' ${top.map((line) => JSON.stringify(line)).join(" ")}`,
+        "  exit 0",
+        "fi",
+        "exit 2",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    chmodSync(join(dir, "docker"), 0o755);
+    return (args = ["--pids", "valence"]) => {
+      const result = spawnSync(SCRIPT, args, {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      });
+      return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+    };
+  }
+
+  it("残っていなければ、何も出さずに 0 を返す", () => {
+    const run = withDocker([HEADER, "u 9129 9034 node /usr/local/bin/pnpm dev"]);
+    const found = run();
+
+    expect(found.status).toBe(0);
+    expect(found.stdout.trim()).toBe("");
+  });
+
+  it("残っていたら、その番号を出して 1 を返す", () => {
+    const run = withDocker([HEADER, "u 100 1 node /usr/local/bin/pnpm check"]);
+    const found = run();
+
+    expect(found.status).toBe(1);
+    expect(found.stdout.trim().split("\n")).toContain("100");
+  });
+
+  it("子まで出す（親だけでは残る）", () => {
+    // **語で当たるのは親だけ**にする——**4 行とも当たる木を置くと、辿らなくても
+    // 同じ答えになる**（**最初に書いた入力がそれで、変異を当てても緑だった**）。
+    //
+    // **実物の `docker top` に出る形**である——**`sh -c pnpm lint && …` にも、
+    // vitest の worker（`forks.js`）にも `pnpm check` / `vitest run` は無い。**
+    const run = withDocker([
+      HEADER,
+      "u 100 1 node /usr/local/bin/pnpm check",
+      "u 101 100 sh -c pnpm lint && pnpm typecheck",
+      "u 102 101 node /home/x/node_modules/vitest/dist/workers/forks.js",
+    ]);
+    const listed = run().stdout.trim().split("\n").sort();
+
+    expect(listed, "親だけしか出ていない（子が残る）").toEqual(["100", "101", "102"]);
+  });
+
+  it("関係のない木は出さない", () => {
+    // **`pnpm dev` の子を巻き込むと、開発サーバが落ちる**
+    const run = withDocker([
+      HEADER,
+      "u 9129 9034 node /usr/local/bin/pnpm dev",
+      "u 9264 9129 next-server",
+      "u 100 1 node /usr/local/bin/pnpm check",
+    ]);
+    const listed = run().stdout.trim().split("\n");
+
+    expect(listed).toEqual(["100"]);
+  });
+
+  it("`./task test:watch` の木は出さない", () => {
+    // **数えない規則は 1 つ**である——**落とす側にも同じものが要る**
+    const run = withDocker([
+      HEADER,
+      "u 200 1 node /usr/local/bin/pnpm test:watch",
+      "u 201 200 sh -c vitest --project '!db'",
+    ]);
+
+    expect(run().status).toBe(0);
+  });
+
+  it("別の作業場には使えない", () => {
+    // **落とす口が生える先**である——**`--elsewhere` と混ぜない**（#186）
+    const run = withDocker([HEADER]);
+
+    expect(run(["--pids", "--elsewhere", "other", "/tmp/other"]).status).toBe(2);
+  });
+});
