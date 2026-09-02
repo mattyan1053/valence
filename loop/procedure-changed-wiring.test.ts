@@ -7,10 +7,6 @@ import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
-function read(path: string): string {
-  return readFileSync(join(REPO_ROOT, path), "utf8");
-}
-
 /** 対象の一覧の正は **スクリプト**。手順書に書き写さない。 */
 function watched(): string[] {
   return execFileSync(

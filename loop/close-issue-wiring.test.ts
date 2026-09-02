@@ -9,7 +9,6 @@
  * **倒す向きは「閉じ損ねる」側**である（**残れば誰かが見るが、誤って閉じると作業が消える**）。
  */
 
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { procedureText } from "./procedure-doc";
 

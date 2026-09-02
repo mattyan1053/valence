@@ -72,18 +72,6 @@ function sandbox(lines?: string): string {
   return dir;
 }
 
-function countIn(dir: string): { status: number; stdout: string } {
-  const done = spawnSync(
-    "bash",
-    ["-c", `${shellFunction("lease_record_lines")}\nlease_record_lines`],
-    {
-      cwd: dir,
-      encoding: "utf8",
-    },
-  );
-  return { status: done.status ?? -1, stdout: done.stdout.trim() };
-}
-
 describe("共有の記録のうち、この作業場のぶんだけを見る", () => {
   /** 前後 2 つの記録を置いて、`lease_record_intruders` に判定させる。 */
   function intruders(before: string, after: string) {

@@ -1,15 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { procedureText } from "./procedure-doc";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-
-function read(path: string): string {
-  return readFileSync(join(REPO_ROOT, path), "utf8");
-}
 
 /** 見出しで区切った 1 節。**節の外の散文で条件が満たされない**ようにする。 */
 function section(heading: string): string {

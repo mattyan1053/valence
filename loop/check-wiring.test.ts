@@ -1,16 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { procedureText } from "./procedure-doc";
-
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-
-function read(path: string): string {
-  return readFileSync(join(REPO_ROOT, path), "utf8");
-}
 
 describe("./task check の読み方", () => {
   it("worker の手順書が、合否を終了コードで決めると書いている", () => {

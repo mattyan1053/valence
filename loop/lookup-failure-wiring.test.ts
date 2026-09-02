@@ -2,17 +2,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type LoopRole, procedureText } from "./procedure-doc";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 /** **両方の手順書を通しで見る**（#136 の「やること」）。 */
 const PROCEDURES: readonly LoopRole[] = ["master", "worker"];
-
-function read(path: string): string {
-  return readFileSync(join(REPO_ROOT, path), "utf8");
-}
 
 /** 一覧を読む bash ブロックと、それが属する節。 */
 type ReadBlock = { procedure: LoopRole; section: string; body: string };

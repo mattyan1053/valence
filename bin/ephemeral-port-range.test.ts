@@ -86,7 +86,7 @@ function crossCheckScript(): string {
     throw new Error("ci.yml から、範囲との突き合わせを取り出せません");
   }
   const rest = lines.slice(from);
-  const to = rest.findIndex((line) => line === "          fi");
+  const to = rest.indexOf("          fi");
   if (to === -1) {
     throw new Error("突き合わせの終わりが見つかりません");
   }
