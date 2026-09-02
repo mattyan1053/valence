@@ -396,3 +396,106 @@ describe("盤面からログアウトできる", () => {
     expect(showsSignOut("signed-out")).toBe(false);
   });
 });
+
+describe("材料が出せなかったことを、サーバ側に残す（#573）", () => {
+  /**
+   * **`changesUnavailable` は計算されていたのに、どこへも渡っていなかった**
+   * ——**画面は「まだ取得できていません」と出し、記録には 1 行も出ない。**
+   * **だから、誰も理由を answer できなかった**（#573 の「最初の一手」が空振りする）。
+   *
+   * **実測（2026-09-02）**: **取得は成功していて 5627 ms**、**期限は 5000 ms**。
+   * **毎回打ち切られていた**——**記録があれば `timedout` の 1 行で分かった。**
+   */
+  function recorder() {
+    const recorded: string[] = [];
+    return {
+      recorded,
+      report: (action: "view", kind: string) => recorded.push(`${action}=${kind}`),
+    };
+  }
+
+  const plan = (unavailable: { pullRequestNumber: number; kind: string; reason: string }[]) => ({
+    kind: "board" as const,
+    plan: {
+      pullRequests: [],
+      edges: [],
+      order: { ordered: [], cyclic: [] },
+      invalid: [],
+      changes: new Map(),
+      changesUnavailable: unavailable,
+      heads: new Map(),
+      titles: new Map(),
+    },
+    approvals: { approved: new Set<number>(), unavailable: [] },
+  });
+
+  it("打ち切られたことが、記録に残る", async () => {
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      {
+        board: async () =>
+          plan([
+            { pullRequestNumber: 1, kind: "timedout", reason: "期限までに材料が返りませんでした" },
+          ]) as never,
+        report,
+      },
+    );
+
+    expect(recorded, "材料が出せなかったことが残っていない").toContain("view=changes/timedout");
+  });
+
+  it("同じ理由は 1 行にまとめる", async () => {
+    // **毎回鳴る記録は、そのうち読まれなくなる**（#248）——**PR の本数ぶん出さない**
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      {
+        board: async () =>
+          plan([
+            { pullRequestNumber: 1, kind: "timedout", reason: "x" },
+            { pullRequestNumber: 2, kind: "timedout", reason: "x" },
+          ]) as never,
+        report,
+      },
+    );
+
+    expect(recorded.filter((line) => line === "view=changes/timedout")).toHaveLength(1);
+  });
+
+  it("理由そのものは残さない", async () => {
+    // **`reason` には応答の値が入りうる**（`AGENTS.md` §6）——**残すのは `kind` だけ**
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      {
+        board: async () =>
+          plan([
+            { pullRequestNumber: 1, kind: "unreadable", reason: "PR の詳細を読めません: 秘密" },
+          ]) as never,
+        report,
+      },
+    );
+
+    expect(recorded.join(" ")).not.toContain("秘密");
+  });
+
+  it("材料が揃っていれば、何も残さない", async () => {
+    // **平常時に鳴る記録は読まれなくなる**（#248）
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      { board: async () => plan([]) as never, report },
+    );
+
+    expect(recorded).toEqual([]);
+  });
+});

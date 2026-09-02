@@ -20,6 +20,31 @@ import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph
 import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
 import { RiskTierView } from "../risk-tier/risk-tier-view";
 
+/**
+ * **材料が無い理由を、画面の語彙にする**（#573）。
+ *
+ * **3 つを 1 つの文にしていた**——**打ち切った / 読めなかった / 本当に材料が無い。**
+ * **利用者に見えたのは全 PR で同じ 1 文**で、**どれなのかはどこにも残らなかった。**
+ *
+ * **実測（2026-09-02）**: **取得は成功していて 5627 ms**、**期限は 5000 ms**
+ * ——**毎回打ち切られていた。** **「取れなかった」ではなく「待たなかった」**である。
+ * **同じ文言だと、権限を疑いに行く**（**実際にそうなった**）。
+ *
+ * **知らない語でも黙らない。** **語彙が増えた日に行が消えると、また同じ顔になる。**
+ */
+export function changeUnavailableNote(kind: string): string {
+  switch (kind) {
+    case "timedout":
+      // **待たなかったのであって、取れなかったのではない**
+      return "リスク判定の材料が、時間内に返りませんでした";
+    case "unreadable":
+      return "リスク判定の材料を読めませんでした";
+    default:
+      // **語彙が増えても、行は残す**——**理由は記録の側にある**
+      return `リスク判定の材料がありません（${kind}）`;
+  }
+}
+
 export type ReviewBoardProps = {
   readonly pullRequests: readonly PullRequestRef[];
   readonly edges: readonly DependencyEdge[];
@@ -36,6 +61,14 @@ export type ReviewBoardProps = {
    * 揃うまでの間も画面は出る。
    */
   readonly changes: ReadonlyMap<number, ChangeSummary>;
+  /**
+   * **材料が無い理由**（#573）。**PR 番号から `kind` を引く**。
+   *
+   * **受けるのは `kind` だけ**である——**`reason` には応答の値が入りうる**
+   * （`AGENTS.md` §6。#506 と同じ判断）。**判定の語彙は `application` の側にあるが、
+   * ここは文字列として受ける**（**`ui` は `application` を import できない**）。
+   */
+  readonly changeUnavailableOf?: (number: number) => string | undefined;
   /**
    * 各行へ足す操作（#330）。
    *
@@ -82,6 +115,7 @@ export function ReviewBoard({
   order,
   invalid,
   changes,
+  changeUnavailableOf,
   renderActions,
   renderStatus,
   headKnown,
@@ -108,12 +142,18 @@ export function ReviewBoard({
         // **材料が無い PR を黙って落とさない。** 行は残し、
         // 「出せなかった」ことが分かる形にする（#107 の `invalid` と同じ形）。
         if (change === undefined) {
+          const kind = changeUnavailableOf?.(number);
           // **材料が無くても操作は出す。** **Tier は目安**であって、
           // **承認してよいかの判断ではない**——**揃うまで押せないのは、
           // 交通整理をしに来た人を待たせるだけである**
           return (
             <>
-              <span>リスク判定の材料がありません（まだ取得できていません）</span>
+              <span>
+                {kind === undefined
+                  ? // **本当に材料が無い**（**取りに行った跡が無い**）
+                    "リスク判定の材料がありません（まだ取得できていません）"
+                  : changeUnavailableNote(kind)}
+              </span>
               {renderStatus?.(number)}
               {renderActions?.(number)}
             </>

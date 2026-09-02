@@ -7,7 +7,7 @@ import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import { orderByDependency } from "../../domain/graph/dependency-order";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { ReviewBoardProps } from "./review-board";
-import { ReviewBoard } from "./review-board";
+import { changeUnavailableNote, ReviewBoard } from "./review-board";
 
 function render(props: ReviewBoardProps): string {
   return renderToStaticMarkup(createElement(ReviewBoard, props));
@@ -317,5 +317,43 @@ describe("図の中だけで、次の 1 本を選べる", () => {
     expect(figure(), "図の中に、脇の説明文が入り込んでいる").not.toContain(
       "いつもどおり中身を読んでください",
     );
+  });
+});
+
+describe("材料が無い理由を、同じ顔にしない（#573）", () => {
+  /**
+   * **「まだ取得できていません」は 3 つを 1 つにしていた**——**打ち切った / 読めなかった /
+   * 本当に材料が無い。** **利用者に見えたのは全 PR で同じ 1 文**で、
+   * **どれなのかはどこにも残らなかった**（記録にも出ていない）。
+   *
+   * **実測（2026-09-02）**: **取得は成功していて 5627 ms** かかっていた。
+   * **期限は 5000 ms** なので、**毎回打ち切られていた**——**「取れなかった」ではなく
+   * 「待たなかった」**である。**その 2 つが同じ文言だと、権限を疑いに行く。**
+   */
+  it("打ち切ったことが分かる", () => {
+    expect(changeUnavailableNote("timedout")).toContain("時間");
+  });
+
+  it("読めなかったことが分かる", () => {
+    expect(changeUnavailableNote("unreadable")).toContain("読め");
+  });
+
+  it("打ち切りと、読めなかったのを、同じ文にしない", () => {
+    // **上の 2 つが空でないことを、ここが支えている**——**同じ文なら、
+    // 分けた意味が無い**
+    expect(changeUnavailableNote("timedout")).not.toBe(changeUnavailableNote("unreadable"));
+  });
+
+  it("知らない理由でも、黙らない", () => {
+    // **語彙が増えたときに、行が消えないこと**（#573 の完了条件）
+    expect(changeUnavailableNote("some-new-kind")).not.toBe("");
+  });
+
+  it("理由そのものは画面へ出さない", () => {
+    // **`reason` には応答の値が入りうる**（`AGENTS.md` §6。#506 と同じ判断）
+    // ——**受けるのは `kind` だけ**である
+    for (const kind of ["timedout", "unreadable", "some-new-kind"]) {
+      expect(changeUnavailableNote(kind)).not.toMatch(/expected|received|token|Bearer/i);
+    }
   });
 });
