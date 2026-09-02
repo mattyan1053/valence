@@ -18,6 +18,12 @@
  * **`unknown` は `loop/procedure/master.md` に 7 行出る**（`review-budget-unknown` など）
  * ——**本文まるごとに当てると、`--trigger` と関係の無い行で緑になる。**
  * **`--trigger` の段だけを切り出してから見る。**
+ *
+ * **正本（`bin/loop-lease`）にも同じことが要る**（#582 のレビュー）。
+ * **`unknown` はそこに 15 行出る**——**散文だけでなく、`TRIGGER=` の既定値・`case` の
+ * 受け口・エラー文にも出る**ので、**`/どちらとも言えない.*unknown/s` は、
+ * 守りたい 1 行から `unknown` を消しても後ろに当たって緑**だった
+ * （**`/s` で `.` が改行を越える**）。**行に寄せる。**
  */
 
 import { readFileSync } from "node:fs";
@@ -52,13 +58,32 @@ function triggerParagraph(path: string): string {
   return (to === -1 ? rest : rest.slice(0, to)).join("\n");
 }
 
+/**
+ * 決め方のうち、**守りたい 1 行**を取り出す。
+ *
+ * **1 行でなければ落とす。** **0 行なら「書いていないから緑」を作る**し、
+ * **2 行以上ならどれに当てているか決まらない**（`AGENTS.md` §4）。
+ */
+function decisionLine(script: string, phrase: string): string {
+  const hits = script.split("\n").filter((line) => line.includes(phrase));
+  const [only] = hits;
+  if (hits.length !== 1 || only === undefined) {
+    throw new Error(`決め方の行が ${hits.length} 行あります（1 行のはず）: ${phrase}`);
+  }
+  return only;
+}
+
 describe("--trigger の決め方は、1 箇所にある", () => {
   it("判定を持つのは bin/loop-lease である", () => {
     // **手順書ではなく、渡される側が持つ**——**両方の役が同じものを読む唯一の場所**
     const script = read("../bin/loop-lease");
 
-    expect(script, "決め方が書いていない").toContain("周回の届き方で決める");
-    expect(script, "分からないときの行き先が無い").toMatch(/どちらとも言えない.*unknown/s);
+    expect(decisionLine(script, "周回の届き方で決める"), "決め方が書いていない").toContain(
+      "時計を見ない",
+    );
+    expect(decisionLine(script, "どちらとも言えない"), "分からないときの行き先が無い").toContain(
+      "unknown",
+    );
   });
 
   for (const procedure of PROCEDURES) {
