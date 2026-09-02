@@ -264,7 +264,7 @@ export async function visibleRepositoriesForCurrentUser(): Promise<VisibleReposi
  * ——**打ち切ったことは `[board] view unavailable kind=changes/timedout` として残り**、
  * **画面にも「時間内に返りませんでした」と出る**（#573）。**黙って消えない。**
  */
-const CHANGES_DEADLINE_MS = 20_000;
+export const CHANGES_DEADLINE_MS = 20_000;
 
 /**
  * 承認の状態の取得を打ち切るまで（#346 のレビュー）。

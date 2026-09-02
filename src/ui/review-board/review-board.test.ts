@@ -357,3 +357,45 @@ describe("材料が無い理由を、同じ顔にしない（#573）", () => {
     }
   });
 });
+
+describe("理由が、行に出る（#577 のレビュー）", () => {
+  /**
+   * **文言だけを直接呼んでいた**——**`ReviewBoard` が `changeUnavailableOf` を
+   * 参照して行へ出す経路は、どの試験も通っていなかった。**
+   * **消して全部緑**である（#577 のレビュー）。
+   *
+   * **「同じ文言だったので権限を疑いに行くことになった」がこの Issue の発端**なので、
+   * **言い分けが壊れても気づけないなら、同じところへ戻る。**
+   */
+  const props = (kind?: string): ReviewBoardProps => ({
+    pullRequests: STACK,
+    edges: EDGES,
+    order: ORDER,
+    invalid: [],
+    // **材料は 1 件も無い**——**理由の側だけを変える**
+    changes: new Map(),
+    headKnown: () => true,
+    titleOf: () => undefined,
+    changeUnavailableOf: kind === undefined ? undefined : () => kind,
+  });
+
+  it("打ち切られた行は、そう出る", () => {
+    expect(render(props("timedout")), "行に理由が出ていない").toContain("時間内に返りませんでした");
+  });
+
+  it("読めなかった行は、そう出る", () => {
+    expect(render(props("unreadable"))).toContain("読めませんでした");
+  });
+
+  it("理由が無ければ、これまでどおり", () => {
+    // **本当に材料が無い側**——**上の判定が空でないことを、ここが支えている**
+    const html = render(props());
+
+    expect(html).toContain("まだ取得できていません");
+    expect(html).not.toContain("時間内に返りませんでした");
+  });
+
+  it("打ち切りと読めなかったを、行の上で取り違えない", () => {
+    expect(render(props("timedout"))).not.toContain("読めませんでした");
+  });
+});
