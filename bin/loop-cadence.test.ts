@@ -1518,3 +1518,222 @@ describe("呼び直した周回を、cron として記録しない", () => {
     });
   }
 });
+
+/**
+ * **説明に書いた数が、実装より 2 世代古かった**（#501）。
+ *
+ * **#497 から #500 まで、4 周かけて分岐を足した**——**足すたびに理由は書き足した**
+ * が、**先頭の「原因は 2 つ」だけが置き去りになった**（**利用者の目に触れる
+ * `[WARN]` にも同じ数が出ていた**）。
+ *
+ * **#500 で言語化したもの**（**`if` を足したら、その上に並んでいる `if` を数える**）
+ * **の、散文側**である——**分岐を足したら、その分岐を数えている文を数える。**
+ *
+ * **数は書いてよい。ただし、数える側を置く**——**そうしないと、次に足した人が
+ * また置き去りにする**（**散文は、誰も走らせない**）。
+ *
+ * **数え方は、走らせて数える**（#502 のレビュー）。**文字列で数えると、書き方に
+ * 依存する**——**別の場所に例が増えれば赤くなり**、**変数経由で出す分岐を足せば
+ * 数に入らない。** **黙るほうが問題である**（**この試験は「足したのに直し忘れる」
+ * を捕まえるために在る**）。
+ *
+ * **`show_reading` を切り出し、入力を全部通して、出た文面の種類を数える**
+ * ——**出し方に依存しない**（#500 で順序を測ったときと同じ手）。
+ */
+describe("説明の数と、実際に出る読みを突き合わせる（#501 / #502）", () => {
+  /** **数を書いている文**（**`原因は予定表が…` のような、数でない行には当たらない**）。 */
+  const CLAIM = /原因は\s*(\d+)\s*つ/g;
+
+  /**
+   * **説明の側も、その節だけを見る**（#502 のレビュー 2 周目）。
+   *
+   * **突き合わせは 2 つの側を持つ**——**読みの側を狭めたとき、説明の側は自分の
+   * diff に出てこない**（**`AGENTS.md` §5 の「変えた側ではなく残る側を数える」**）。
+   *
+   * **節は、直前の関数の終わりから `recorded_round` の定義まで**である
+   * ——**中身の言葉ではなく、置かれている場所で切る**（**切り方が、数えたい語に
+   * 依存しないように**）。
+   *
+   * **`[WARN]` の側は、ここには入らない**——**あちらには数を書いていない**
+   * （**「原因は行ごとに違う」**）。**数を書く場所を 1 つに寄せてある。**
+   */
+  function explanationOf(script: string): string {
+    const end = script.indexOf("recorded_round() {");
+    expect(end, "recorded_round が bin/loop-cadence にありません").toBeGreaterThanOrEqual(0);
+    const before = script.slice(0, end);
+    const start = before.lastIndexOf("\n}\n");
+    expect(start, "説明の節の始まりが見つかりません").toBeGreaterThanOrEqual(0);
+    return before.slice(start + 3);
+  }
+
+  /** **その節に書かれた数**（**書かれていなければ空**）。 */
+  function claimsOf(script: string): number[] {
+    return [...explanationOf(script).matchAll(CLAIM)].map(([, count]) => Number(count));
+  }
+
+  /** **読みを出す側**（`show_reading` が中で呼ぶものも要る）。 */
+  const PARTS = ["recorded_round", "fresh_round", "show_reading"] as const;
+
+  /** **その版の `bin/loop-cadence` から、関数をそのまま取り出す。書き写さない。** */
+  function shellFunction(script: string, name: string): string {
+    const from = script.indexOf(`${name}() {`);
+    expect(from, `${name} が bin/loop-cadence にありません`).toBeGreaterThanOrEqual(0);
+    return `${script.slice(from).split("\n}\n")[0] ?? ""}\n}\n`;
+  }
+
+  /**
+   * **走らせて、出た読みの種類を数える。**
+   *
+   * **入力を全部通す**——**`last_poke` / `last_unknown` は「無い・古い・新しい」の
+   * 3 通り、窓は「分かる・分からない」の 2 通り。** **分岐が増えれば、その組み合わせ
+   * のどこかで新しい文面が出る**ので、**出し方（`echo` か変数か）に依存しない。**
+   */
+  /**
+   * **ドライバが回す入力軸**——**`show_reading` の位置引数と、順も数も同じ。**
+   *
+   * **軸が増えたら、ここも増える**（#502 のレビュー 3 周目）。**下の「軸の数が
+   * 合っている」が、増やし忘れを赤にする**——**足りないドライバは、新しい分岐へ
+   * 一度も入らないまま「4 種類」を数える**（**説明が古いまま緑**になる）。
+   */
+  const AXES = [
+    ["-", "1000", "9500"], // last_poke: 記録が無い / 窓の外 / 窓の中
+    ["-", "1000", "9500"], // last_unknown: 同上
+    ["", "3600"], // window: 分からない / 分かる
+  ];
+
+  /** 各軸の値を、すべての組み合わせで並べる。 */
+  function combinations(axes: string[][]): string[][] {
+    return axes.reduce<string[][]>(
+      (rows, values) => rows.flatMap((row) => values.map((value) => [...row, value])),
+      [[]],
+    );
+  }
+
+  function readingsOf(script: string): string[] {
+    const driver = [
+      "set -u",
+      "NOW=10000",
+      ...PARTS.map((name) => shellFunction(script, name)),
+      ...combinations(AXES).map(
+        (values) => `show_reading ${values.map((value) => `"${value}"`).join(" ")}`,
+      ),
+    ].join("\n");
+    const run = spawnSync("/bin/bash", ["-c", driver], { encoding: "utf8" });
+    expect(run.status, run.stderr).toBe(0);
+    const lines = run.stdout.split("\n").filter((line) => line.trim().length > 0);
+    return [...new Set(lines)];
+  }
+
+  /**
+   * **`show_reading` が読む位置引数の番号**（`$1` も `${1-}` も拾う）。
+   *
+   * **範囲は `show_reading` の中だけ**（`AGENTS.md` §4）——**`bin/loop-cadence` 全体では
+   * 位置引数を持つ行が 12 行あり**、**そのうち `show_reading` の中は 1 行だけ**である
+   * （**`local last_poke="${1-}" last_unknown="${2-}" window="${3-}"`**）。
+   *
+   * **番号で読んでいない形は、数えられない**——**`$@` / `$*` / `shift` があれば、
+   * 何軸なのかはここからは決まらない。** **そのときは「分からない」で落とす**
+   * （**「3 軸だ」と読んで、黙って通さない**）。
+   */
+  function positionalsOf(fn: string): number[] {
+    expect(fn, "位置引数を番号で読んでいないので、軸の数が決まりません").not.toMatch(
+      /\$[@*]|\bshift\b/,
+    );
+    const numbers = [...fn.matchAll(/\$\{?([1-9])[0-9]*/g)].map(([, digit]) => Number(digit));
+    return [...new Set(numbers)].sort((a, b) => a - b);
+  }
+
+  const script = () => readFileSync(join(REPO_ROOT, "bin/loop-cadence"), "utf8");
+
+  it("説明に書いた原因の数が、`show_reading` が出す読みの数と合っている", () => {
+    const readings = readingsOf(script());
+    const claims = claimsOf(script());
+
+    // **数える側が空になったことを、緑と混ぜない**——**取り出しに失敗すると、
+    // 何も見ないまま通る。**
+    expect(readings.length, "読みが 1 つも出ていない").toBeGreaterThan(0);
+    for (const claim of claims) {
+      expect(claim, "説明の数が、出る読みの数と合っていない").toBe(readings.length);
+    }
+    // **数を書かない形も許す**（#501 の完了条件）——**書かなければ、食い違いようが
+    // 無い。** **ただし漢数字は見えない**（「原因は四つ」と書かれたら素通りする）。
+    //
+    // **数でない文に、数を書かない**——**「原因は 1 つではない」は、数える側からは
+    // 「1 つ」に見える**（**この試験を書いている最中に、自分で踏んだ**）。
+    // **倒れる向きは安全側**である（**赤くなるので気づく。黙って見逃さない**）。
+  });
+
+  it("ドライバが回す軸の数が、`show_reading` の位置引数と合っている", () => {
+    // **ここが空くと、この PR の主張が空になる**（#502 のレビュー 3 周目）——
+    // **第 4 の軸で決まる読みを足しても、3 軸しか回さないドライバは到達しない**ので、
+    // **説明が「4 つ」のままでも緑になる。**
+    //
+    // **軸を先回りして足さない。** **足りないことが赤くなればよい**——
+    // **増やした人が、増やしたときにドライバを直す。**
+    const positionals = positionalsOf(shellFunction(script(), "show_reading"));
+
+    // **読めなかったことを、緑と混ぜない。**
+    expect(positionals.length, "位置引数を 1 つも読んでいない").toBeGreaterThan(0);
+    expect(positionals, "位置引数が飛んでいる（$1 から連番で読んでいない）").toStrictEqual(
+      positionals.map((_, index) => index + 1),
+    );
+    expect(positionals.length, "ドライバの軸の数が、show_reading の引数と合っていない").toBe(
+      AXES.length,
+    );
+  });
+
+  it("説明の節の外に数を書いても、突き合わせに入らない", () => {
+    // **前の周回で読みの側を狭めたとき、説明の側は自分の diff に出てこなかった**
+    // （#502 のレビュー 2 周目）——**片方を直したら、突き合わせている相手を見る。**
+    const decoy = `# **別の話。原因は 2 つある**\n${script()}`;
+
+    expect(claimsOf(decoy), "節の外に書いた数を拾っている").toStrictEqual(claimsOf(script()));
+  });
+
+  it("説明の節に数を書けば、突き合わせに出る", () => {
+    // **狭めた先が空になっていないこと**——**節の切り方を間違えると、
+    // 何も拾わないまま緑になる**（**上の decoy と対で、節の両側を見ている**）。
+    //
+    // **入力は、いまの本文から作らない** (#502 のレビュー 3 周目)。**数を消すのは、
+    // この PR が許している形**（すぐ上の試験）——**実ファイルに `原因は 4 つ` が
+    // 在ることを前提にすると、消した瞬間にこの試験が「書き戻せ」と言う**
+    // （**この PR が開けた逃げ道を、試験が塞ぎ返す**）。
+    //
+    // **節の終わりは `recorded_round` の定義**なので、**その直前へ 1 行入れる**
+    // ——**いまの本文が数を持っていても、持っていなくても、1 つ増える。**
+    const marker = "recorded_round() {";
+    const withNumber = script().replace(marker, `# **試験が入れた行。原因は 7 つ**\n${marker}`);
+    expect(withNumber, "書き換えが当たっていない").not.toBe(script());
+
+    expect(claimsOf(withNumber), "節の中に入れた数を拾えていない").toStrictEqual([
+      ...claimsOf(script()),
+      7,
+    ]);
+  });
+
+  it("`show_reading` の外に同じ書き方の文面があっても、数に入らない", () => {
+    // **文字列で数えると、ここで赤くなった**（#502 のレビュー）——**原因は増えて
+    // いないのに、例を 1 行足しただけで数が変わる。**
+    const decoy = `# 例: echo "  読み=これは説明のための例である"\n${script()}`;
+
+    expect(readingsOf(decoy), "外に置いた例を数えている").toStrictEqual(readingsOf(script()));
+  });
+
+  it("`show_reading` の中に違う出し方で足したら、数に入る", () => {
+    // **こちらが本当に怖い側**である（#502 のレビュー）——**文字列で数えると、
+    // 二重引用符で書かれた文面しか見えない**ので、**単引用符や変数経由で出す分岐を
+    // 足しても数が増えず**、**説明が古いまま黙って緑になる。**
+    //
+    // **最後の 1 行を、別の書き方の新しい文面に差し替える**——**手前の分岐は
+    // `$asleep` を出したままなので、読みは 1 種類増える。**
+    const added = script().replace(
+      '\n  echo "$asleep"\n}',
+      "\n  echo '  読み=試験が足した 5 つ目（別の書き方で出している）'\n}",
+    );
+    expect(added, "書き換えが当たっていない").not.toBe(script());
+
+    expect(readingsOf(added).length, "違う出し方で足した読みが、数から漏れた").toBe(
+      readingsOf(script()).length + 1,
+    );
+  });
+});
