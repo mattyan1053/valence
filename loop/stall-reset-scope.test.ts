@@ -50,6 +50,31 @@ function bareResets(role: LoopRole): string[] {
 }
 
 /**
+ * 散文（bash ブロックの外）。**打てと書いてある行が、ここにも出る**
+ * ——**ブロックだけを見ていると、箇条書きの「〜を通す」が丸ごと落ちる**（#569 のレビュー）。
+ */
+function proseLines(role: LoopRole): string[] {
+  return procedureText(role)
+    .split("```")
+    .filter((_, index) => index % 2 === 0)
+    .flatMap((chunk) => chunk.split("\n"))
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+
+/**
+ * 対象を渡していない `--reset` が出てくる散文の行。
+ *
+ * **次に来る字で見分ける**（**言い回しでは見分けない**。`AGENTS.md` §4）——
+ * **識別子・`<…>`・引用符が続けば名指し**で、**そこで終わっていれば裸**である。
+ */
+const BARE_RESET = /bin\/loop-stall --reset(?![ \t]*[A-Za-z0-9_<"'$])/;
+
+function bareResetProse(role: LoopRole): string[] {
+  return proseLines(role).filter((line) => BARE_RESET.test(line));
+}
+
+/**
  * 「空転を検出する」の節。**周回が前へ進んだときに消す、と言っている場所**である。
  *
  * **見出しから切る**（`AGENTS.md` §4）——**語で切ると、入口の目次に当たる**
@@ -61,6 +86,23 @@ function stallSection(role: LoopRole): string {
     .filter((section) => section.split("\n")[0]?.includes("空転を検出する") === true);
   if (sections.length !== 1) {
     throw new Error(`${role} の手順書の「空転を検出する」の節が ${sections.length} 個あります`);
+  }
+  return sections[0] as string;
+}
+
+/**
+ * master の「要求が満たされたか確かめる」の節。**`changes-requested` を外す段**である。
+ *
+ * **見出しから切る**（`stallSection` と同じ理由）。
+ */
+function changesRequestedSection(): string {
+  const sections = procedureText("master")
+    .split(/\n### /)
+    .filter((section) => section.split("\n")[0]?.includes("要求が満たされたか確かめる") === true);
+  if (sections.length !== 1) {
+    throw new Error(
+      `master の手順書の「要求が満たされたか確かめる」の節が ${sections.length} 個あります`,
+    );
   }
   return sections[0] as string;
 }
@@ -82,6 +124,25 @@ describe("bin/loop-stall --reset の打ち方", () => {
   it("master も、空転の節では名指しする", () => {
     expect(stallSection("master"), "何を消すのかが書かれていない").toContain(
       "bin/loop-stall --reset <",
+    );
+  });
+
+  it("散文にも、裸の --reset を置かない（worker）", () => {
+    // **打つ指示は bash ブロックに置く**——**散文に裸の形が残ると、読んだ側はそれを打つ。**
+    // **禁止を書きたいときは「カウンタを消さない」と書く**（**命令の形を残さない**）。
+    expect(bareResetProse("worker"), "散文に裸の --reset が残っている").toEqual([]);
+  });
+
+  it("散文にも、裸の --reset を置かない（master）", () => {
+    // **例外（マージのあとの打ち切り）は、下の試験が見ているブロックの中にある。**
+    expect(bareResetProse("master"), "散文に裸の --reset が残っている").toEqual([]);
+  });
+
+  it("master は、changes-requested を外した周回で消すものを名指しする", () => {
+    // **満たされた周回が消すのは、その head の対応待ちである**——**古い head の記録は
+    // 別の識別子として既に数え直されている**（同じ節に理由がある）。
+    expect(changesRequestedSection(), "何を消すのかが書かれていない").toContain(
+      'bin/loop-stall --reset "awaiting-worker:',
     );
   });
 
