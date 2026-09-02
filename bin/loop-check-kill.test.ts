@@ -33,6 +33,48 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./loop-check-kill", import.meta.url));
 
+/**
+ * `bin/loop-check-leftovers` の身代わりの中身。
+ *
+ * **3 つの口を 1 つのスクリプトで受ける**——**実物と同じ形**である
+ * （`--groups` / `--alive` / 名前で当てる通常モード）。
+ */
+function leftoversStub({
+  askLog,
+  groups,
+  groupsStatus,
+  alive,
+  aliveStatus,
+  named,
+  namedStatus,
+}: {
+  askLog: string;
+  groups: string[];
+  groupsStatus: number;
+  alive: string[];
+  aliveStatus: number;
+  named: string[];
+  namedStatus: number;
+}): string {
+  const list = (lines: string[]) => lines.map((line) => JSON.stringify(line)).join(" ");
+  return [
+    "#!/usr/bin/env bash",
+    `printf '%s\\n' "$*" >>${JSON.stringify(askLog)}`,
+    'if [[ $1 == "--groups" ]]; then',
+    `  ${groupsStatus === 0 ? "exit 0" : groupsStatus === 2 ? "exit 2" : ""}`,
+    `  printf '%s\\n' ${list(groups) || '""'}`,
+    "  exit 1",
+    "fi",
+    'if [[ $1 == "--alive" ]]; then',
+    `  ${aliveStatus === 2 ? "exit 2" : ""}`,
+    alive.length === 0 ? "  exit 0" : `  printf '%s\\n' ${list(alive)}; exit 1`,
+    "fi",
+    // **名前で当てる側**——**列挙のあとに始まった別の走りは、ここにしか出ない**
+    `${namedStatus === 2 ? "exit 2" : ""}`,
+    named.length === 0 ? "exit 0" : `printf '%s\\n' ${list(named)} >&2; exit 1`,
+  ].join("\n");
+}
+
 describe("bin/loop-check-kill", () => {
   const sandboxes: string[] = [];
 
@@ -53,6 +95,9 @@ describe("bin/loop-check-kill", () => {
     alive = [] as string[],
     groupsStatus = 1,
     aliveStatus = -1,
+    /** **名前で当てる側**（通常モード）が返すもの。**グループの外を捕まえる。** */
+    named = [] as string[],
+    namedStatus = -1,
   } = {}): {
     run: (args?: string[]) => { status: number; stdout: string; stderr: string };
     killed: () => string[];
@@ -64,22 +109,7 @@ describe("bin/loop-check-kill", () => {
     const askLog = join(dir, "ask.log");
     writeFileSync(
       join(dir, "leftovers"),
-      [
-        "#!/usr/bin/env bash",
-        `printf '%s\\n' "$*" >>${JSON.stringify(askLog)}`,
-        'if [[ $1 == "--groups" ]]; then',
-        `  ${groupsStatus === 0 ? "exit 0" : groupsStatus === 2 ? "exit 2" : ""}`,
-        `  printf '%s\\n' ${groups.map((g) => JSON.stringify(g)).join(" ") || '""'}`,
-        "  exit 1",
-        "fi",
-        'if [[ $1 == "--alive" ]]; then',
-        `  ${aliveStatus === 2 ? "exit 2" : ""}`,
-        alive.length === 0
-          ? "  exit 0"
-          : `  printf '%s\\n' ${alive.map((l) => JSON.stringify(l)).join(" ")}; exit 1`,
-        "fi",
-        "exit 0",
-      ].join("\n"),
+      leftoversStub({ askLog, groups, groupsStatus, alive, aliveStatus, named, namedStatus }),
       { mode: 0o755 },
     );
     chmodSync(join(dir, "leftovers"), 0o755);
@@ -172,6 +202,23 @@ describe("bin/loop-check-kill", () => {
   it("確かめられなければ、2 を返す（1 に潰さない）", () => {
     // **「判定できない」と「落とし切れなかった」を混ぜない**（#572 のレビュー）
     expect(withStubs({ aliveStatus: 2 }).run().status).toBe(2);
+  });
+
+  it("グループの外で新しく始まった走りも、見落とさない", () => {
+    // **落としたグループには居ない**（**新しい PGID**）ので、**`--alive` には出ない。**
+    // **名前で当てる側にしか出ない**——**TERM から KILL までの間に始まると、この形になる。**
+    //
+    // **消すと、呼び手は「片付いた」と読んで次の `./task check` を始める**
+    // ——**#547 が塞ごうとした重なりが戻る。**
+    const stub = withStubs({ named: ["300 300 Sl node /usr/local/bin/pnpm check"] });
+    const done = stub.run();
+
+    expect(done.status, "グループの外を見ていない").toBe(1);
+  });
+
+  it("名前で当てる側も、確かめられなければ 2 を返す", () => {
+    // **「判定できない」を「落とし切れなかった」に潰さない**（#572 のレビュー）
+    expect(withStubs({ namedStatus: 2 }).run().status).toBe(2);
   });
 
   it("作業場の名前が無ければ、使い方を出して 2 を返す", () => {
