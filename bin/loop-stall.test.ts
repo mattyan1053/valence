@@ -2521,36 +2521,60 @@ describe("手放すまでの間を、待って見る（#579）", () => {
   }
 
   it("手放すまでに間があっても、待てば空く", () => {
-    // **落ちる条件を作って再現する**（#579 の「本筋」）——**TERM を受けてから
-    // 手放すまでに間を置く保持側**を、決まった形で起こす。
+    // **落ちる条件を作る**（#579 の「本筋」）。**握り続けさせるのが要点**である。
+    //
+    // **グループごと TERM を撃つと、ロックはその場で空く**（**実測 10/10**。#580 の
+    // レビュー）——**`flock` 自身も倒れる**ので、**待ちを消しても緑になる。**
+    // **撃つのは trap を持つ内側の bash だけ**にする——**`flock` は生き残り、
+    // **内側が抜けるまでロックを握ったまま**である（**実測 0/10 で空かない**）。
+    //
+    // **`sleep 30 & wait` にする。** **`sleep` を前面で待つと、bash は trap を
+    // その終了まで走らせない**——**0.3 秒のはずが 30 秒になる。**
     const dir = sandbox();
     const lock = join(dir, "held.lock");
     writeFileSync(lock, "");
     const ready = join(dir, "ready");
-
-    const holder = spawn(
-      "/usr/bin/bash",
+    const innerPid = join(dir, "inner");
+    const holder = join(dir, "holder.sh");
+    writeFileSync(
+      holder,
       [
-        "-c",
-        // **TERM を受けても、すぐには手放さない**——**0.3 秒後に抜ける**
-        `flock -x '${lock}' /usr/bin/bash -c 'trap "sleep 0.3; exit 0" TERM; touch "${ready}"; sleep 30'`,
-      ],
-      { cwd: dir, detached: true, stdio: "ignore" },
+        "#!/usr/bin/env bash",
+        // **背景の `sleep` もロックの fd を継ぐ** ——**残すと、内側が抜けても
+        // 握られたまま**である（**実測で 5 秒待っても空かなかった**）。**trap で落とす。**
+        "sleep 30 & sleeper=$!",
+        // **TERM を受けても、すぐには手放さない**
+        "trap 'sleep 0.3; kill \"$sleeper\" 2>/dev/null; exit 0' TERM",
+        `echo $$ > ${JSON.stringify(innerPid)}`,
+        `touch ${JSON.stringify(ready)}`,
+        // **`sleep` を前面で待たない**——**bash は trap をその終了まで走らせない**
+        "wait",
+      ].join("\n"),
+      { mode: 0o755 },
     );
-    holder.unref();
+
+    const group = spawn("/usr/bin/setsid", ["/usr/bin/flock", "-x", lock, holder], {
+      cwd: dir,
+      detached: true,
+      stdio: "ignore",
+    });
+    group.unref();
     expect(
-      waitUntil(() => existsSync(ready), 10_000),
+      waitUntil(() => existsSync(innerPid), 10_000),
       "保持側が握っていない",
     ).toBe(true);
 
-    // **打ち切る側**——**本物の試験では枠の timeout がこれを撃つ**
     try {
-      process.kill(-(holder.pid ?? 0), "SIGTERM");
-    } catch {
-      // もう居ない
+      // **内側だけを撃つ**——**グループへ撃つと `flock` ごと倒れ、その場で空く**
+      process.kill(Number(readFileSync(innerPid, "utf8").trim()), "SIGTERM");
+      expect(lockIsFree(lock), "待てば空くのに「残っている」と答えている").toBe(true);
+    } finally {
+      try {
+        process.kill(-(group.pid ?? 0), "SIGKILL");
+      } catch {
+        // もう居ない
+      }
     }
-
-    expect(lockIsFree(lock), "待てば空くのに「残っている」と答えている").toBe(true);
   });
 
   it("本当に手放さないなら、空いたと言わない", () => {
