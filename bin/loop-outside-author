@@ -33,7 +33,18 @@ set -uo pipefail
 
 # GitHub のログイン名。**英数字とハイフンだけ**である（bot は `[bot]` が付く）。
 # **外から来る文字列を、そのまま保留の本文へ戻さない** (`bin/loop-gate` と同じ判断)。
-readonly LOGIN_RE='^[A-Za-z0-9-]{1,39}(\[bot\])?$'
+#
+# **bot は 2 通りの形で来る** (#562)。**走らせて測った**（`gh` 2.86.0）——
+# **`--json author` は `app/dependabot`**、**REST は `dependabot[bot]`** を返す。
+# **付けているのは `gh` の側**なので、**どちらの口から来ても、ここへ届く。**
+#
+# **弾くと、bot の不在が全体停止になる** (#70 と同じ形)。**dependabot は指摘に
+# 応えて head を押し直さない**ので、**`awaiting-worker:<PR>@<sha>` の識別子が動かず、
+# 3 周で `loop/STOP`** に達する——**常駐している側まで止まる。**
+#
+# **緩めるのは「読める形」だけ**である。**判定不能は、これまでどおり exit 2 へ倒す**
+# ——**前置きだけ（`app/`）・空白入り・長すぎるものは通さない**（試験で押さえてある）。
+readonly LOGIN_RE='^(app/)?[A-Za-z0-9-]{1,39}(\[bot\])?$'
 
 usage() {
   echo "使い方: bin/loop-outside-author <PR番号>" >&2
