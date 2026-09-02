@@ -125,6 +125,25 @@ function records(dir: string, lines: [number, string][], workspace = dir, role =
 }
 
 /**
+ * **周回が終わった時刻を置く**（#575）。**枠のとき暇だったかは、始まりだけでは
+ * 言えない**——**「始まった」と「終わった」の間が、塞がっていた時間**である。
+ *
+ * **置き場所と書式は `bin/loop-lease` が決める**ので、**実際に返した周回が
+ * 書いたものを読めること**（`実際に返した周回が読める`）で両端を留めてある。
+ */
+function ends(dir: string, at: number[], role = "worker"): void {
+  const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", role], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  expect(scope.status, scope.stderr).toBe(0);
+  writeFileSync(
+    join(dir, ".git", `valence-loop-ends-${scope.stdout.trim()}`),
+    `${at.join("\n")}\n`,
+  );
+}
+
+/**
  * **いま周回を回している状態にする**（**返さない**）。**始めた時刻も決める。**
  *
  * **`bin/loop-lease` は始まりを `valence-loop-rounds-<scope>` に書く**——**試験は
@@ -1540,6 +1559,192 @@ describe("呼び直した周回を、cron として記録しない", () => {
  * **`show_reading` を切り出し、入力を全部通して、出た文面の種類を数える**
  * ——**出し方に依存しない**（#500 で順序を測ったときと同じ手）。
  */
+describe("暇な枠を跨いだかで、次の一手を決める（#575）", () => {
+  /**
+   * **`stale` は次の一手を決められなかった**——**`CronList` を引いても、
+   * 「空なら入れ直す / 空でなければ塞がっているだけ」で 2 つに割れたまま**である。
+   *
+   * **割れる理由は「暇な枠を跨いだか」がどこにも残っていないこと**だった
+   * ——**塞がっているセッションでは cron が発火しない**ので、
+   * **鳴らなかったことは、死んでいる証拠にも、忙しい証拠にもなる。**
+   *
+   * **周回を握っていた時間なら、記録から言える。**
+   */
+  it("暇な枠を跨いだのに鳴っていないなら、入れ直すと言う", () => {
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+    // **どの周回もすぐ返している**——**枠（1800 秒ごと）のとき、この作業場は暇だった。**
+    ends(dir, [1_100, 9_100, 9_600]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "止まっていると言っていない").toMatch(/stale/);
+    expect(done.stdout, "暇な枠を跨いだのに、まだ引けと言っている").toMatch(/入れ直す/);
+    // **「引いて見る」は、判定を人へ差し戻す側の言い方**である——**倒せたなら出ない。**
+    // **`CronList` そのものでは見分けない**（**倒した側も「引かずに」と言う**）。
+    expect(done.stdout, "引いて見ろ、のままになっている").not.toMatch(/引いて見る/);
+  });
+
+  it("暇な枠を跨いでいないなら、判らないと言う", () => {
+    // **#531 を壊さない**——**塞がっていただけのことがある。**
+    const { dir } = workspace();
+    // **枠は 1800 秒ごと**（2800 / 4600 / 6400 / 8200 / 10000）——**そのどれもが、
+    // 走っている周回の中にある。**
+    records(dir, [
+      [1_000, "cron"],
+      [2_500, "poke"],
+      [5_000, "poke"],
+      [7_500, "poke"],
+      [9_500, "poke"],
+    ]);
+    // **最後の周回は、まだ返っていない**（いま回している周回がこれである）。
+    ends(dir, [1_500, 5_000, 7_000, 9_000]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "止まっていると言っていない").toMatch(/stale/);
+    expect(done.stdout, "跨いでいないのに断定している").not.toMatch(/入れ直す/);
+    expect(done.stdout, "判らないと言っていない").toMatch(/まだ判らない/);
+  });
+
+  it("終わりの記録が無いなら、これまでどおり引いて見ろと言う", () => {
+    // **読めないことを、片方へ倒さない**——**記録を持たない版から上げた直後がこれ。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "止まっていると言っていない").toMatch(/stale/);
+    // **判定した側の言い方は「暇な枠」で見分ける**——**`入れ直す` は、これまでの
+    // 文面（`空なら入れ直す`）にも出る**（**先に数えた**）。
+    expect(done.stdout, "記録が無いのに断定している").not.toMatch(/暇な枠/);
+    expect(done.stdout, "引く先を言っていない").toMatch(/CronList/);
+  });
+
+  it("実際に返した周回が読める", () => {
+    // **両端を留める**——**書く側（`bin/loop-lease`）と読む側（この試験）で
+    // 置き場所が食い違うと、ここだけが緑になる。**
+    const { dir, stamp } = workspace();
+    round(dir, stamp, "cron");
+    round(dir, stamp, "poke");
+
+    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(scope.status, scope.stderr).toBe(0);
+    const written = readFileSync(
+      join(dir, ".git", `valence-loop-ends-${scope.stdout.trim()}`),
+      "utf8",
+    );
+
+    expect(
+      written.trim().split("\n").filter(Boolean),
+      "返した周回の数だけ残っていない",
+    ).toHaveLength(2);
+  });
+});
+
+describe("鳴った記録を、突かれた記録に押し出させない（#575）", () => {
+  /**
+   * **問題が長引くほど、見張りの声が小さくなっていた**（master の実測、2026-09-02）。
+   *
+   * **窓は 20 件**で、**cron が鳴らないほど poke が積もる**——**押し出された結果、
+   * `cron` の記録が 1 件になり**、**間隔が測れず**（2 件要る）、
+   * **判定は `stale` から `unknown` へ落ちた**（**`読み=` ごと消えた**）。
+   *
+   * **もう 1 周で `last_cron=-` になる**——**「ずっと鳴っていない」と
+   * 「一度も鳴っていない」が同じ顔になる**（`AGENTS.md` §5 が名指ししている形）。
+   *
+   * **#537 は「別の種類の行を足した」ときの話**だったが、**普通の poke が積もるだけで
+   * 同じところへ来る。**
+   */
+  it("突かれた周回が窓を超えても、鳴った記録は残る", () => {
+    const { dir, stamp } = workspace();
+    round(dir, stamp, "cron");
+    round(dir, stamp, "cron");
+    // **窓（20 件）を超えるまで突く。**
+    for (let i = 0; i < 25; i += 1) {
+      round(dir, stamp, "poke");
+    }
+
+    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(scope.status, scope.stderr).toBe(0);
+    const written = readFileSync(
+      join(dir, ".git", `valence-loop-starts-${scope.stdout.trim()}`),
+      "utf8",
+    );
+    const cronLines = written.split("\n").filter((line) => line.split("\t")[1] === "cron");
+
+    // **間隔を測るには 2 件要る**——**1 件へ落ちた時点で、判定は黙る。**
+    expect(cronLines, "鳴った記録が押し出されている").toHaveLength(2);
+  });
+
+  it("突かれた記録は、これまでどおり窓で刈る", () => {
+    // **残す側を足したぶん、もう片方が増え続けては意味が無い**（#537）。
+    const { dir, stamp } = workspace();
+    for (let i = 0; i < 25; i += 1) {
+      round(dir, stamp, "poke");
+    }
+
+    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(scope.status, scope.stderr).toBe(0);
+    const written = readFileSync(
+      join(dir, ".git", `valence-loop-starts-${scope.stdout.trim()}`),
+      "utf8",
+    );
+    const pokeLines = written.split("\n").filter((line) => line.split("\t")[1] === "poke");
+
+    expect(pokeLines.length, "突かれた記録が増え続けている").toBeLessThanOrEqual(20);
+  });
+
+  it("間隔が測れないときも、次に見るところを言う", () => {
+    // **`unknown` で黙ると、そこで人が止まる**（#530 と同じ形）——
+    // **`stale` のときだけ読みを出していた。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+    expect(done.stdout, "間隔が測れると言っている").toMatch(/interval=unknown/);
+    expect(done.stdout, "どこを見るかを言っていない").toMatch(/読み=/);
+    expect(done.stdout, "どの作業場かを言っていない").toMatch(/workspace=/);
+    // **「一度も鳴っていない」と混ぜない**——**鳴った記録は 1 本ある。**
+    expect(done.stdout, "一度も鳴っていない側の文面が出ている").not.toMatch(/1 本も無い/);
+  });
+
+  it("一度も鳴っていないときは、そう言う", () => {
+    // **押し出されたのと混ぜない**（`AGENTS.md` §5）。
+    const { dir } = workspace();
+    records(dir, [
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000" });
+
+    expect(done.stdout, "鳴った記録があると言っている").toMatch(/last_cron=-/);
+    expect(done.stdout, "一度も鳴っていないと言っていない").toMatch(/1 本も無い/);
+  });
+});
+
 describe("説明の数と、実際に出る読みを突き合わせる（#501 / #502）", () => {
   /** **数を書いている文**（**`原因は予定表が…` のような、数でない行には当たらない**）。 */
   const CLAIM = /原因は\s*(\d+)\s*つ/g;
@@ -1599,6 +1804,8 @@ describe("説明の数と、実際に出る読みを突き合わせる（#501 / 
     ["-", "1000", "9500"], // last_poke: 記録が無い / 窓の外 / 窓の中
     ["-", "1000", "9500"], // last_unknown: 同上
     ["", "3600"], // window: 分からない / 分かる
+    ["-", "0", "2"], // 暇な枠 (#575): 数えられない / 跨いでいない / 跨いだ
+    ["-", "1000"], // last_cron (#575): 一度も鳴っていない / 押し出されて 1 本
   ];
 
   /** 各軸の値を、すべての組み合わせで並べる。 */

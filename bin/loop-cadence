@@ -167,7 +167,7 @@ show_workspace() {
   echo "  workspace=$1"
 }
 
-# **`stale` の原因は 4 つあり、打つ手が違う** (#497 / #498 / #499)。
+# **止まって見える原因は 7 つあり、打つ手が違う** (#497 / #498 / #499 / #575)。
 #
 # **文面はここに写さない**——**写すと直す先が 2 つになり、片方だけが古くなる**
 # （#319 と同じ。**実際、この段落が 2 世代ぶん置き去りになった**。#501）。
@@ -218,8 +218,53 @@ fresh_round() {
   ((NOW - at <= window))
 }
 
+# **枠のとき、この作業場は暇だったか** (#575)。
+#
+# **`stale` の読みが 2 つに割れていたのは、これがどこにも残っていなかったから**である
+# ——**塞がっているセッションでは cron が発火しない**ので、**鳴らなかったことは
+# 「予定表が死んでいる」証拠にも「忙しかった」証拠にもなる。**
+#
+# **握っていた時間なら記録から言える。** **`bin/loop-lease` は周回の始まりと
+# 終わりを書く**ので、**ある時刻に握っていたかは「その時刻までの始まりの数」と
+# 「終わりの数」で決まる**（**周回は作業場ごとに直列**である）。
+#
+# **枠の時刻は、最後に鳴った cron から間隔ごと**に置く（**間隔は呼ぶ側が持っている**
+# ——**渡されたものか、記録から測ったもの**）。**リポジトリへ固定しない**（#378）。
+#
+# **数えられないなら `-` を返す**——**0 へ倒さない**（**「暇な枠は無かった」と
+# 「分からない」は別**である）。**終わりの記録を持たない版から上げた直後がそれ**で、
+# **そこで断定すると、#531 で踏んだ形に戻る。**
+idle_slots() {
+  local scope="$1" last_cron="$2" interval="$3"
+  local starts="$common_dir/valence-loop-starts-$scope"
+  local ends="$common_dir/valence-loop-ends-$scope"
+  local at _trigger _where line slot idle=0 held oldest=""
+  local start_at=() end_at=()
+  [[ -f $starts && -f $ends ]] || { echo "-"; return 0; }
+  while IFS=$'\t' read -r at _trigger _where; do
+    [[ $at =~ ^[0-9]+$ ]] || continue
+    start_at+=("$at")
+    [[ -n $oldest ]] && ((oldest <= at)) || oldest="$at"
+  done <"$starts"
+  while read -r line; do
+    [[ $line =~ ^[0-9]+$ ]] || continue
+    end_at+=("$line")
+  done <"$ends"
+  # **始まりが 1 本も無いなら、何も言えない**（**終わりだけでは間が決まらない**）。
+  [[ -n $oldest ]] || { echo "-"; return 0; }
+  for ((slot = last_cron + interval; slot <= NOW; slot += interval)); do
+    # **残っている記録より前の枠は数えない**——**刈られたぶんは「暇だった」とは言えない。**
+    ((slot >= oldest)) || continue
+    held=0
+    for at in "${start_at[@]}"; do ((at <= slot)) && held=$((held + 1)); done
+    for at in "${end_at[@]}"; do ((at <= slot)) && held=$((held - 1)); done
+    ((held > 0)) || idle=$((idle + 1))
+  done
+  echo "$idle"
+}
+
 show_reading() {
-  local last_poke="${1-}" last_unknown="${2-}" window="${3-}"
+  local last_poke="${1-}" last_unknown="${2-}" window="${3-}" idle="${4-}" last_cron="${5-}"
   local asleep="  読み=どちらの周回も新しくない。そのセッションが動いていない——引く先が居ないので、先に起こす"
   # **cron 以外の周回が 1 つも記録されていない**——**動いている証拠が無い。**
   if ! recorded_round "$last_poke" && ! recorded_round "$last_unknown"; then
@@ -227,6 +272,13 @@ show_reading() {
     return 0
   fi
   if [[ -z $window ]]; then
+    # **窓が無い理由は 2 つある** (#575)。**混ぜない**（`AGENTS.md` §5）——
+    # **「一度も鳴っていない」と「鳴った記録が押し出されて 1 本になった」は、
+    # `last_cron=-` になった時点で同じ顔**になる。**その手前で言い分ける。**
+    if recorded_round "$last_cron"; then
+      echo "  読み=鳴った記録が 1 本しか残っておらず、間隔が測れない。新しいかは言えない——押し出された側である。CronList を引く"
+      return 0
+    fi
     echo "  読み=cron の周回が 1 本も無い。ほかの周回が新しいかは言えない——そのセッションが居れば CronList を引いて入れ直す"
     return 0
   fi
@@ -251,6 +303,18 @@ show_reading() {
     #
     # **見分けはこの道具では付かない**（**他のセッションを引けない**——下の但し書き）。
     # **引いた結果で分かれる形にする**（**隣の枝と同じ言い方**）。
+    # **暇な枠を跨いだかで倒す** (#575)。**跨いだのに鳴っていないなら、
+    # 「塞がっていた」では説明が付かない**——**予定表の側を指す。**
+    if [[ $idle =~ ^[0-9]+$ ]] && ((idle > 0)); then
+      echo "  読み=突かれた周回だけが新しい。暇な枠を $idle 回跨いだのに鳴っていない——予定表が死んでいる。CronList を引かずに入れ直す"
+      return 0
+    fi
+    # **跨いでいないなら、断定しない** (#531)。**塞がっていただけのことがある。**
+    if [[ $idle =~ ^[0-9]+$ ]]; then
+      echo "  読み=突かれた周回だけが新しい。暇な枠をまだ跨いでいない——塞がっているだけかもしれない。まだ判らない（暇な枠が来るまで待つ）"
+      return 0
+    fi
+    # **数えられない**（終わりの記録が無い版）——**これまでどおり。**
     echo "  読み=突かれた周回だけが新しい。そのセッションは動いている——引いて見る（CronList）: 空なら入れ直す / 空でなければ塞がっているだけで、いずれ回る"
     return 0
   fi
@@ -329,6 +393,8 @@ evaluate_scope() {
   # （**cron の記録が 1 本も無い行**）ので、**先に置く**（`set -u`）。
   local window=""
   local at trigger _where interval interval_shown gap running_since cron_at=()
+  # **枠のとき暇だったか** (#575)。**数えられない行もある**ので、先に置く（`set -u`）。
+  local idle_shown="-"
   starts="$common_dir/valence-loop-starts-$scope"
   if [[ ! -f $starts ]]; then
     # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
@@ -456,8 +522,16 @@ evaluate_scope() {
     ((blocked_rings == 0)) || blocked_shown=" blocked=$blocked_rings"
     echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age${blocked_shown} ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"
   fi
-  [[ $verdict != "stale" ]] || show_workspace "$workspace"
-  [[ $verdict != "stale" ]] || show_reading "$last_poke" "$last_unknown" "$window"
+  # **`unknown` でも黙らない** (#575)。**`stale` のときだけ読みを出していた**ので、
+  # **記録が押し出されて `unknown` へ落ちた瞬間、次の一手がまるごと消えた**
+  # （**実測。問題が長引くほど見張りの声が小さくなる**）。**`ok` だけが黙る。**
+  [[ $verdict == "ok" ]] || show_workspace "$workspace"
+  # **数えるのは、枠が決まる行だけ**（#575）——**間隔が無ければ枠も無い。**
+  idle_shown="-"
+  [[ $verdict == "ok" || $last_cron == "-" || -z ${interval:-} ]] ||
+    idle_shown="$(idle_slots "$scope" "$last_cron" "$interval")"
+  [[ $verdict == "ok" ]] ||
+    show_reading "$last_poke" "$last_unknown" "$window" "$idle_shown" "$last_cron"
   case "$verdict" in
     stale) stale=1 ;;
     unknown) undecidable=1 ;;
