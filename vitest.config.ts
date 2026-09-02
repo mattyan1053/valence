@@ -30,7 +30,10 @@ export const projects = [
       //
       // **直下も見る** (#493)。**`AGENTS.md` は repo 直下**なので、**co-location で
       // 並ぶ試験もそこに置く**——**include に足さないと、置いただけで走らない。**
-      include: ["*.test.ts", "src/**/*.test.ts", "test/**/*.test.ts"],
+      //
+      // **`supabase/` も見る** (#561)。**`config.toml` を見張る試験はその隣に置く**
+      // ——**ここへ足さないと、置いただけで走らない**（直下と同じ理由）。
+      include: ["*.test.ts", "src/**/*.test.ts", "test/**/*.test.ts", "supabase/**/*.test.ts"],
       // **上の include は `*.db.test.ts` にも当たる。** 除かないと、
       // **DB を要求する試験が `./task check` に混ざる。**
       exclude: [DB_TEST_PATTERN],

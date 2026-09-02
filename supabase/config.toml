@@ -18,10 +18,23 @@ extra_search_path = ["public", "extensions"]
 max_rows = 1000
 # Controls whether new tables, views, sequences and functions created in the `public` schema by
 # `postgres` are reachable through the Data API roles (`anon`, `authenticated`, `service_role`)
-# without explicit GRANTs. When unset, new entities are NOT auto-exposed, matching the new cloud
-# default. Set to `true` to keep the legacy behaviour of auto-exposing new entities; this is
-# deprecated and the field is removed on 2026-10-30 once the always-revoked behaviour is permanent.
-# auto_expose_new_tables = true
+# without explicit GRANTs.
+#
+# **書かない、を選ばない** (#561)。**未設定の意味は CLI の版で変わる**——**2.115.0 まで
+# は「自動公開しない」だが、2.116.0 で既定が `true` へ反転する**（リリースノート）。
+# **反転しても、この行を書いていなければ何も起きたように見えない。**
+#
+# **`false` に固定しているのは、migration の `grant` が抜けたときに落ちてほしいから**
+# である。**自動公開されると、権限を 1 行も書かなくても DB の試験が通る**
+# ——**動くことは変わらず、壊れたときに検出できなくなる側**である（`AGENTS.md` §4）。
+#
+# **消したときに何が起きるかは測ってある** (#561)——**`true` にして作り直すと、
+# `grant` を 1 行も書かないテーブルを `anon` が読める**（`has_table_privilege` で確認）。
+# **この行があることは supabase/auto-expose-new-tables.test.ts が見る。**
+#
+# **この項目自体が 2026-10-30 に消える**（上流の予定。**常に revoke する挙動が既定に
+# なったら不要になる**）——**消えた版へ上げる日には、この行と上の試験も一緒に外す。**
+auto_expose_new_tables = false
 
 [api.tls]
 # Enable HTTPS endpoints locally using a self-signed certificate.
