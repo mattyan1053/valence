@@ -451,7 +451,7 @@ describe("応答不能の通知が続くとき、上限で止まる（#356）", 
     return {
       reviews: [],
       answers,
-      comments: answers.map((at, i) => request(minutesAgo(101 - i * 10))),
+      comments: answers.map((_at, i) => request(minutesAgo(101 - i * 10))),
       createdAt: minutesAgo(300),
     };
   }

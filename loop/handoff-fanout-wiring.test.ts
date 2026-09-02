@@ -17,13 +17,8 @@
  * 走っている周回と競る**（#186 の形）。
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { type LoopRole, procedureText } from "./procedure-doc";
-
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const PROCEDURES = [{ role: "master" }, { role: "worker" }] as const;
 

@@ -19,10 +19,6 @@ import { procedureText } from "./procedure-doc";
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const TASK = join(REPO_ROOT, "task");
 
-function read(path: string): string {
-  return readFileSync(join(REPO_ROOT, path), "utf8");
-}
-
 /** 節ごとの bash ブロック。 */
 function blocks(): { section: string; body: string }[] {
   const found: { section: string; body: string }[] = [];

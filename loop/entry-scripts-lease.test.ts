@@ -20,7 +20,6 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
