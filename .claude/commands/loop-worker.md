@@ -1,4 +1,4 @@
-<!-- 版: 9408cba74d76 -->
+<!-- 版: 03a29fb1549e -->
 ---
 name: "Loop: Worker"
 description: Issue の実装またはレビュー指摘への対応を 1 周だけ実行する
@@ -32,11 +32,10 @@ worker ループを **1 周だけ** 実行する。`/loop` が本コマンドを
 **直列化の単位は「作業場」で、役ではない**（**worker は何人いてもよい**）。**冒頭で決着させる。**
 
 ```bash
-bin/loop-lease acquire worker "<冒頭の `版:` の値>" --trigger <cron|poke>  # token を控える
+bin/loop-lease acquire worker "<冒頭の `版:` の値>" --trigger <cron|poke|unknown>  # token を控える
 ```
 
-**`--trigger` は、この周回がどう始まったか** (#378)——**cron が鳴ったなら `cron`、
-人や別のセッションに突かれたなら `poke`**（**混ぜると、突かれた日が健全に見える**）。**捨てて呼び直した周回も `poke`** (#444)——**同じ刻みの 2 回目は、cron が鳴ったのではない**（**混ぜると、その間が周期として読まれる**）。
+**`--trigger` は、この周回がどう始まったか** (#378 / #581)。**決め方は `bin/loop-lease` の冒頭にある**——**ここに書き写さない**（`AGENTS.md` §5。**写した結果、決め方が worker の入口にしか根付かず、master 側は時計の推量だった**）。**見るのは周回の届き方で、時計ではない**——**分からないなら `unknown` を渡す。`poke` へ倒さない。**
 
 - **exit 0** → 続ける。**この周回を終えるとき（何もせず終わる場合も含めて）必ず返す**
 
@@ -53,7 +52,7 @@ bin/loop-lease acquire worker "<冒頭の `版:` の値>" --trigger <cron|poke> 
 **その前に、印を持つ木がここにあるかを見る** (#262 / #369)——**木を触る前に押さえる。**
 
 ```bash
-bin/loop-lease recover worker "<読んだ印>" --trigger <cron|poke>   # token を控える
+bin/loop-lease recover worker "<読んだ印>" --trigger <cron|poke|unknown>   # token を控える
 ```
 
 - **exit 0** → 押さえた。下へ進む。**この先どの経路で終わるときも必ず返す**
@@ -104,7 +103,7 @@ bin/loop-procedure-stamp worker "<読んだ印>"  # 揃ったか。判定はこ�
 
 ```bash
 bin/loop-procedure-body --entry worker   # これがこの周回の入口である
-bin/loop-lease acquire worker "<読み直した入口の 版>" --trigger <cron|poke>  # 印は捨てない
+bin/loop-lease acquire worker "<読み直した入口の 版>" --trigger <cron|poke|unknown>  # 印は捨てない
 ```
 
 - **exit 0**（`acquire`）→ **読み直した入口に従って、1.0 の続きから進む**（**返さない**）

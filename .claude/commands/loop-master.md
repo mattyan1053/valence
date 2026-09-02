@@ -1,4 +1,4 @@
-<!-- 版: edb97323bf9d -->
+<!-- 版: ada17d10e69f -->
 ---
 name: "Loop: Master"
 description: PR の確認・マージ判断・作業の Issue 化を 1 周だけ実行する
@@ -35,8 +35,10 @@ master ループを **1 周だけ** 実行する。`/loop` が本コマンドを
 **冒頭で決着させる。** ゲートを回してから気づく形にしない。
 
 ```bash
-bin/loop-lease acquire master "<冒頭の `版:` の値>" --trigger <cron|poke>   # token を控える。呼び直しは poke (#422 / #444)
+bin/loop-lease acquire master "<冒頭の `版:` の値>" --trigger <cron|poke|unknown>   # token を控える
 ```
+
+**`--trigger` は、この周回がどう始まったか** (#378 / #581)。**決め方は `bin/loop-lease` の冒頭にある**——**ここに書き写さない**（`AGENTS.md` §5。**写した結果、決め方が worker の入口にしか根付かず、master 側は時計の推量だった**）。**見るのは周回の届き方で、時計ではない**——**分からないなら `unknown` を渡す。`poke` へ倒さない。**
 
 - **exit 0** → 続ける。**この周回を終えるとき（何もせず終わる場合も含めて）必ず返す**
 
@@ -50,8 +52,7 @@ bin/loop-lease acquire master "<冒頭の `版:` の値>" --trigger <cron|poke> 
 - **exit 2** → 設定か環境の誤り。標準エラーに出た内容を報告して終わる
 
 **印がずれていたら、`acquire` は exit 3 で止まる** (#241 / #243 / #244 のレビュー)。
-**exit 2（設定か環境の誤り）とは行き先が違う**ので、**番号で分ける**——
-**文言で見分けない。**
+**exit 2（設定か環境の誤り）とは行き先が違う**ので、**番号で分ける**——**文言で見分けない。**
 **配られた手順書がディスクより古い**ということなので、**この周回は捨てて呼び直す**
 （**1 回だけ**。**lease は取れていないので返さない**）。
 
@@ -61,7 +62,7 @@ bin/loop-lease acquire master "<冒頭の `版:` の値>" --trigger <cron|poke> 
 
 ```bash
 bin/loop-procedure-body --entry master   # これがこの周回の入口である
-bin/loop-lease acquire master "<読み直した入口の `版:` の値>" --trigger <cron|poke>   # 印は捨てない
+bin/loop-lease acquire master "<読み直した入口の `版:` の値>" --trigger <cron|poke|unknown>   # 印は捨てない
 ```
 
 - **exit 0**（`acquire`）→ **読み直した入口に従って、1.0 の続きから進む**（**返さない**）

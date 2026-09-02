@@ -870,6 +870,30 @@ describe("bin/loop-lease", () => {
       return join(sandbox, ".git", `valence-loop-starts-${scope.stdout.trim()}`);
     }
 
+    it("分からないなら、そう言える（推量を poke へ倒さない）", () => {
+      // **呼ぶ側が時計で当て推量していた** (#581)。**予定は `7,37` なのに実際の
+      // 発火は `:15` / `:45`（+8 分）**で、**当てに行くと必ず外れる**——
+      // **外れた先が `poke` だった**ので、**`last_cron` が永久に古いまま**になり、
+      // **7 時間ぶん「cron が止まっている」と言い続けた**（**道具は正しく数えていた。
+      // 入力が嘘だった**）。
+      //
+      // **省略すれば `unknown` になる**が、**それは「古い手順書で始まった」と
+      // 同じ顔**である——**いまの手順で走って、なお分からなかった**ことを言えない。
+      const held = run(["acquire", "worker", stampFor("worker"), "--trigger", "unknown"]);
+
+      expect(held.status, held.stderr).toBe(0);
+      expect(readFileSync(startsFile(), "utf8"), "unknown として残っていない").toContain(
+        "\tunknown\t",
+      );
+    });
+
+    it("知らない言葉は、これまでどおり通さない", () => {
+      // **緩めない**——**`unknown` を足したのであって、何でも受けるのではない。**
+      const bad = run(["acquire", "worker", stampFor("worker"), "--trigger", "たぶん cron"]);
+
+      expect(bad.status, "知らない言葉を受けている").toBe(2);
+    });
+
     it("走っている周回があるなら、鳴ったことを残す", () => {
       // **前は何も書かなかった**ので、**忙しい作業場が「cron が鳴っていない」と
       // 同じ顔になった**（#536。**4 回突かれて、4 回とも予定表は生きていた**）。
