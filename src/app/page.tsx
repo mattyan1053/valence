@@ -7,7 +7,9 @@
  * **infrastructure を直に触らない**（§3）。**合成ルートだけを呼ぶ。**
  */
 
+import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
 import { visibleRepositoriesForCurrentUser } from "../composition/auth";
+import { SignOutButton, showsSignOut } from "../ui/auth/sign-out-button";
 import { RepositoryList } from "../ui/repository-list/repository-list";
 
 /**
@@ -36,12 +38,22 @@ export function boardPath(repository: { readonly owner: string; readonly name: s
   return `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
 }
 
-export default async function Home() {
-  const result = await visibleRepositoriesForCurrentUser();
-
+/**
+ * **引いた結果を、画面にする**（#563）。
+ *
+ * **取ってくる側と分ける**——**画面から呼ぶと composition が本物を掴む**ので、
+ * **「ログアウトを出していること」を試験から見られない**（**盤面が #519 で
+ * 同じ形にしている**）。**判断はここに無い**——**受けた結果を出すだけ**である。
+ */
+export function renderHome(result: VisibleRepositoriesResult) {
   return (
     <main className="mx-auto flex max-w-2xl flex-1 flex-col justify-center gap-4 px-6 py-16">
-      <h1 className="font-mono text-3xl font-bold tracking-tight">Valence</h1>
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="font-mono text-3xl font-bold tracking-tight">Valence</h1>
+        {/* **期限が切れた画面からも出られること**（#563）。
+         **判定は `showsSignOut` が持つ**（盤面と 2 箇所に置かない） */}
+        {showsSignOut(result.kind) ? <SignOutButton action="/auth/logout" /> : undefined}
+      </div>
       <p className="text-lg">AI 時代の PR コントロールセンター</p>
       {result.kind === "listed" ? (
         <RepositoryList
@@ -70,4 +82,8 @@ export default async function Home() {
       )}
     </main>
   );
+}
+
+export default async function Home() {
+  return renderHome(await visibleRepositoriesForCurrentUser());
 }

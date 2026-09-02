@@ -21,6 +21,7 @@ import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge"
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
 import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
+import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button";
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
 import { MergeButton, mergeNotice } from "../../../../ui/merge/merge-button";
 import { ReviewBoard } from "../../../../ui/review-board/review-board";
@@ -206,9 +207,15 @@ export async function renderRepositoryBoard(
 
   return (
     <main className="mx-auto flex max-w-4xl flex-1 flex-col gap-4 px-6 py-12">
-      <h1 className="font-mono text-2xl font-bold tracking-tight">
-        {owner}/{name}
-      </h1>
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="font-mono text-2xl font-bold tracking-tight">
+          {owner}/{name}
+        </h1>
+        {/* **期限が切れた盤面からも出られること**（#563）——**「入り直してください」
+            と言う画面に、いまのセッションを捨てる手が無かった。**
+            **判定は `showsSignOut` が持つ**（入口の画面と 2 箇所に置かない） */}
+        {showsSignOut(result.kind) ? <SignOutButton action="/auth/logout" /> : undefined}
+      </div>
       {/* **押せなかった理由は、押した画面に出す** */}
       {outcome === undefined ? undefined : <p className="text-sm">{approveNotice(outcome)}</p>}
       {mergeOutcome === undefined ? undefined : (

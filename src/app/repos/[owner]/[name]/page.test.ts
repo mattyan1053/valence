@@ -12,7 +12,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
+import type { RepositoryBoardResult } from "../../../../application/review-order/view-repository-board";
 import { mergeBlockFor } from "../../../../domain/graph/merge-block";
+import { showsSignOut } from "../../../../ui/auth/sign-out-button";
 import {
   approvalDisplay,
   approveNoticeKind,
@@ -358,5 +360,39 @@ describe("commit が分からない PR", () => {
 
     expect(boxOf(markup, 1), "箱にタイトルが届いていない").toContain("依存グラフを図にする");
     expect(boxOf(markup, 2), "取れていないタイトルを、空欄で出している").toContain("タイトル不明");
+  });
+});
+
+describe("盤面からログアウトできる", () => {
+  // **入れるが出られない**（#563）——**GitHub の token は 8 時間で切れる**が、
+  // **Supabase のセッションはもっと長く生きる。** **その差の間、盤面は
+  // 「入り直してください」と言うのに、いまのセッションを捨てる手が無かった。**
+  async function markup(result: RepositoryBoardResult): Promise<string> {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        { board: async () => result, report: () => {} },
+      ),
+    );
+  }
+
+  it("期限が切れている画面から、POST で出せる", async () => {
+    // **この Issue が塞ぎに来た場面そのもの**である
+    const html = await markup({ kind: "needs-login" });
+
+    expect(html).toContain('action="/auth/logout"');
+    expect(html).toContain('method="post"');
+  });
+
+  it("ログインしていない画面には出さない", async () => {
+    expect(await markup({ kind: "signed-out" })).not.toContain("/auth/logout");
+  });
+
+  it("判定は書き写さない", async () => {
+    // **出す・出さないを決めるのは `showsSignOut` ひとつ**である（§5）
+    // ——**入口の画面と 2 箇所に置くと、片方だけが直る**
+    expect(showsSignOut("needs-login")).toBe(true);
+    expect(showsSignOut("signed-out")).toBe(false);
   });
 });
