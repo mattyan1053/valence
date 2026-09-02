@@ -24,37 +24,46 @@ import { describe, expect, it } from "vitest";
 import { type LoopRole, procedureText } from "./procedure-doc";
 
 /**
- * その役の手順書に出てくる bash ブロック。**散文は数えない**——
+ * 渡された本文に出てくる bash ブロック。**散文は数えない**——
  * **「引数無しで打たない」と書いた行まで数えてしまう。**
+ *
+ * **本文を受け取る**（役ではない）——**「節の外に無いこと」を見たい**ので、
+ * **切り出した本文にも同じ目を当てる**（#569 のレビュー 2 周目）。
  */
-function codeBlocks(role: LoopRole): string[] {
-  return procedureText(role)
+function codeBlocksOf(text: string): string[] {
+  return text
     .split("```")
     .filter((_, index) => index % 2 === 1)
     .map((block) => block.replace(/^bash\n/, ""));
 }
 
-/** **打てと書いてある行**だけを拾う（コメントは落とす）。 */
-function resetLines(role: LoopRole): string[] {
-  return codeBlocks(role)
-    .flatMap((block) => block.split("\n"))
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("bin/loop-stall --reset"));
-}
+/**
+ * 対象を渡していない `--reset` の行。**記録を丸ごと消す側**である。
+ *
+ * **終わりはコメントだけではない** (#569 のレビュー 2 周目)——
+ * **`bin/loop-stall --reset || true` も対象を渡していない**ので、
+ * **`||` `&&` `;` `|` も終端に数える**（**完全一致では通り抜ける**）。
+ */
+const BARE_RESET_COMMAND = /^bin\/loop-stall --reset[ \t]*($|[|&;])/;
 
-/** 引数を渡していない `--reset`。**記録を丸ごと消す側**である。 */
-function bareResets(role: LoopRole): string[] {
-  return resetLines(role).filter(
-    (line) => line.replace(/\s+#.*$/, "").trim() === "bin/loop-stall --reset",
-  );
+function bareResetsIn(text: string): string[] {
+  return codeBlocksOf(text)
+    .flatMap((block) => block.split("\n"))
+    .map((line) =>
+      line
+        .trim()
+        .replace(/\s+#.*$/, "")
+        .trim(),
+    )
+    .filter((line) => BARE_RESET_COMMAND.test(line));
 }
 
 /**
  * 散文（bash ブロックの外）。**打てと書いてある行が、ここにも出る**
  * ——**ブロックだけを見ていると、箇条書きの「〜を通す」が丸ごと落ちる**（#569 のレビュー）。
  */
-function proseLines(role: LoopRole): string[] {
-  return procedureText(role)
+function proseLinesOf(text: string): string[] {
+  return text
     .split("```")
     .filter((_, index) => index % 2 === 0)
     .flatMap((chunk) => chunk.split("\n"))
@@ -71,7 +80,28 @@ function proseLines(role: LoopRole): string[] {
 const BARE_RESET = /bin\/loop-stall --reset(?![ \t]*[A-Za-z0-9_<"'$])/;
 
 function bareResetProse(role: LoopRole): string[] {
-  return proseLines(role).filter((line) => BARE_RESET.test(line));
+  return proseLinesOf(procedureText(role)).filter((line) => BARE_RESET.test(line));
+}
+
+/**
+ * master の「exit 0 — マージする」の節。**引数無しで打ってよい唯一の場面**である。
+ *
+ * **場面そのものを切り出す** (#569 のレビュー 2 周目)。**`bin/loop-lease release master`
+ * を含むブロックは 4 個ある**ので、**「release がある 1 ブロック」では場面を絞れない**
+ * ——**同期の失敗で打ち切る側へ移しても、件数もその語も変わらない。**
+ */
+function mergeSection(): string {
+  const text = procedureText("master");
+  const from = text.indexOf("### exit 0 — マージする");
+  if (from < 0) {
+    throw new Error("master の手順書に「exit 0 — マージする」の節がありません");
+  }
+  return text.slice(from).split("\n### ")[0] as string;
+}
+
+/** マージの節を取り除いた残り。**例外がそこにしか無いこと**を、この側で見る。 */
+function outsideMergeSection(): string {
+  return procedureText("master").split(mergeSection()).join("\n");
 }
 
 /**
@@ -111,7 +141,7 @@ describe("bin/loop-stall --reset の打ち方", () => {
   it("worker は、引数無しで打たない", () => {
     // **出口は、何もしなかった周回も通る**——**そこで丸ごと消すと、
     // 前の周回が積んだ `local-ci-failed` まで消える**（**まだ赤いのに数え直される**）。
-    expect(bareResets("worker"), "引数無しの --reset が残っている").toEqual([]);
+    expect(bareResetsIn(procedureText("worker")), "引数無しの --reset が残っている").toEqual([]);
   });
 
   it("worker は、消すものを名指しする", () => {
@@ -141,8 +171,11 @@ describe("bin/loop-stall --reset の打ち方", () => {
   it("master は、changes-requested を外した周回で消すものを名指しする", () => {
     // **満たされた周回が消すのは、その head の対応待ちである**——**古い head の記録は
     // 別の識別子として既に数え直されている**（同じ節に理由がある）。
+    // **末尾まで見る**（#569 のレビュー 2 周目）——**`@<SHA>` を削ると、
+    // `bin/loop-stall` は知らない識別子として exit 2 を返す**（**消えない**）。
+    // **label は既に外れている**ので、**同じ経路はもう来ない**——**古い対応待ちが残る。**
     expect(changesRequestedSection(), "何を消すのかが書かれていない").toContain(
-      'bin/loop-stall --reset "awaiting-worker:',
+      'bin/loop-stall --reset "awaiting-worker:<PR番号>@<SHA>"',
     );
   });
 
@@ -150,17 +183,9 @@ describe("bin/loop-stall --reset の打ち方", () => {
     // **役ごとに違ってよい理由は、打つ場面のほうにある**——**マージはループ全体が
     // 前へ進んだ証拠**なので、**共有の記録も数え直してよい。**
     //
-    // **場面は、同じブロックの `bin/loop-lease release master` で見分ける**
-    // ——**散文の言い回しで見分けない**（`AGENTS.md` §4）。
-    const blocks = codeBlocks("master").filter((block) =>
-      block
-        .split("\n")
-        .some((line) => line.trim().replace(/\s+#.*$/, "") === "bin/loop-stall --reset"),
-    );
-
-    expect(blocks, "引数無しの --reset が 1 箇所ではない").toHaveLength(1);
-    expect(blocks[0], "打ち切りのブロックではないところで丸ごと消している").toContain(
-      "bin/loop-lease release master",
-    );
+    // **場面そのものを切り出して見る**（#569 のレビュー 2 周目）——**「release を含む
+    // ブロックが 1 つ」では、同期の失敗で打ち切る側へ移しても気づけない。**
+    expect(bareResetsIn(mergeSection()), "マージの節に、引数無しの --reset が無い").toHaveLength(1);
+    expect(bareResetsIn(outsideMergeSection()), "マージの節の外で丸ごと消している").toEqual([]);
   });
 });
