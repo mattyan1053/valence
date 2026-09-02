@@ -125,21 +125,24 @@ function records(dir: string, lines: [number, string][], workspace = dir, role =
 }
 
 /**
- * **周回が終わった時刻を置く**（#575）。**枠のとき暇だったかは、始まりだけでは
+ * **握っていた時間を置く**（#575）。**枠のとき暇だったかは、始まりだけでは
  * 言えない**——**「始まった」と「終わった」の間が、塞がっていた時間**である。
+ *
+ * **組で持つ** (#578 のレビュー)——**別々に数えると、対応の付かない始まりが
+ * 1 本でもあれば「ずっと握っている」へ倒れたまま戻らない。**
  *
  * **置き場所と書式は `bin/loop-lease` が決める**ので、**実際に返した周回が
  * 書いたものを読めること**（`実際に返した周回が読める`）で両端を留めてある。
  */
-function ends(dir: string, at: number[], role = "worker"): void {
+function held(dir: string, spans: [number, number][], role = "worker"): void {
   const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", role], {
     cwd: dir,
     encoding: "utf8",
   });
   expect(scope.status, scope.stderr).toBe(0);
   writeFileSync(
-    join(dir, ".git", `valence-loop-ends-${scope.stdout.trim()}`),
-    `${at.join("\n")}\n`,
+    join(dir, ".git", `valence-loop-held-${scope.stdout.trim()}`),
+    `${spans.map(([from, to]) => `${from}\t${to}`).join("\n")}\n`,
   );
 }
 
@@ -1578,7 +1581,11 @@ describe("暇な枠を跨いだかで、次の一手を決める（#575）", () 
       [9_500, "poke"],
     ]);
     // **どの周回もすぐ返している**——**枠（1800 秒ごと）のとき、この作業場は暇だった。**
-    ends(dir, [1_100, 9_100, 9_600]);
+    held(dir, [
+      [1_000, 1_100],
+      [9_000, 9_100],
+      [9_500, 9_600],
+    ]);
 
     const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
 
@@ -1601,8 +1608,14 @@ describe("暇な枠を跨いだかで、次の一手を決める（#575）", () 
       [7_500, "poke"],
       [9_500, "poke"],
     ]);
-    // **最後の周回は、まだ返っていない**（いま回している周回がこれである）。
-    ends(dir, [1_500, 5_000, 7_000, 9_000]);
+    // **枠はどれも、走っている周回の中にある。**
+    held(dir, [
+      [1_000, 1_500],
+      [2_500, 5_000],
+      [5_000, 7_000],
+      [7_500, 9_000],
+      [9_000, 10_000],
+    ]);
 
     const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
 
@@ -1628,6 +1641,97 @@ describe("暇な枠を跨いだかで、次の一手を決める（#575）", () 
     expect(done.stdout, "引く先を言っていない").toMatch(/CronList/);
   });
 
+  it("鳴ったが走れなかった記録は、握っていた時間に数えない", () => {
+    // **`cron-blocked` は lease を取れなかった試み**である（#536）——**周回は
+    // 始まっていない**ので、**返した記録も無い。** **始まりの数から引く形にすると、
+    // これが 1 本あるだけで「ずっと握っている」へ倒れたまま戻らない**
+    // （#578 のレビュー。**倒れる先は「まだ判らない」＝黙る側**である）。
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [1_200, "cron-blocked"],
+      [9_000, "poke"],
+    ]);
+    held(dir, [
+      [1_000, 1_100],
+      [9_000, 9_100],
+    ]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "走れなかった記録で、握っていると読んでいる").toMatch(/入れ直す/);
+  });
+
+  it("組の記録より前の枠は、数に入れない", () => {
+    // **この記録を持たない版から上げた直後**——**始まりだけが残っている。**
+    // **そこを「暇だった」と読まない**（**刈られたぶんも同じ**）。
+    //
+    // **同時に、その先で止まったままにもしない** (#578 のレビュー)——**古い始まりを
+    // 引き算に混ぜると、以後ずっと「握っている」になる。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [2_000, "poke"],
+      [3_000, "poke"],
+      [9_000, "poke"],
+    ]);
+    // **組は、いちばん新しい 1 周ぶんだけ**（**それ以前は分からない**）。
+    held(dir, [[9_000, 9_100]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    // **9000 より前の枠（2800 / 4600 / 6400 / 8200）は数えない**——**残るのは 10000 だけ**で、
+    // **そこは暇だった。**
+    expect(done.stdout, "組より前を数えているか、その先で止まったままになっている").toMatch(
+      /暇な枠を 1 回跨いだ/,
+    );
+  });
+
+  it("刈り込みの窓は、始まりと終わりで食い違わない", () => {
+    // **別々のファイルに持つと、片方だけが押し出される** (#578 のレビュー)——
+    // **組にしてあるので、食い違いようが無い。** **その形をここで留める。**
+    const { dir, stamp } = workspace();
+    for (let i = 0; i < 25; i += 1) {
+      round(dir, stamp, "poke");
+    }
+
+    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(scope.status, scope.stderr).toBe(0);
+    const lines = readFileSync(
+      join(dir, ".git", `valence-loop-held-${scope.stdout.trim()}`),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean);
+
+    expect(lines.length, "握っていた時間が増え続けている").toBeLessThanOrEqual(20);
+    for (const line of lines) {
+      expect(line.split("\t"), "始まりと終わりが組になっていない").toHaveLength(2);
+    }
+  });
+
+  it("いま回している周回の中の枠は、暇に数えない", () => {
+    // **組が書かれるのは返したとき**なので、**走っている最中の周回は記録に無い**
+    // ——**その始まりを別に見ないと、いま握っている時間まで「暇だった」になる。**
+    const { dir, stamp } = workspace();
+    // **先に握る**——**`acquire` は始まりを 1 行足す**ので、**あとから記録を置く**
+    // （**置かないと、その 1 行が「どう始まったか分からない周回」として読まれる**）。
+    running(dir, stamp, 9_200);
+    records(dir, [
+      [1_000, "cron"],
+      [9_500, "poke"],
+    ]);
+    held(dir, [[1_000, 1_100]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    // **枠は 2800 / 4600 / 6400 / 8200 / 10000**——**最後の 1 つは、走っている周回の中**である。
+    expect(done.stdout, "走っている周回の中の枠を、暇に数えている").toMatch(/暇な枠を 4 回跨いだ/);
+  });
+
   it("実際に返した周回が読める", () => {
     // **両端を留める**——**書く側（`bin/loop-lease`）と読む側（この試験）で
     // 置き場所が食い違うと、ここだけが緑になる。**
@@ -1641,7 +1745,7 @@ describe("暇な枠を跨いだかで、次の一手を決める（#575）", () 
     });
     expect(scope.status, scope.stderr).toBe(0);
     const written = readFileSync(
-      join(dir, ".git", `valence-loop-ends-${scope.stdout.trim()}`),
+      join(dir, ".git", `valence-loop-held-${scope.stdout.trim()}`),
       "utf8",
     );
 

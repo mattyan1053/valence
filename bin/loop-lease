@@ -76,20 +76,22 @@ record_start() {
   fi
 }
 
-# **周回が終わったことを 1 行足す** (#575)。**始まりと同じ形で刈り込む**
-# ——**増え続けさせない**（`record_start` と同じ理由）。
+# **握っていた時間を 1 行足す** (#575)。**始まりと終わりを、同じ行に組で書く**
+# （#578 のレビュー）——**別々に持つと、片方だけが落ちたときに気づけない。**
+#
+# **刈り込みは 1 つの窓**である（**組なので、食い違いようが無い**）。
 #
 # **書けなくても、呼んだ側の答えは変えない**（**記録は診断**）——**言うだけである。**
-record_end() {
-  if ! printf '%s\n' "$now" >>"$ENDS" 2>/dev/null; then
-    echo "[WARN] $SCOPE_LABEL の周回の終わりを書けません: $ENDS" >&2
+record_held() {
+  if ! printf '%s\t%s\n' "$1" "$now" >>"$HELD" 2>/dev/null; then
+    echo "[WARN] $SCOPE_LABEL の握っていた時間を書けません: $HELD" >&2
     return 0
   fi
-  local kept_ends
-  kept_ends="$(tail -n "$RECENT_STARTS" "$ENDS" 2>/dev/null)" || return 0
-  if ! { printf '%s\n' "$kept_ends" >"$ENDS.tmp" 2>/dev/null &&
-    mv -f "$ENDS.tmp" "$ENDS" 2>/dev/null; }; then
-    rm -f "$ENDS.tmp" 2>/dev/null || true
+  local kept_held
+  kept_held="$(tail -n "$RECENT_STARTS" "$HELD" 2>/dev/null)" || return 0
+  if ! { printf '%s\n' "$kept_held" >"$HELD.tmp" 2>/dev/null &&
+    mv -f "$HELD.tmp" "$HELD" 2>/dev/null; }; then
+    rm -f "$HELD.tmp" 2>/dev/null || true
   fi
 }
 
@@ -419,12 +421,17 @@ set_role_paths() {
   # **周回が始まった記録** (#378)。**`ROUNDS` に列を足さない**——**あれは前の版も
   # 読んでいる**ので、**列を足すと解釈が黙って変わる**（`AGENTS.md` §5）。
   STARTS="$common_dir/valence-loop-starts-$lease_scope"
-  # **周回が終わった記録** (#575)。**始まりと対で、握っていた時間が決まる**
-  # ——**「枠のとき暇だったか」は、その外側にあったかどうか**である。
+  # **握っていた時間** (#575)。**「枠のとき暇だったか」は、その外側にあったか**である。
+  #
+  # **1 行に「始まり」と「終わり」を組で書く** (#578 のレビュー)。**別々に数えると、
+  # 対応の付かない始まりが 1 本でもあれば「ずっと握っている」へ倒れたまま戻らない**
+  # ——**鳴ったが走れなかった記録（`cron-blocked`）**も、**この記録を持たない版が
+  # 書いた始まり**も、**刈り込みの窓が食い違って落ちた終わり**も、**どれも同じ形で
+  # 効く**（**倒れる先は「まだ判らない」＝黙る側**なので、**気づけない**）。
   #
   # **`STARTS` に別の種類の行を足さない**（#537）——**あちらは窓を持つ**ので、
   # **足したぶん、元からあった cron の記録が押し出される。** **別のファイルにする。**
-  ENDS="$common_dir/valence-loop-ends-$lease_scope"
+  HELD="$common_dir/valence-loop-held-$lease_scope"
   # **いちばん長かった周回の秒数。** 「周回が動いているか」を外から判断するのに使う
   # （bin/loop-stall）。**書き写した閾値を置かないため**に、実測を溜める形にしてある。
   ROUND_LEN="$common_dir/valence-loop-roundlen-$lease_scope"
@@ -1853,8 +1860,8 @@ release)
     rm -f "$ROUND_LEN.tmp" 2>/dev/null || true
     echo "[WARN] $SCOPE_LABEL の周回の長さを記録できません: $ROUND_LEN" >&2
   fi
-  # **返した時刻を残す** (#575)。**ここから次の `acquire` までが、暇だった時間**である。
-  record_end
+  # **握っていた時間を残す** (#575)。**この外側が、暇だった時間**である。
+  record_held "$held_since"
   rm -f "$STATE" || {
     echo "[FAIL] lease を消せません: $STATE" >&2
     exit 2

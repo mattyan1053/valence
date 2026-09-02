@@ -224,9 +224,14 @@ fresh_round() {
 # ——**塞がっているセッションでは cron が発火しない**ので、**鳴らなかったことは
 # 「予定表が死んでいる」証拠にも「忙しかった」証拠にもなる。**
 #
-# **握っていた時間なら記録から言える。** **`bin/loop-lease` は周回の始まりと
-# 終わりを書く**ので、**ある時刻に握っていたかは「その時刻までの始まりの数」と
-# 「終わりの数」で決まる**（**周回は作業場ごとに直列**である）。
+# **握っていた時間なら記録から言える。** **`bin/loop-lease` は周回ごとに
+# 「始まり」と「終わり」を組で書く**ので、**ある時刻に握っていたかは、
+# その組のどれかに入るかで決まる。**
+#
+# **数で引き算しない** (#578 のレビュー)——**対応の付かない始まりが 1 本でもあると、
+# 「ずっと握っている」へ倒れたまま戻らない**（**鳴ったが走れなかった記録・
+# この記録を持たない版が書いた始まり・窓から落ちた終わり**）。**倒れる先は
+# 「まだ判らない」＝黙る側**なので、**気づけない。**
 #
 # **枠の時刻は、最後に鳴った cron から間隔ごと**に置く（**間隔は呼ぶ側が持っている**
 # ——**渡されたものか、記録から測ったもの**）。**リポジトリへ固定しない**（#378）。
@@ -236,29 +241,38 @@ fresh_round() {
 # **そこで断定すると、#531 で踏んだ形に戻る。**
 idle_slots() {
   local scope="$1" last_cron="$2" interval="$3"
-  local starts="$common_dir/valence-loop-starts-$scope"
-  local ends="$common_dir/valence-loop-ends-$scope"
-  local at _trigger _where line slot idle=0 held oldest=""
-  local start_at=() end_at=()
-  [[ -f $starts && -f $ends ]] || { echo "-"; return 0; }
-  while IFS=$'\t' read -r at _trigger _where; do
-    [[ $at =~ ^[0-9]+$ ]] || continue
-    start_at+=("$at")
-    [[ -n $oldest ]] && ((oldest <= at)) || oldest="$at"
-  done <"$starts"
-  while read -r line; do
-    [[ $line =~ ^[0-9]+$ ]] || continue
-    end_at+=("$line")
-  done <"$ends"
-  # **始まりが 1 本も無いなら、何も言えない**（**終わりだけでは間が決まらない**）。
-  [[ -n $oldest ]] || { echo "-"; return 0; }
+  local held="$common_dir/valence-loop-held-$scope"
+  local rounds="$common_dir/valence-loop-rounds-$scope"
+  local from to slot idle=0 busy floor="" running_since=""
+  local held_from=() held_to=()
+  [[ -f $held ]] || { echo "-"; return 0; }
+  while IFS=$'\t' read -r from to; do
+    [[ $from =~ ^[0-9]+$ && $to =~ ^[0-9]+$ ]] || continue
+    held_from+=("$from")
+    held_to+=("$to")
+    [[ -n $floor ]] && ((floor <= from)) || floor="$from"
+  done <"$held"
+  # **組が 1 つも無いなら、何も言えない**（**この記録を持たない版から上げた直後**）。
+  [[ -n $floor ]] || { echo "-"; return 0; }
+  # **いま回している周回は、まだ組になっていない**——**返したときに書かれる**ので、
+  # **その始まりは別に見る**（**握っている最中は、暇ではない**）。
+  if is_running "$scope" && [[ -f $rounds ]] &&
+    read -r running_since <"$rounds" 2>/dev/null &&
+    [[ $running_since =~ ^[0-9]+$ ]]; then
+    :
+  else
+    running_since=""
+  fi
   for ((slot = last_cron + interval; slot <= NOW; slot += interval)); do
-    # **残っている記録より前の枠は数えない**——**刈られたぶんは「暇だった」とは言えない。**
-    ((slot >= oldest)) || continue
-    held=0
-    for at in "${start_at[@]}"; do ((at <= slot)) && held=$((held + 1)); done
-    for at in "${end_at[@]}"; do ((at <= slot)) && held=$((held - 1)); done
-    ((held > 0)) || idle=$((idle + 1))
+    # **組が残っている範囲だけを見る** (#578 のレビュー)。**それより前は、
+    # 握っていたかどうかが分からない**——**刈られたぶんを「暇だった」と読まない。**
+    ((slot >= floor)) || continue
+    busy=0
+    for i in "${!held_from[@]}"; do
+      ((held_from[i] <= slot && slot <= held_to[i])) && busy=1 && break
+    done
+    [[ -z $running_since ]] || ((running_since > slot)) || busy=1
+    ((busy == 1)) || idle=$((idle + 1))
   done
   echo "$idle"
 }
