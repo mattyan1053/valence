@@ -200,11 +200,18 @@ describe("bin/loop-check-kill", () => {
 
 describe("落ちたことを、親に頼らず確かめる（#572 のレビュー）", () => {
   /**
-   * **落とす対象は「子まで辿った番号」なのに、落ちたかを通常モードで見ていた**
-   * ——**あちらはコマンド名で当てる**ので、**reparent された `forks.js` が残っていても
-   * 0 が返る。** **この PR が足した「子まで辿る」側が、確認には効いていなかった。**
+   * **落とす対象は「子まで辿った番号」なのに、確かめるのは通常モードだった**
+   * ——**あちらはコマンド名で当てる**ので、**親が消えたあとの子には当たらない。**
    *
-   * **番号は番号のまま**である——**親が消えても `kill -0` で引ける。**
+   * **ただし `kill -0` では見られない**（#572 のレビュー 3 周目）。**あれは
+   * 「シグナルを送れるか」しか見ない**ので、**KILL の直後、まだ刈り取られていない
+   * ゾンビにも通る**——**実測で 20/20**（**落とせているのに「残っている」と答える**）。
+   *
+   * **状態で見る。** **`Z` は死んでいる**（**親の回収を待っているだけ**）。
+   *
+   * **語では測らない**（`AGENTS.md` §4）——**`kill -0` はこの 2 ファイルの散文に
+   * 5 行出る**ので、**文字列で当てると、直っていなくても緑になる。**
+   * **終了コードと、出た番号で見る。**
    */
   const sandboxes: string[] = [];
 
@@ -214,18 +221,18 @@ describe("落ちたことを、親に頼らず確かめる（#572 のレビュ�
     }
   });
 
+  /** `ps -o stat=` が返す状態。**空なら「もう居ない」。** */
   function run({
     pids,
-    alive,
+    states = {} as Record<string, string>,
     verifyStatus = 0,
   }: {
     pids: string[];
-    alive: string[];
+    states?: Record<string, string>;
     verifyStatus?: number;
   }): { status: number; stdout: string; stderr: string } {
     const dir = mkdtempSync(join(tmpdir(), "check-kill-alive-"));
     sandboxes.push(dir);
-    const state = join(dir, "round");
     writeFileSync(
       join(dir, "leftovers"),
       [
@@ -240,22 +247,24 @@ describe("落ちたことを、親に頼らず確かめる（#572 のレビュ�
       { mode: 0o755 },
     );
     chmodSync(join(dir, "leftovers"), 0o755);
+    writeFileSync(join(dir, "kill"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    chmodSync(join(dir, "kill"), 0o755);
     writeFileSync(
-      join(dir, "kill"),
+      join(dir, "ps"),
       [
         "#!/usr/bin/env bash",
-        `printf 'done' >${JSON.stringify(state)}`,
-        'if [[ $1 == "-0" ]]; then',
-        `  for pid in ${alive.map((pid) => JSON.stringify(pid)).join(" ") || '""'}; do`,
-        '    [[ $2 == "$pid" ]] && exit 0',
-        "  done",
-        "  exit 1",
-        "fi",
-        "exit 0",
+        // **`-o stat= -p <番号>` で呼ばれる**——**最後の引数が番号である**
+        'pid="${@: -1}"',
+        ...Object.entries(states).map(
+          ([pid, state]) =>
+            `[[ $pid == ${JSON.stringify(pid)} ]] && { echo ${JSON.stringify(state)}; exit 0; }`,
+        ),
+        // **知らない番号は「もう居ない」**
+        "exit 1",
       ].join("\n"),
       { mode: 0o755 },
     );
-    chmodSync(join(dir, "kill"), 0o755);
+    chmodSync(join(dir, "ps"), 0o755);
     const result = spawnSync(SCRIPT, ["valence"], {
       cwd: dir,
       encoding: "utf8",
@@ -264,27 +273,36 @@ describe("落ちたことを、親に頼らず確かめる（#572 のレビュ�
         LOOP_CHECK_KILL_GRACE_SEC: "0",
         LOOP_CHECK_LEFTOVERS: join(dir, "leftovers"),
         LOOP_CHECK_KILL_CMD: join(dir, "kill"),
+        LOOP_CHECK_PS_CMD: join(dir, "ps"),
       },
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
-  it("1 つでも生き残っていたら、1 を返してその番号を出す", () => {
-    // **通常モードは 0 を返している**（**コマンド名では当たらない**）——**それでも赤**
-    const done = run({ pids: ["100", "101", "102"], alive: ["102"] });
+  it("落とせているのに「残っている」と言わない（ゾンビ）", () => {
+    // **これがこの周回の指摘そのもの**である——**KILL の直後、まだ刈り取られて
+    // いない子は `Z` で残る。** **シグナルは通るが、走ってはいない。**
+    const done = run({ pids: ["100", "101"], states: { "100": "Z", "101": "Z+" } });
 
-    expect(done.status, "生き残っているのに成功と言っている").toBe(1);
-    expect(done.stderr, "どれが残ったかが出ない").toContain("102");
+    expect(done.status, `落ちているのに残っていると言っている: ${done.stderr}`).toBe(0);
   });
 
-  it("全部落ちていれば、0 を返す", () => {
-    // **上の判定が空でないことを、ここが支えている**
-    expect(run({ pids: ["100", "101"], alive: [] }).status).toBe(0);
+  it("もう居なければ、0 を返す", () => {
+    expect(run({ pids: ["100"], states: {} }).status).toBe(0);
+  });
+
+  it("1 つでも走っていたら、1 を返してその番号を出す", () => {
+    // **上の判定が空でないことを、ここが支えている**——**通常モードは 0 を返している**
+    // （**コマンド名では当たらない**）**のに、赤くなる**
+    const done = run({ pids: ["100", "101", "102"], states: { "102": "Sl" } });
+
+    expect(done.status, "走っているのに成功と言っている").toBe(1);
+    expect(done.stderr, "どれが残ったかが出ない").toContain("102");
   });
 
   it("再検査できないときは、2 を返す（1 に潰さない）", () => {
     // **`docker` を引けなくなると `bin/loop-check-leftovers` は 2 を返す**
     // ——**「落とし切れなかった」と混ぜると、呼ぶ側が見分けられない**
-    expect(run({ pids: ["100"], alive: [], verifyStatus: 2 }).status).toBe(2);
+    expect(run({ pids: ["100"], states: {}, verifyStatus: 2 }).status).toBe(2);
   });
 });

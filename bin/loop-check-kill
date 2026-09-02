@@ -55,6 +55,12 @@ readonly LEFTOVERS="${LOOP_CHECK_LEFTOVERS:-$here/loop-check-leftovers}"
 # 記録を書くだけの `kill` である**）。**既定は組み込み**で、外部の `kill(1)` に依存しない。
 readonly KILL_CMD="${LOOP_CHECK_KILL_CMD:-kill}"
 
+# **生死は状態で見る**（#572 のレビュー 3 周目）。**`kill -0` は使えない**
+# ——**あれは「シグナルを送れるか」しか見ない**ので、**KILL の直後、まだ親に
+# 刈り取られていないゾンビにも通る**（**実測 20/20**）。**落とせているのに
+# 「残っている」と答える**——**この口が言いたいことの、ちょうど逆である。**
+readonly PS_CMD="${LOOP_CHECK_PS_CMD:-ps}"
+
 # **TERM で頼んでから、KILL で落とす。** **`vitest` は TERM で畳めることがある**
 # ——**いきなり KILL にすると、書きかけの記録が残る。**
 readonly GRACE_SEC="${LOOP_CHECK_KILL_GRACE_SEC:-2}"
@@ -86,10 +92,19 @@ mapfile -t targets < <(printf '%s\n' "$pids" | grep -E '^[0-9]+$' || true)
 # reparent された子（`forks.js` など）は当たらない**——**残っていても 0 が返る。**
 # **この口が足した「子まで辿る」側が、確認には効かない。**
 #
-# **番号は番号のまま**である（**親の生死に依らない**）——**`kill -0` で引く。**
+# **番号は番号のまま**である（**親の生死に依らない**）。
+
+# **まだ走っているか。** **`Z` は死んでいる**——**親の回収を待っているだけ**である。
+# **空なら、もう居ない。**
+running() {
+  local state
+  state="$("$PS_CMD" -o stat= -p "$1" 2>/dev/null | tr -d ' ')"
+  [[ -n $state && $state != Z* ]]
+}
+
 survivors=()
 for pid in "${targets[@]}"; do
-  "$KILL_CMD" -0 "$pid" 2>/dev/null && survivors+=("$pid")
+  running "$pid" && survivors+=("$pid")
 done
 
 if ((${#survivors[@]})); then
