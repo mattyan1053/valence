@@ -1527,18 +1527,22 @@ describe("master の周回も見る", () => {
  * `--trigger cron` を渡すと、34〜91 秒の間が記録に入り**、**周期として読まれる**
  * （**実測: `interval=~91`。窓が約 3 分になっていた**）。
  *
- * **両方の役に掛ける。** **master は前から `poke` を渡していた**が、**入口の文は
- * どちらとも読めた**——**同じ 1 文を、2 つの役が違う側に読んでいた。**
- * **片方だけ直すと、記録の意味が役で違うまま**である。
+ * **判定を持つのは `bin/loop-lease` の冒頭である**（#581）。**ここは以前、両方の入口に
+ * 同じ文が書いてあることを要求していた**——**写しを強制する試験**だった。
+ * **写した結果、決め方が worker の入口にしか根付かず、master 側は時計の推量で
+ * 渡していた**（`AGENTS.md` §5）。**入口が指しているかは
+ * `loop/trigger-fact-wiring.test.ts` が見る**ので、**ここは持つ側だけを見る。**
+ *
+ * **語では測らない**（`AGENTS.md` §4）——**`呼び直` は `bin/loop-lease` に 5 行出る**
+ * （**exit 3 の説明・積み方の理由・標準エラーの文面**）。
+ * **「捨てて呼び直した周回」まで寄せると 1 行**である。
  */
 describe("呼び直した周回を、cron として記録しない", () => {
-  for (const role of ["worker", "master"] as const) {
-    it(`${role} の入口が、呼び直しは poke だと書いている`, () => {
-      const entry = readFileSync(join(REPO_ROOT, `.claude/commands/loop-${role}.md`), "utf8");
+  it("決め方を持つ側が、呼び直しは poke だと書いている", () => {
+    const script = readFileSync(join(REPO_ROOT, "bin/loop-lease"), "utf8");
 
-      expect(entry, "呼び直しの trigger が書いていない").toMatch(/呼び直(し|した).{0,40}poke/);
-    });
-  }
+    expect(script, "呼び直しの trigger が書いていない").toMatch(/捨てて呼び直した周回.{0,20}poke/);
+  });
 });
 
 /**
