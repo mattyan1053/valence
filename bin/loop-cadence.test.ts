@@ -1690,13 +1690,25 @@ describe("説明の数と、実際に出る読みを突き合わせる（#501 / 
     expect(claimsOf(decoy), "節の外に書いた数を拾っている").toStrictEqual(claimsOf(script()));
   });
 
-  it("説明の節の数を変えたら、突き合わせに出る", () => {
+  it("説明の節に数を書けば、突き合わせに出る", () => {
     // **狭めた先が空になっていないこと**——**節の切り方を間違えると、
-    // 何も拾わないまま緑になる。**
-    const changed = script().replace("原因は 4 つ", "原因は 3 つ");
-    expect(changed, "書き換えが当たっていない").not.toBe(script());
+    // 何も拾わないまま緑になる**（**上の decoy と対で、節の両側を見ている**）。
+    //
+    // **入力は、いまの本文から作らない** (#502 のレビュー 3 周目)。**数を消すのは、
+    // この PR が許している形**（すぐ上の試験）——**実ファイルに `原因は 4 つ` が
+    // 在ることを前提にすると、消した瞬間にこの試験が「書き戻せ」と言う**
+    // （**この PR が開けた逃げ道を、試験が塞ぎ返す**）。
+    //
+    // **節の終わりは `recorded_round` の定義**なので、**その直前へ 1 行入れる**
+    // ——**いまの本文が数を持っていても、持っていなくても、1 つ増える。**
+    const marker = "recorded_round() {";
+    const withNumber = script().replace(marker, `# **試験が入れた行。原因は 7 つ**\n${marker}`);
+    expect(withNumber, "書き換えが当たっていない").not.toBe(script());
 
-    expect(claimsOf(changed), "節の中の数を拾えていない").toStrictEqual([3]);
+    expect(claimsOf(withNumber), "節の中に入れた数を拾えていない").toStrictEqual([
+      ...claimsOf(script()),
+      7,
+    ]);
   });
 
   it("`show_reading` の外に同じ書き方の文面があっても、数に入らない", () => {
