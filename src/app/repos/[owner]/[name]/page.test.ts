@@ -396,3 +396,191 @@ describe("盤面からログアウトできる", () => {
     expect(showsSignOut("signed-out")).toBe(false);
   });
 });
+
+describe("材料が出せなかったことを、サーバ側に残す（#573）", () => {
+  /**
+   * **`changesUnavailable` は計算されていたのに、どこへも渡っていなかった**
+   * ——**画面は「まだ取得できていません」と出し、記録には 1 行も出ない。**
+   * **だから、誰も理由を answer できなかった**（#573 の「最初の一手」が空振りする）。
+   *
+   * **実測（2026-09-02）**: **取得は成功していて 5627 ms**、**期限は 5000 ms**。
+   * **毎回打ち切られていた**——**記録があれば `timedout` の 1 行で分かった。**
+   */
+  function recorder() {
+    const recorded: string[] = [];
+    return {
+      recorded,
+      report: (action: "view", kind: string) => recorded.push(`${action}=${kind}`),
+    };
+  }
+
+  const plan = (unavailable: { pullRequestNumber: number; kind: string; reason: string }[]) => ({
+    kind: "board" as const,
+    plan: {
+      pullRequests: [],
+      edges: [],
+      order: { ordered: [], cyclic: [] },
+      invalid: [],
+      changes: new Map(),
+      changesUnavailable: unavailable,
+      heads: new Map(),
+      titles: new Map(),
+    },
+    approvals: { approved: new Set<number>(), unavailable: [] },
+  });
+
+  it("打ち切られたことが、記録に残る", async () => {
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      {
+        board: async () =>
+          plan([
+            { pullRequestNumber: 1, kind: "timedout", reason: "期限までに材料が返りませんでした" },
+          ]) as never,
+        report,
+      },
+    );
+
+    expect(recorded, "材料が出せなかったことが残っていない").toContain("view=changes/timedout");
+  });
+
+  it("同じ理由は 1 行にまとめる", async () => {
+    // **毎回鳴る記録は、そのうち読まれなくなる**（#248）——**PR の本数ぶん出さない**
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      {
+        board: async () =>
+          plan([
+            { pullRequestNumber: 1, kind: "timedout", reason: "x" },
+            { pullRequestNumber: 2, kind: "timedout", reason: "x" },
+          ]) as never,
+        report,
+      },
+    );
+
+    expect(recorded.filter((line) => line === "view=changes/timedout")).toHaveLength(1);
+  });
+
+  it("理由そのものは残さない", async () => {
+    // **`reason` には応答の値が入りうる**（`AGENTS.md` §6）——**残すのは `kind` だけ**
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      {
+        board: async () =>
+          plan([
+            { pullRequestNumber: 1, kind: "unreadable", reason: "PR の詳細を読めません: 秘密" },
+          ]) as never,
+        report,
+      },
+    );
+
+    expect(recorded.join(" ")).not.toContain("秘密");
+  });
+
+  it("材料が揃っていれば、何も残さない", async () => {
+    // **平常時に鳴る記録は読まれなくなる**（#248）
+    const { recorded, report } = recorder();
+
+    await renderRepositoryBoard(
+      { owner: "acme", name: "web" },
+      {},
+      { board: async () => plan([]) as never, report },
+    );
+
+    expect(recorded).toEqual([]);
+  });
+});
+
+describe("盤面が、理由を部品まで渡す（#577 のレビュー 2 周目）", () => {
+  /**
+   * **`page.tsx` の `changeUnavailableOf` を消しても、全試験が通っていた。**
+   *
+   * - **`plan()` は `pullRequests: []`** ——**行を 1 度も描かない**
+   * - **`review-board.test.ts` は `ReviewBoard` へ直接渡している**
+   *   ——**部品は押さえたが、page からの配線は誰も見ていない**
+   *
+   * **本番だけが「まだ取得できていません」に戻る**——**この Issue の元の症状**である。
+   *
+   * **守りたいのは 1 行**である（`page.tsx` の `changeUnavailableOf`）。
+   * **変異は、その 1 行だけを消して打つ**——**前の周回は周りごと消していて、
+   * `headKnown` が落ちた別の理由で赤くなっていた**（**当たっていない変異**）。
+   */
+  async function markup(
+    unavailable: { pullRequestNumber: number; kind: string; reason: string }[],
+  ) {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        {
+          board: async () =>
+            ({
+              kind: "board",
+              plan: {
+                // **行を描く**——**空だと、配線を消しても気づけない**
+                pullRequests: [
+                  {
+                    number: 1,
+                    base: { repository: "r", branch: "main" },
+                    head: { repository: "r", branch: "feat/a" },
+                  },
+                ],
+                edges: [],
+                order: { ordered: [1], cyclic: [] },
+                invalid: [],
+                // **材料は無い**——**理由の側だけを変える**
+                changes: new Map(),
+                changesUnavailable: unavailable,
+                heads: new Map([[1, "a".repeat(40)]]),
+                titles: new Map(),
+              },
+              approvals: { approved: new Set<number>(), unavailable: [] },
+            }) as never,
+          report: () => {},
+        },
+      ),
+    );
+  }
+
+  it("打ち切られたことが、行に出る", async () => {
+    const html = await markup([
+      { pullRequestNumber: 1, kind: "timedout", reason: "期限までに材料が返りませんでした" },
+    ]);
+
+    expect(html, "page から部品へ理由が渡っていない").toContain("時間内に返りませんでした");
+  });
+
+  it("読めなかったことも、行に出る", async () => {
+    const html = await markup([
+      { pullRequestNumber: 1, kind: "unreadable", reason: "PR の詳細を読めません" },
+    ]);
+
+    expect(html).toContain("読めませんでした");
+  });
+
+  it("理由が無ければ、これまでどおり", async () => {
+    // **上の判定が空でないことを、ここが支えている**
+    const html = await markup([]);
+
+    expect(html).toContain("まだ取得できていません");
+    expect(html).not.toContain("時間内に返りませんでした");
+  });
+
+  it("別の PR の理由を、この行に出さない", async () => {
+    // **番号で引いている**ことを見る——**`find` が最初の 1 件を返すだけだと、
+    // どの行にも同じ理由が出る**
+    const html = await markup([{ pullRequestNumber: 999, kind: "timedout", reason: "別の PR" }]);
+
+    expect(html).toContain("まだ取得できていません");
+    expect(html).not.toContain("時間内に返りませんでした");
+  });
+});

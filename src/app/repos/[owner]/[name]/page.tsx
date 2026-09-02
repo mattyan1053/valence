@@ -173,6 +173,27 @@ export type BoardPageDeps = {
   readonly report: (action: "view", kind: string) => void;
 };
 
+/**
+ * **材料が出せなかったことを、サーバ側に残す** (#573)。
+ *
+ * **画面は「まだ取得できていません」としか言えない**（**`reason` には応答の値が
+ * 入りうる**。`AGENTS.md` §6）ので、**どれだったかはここにしか残らない。**
+ *
+ * **`kind` ごとに 1 行**である——**PR の本数ぶん出すと、毎回鳴る記録になる**（#248）。
+ *
+ * **これが無いと、#573 の「最初の一手」が空振りする**——**記録を読んで決める、と
+ * 書いてあるのに、記録が 1 行も出ていなかった**（**実測: 期限 5000 ms に対して
+ * 取得は 5627 ms。毎回打ち切られていた**）。
+ */
+function reportMissingChanges(
+  unavailable: readonly { readonly kind: string }[],
+  report: BoardPageDeps["report"],
+): void {
+  for (const kind of new Set(unavailable.map((entry) => entry.kind))) {
+    report("view", `changes/${kind}`);
+  }
+}
+
 export async function renderRepositoryBoard(
   { owner, name }: { readonly owner: string; readonly name: string },
   query: Record<string, string | string[] | undefined>,
@@ -185,6 +206,10 @@ export async function renderRepositoryBoard(
   const unavailable = boardUnavailableReason(result);
   if (unavailable !== undefined) {
     deps.report("view", unavailable);
+  }
+
+  if (result.kind === "board") {
+    reportMissingChanges(result.plan.changesUnavailable, deps.report);
   }
 
   if (result.kind === "not-found") {
@@ -229,6 +254,12 @@ export async function renderRepositoryBoard(
             order={result.plan.order}
             invalid={result.plan.invalid}
             changes={result.plan.changes}
+            // **なぜ出せなかったかを、行に出す** (#573)——**`kind` だけを渡す**
+            // （**`reason` は画面へ出さない**。§6）
+            changeUnavailableOf={(number) =>
+              result.plan.changesUnavailable.find((entry) => entry.pullRequestNumber === number)
+                ?.kind
+            }
             // **図の札を、ボタンと同じ条件にする**（#541 のレビュー）——**`MergeButton`
             // へ渡している `headSha` と、同じものを見る**（**無効なボタンの隣に
             // 「押せる」と出さない**）
