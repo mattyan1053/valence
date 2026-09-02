@@ -243,7 +243,8 @@ idle_slots() {
   local scope="$1" last_cron="$2" interval="$3"
   local held="$common_dir/valence-loop-held-$scope"
   local rounds="$common_dir/valence-loop-rounds-$scope"
-  local from to slot idle=0 busy floor="" running_since=""
+  local from to slot idle=0 busy floor="" running_since="" trigger _where matched
+  local starts="$common_dir/valence-loop-starts-$scope"
   local held_from=() held_to=()
   [[ -f $held ]] || { echo "-"; return 0; }
   while IFS=$'\t' read -r from to; do
@@ -254,6 +255,18 @@ idle_slots() {
   done <"$held"
   # **組が 1 つも無いなら、何も言えない**（**この記録を持たない版から上げた直後**）。
   [[ -n $floor ]] || { echo "-"; return 0; }
+  # **返せずに終わった周回があるなら、そこから先は分からない** (#578 のレビュー 2 周目)。
+  #
+  # **`release` へ到達しない周回では、組が書かれない**（**無音のまま期限切れになって
+  # 引き継がれた・context が尽きた・落ちた**）——**その穴を「暇だった」と読むと、
+  # 倒れる向きが逆になる**（**実際には旧 lease が塞いでいて cron が発火できなかった**）。
+  # **従うと予定が 2 本になる。**
+  #
+  # **開始の一覧は、穴の検出にだけ使う**——**算術には戻さない**（**戻すと、
+  # `cron-blocked` も旧い開始も、また `held` を狂わせる**）。
+  #
+  # **読めないなら、分からないと言う**（**穴が無いことを確かめられていない**）。
+  [[ -f $starts ]] || { echo "-"; return 0; }
   # **いま回している周回は、まだ組になっていない**——**返したときに書かれる**ので、
   # **その始まりは別に見る**（**握っている最中は、暇ではない**）。
   if is_running "$scope" && [[ -f $rounds ]] &&
@@ -263,6 +276,20 @@ idle_slots() {
   else
     running_since=""
   fi
+  while IFS=$'\t' read -r from trigger _where; do
+    [[ $from =~ ^[0-9]+$ ]] || continue
+    # **鳴ったが走れなかった試行は、周回ではない** (#536)——**組が無くて当然である。**
+    [[ $trigger != "cron-blocked" ]] || continue
+    # **組が残っている範囲だけを見る**（**それより前は、もともと数えない**）。
+    ((from >= floor)) || continue
+    # **いま回している周回は、返したときに組になる**——**穴ではない。**
+    [[ -z $running_since ]] || ((from != running_since)) || continue
+    matched=0
+    for i in "${!held_from[@]}"; do
+      ((held_from[i] == from)) && matched=1 && break
+    done
+    ((matched == 1)) || { echo "-"; return 0; }
+  done <"$starts"
   for ((slot = last_cron + interval; slot <= NOW; slot += interval)); do
     # **組が残っている範囲だけを見る** (#578 のレビュー)。**それより前は、
     # 握っていたかどうかが分からない**——**刈られたぶんを「暇だった」と読まない。**
