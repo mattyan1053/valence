@@ -19,6 +19,13 @@
  * ——**本文まるごとに当てると、`--trigger` と関係の無い行で緑になる。**
  * **`--trigger` の段だけを切り出してから見る。**
  *
+ * **渡している行も、1 本ではない**（#582 のレビュー）。**`acquire` / `recover` は
+ * worker に 3 本、master に 2 本ある**ので、**ファイル全体に当てると、どれか 1 本から
+ * `unknown` を消しても残りに当たって緑**になる。**倒れる先が悪い**——**`recover` と
+ * 読み直しの `acquire` は「印がずれて捨てた周回」の入口**で、**どう始まったかが
+ * いちばん分からない場面**である。**そこだけ選択肢が `cron|poke` へ戻る。**
+ * **全部取り出して、1 行ずつ見る。**
+ *
  * **正本（`bin/loop-lease`）にも同じことが要る**（#582 のレビュー）。
  * **`unknown` はそこに 15 行出る**——**散文だけでなく、`TRIGGER=` の既定値・`case` の
  * 受け口・エラー文にも出る**ので、**`/どちらとも言えない.*unknown/s` は、
@@ -73,6 +80,28 @@ function decisionLine(script: string, phrase: string): string {
   return only;
 }
 
+/**
+ * `--trigger` を**渡している行**を、全部取り出す。
+ *
+ * **1 本ではない。** **worker は 3 本（`acquire` 2 本と `recover` 1 本）、master は 2 本**
+ * ある——**どれも守る対象**なので、**`decisionLine()` のように 1 行へ寄せる形は当たらない。**
+ *
+ * **0 本なら落とす**（`decisionLine()` と同じ理由）——**打つ行ごと消えたときに
+ * 「書いていないから緑」にしない。**
+ *
+ * **説明の散文と混ざらない。** **散文は `` `--trigger` `` と書く**ので、
+ * **`--trigger ` には当たらない**（数えて確かめた）。
+ */
+function triggerArgumentLines(path: string): string[] {
+  const hits = read(path)
+    .split("\n")
+    .filter((line) => line.includes("bin/loop-lease") && line.includes("--trigger "));
+  if (hits.length === 0) {
+    throw new Error(`--trigger を渡している行がありません: ${path}`);
+  }
+  return hits;
+}
+
 describe("--trigger の決め方は、1 箇所にある", () => {
   it("判定を持つのは bin/loop-lease である", () => {
     // **手順書ではなく、渡される側が持つ**——**両方の役が同じものを読む唯一の場所**
@@ -106,9 +135,12 @@ describe("--trigger の決め方は、1 箇所にある", () => {
         expect(triggerParagraph(procedure.path)).toContain("unknown");
       });
 
-      it.runIf(procedure.acquires)("渡せる値に unknown が並んでいる", () => {
-        // **段だけでなく、打つ行にも出ていること**——**読む人が写すのはこちら**
-        expect(read(procedure.path), "打つ行が古い").toContain("--trigger <cron|poke|unknown>");
+      it.runIf(procedure.acquires)("渡している行すべてに、unknown が並んでいる", () => {
+        // **段だけでなく、打つ行にも出ていること**——**読む人が写すのはこちら**。
+        // **1 本ではない**ので、**全部取り出して 1 行ずつ見る**（#582 のレビュー）
+        for (const line of triggerArgumentLines(procedure.path)) {
+          expect(line, "打つ行が古い").toContain("--trigger <cron|poke|unknown>");
+        }
       });
     });
   }
