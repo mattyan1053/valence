@@ -499,3 +499,88 @@ describe("材料が出せなかったことを、サーバ側に残す（#573）
     expect(recorded).toEqual([]);
   });
 });
+
+describe("盤面が、理由を部品まで渡す（#577 のレビュー 2 周目）", () => {
+  /**
+   * **`page.tsx` の `changeUnavailableOf` を消しても、全試験が通っていた。**
+   *
+   * - **`plan()` は `pullRequests: []`** ——**行を 1 度も描かない**
+   * - **`review-board.test.ts` は `ReviewBoard` へ直接渡している**
+   *   ——**部品は押さえたが、page からの配線は誰も見ていない**
+   *
+   * **本番だけが「まだ取得できていません」に戻る**——**この Issue の元の症状**である。
+   *
+   * **守りたいのは 1 行**である（`page.tsx` の `changeUnavailableOf`）。
+   * **変異は、その 1 行だけを消して打つ**——**前の周回は周りごと消していて、
+   * `headKnown` が落ちた別の理由で赤くなっていた**（**当たっていない変異**）。
+   */
+  async function markup(
+    unavailable: { pullRequestNumber: number; kind: string; reason: string }[],
+  ) {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        {
+          board: async () =>
+            ({
+              kind: "board",
+              plan: {
+                // **行を描く**——**空だと、配線を消しても気づけない**
+                pullRequests: [
+                  {
+                    number: 1,
+                    base: { repository: "r", branch: "main" },
+                    head: { repository: "r", branch: "feat/a" },
+                  },
+                ],
+                edges: [],
+                order: { ordered: [1], cyclic: [] },
+                invalid: [],
+                // **材料は無い**——**理由の側だけを変える**
+                changes: new Map(),
+                changesUnavailable: unavailable,
+                heads: new Map([[1, "a".repeat(40)]]),
+                titles: new Map(),
+              },
+              approvals: { approved: new Set<number>(), unavailable: [] },
+            }) as never,
+          report: () => {},
+        },
+      ),
+    );
+  }
+
+  it("打ち切られたことが、行に出る", async () => {
+    const html = await markup([
+      { pullRequestNumber: 1, kind: "timedout", reason: "期限までに材料が返りませんでした" },
+    ]);
+
+    expect(html, "page から部品へ理由が渡っていない").toContain("時間内に返りませんでした");
+  });
+
+  it("読めなかったことも、行に出る", async () => {
+    const html = await markup([
+      { pullRequestNumber: 1, kind: "unreadable", reason: "PR の詳細を読めません" },
+    ]);
+
+    expect(html).toContain("読めませんでした");
+  });
+
+  it("理由が無ければ、これまでどおり", async () => {
+    // **上の判定が空でないことを、ここが支えている**
+    const html = await markup([]);
+
+    expect(html).toContain("まだ取得できていません");
+    expect(html).not.toContain("時間内に返りませんでした");
+  });
+
+  it("別の PR の理由を、この行に出さない", async () => {
+    // **番号で引いている**ことを見る——**`find` が最初の 1 件を返すだけだと、
+    // どの行にも同じ理由が出る**
+    const html = await markup([{ pullRequestNumber: 999, kind: "timedout", reason: "別の PR" }]);
+
+    expect(html).toContain("まだ取得できていません");
+    expect(html).not.toContain("時間内に返りませんでした");
+  });
+});
