@@ -1588,23 +1588,59 @@ describe("説明の数と、実際に出る読みを突き合わせる（#501 / 
    * 3 通り、窓は「分かる・分からない」の 2 通り。** **分岐が増えれば、その組み合わせ
    * のどこかで新しい文面が出る**ので、**出し方（`echo` か変数か）に依存しない。**
    */
+  /**
+   * **ドライバが回す入力軸**——**`show_reading` の位置引数と、順も数も同じ。**
+   *
+   * **軸が増えたら、ここも増える**（#502 のレビュー 3 周目）。**下の「軸の数が
+   * 合っている」が、増やし忘れを赤にする**——**足りないドライバは、新しい分岐へ
+   * 一度も入らないまま「4 種類」を数える**（**説明が古いまま緑**になる）。
+   */
+  const AXES = [
+    ["-", "1000", "9500"], // last_poke: 記録が無い / 窓の外 / 窓の中
+    ["-", "1000", "9500"], // last_unknown: 同上
+    ["", "3600"], // window: 分からない / 分かる
+  ];
+
+  /** 各軸の値を、すべての組み合わせで並べる。 */
+  function combinations(axes: string[][]): string[][] {
+    return axes.reduce<string[][]>(
+      (rows, values) => rows.flatMap((row) => values.map((value) => [...row, value])),
+      [[]],
+    );
+  }
+
   function readingsOf(script: string): string[] {
     const driver = [
       "set -u",
       "NOW=10000",
       ...PARTS.map((name) => shellFunction(script, name)),
-      "for poke in - 1000 9500; do",
-      "  for unknown in - 1000 9500; do",
-      '    for window in "" 3600; do',
-      '      show_reading "$poke" "$unknown" "$window"',
-      "    done",
-      "  done",
-      "done",
+      ...combinations(AXES).map(
+        (values) => `show_reading ${values.map((value) => `"${value}"`).join(" ")}`,
+      ),
     ].join("\n");
     const run = spawnSync("/bin/bash", ["-c", driver], { encoding: "utf8" });
     expect(run.status, run.stderr).toBe(0);
     const lines = run.stdout.split("\n").filter((line) => line.trim().length > 0);
     return [...new Set(lines)];
+  }
+
+  /**
+   * **`show_reading` が読む位置引数の番号**（`$1` も `${1-}` も拾う）。
+   *
+   * **範囲は `show_reading` の中だけ**（`AGENTS.md` §4）——**`bin/loop-cadence` 全体では
+   * 位置引数を持つ行が 12 行あり**、**そのうち `show_reading` の中は 1 行だけ**である
+   * （**`local last_poke="${1-}" last_unknown="${2-}" window="${3-}"`**）。
+   *
+   * **番号で読んでいない形は、数えられない**——**`$@` / `$*` / `shift` があれば、
+   * 何軸なのかはここからは決まらない。** **そのときは「分からない」で落とす**
+   * （**「3 軸だ」と読んで、黙って通さない**）。
+   */
+  function positionalsOf(fn: string): number[] {
+    expect(fn, "位置引数を番号で読んでいないので、軸の数が決まりません").not.toMatch(
+      /\$[@*]|\bshift\b/,
+    );
+    const numbers = [...fn.matchAll(/\$\{?([1-9])[0-9]*/g)].map(([, digit]) => Number(digit));
+    return [...new Set(numbers)].sort((a, b) => a - b);
   }
 
   const script = () => readFileSync(join(REPO_ROOT, "bin/loop-cadence"), "utf8");
@@ -1625,6 +1661,25 @@ describe("説明の数と、実際に出る読みを突き合わせる（#501 / 
     // **数でない文に、数を書かない**——**「原因は 1 つではない」は、数える側からは
     // 「1 つ」に見える**（**この試験を書いている最中に、自分で踏んだ**）。
     // **倒れる向きは安全側**である（**赤くなるので気づく。黙って見逃さない**）。
+  });
+
+  it("ドライバが回す軸の数が、`show_reading` の位置引数と合っている", () => {
+    // **ここが空くと、この PR の主張が空になる**（#502 のレビュー 3 周目）——
+    // **第 4 の軸で決まる読みを足しても、3 軸しか回さないドライバは到達しない**ので、
+    // **説明が「4 つ」のままでも緑になる。**
+    //
+    // **軸を先回りして足さない。** **足りないことが赤くなればよい**——
+    // **増やした人が、増やしたときにドライバを直す。**
+    const positionals = positionalsOf(shellFunction(script(), "show_reading"));
+
+    // **読めなかったことを、緑と混ぜない。**
+    expect(positionals.length, "位置引数を 1 つも読んでいない").toBeGreaterThan(0);
+    expect(positionals, "位置引数が飛んでいる（$1 から連番で読んでいない）").toStrictEqual(
+      positionals.map((_, index) => index + 1),
+    );
+    expect(positionals.length, "ドライバの軸の数が、show_reading の引数と合っていない").toBe(
+      AXES.length,
+    );
   });
 
   it("説明の節の外に数を書いても、突き合わせに入らない", () => {
