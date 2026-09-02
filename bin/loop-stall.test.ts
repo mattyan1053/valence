@@ -1,4 +1,4 @@
-import { execFileSync, type SpawnSyncReturns, spawnSync } from "node:child_process";
+import { execFileSync, type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { holdingSnippet } from "../test/held-lock";
+import { holdingSnippet, holdLock, lockIsFree, waitUntil } from "../test/held-lock";
 import { MODELLED_SPAWNS, SCRIPT_TEST_TIMEOUT_MS } from "../test/slow-machine";
 
 const SCRIPT = fileURLToPath(new URL("./loop-stall", import.meta.url));
@@ -726,7 +726,12 @@ describe("握り合わせが噛み合わなかったとき", () => {
 
     // **ロックが空いていれば、保持側は残っていない。** 「返ってきた」だけでは、
     // 背後に居座っているかどうかが分からない
-    const free = spawnSync("/usr/bin/flock", ["-n", lock, "-c", "true"], { encoding: "utf8" });
+    //
+    // **打ち切った直後に見ない** (#579)。**`spawnSync` が返るのは「撃った時点」**で、
+    // **trap の TERM を受けた保持側が実際に手放すまでには間がある**——**そこで
+    // 待たずに見ると、落とせているのに「残っている」と答える**（**#577 で関係の
+    // 無い PR が落ちた**）。**待ちの上限は `lockIsFree` が持つ**（§5）。
+    const free = lockIsFree(lock);
     rmSync(repo, { recursive: true, force: true });
 
     // **まず「握っていた」ことを確かめる。** ここが通らない限り、下の 2 つには意味が無い
@@ -734,7 +739,7 @@ describe("握り合わせが噛み合わなかったとき", () => {
       "holder_has_lock",
     );
     expect(stuck.status, "上限で打ち切られていない").not.toBe(0);
-    expect(free.status, "ロックが解放されていない（保持側が残っている）").toBe(0);
+    expect(free, "ロックが解放されていない（保持側が残っている）").toBe(true);
   });
 });
 
@@ -2485,5 +2490,110 @@ describe("作業場ごとに数える", () => {
     }
 
     expect(last, "2 回目だと分かる形になっていない").toContain("2 回目");
+  });
+});
+
+describe("手放すまでの間を、待って見る（#579）", () => {
+  /**
+   * **シグナルを送った直後に生死を見ていた。** **`spawnSync` が返るのは打ち切った時点**
+   * で、**trap が撃った TERM を受けて保持側が実際に `flock` を手放すまでには間がある**
+   * ——**その間に `flock -n` を打つと、落とせているのに「残っている」と答える。**
+   *
+   * **#572 で直したのと同じ形**である（**あちらは `kill -0` がゾンビにも通った**）。
+   *
+   * **関係の無い PR が落ちた**（#577。**触ったのは `page.test.ts` の 1 ファイルだけ**）。
+   *
+   * **総当たりで待たない**（`test/held-lock.ts` の方針）——**`flock -w` は
+   * カーネル側で待つ**ので、**プロセスは 1 回しか起こさない。**
+   */
+  const sandboxes: string[] = [];
+
+  afterEach(() => {
+    for (const dir of sandboxes.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function sandbox(): string {
+    const dir = mkdtempSync(join(tmpdir(), "loop-stall-release-"));
+    sandboxes.push(dir);
+    return dir;
+  }
+
+  it("手放すまでに間があっても、待てば空く", () => {
+    // **落ちる条件を作る**（#579 の「本筋」）。**握り続けさせるのが要点**である。
+    //
+    // **グループごと TERM を撃つと、ロックはその場で空く**（**実測 10/10**。#580 の
+    // レビュー）——**`flock` 自身も倒れる**ので、**待ちを消しても緑になる。**
+    // **撃つのは trap を持つ内側の bash だけ**にする——**`flock` は生き残り、
+    // **内側が抜けるまでロックを握ったまま**である（**実測 0/10 で空かない**）。
+    //
+    // **`sleep 30 & wait` にする。** **`sleep` を前面で待つと、bash は trap を
+    // その終了まで走らせない**——**0.3 秒のはずが 30 秒になる。**
+    const dir = sandbox();
+    const lock = join(dir, "held.lock");
+    writeFileSync(lock, "");
+    const ready = join(dir, "ready");
+    const innerPid = join(dir, "inner");
+    const holder = join(dir, "holder.sh");
+    writeFileSync(
+      holder,
+      [
+        "#!/usr/bin/env bash",
+        // **背景の `sleep` もロックの fd を継ぐ** ——**残すと、内側が抜けても
+        // 握られたまま**である（**実測で 5 秒待っても空かなかった**）。**trap で落とす。**
+        "sleep 30 & sleeper=$!",
+        // **TERM を受けても、すぐには手放さない**
+        "trap 'sleep 0.3; kill \"$sleeper\" 2>/dev/null; exit 0' TERM",
+        `echo $$ > ${JSON.stringify(innerPid)}`,
+        `touch ${JSON.stringify(ready)}`,
+        // **`sleep` を前面で待たない**——**bash は trap をその終了まで走らせない**
+        "wait",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const group = spawn("/usr/bin/setsid", ["/usr/bin/flock", "-x", lock, holder], {
+      cwd: dir,
+      detached: true,
+      stdio: "ignore",
+    });
+    group.unref();
+
+    // **起動確認も `try` の内側に置く** (#580 のレビュー 2 周目)。**外に出すと、
+    // 起動が遅れて時間切れになったときに例外がここで飛び**、**`finally` に入らない**
+    // ——**`afterEach` は sandbox を消すだけ**なので、**`sleep 30` まで進んだ保持側が
+    // 最大 30 秒残る。** **この PR は走りの残りを片付ける系列**（#571 / #574 / #579）
+    // なので、**その試験が残りを積むのは、直そうとしているものと同じ形**である。
+    // **出るのは負荷が高いときだけ**で、**flake が出るのと同じ条件**でもある。
+    try {
+      expect(
+        waitUntil(() => existsSync(innerPid), 10_000),
+        "保持側が握っていない",
+      ).toBe(true);
+      // **内側だけを撃つ**——**グループへ撃つと `flock` ごと倒れ、その場で空く**
+      process.kill(Number(readFileSync(innerPid, "utf8").trim()), "SIGTERM");
+      expect(lockIsFree(lock), "待てば空くのに「残っている」と答えている").toBe(true);
+    } finally {
+      try {
+        process.kill(-(group.pid ?? 0), "SIGKILL");
+      } catch {
+        // もう居ない
+      }
+    }
+  });
+
+  it("本当に手放さないなら、空いたと言わない", () => {
+    // **緩めない**（#579）——**待っても手放さないときは、これまでどおり落ちる**
+    const dir = sandbox();
+    const lock = join(dir, "held.lock");
+    writeFileSync(lock, "");
+    const held = holdLock({ dir, lock, limitSeconds: 10 });
+
+    try {
+      expect(lockIsFree(lock, 1), "握られているのに「空いた」と言っている").toBe(false);
+    } finally {
+      held.release();
+    }
   });
 });
