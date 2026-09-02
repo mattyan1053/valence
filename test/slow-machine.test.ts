@@ -118,7 +118,14 @@ describe("プロセスを起こす試験の枠", () => {
 
     // **直下も見る** (#493)。**`AGENTS.md` の隣に置く試験は repo 直下**にあり、
     // **ここが「何を集めるか」を固定している**——**足し忘れると、置いただけで走らない。**
-    expect(unit?.test.include).toEqual(["*.test.ts", "src/**/*.test.ts", "test/**/*.test.ts"]);
+    //
+    // **`supabase/` も同じ** (#561)。**`config.toml` を見張る試験はその隣に置く。**
+    expect(unit?.test.include).toEqual([
+      "*.test.ts",
+      "src/**/*.test.ts",
+      "test/**/*.test.ts",
+      "supabase/**/*.test.ts",
+    ]);
     expect(unit?.test.testTimeout).toBeUndefined();
   });
 
