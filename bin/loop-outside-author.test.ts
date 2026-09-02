@@ -121,6 +121,52 @@ describe("bin/loop-outside-author", () => {
   });
 
   /**
+   * **bot の著者を、名前の形で弾かない** (#562)。
+   *
+   * **実測（`gh` 2.86.0）**: `--json author` は bot を `app/dependabot` で返し、
+   * REST（`repos/{owner}/{repo}/pulls/<N>`）は `dependabot[bot]` を返す
+   * ——**`gh` の側が `app/` を付けている**ので、**どちらの形もこの口へ来る。**
+   *
+   * **弾くと、bot の不在が全体停止になる** (#70)。**dependabot は指摘に応えて
+   * head を押し直さない**ので、**`awaiting-worker:<PR>@<sha>` の識別子が動かず、
+   * 3 周で `loop/STOP`** に達する——**常駐している側まで止まる。**
+   */
+  it("bot の著者は、外である", () => {
+    withGh({ account: "loop-account", author: "app/dependabot" });
+    const result = run();
+
+    expect(result.status, "bot を判定不能へ倒している").toBe(0);
+    // **誰を待っているのかを出す**（保留の理由に書けないと、理由の無い保留になる）
+    expect(result.stdout.trim(), "誰の PR かが出ていない").toBe("app/dependabot");
+  });
+
+  it("REST が返す形の bot も、外である", () => {
+    // **同じ問いに 2 通りの形で答えが来る**——**口によって違う**（上のコメント）
+    withGh({ account: "loop-account", author: "dependabot[bot]" });
+
+    expect(run().status).toBe(0);
+  });
+
+  it("`app/` を通しても、判定不能まで飲み込まない", () => {
+    // **緩めた範囲が、判定不能を「外」へ倒していないこと** (#562 の完了条件)。
+    // **倒すと、worker の対応待ちが人待ちに化ける**——**誰も直さないまま保留が残る。**
+    const unreadable = [
+      "app/", // 前置きだけで、名前が無い
+      "app/depend abot", // 空白入り
+      `app/${"a".repeat(40)}`, // 長すぎる（ログイン名は 39 文字まで）
+      "app/app/dependabot", // 前置きが 2 つ
+      "/dependabot", // 前置きの形をしていない
+      "app/dependabot; rm -rf /", // そのまま保留の本文へ戻さない
+    ];
+
+    for (const author of unreadable) {
+      withGh({ account: "loop-account", author });
+
+      expect(run().status, `判定不能を通している: ${author}`).toBe(2);
+    }
+  });
+
+  /**
    * **名前だけで訊く口** (#559 のレビュー)。
    *
    * **一覧を持っている側は、PR 番号ではなく著者名を持っている**——**`bin/loop-open-work`
@@ -157,10 +203,20 @@ describe("bin/loop-outside-author", () => {
       expect(run(["--author", "someone-else"]).status).toBe(2);
     });
 
+    it("bot の名前でも訊ける", () => {
+      // **一覧を持っている側が渡すのも `gh` の返した形**である（`app/dependabot`）
+      withGh({ account: "loop-account" });
+      const result = run(["--author", "app/dependabot"]);
+
+      expect(result.status, "bot を判定不能へ倒している").toBe(0);
+      expect(result.stdout.trim(), "誰の PR かが出ていない").toBe("app/dependabot");
+    });
+
     it("名前の形をしていないものは受けない", () => {
       withGh({ account: "loop-account" });
 
       expect(run(["--author", "someone else; rm -rf /"]).status).toBe(2);
+      expect(run(["--author", "app/"]).status, "前置きだけを通している").toBe(2);
       expect(run(["--author"]).status, "名前が無いのに通している").toBe(2);
       expect(run(["--author", "a", "b"]).status, "余った引数を黙って捨てている").toBe(2);
     });
