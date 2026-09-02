@@ -57,7 +57,9 @@ describe("bin/loop-check-kill", () => {
     pids = ["100"],
     after = [] as string[],
     lookupStatus = 1,
-    killFails = false,
+    verifyStatus = 0,
+    /** **落ちなかった番号。** `kill -0` に答えさせる（**親が消えても番号は番号**）。 */
+    alive = [] as string[],
   } = {}): Sandbox {
     const dir = mkdtempSync(join(tmpdir(), "check-kill-"));
     sandboxes.push(dir);
@@ -78,9 +80,11 @@ describe("bin/loop-check-kill", () => {
         "fi",
         // **落としたあとの確かめ**
         `if [[ -s ${JSON.stringify(state)} ]]; then`,
-        after.length === 0
-          ? "  exit 0"
-          : `  printf '%s\\n' ${after.map((line) => JSON.stringify(line)).join(" ")} >&2; exit 1`,
+        verifyStatus === 2
+          ? "  exit 2"
+          : after.length === 0
+            ? "  exit 0"
+            : `  printf '%s\\n' ${after.map((line) => JSON.stringify(line)).join(" ")} >&2; exit 1`,
         "fi",
         "exit 1",
       ].join("\n"),
@@ -94,7 +98,14 @@ describe("bin/loop-check-kill", () => {
         "#!/usr/bin/env bash",
         `printf '%s\\n' "$*" >>${JSON.stringify(killLog)}`,
         `printf 'done' >${JSON.stringify(state)}`,
-        killFails ? "exit 1" : "exit 0",
+        // **`-0` は生存確認である**——**落としたことにしない**
+        'if [[ $1 == "-0" ]]; then',
+        `  for pid in ${alive.map((pid) => JSON.stringify(pid)).join(" ") || '""'}; do`,
+        '    [[ $2 == "$pid" ]] && exit 0',
+        "  done",
+        "  exit 1",
+        "fi",
+        "exit 0",
       ].join("\n"),
       { mode: 0o755 },
     );
@@ -184,5 +195,96 @@ describe("bin/loop-check-kill", () => {
     const stub = withStubs();
 
     expect(stub.run([]).status).toBe(2);
+  });
+});
+
+describe("落ちたことを、親に頼らず確かめる（#572 のレビュー）", () => {
+  /**
+   * **落とす対象は「子まで辿った番号」なのに、落ちたかを通常モードで見ていた**
+   * ——**あちらはコマンド名で当てる**ので、**reparent された `forks.js` が残っていても
+   * 0 が返る。** **この PR が足した「子まで辿る」側が、確認には効いていなかった。**
+   *
+   * **番号は番号のまま**である——**親が消えても `kill -0` で引ける。**
+   */
+  const sandboxes: string[] = [];
+
+  afterEach(() => {
+    for (const dir of sandboxes.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function run({
+    pids,
+    alive,
+    verifyStatus = 0,
+  }: {
+    pids: string[];
+    alive: string[];
+    verifyStatus?: number;
+  }): { status: number; stdout: string; stderr: string } {
+    const dir = mkdtempSync(join(tmpdir(), "check-kill-alive-"));
+    sandboxes.push(dir);
+    const state = join(dir, "round");
+    writeFileSync(
+      join(dir, "leftovers"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ $1 == "--pids" ]]; then',
+        `  printf '%s\\n' ${pids.map((pid) => JSON.stringify(pid)).join(" ")}`,
+        "  exit 1",
+        "fi",
+        // **通常モードは「もう見つからない」と答える**——**親が消えたあとの形**
+        `  ${verifyStatus === 2 ? "exit 2" : "exit 0"}`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    chmodSync(join(dir, "leftovers"), 0o755);
+    writeFileSync(
+      join(dir, "kill"),
+      [
+        "#!/usr/bin/env bash",
+        `printf 'done' >${JSON.stringify(state)}`,
+        'if [[ $1 == "-0" ]]; then',
+        `  for pid in ${alive.map((pid) => JSON.stringify(pid)).join(" ") || '""'}; do`,
+        '    [[ $2 == "$pid" ]] && exit 0',
+        "  done",
+        "  exit 1",
+        "fi",
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    chmodSync(join(dir, "kill"), 0o755);
+    const result = spawnSync(SCRIPT, ["valence"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LOOP_CHECK_KILL_GRACE_SEC: "0",
+        LOOP_CHECK_LEFTOVERS: join(dir, "leftovers"),
+        LOOP_CHECK_KILL_CMD: join(dir, "kill"),
+      },
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it("1 つでも生き残っていたら、1 を返してその番号を出す", () => {
+    // **通常モードは 0 を返している**（**コマンド名では当たらない**）——**それでも赤**
+    const done = run({ pids: ["100", "101", "102"], alive: ["102"] });
+
+    expect(done.status, "生き残っているのに成功と言っている").toBe(1);
+    expect(done.stderr, "どれが残ったかが出ない").toContain("102");
+  });
+
+  it("全部落ちていれば、0 を返す", () => {
+    // **上の判定が空でないことを、ここが支えている**
+    expect(run({ pids: ["100", "101"], alive: [] }).status).toBe(0);
+  });
+
+  it("再検査できないときは、2 を返す（1 に潰さない）", () => {
+    // **`docker` を引けなくなると `bin/loop-check-leftovers` は 2 を返す**
+    // ——**「落とし切れなかった」と混ぜると、呼ぶ側が見分けられない**
+    expect(run({ pids: ["100"], alive: [], verifyStatus: 2 }).status).toBe(2);
   });
 });
