@@ -3,10 +3,11 @@
 #
 #   bin/loop-check-leftovers <作業場の名前>              自分の作業場
 #   bin/loop-check-leftovers --elsewhere <名前> <場所>   別の作業場（言い方が変わる）
-#   bin/loop-check-leftovers --pids <作業場の名前>       落とす側へ番号を渡す (#571)
+#   bin/loop-check-leftovers --groups <作業場の名前>     落とす側へグループを渡す (#571 / #574)
+#   bin/loop-check-leftovers --alive <名前> <PGID>...    そのグループがまだ走っているか
 #
 #   exit 0 = 残っていない
-#   exit 1 = 残っている（何が残っているかを標準エラーへ出す。--pids は番号を標準出力へ）
+#   exit 1 = 残っている（何が残っているかを標準エラーへ出す。--groups は番号を標準出力へ）
 #   exit 2 = 判定できない（使い方の誤り / docker を引けない）
 #
 # **`./task check` が呼び出し側の上限で切られると、コンテナの中の `pnpm check` は
@@ -33,11 +34,11 @@
 # **ここは落とさない。落とすのは `bin/loop-check-kill` である** (#571)。
 # **判定はこちらが持つ**——**「何がその走りのぶんか」を落とす側にも書くと、
 # `test:watch` を数えない規則が 2 箇所になる**（`AGENTS.md` §5）。
-# **`--pids` は、その判定の結果だけを渡す口**である。
+# **`--groups` は、その判定の結果だけを渡す口**である。
 #
-# **子まで出す。** **親（`pnpm check`）だけを落とすと `vitest` が残る**
-# ——**実測で 2 回打っている**（#571）。**`sh -c pnpm lint && …` は語では当たらない**
-# ので、**`docker top` の PPID から辿る**（**同じ表の中で済む**）。
+# **グループで渡す** (#574)。**親（`pnpm check`）だけを落とすと `vitest` が残り**
+# （**実測で 2 回打っている**。#571）、**列挙のあとに fork された子は、名前でも親でも
+# 辿れない**——**同じグループに入ることだけが頼り**である（**`setsid` しないかぎり**）。
 #
 # **踏んだ 2 回とも、気づけば人が落とせている**——**当時は言えば足りた。**
 # **`./task test:watch` のように、人が意図して長く走らせているもの**もあるので、
@@ -53,30 +54,43 @@ set -uo pipefail
 usage() {
   echo "使い方: bin/loop-check-leftovers <作業場の名前>" >&2
   echo "        bin/loop-check-leftovers --elsewhere <名前> <場所>" >&2
-  echo "        bin/loop-check-leftovers --pids <作業場の名前>" >&2
+  echo "        bin/loop-check-leftovers --groups <作業場の名前>" >&2
+  echo "        bin/loop-check-leftovers --alive <名前> <PGID>..." >&2
   echo "        exit 0 残っていない / exit 1 残っている / exit 2 判定できない" >&2
   exit 2
 }
 
-# **`--pids` は自分の作業場だけ** (#571)。**`--elsewhere` と混ぜない**——
+# **`--groups` / `--alive` は自分の作業場だけ** (#571 / #574)。**`--elsewhere` と混ぜない**——
 # **他の作業場のものを落とす口を、ここから生やさない**（#186）。
-if [[ ${1-} == "--pids" ]]; then
+if [[ ${1-} == "--groups" ]]; then
   [[ $# -eq 2 && -n ${2-} && ${2-} != --* ]] || usage
   readonly WORKSPACE="$2"
   readonly WHERE=""
-  readonly PIDS_ONLY=1
+  readonly GROUPS_ONLY=1
+  ALIVE_OF=()
+elif [[ ${1-} == "--alive" ]]; then
+  # **落としたグループが、まだ走っているか。** **名前では見ない**
+  # ——**列挙のあとに fork された子は、名前に当たらない**（#574）。
+  [[ $# -ge 3 && -n ${2-} && ${2-} != --* ]] || usage
+  readonly WORKSPACE="$2"
+  readonly WHERE=""
+  readonly GROUPS_ONLY=0
+  ALIVE_OF=("${@:3}")
 elif [[ ${1-} == "--elsewhere" ]]; then
   [[ $# -eq 3 && -n ${2-} && -n ${3-} ]] || usage
   readonly WORKSPACE="$2"
   # **どの作業場かを言えないなら、この口は役に立たない**——**待つ相手が分からない。**
   readonly WHERE="$3"
-  readonly PIDS_ONLY=0
+  readonly GROUPS_ONLY=0
+  ALIVE_OF=()
 else
   [[ $# -eq 1 && -n ${1-} ]] || usage
   readonly WORKSPACE="$1"
   readonly WHERE=""
-  readonly PIDS_ONLY=0
+  readonly GROUPS_ONLY=0
+  ALIVE_OF=()
 fi
+readonly ALIVE_OF
 
 # **compose がコンテナに付ける label で引く**（`task` の `warn_stale_containers` と
 # 同じ引き方）——**`compose ps` より速く、project を名指しできる。**
@@ -97,7 +111,13 @@ container="${container%%$'\n'*}"
 # **上がっていなければ、走りは残っていない**——**覗きに行かない**
 [[ -n $container ]] || exit 0
 
-if ! processes="$(docker top "$container" 2>/dev/null)"; then
+# **列を名指しで受ける** (#574)。**既定は `UID PID PPID CMD`** だが、**実行木で読むには
+# グループと状態が要る**——**`pgid` はあとから fork された子も同じ値を持ち**、
+# **`stat` は `Z`（親の回収待ち）を分ける**（#572）。
+#
+# **列を読むのは下の 2 箇所だけ**である（**数えた**）——**グループを出す `--groups` と、
+# 生死を見る `--alive`。** **名前で当てる側は列を読まない**（**行ごと拾うだけ**）。
+if ! processes="$(docker top "$container" -eo pid,pgid,stat,cmd 2>/dev/null)"; then
   # **ここも言い分ける** (#549 のレビュー 2 周目)。**`--elsewhere` は複数の作業場を
   # 回る**ので、**場所なしで出るとどれのことか分からない**——**`ps` の側だけでは半分。**
   if [[ -n $WHERE ]]; then
@@ -106,6 +126,25 @@ if ! processes="$(docker top "$container" 2>/dev/null)"; then
     echo "[WARN] コンテナの中を読めないので、残った走りがあるかを判定できません" >&2
   fi
   exit 2
+fi
+
+# **落としたグループが、まだ走っているか** (#574)。**名前では見ない**
+# ——**列挙のあとに fork された子は、名前に当たらない**（**この Issue そのもの**）。
+# **`Z` は数えない**（#572）——**親の回収を待っているだけ**である。
+if ((${#ALIVE_OF[@]})); then
+  alive=""
+  while read -r pid pgid state _rest; do
+    [[ -n $pid && -n $pgid ]] || continue
+    [[ $state == Z* ]] && continue
+    for want in "${ALIVE_OF[@]}"; do
+      [[ $pgid == "$want" ]] || continue
+      alive+="$pid $pgid $state"$'\n'
+      break
+    done
+  done < <(printf '%s\n' "$processes" | tail -n +2)
+  [[ -n $alive ]] || exit 0
+  printf '%s' "$alive"
+  exit 1
 fi
 
 # **何を「走り」と数えるか。** **`./task check` が中で起こすもの**である
@@ -122,30 +161,16 @@ leftovers="$(printf '%s\n' "$processes" | grep -E "pnpm (check|test)( |$)|vitest
 
 [[ -n $leftovers ]] || exit 0
 
-# **番号だけを渡す口** (#571)。**落とす側は判定を持たない。**
+# **グループを渡す口** (#571 / #574)。**落とす側は判定を持たない。**
 #
-# **`docker top` の列は UID PID PPID CMD** である——**2 列目が番号、3 列目が親。**
-# **当たった行から下を全部集める**（**`sh -c pnpm lint && …` は語では当たらない**）。
-if ((PIDS_ONLY)); then
-  declare -A wanted=()
-  while read -r _uid pid _rest; do
-    [[ -n $pid ]] && wanted["$pid"]=1
+# **列は PID PGID STAT CMD** である——**1 列目が番号、2 列目がグループ。**
+# **当たった行のグループを出す**——**落とす側は、それを 1 つの単位として落とす。**
+if ((GROUPS_ONLY)); then
+  declare -A groups=()
+  while read -r _pid pgid _rest; do
+    [[ -n $pgid ]] && groups["$pgid"]=1
   done < <(printf '%s\n' "$leftovers")
-
-  # **親が集合に入るまで繰り返す**——**表の順序に頼らない**（**子が先に並ぶことがある**）
-  while :; do
-    added=0
-    while read -r _uid pid ppid _rest; do
-      [[ -n $pid && -n $ppid ]] || continue
-      [[ -n ${wanted[$pid]-} ]] && continue
-      [[ -n ${wanted[$ppid]-} ]] || continue
-      wanted["$pid"]=1
-      added=1
-    done < <(printf '%s\n' "$processes" | tail -n +2)
-    ((added)) || break
-  done
-
-  printf '%s\n' "${!wanted[@]}"
+  printf '%s\n' "${!groups[@]}"
   exit 1
 fi
 

@@ -33,8 +33,12 @@ import { afterEach, describe, expect, it } from "vitest";
 const SCRIPT = fileURLToPath(new URL("./loop-check-leftovers", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
-/** `docker top` が返す表。**1 行目は見出し**（実物と同じ形）。 */
-const HEADER = "UID                 PID                 PPID                CMD";
+/**
+ * `docker top -eo pid,pgid,stat,cmd` が返す表。**1 行目は見出し**（実物と同じ形）。
+ *
+ * **列を名指しで受けている** (#574)——**既定の `UID PID PPID CMD` ではない。**
+ */
+const HEADER = "PID                 PGID                STAT                CMD";
 
 describe("bin/loop-check-leftovers", () => {
   const sandboxes: string[] = [];
@@ -103,7 +107,7 @@ describe("bin/loop-check-leftovers", () => {
   it("走りが残っていなければ、0 を返す", () => {
     // **`pnpm dev` は常に居る**——**それを「残っている」と読まない**
     const docker = withDocker({
-      top: [HEADER, "u 9129 9034 node /usr/local/bin/pnpm dev", "u 9264 9263 next-server"],
+      top: [HEADER, "9129 9129 Sl node /usr/local/bin/pnpm dev", "9264 9264 Sl next-server"],
     });
 
     expect(docker.run().status, "居ないのに居ると言っている").toBe(0);
@@ -113,8 +117,8 @@ describe("bin/loop-check-leftovers", () => {
     const docker = withDocker({
       top: [
         HEADER,
-        "u 9129 9034 node /usr/local/bin/pnpm dev",
-        "u 3632112 3632069 sh -c vitest run --project '!db'",
+        "9129 9129 Sl node /usr/local/bin/pnpm dev",
+        "3632112 3632112 Sl sh -c vitest run --project '!db'",
       ],
     });
 
@@ -127,7 +131,7 @@ describe("bin/loop-check-leftovers", () => {
   it("`pnpm check` が残っていても見つける", () => {
     // **切られるのは `./task check` の側**である——**その子が残る**
     const docker = withDocker({
-      top: [HEADER, "u 100 1 node /usr/local/bin/pnpm check"],
+      top: [HEADER, "100 100 Sl node /usr/local/bin/pnpm check"],
     });
 
     expect(docker.run().status).toBe(1);
@@ -142,8 +146,8 @@ describe("bin/loop-check-leftovers", () => {
     const docker = withDocker({
       top: [
         HEADER,
-        "u 3864163 9010 node /usr/local/bin/pnpm test:watch",
-        "u 3864200 3864163 sh -c vitest --project '!db'",
+        "3864163 3864163 Sl node /usr/local/bin/pnpm test:watch",
+        "3864200 3864200 Sl sh -c vitest --project '!db'",
       ],
     });
 
@@ -155,7 +159,7 @@ describe("bin/loop-check-leftovers", () => {
 
   it("`pnpm test` は、これまでどおり数える", () => {
     // **消してはいけないほう**——**`test:watch` を外したついでに、`test` まで外さない**
-    const docker = withDocker({ top: [HEADER, "u 100 1 node /usr/local/bin/pnpm test"] });
+    const docker = withDocker({ top: [HEADER, "100 100 Sl node /usr/local/bin/pnpm test"] });
 
     expect(docker.run().status, "走り切っていない `pnpm test` を見逃している").toBe(1);
   });
@@ -325,8 +329,8 @@ describe("bin/loop-check-leftovers --elsewhere", () => {
     };
   }
 
-  const BUSY = [HEADER, "u 3632112 3632069 sh -c vitest run --project '!db'"];
-  const IDLE = [HEADER, "u 9129 9034 node /usr/local/bin/pnpm dev"];
+  const BUSY = [HEADER, "3632112 3632112 Sl sh -c vitest run --project '!db'"];
+  const IDLE = [HEADER, "9129 9129 Sl node /usr/local/bin/pnpm dev"];
 
   it("走っていれば、どの作業場かと、何が走っているかを言う", () => {
     const found = withDocker(BUSY)(["--elsewhere", "valence-worker-b", "/home/x/valence-worker-b"]);
@@ -491,7 +495,7 @@ describe("作業場を並べられないとき", () => {
               '  if [[ $* == *"-worker-b"* ]]; then echo "abc123"; fi',
               "  exit 0",
               "fi",
-              `if [[ $1 == "top" ]]; then printf '%s\\n' ${JSON.stringify(HEADER)} "u 1 1 sh -c vitest run"; exit 0; fi`,
+              `if [[ $1 == "top" ]]; then printf '%s\\n' ${JSON.stringify(HEADER)} "1 1 Sl sh -c vitest run"; exit 0; fi`,
             ]
           : ['printf ""']),
         "exit 0",
@@ -617,15 +621,19 @@ describe("作業場を並べられないとき", () => {
   });
 });
 
-describe("bin/loop-check-leftovers --pids", () => {
+describe("bin/loop-check-leftovers --groups / --alive", () => {
   /**
-   * **落とす側が、同じ判定を持たないようにする**（#571。`AGENTS.md` §5）。
+   * **検出を、名前から実行木へ移す**（#574）。
    *
-   * **「何がその走りのぶんか」はこのスクリプトが決める**——**落とす側が
-   * `docker top` を引き直すと、`test:watch` を数えない規則が 2 箇所になる。**
+   * **名前で当てているかぎり、列挙のあとに fork された子は見えない**
+   * ——**`sh -c pnpm lint && …` にも vitest の worker（`forks.js`）にも
+   * `pnpm check` / `vitest run` は無い**ので、**親が消えて reparent されると、
+   * 木辿りからも名前からも落ちる。**
    *
-   * **子まで出す。** **親（`pnpm check`）だけを落とすと `vitest` が残る**
-   * （**worker-2 の実測。2 回打っている**）——**残ったものは、次の走りと重なる。**
+   * **グループなら見える。** **`setsid` しないかぎり、あとから fork された子も
+   * 同じ PGID に入る**——**`docker top -eo pid,pgid,stat,cmd` で引ける。**
+   *
+   * **`Z` は数えない**（#572）——**親の回収を待っているだけ**である。
    */
   const sandboxes: string[] = [];
 
@@ -635,12 +643,12 @@ describe("bin/loop-check-leftovers --pids", () => {
     }
   });
 
-  function withDocker(top: string[]): (args?: string[]) => {
+  function withDocker(top: string[]): (args: string[]) => {
     status: number;
     stdout: string;
     stderr: string;
   } {
-    const dir = mkdtempSync(join(tmpdir(), "leftover-pids-"));
+    const dir = mkdtempSync(join(tmpdir(), "leftover-groups-"));
     sandboxes.push(dir);
     writeFileSync(
       join(dir, "docker"),
@@ -656,7 +664,7 @@ describe("bin/loop-check-leftovers --pids", () => {
       { mode: 0o755 },
     );
     chmodSync(join(dir, "docker"), 0o755);
-    return (args = ["--pids", "valence"]) => {
+    return (args) => {
       const result = spawnSync(SCRIPT, args, {
         cwd: dir,
         encoding: "utf8",
@@ -666,67 +674,75 @@ describe("bin/loop-check-leftovers --pids", () => {
     };
   }
 
-  it("残っていなければ、何も出さずに 0 を返す", () => {
-    const run = withDocker([HEADER, "u 9129 9034 node /usr/local/bin/pnpm dev"]);
-    const found = run();
-
-    expect(found.status).toBe(0);
-    expect(found.stdout.trim()).toBe("");
-  });
-
-  it("残っていたら、その番号を出して 1 を返す", () => {
-    const run = withDocker([HEADER, "u 100 1 node /usr/local/bin/pnpm check"]);
-    const found = run();
+  it("走りのグループを出す", () => {
+    const run = withDocker([
+      HEADER,
+      "9129 9124 Sl node /usr/local/bin/pnpm dev",
+      "100 100 Sl node /usr/local/bin/pnpm check",
+      "101 100 S sh -c pnpm lint && pnpm typecheck",
+    ]);
+    const found = run(["--groups", "valence"]);
 
     expect(found.status).toBe(1);
-    expect(found.stdout.trim().split("\n")).toContain("100");
+    expect(found.stdout.trim().split("\n")).toEqual(["100"]);
   });
 
-  it("子まで出す（親だけでは残る）", () => {
-    // **語で当たるのは親だけ**にする——**4 行とも当たる木を置くと、辿らなくても
-    // 同じ答えになる**（**最初に書いた入力がそれで、変異を当てても緑だった**）。
-    //
-    // **実物の `docker top` に出る形**である——**`sh -c pnpm lint && …` にも、
-    // vitest の worker（`forks.js`）にも `pnpm check` / `vitest run` は無い。**
+  it("`pnpm dev` のグループは出さない", () => {
+    // **巻き込むと開発サーバが落ちる**
+    const run = withDocker([HEADER, "9129 9124 Sl node /usr/local/bin/pnpm dev"]);
+
+    expect(run(["--groups", "valence"]).status).toBe(0);
+  });
+
+  it("`./task test:watch` のグループも出さない", () => {
+    // **数えない規則は 1 箇所のまま**である（#529）
+    const run = withDocker([HEADER, "200 200 Sl node /usr/local/bin/pnpm test:watch"]);
+
+    expect(run(["--groups", "valence"]).status).toBe(0);
+  });
+
+  it("列挙のあとに fork された子を、グループから見つける", () => {
+    // **この Issue そのもの**である——**親（`pnpm check`）は消え、
+    // 残っているのは名前に当たらない worker だけ。** **名前では見えない。**
     const run = withDocker([
       HEADER,
-      "u 100 1 node /usr/local/bin/pnpm check",
-      "u 101 100 sh -c pnpm lint && pnpm typecheck",
-      "u 102 101 node /home/x/node_modules/vitest/dist/workers/forks.js",
+      "102 100 Sl node /home/x/node_modules/vitest/dist/workers/forks.js",
     ]);
-    const listed = run().stdout.trim().split("\n").sort();
+    const found = run(["--alive", "valence", "100"]);
 
-    expect(listed, "親だけしか出ていない（子が残る）").toEqual(["100", "101", "102"]);
+    expect(found.status, "グループに残っているのに 0 を返している").toBe(1);
+    expect(found.stdout, "何が残っているかが出ない").toContain("102");
   });
 
-  it("関係のない木は出さない", () => {
-    // **`pnpm dev` の子を巻き込むと、開発サーバが落ちる**
-    const run = withDocker([
-      HEADER,
-      "u 9129 9034 node /usr/local/bin/pnpm dev",
-      "u 9264 9129 next-server",
-      "u 100 1 node /usr/local/bin/pnpm check",
-    ]);
-    const listed = run().stdout.trim().split("\n");
+  it("`Z` は残っていると数えない", () => {
+    // **親の回収を待っているだけ**である（#572 で測った側）
+    const run = withDocker([HEADER, "102 100 Z node /home/x/…/forks.js <defunct>"]);
 
-    expect(listed).toEqual(["100"]);
+    expect(run(["--alive", "valence", "100"]).status).toBe(0);
   });
 
-  it("`./task test:watch` の木は出さない", () => {
-    // **数えない規則は 1 つ**である——**落とす側にも同じものが要る**
-    const run = withDocker([
-      HEADER,
-      "u 200 1 node /usr/local/bin/pnpm test:watch",
-      "u 201 200 sh -c vitest --project '!db'",
-    ]);
+  it("別のグループは数えない", () => {
+    // **落としたグループのぶんだけを見る**
+    const run = withDocker([HEADER, "9129 9124 Sl node /usr/local/bin/pnpm dev"]);
 
-    expect(run().status).toBe(0);
+    expect(run(["--alive", "valence", "100"]).status).toBe(0);
   });
 
-  it("別の作業場には使えない", () => {
-    // **落とす口が生える先**である——**`--elsewhere` と混ぜない**（#186）
-    const run = withDocker([HEADER]);
+  it("読めなければ、判定できないと言う", () => {
+    const dir = mkdtempSync(join(tmpdir(), "leftover-groups-fail-"));
+    sandboxes.push(dir);
+    writeFileSync(
+      join(dir, "docker"),
+      '#!/usr/bin/env bash\nif [[ $1 == "ps" ]]; then printf "%s\\n" abc123; exit 0; fi\nexit 1\n',
+      { mode: 0o755 },
+    );
+    chmodSync(join(dir, "docker"), 0o755);
+    const result = spawnSync(SCRIPT, ["--alive", "valence", "100"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+    });
 
-    expect(run(["--pids", "--elsewhere", "other", "/tmp/other"]).status).toBe(2);
+    expect(result.status).toBe(2);
   });
 });
