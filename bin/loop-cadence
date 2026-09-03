@@ -492,6 +492,8 @@ evaluate_scope() {
   # （**cron の記録が 1 本も無い行**）ので、**先に置く**（`set -u`）。
   local window=""
   local at trigger _where interval interval_shown gap running_since cron_at=()
+  # **窓を決めた項**（#601）。**窓が決まらない行もある**ので、先に置く（`set -u`）。
+  local window_from=""
   # **枠のとき暇だったか** (#575)。**数えられない行もある**ので、先に置く（`set -u`）。
   local idle_shown="-"
   starts="$common_dir/valence-loop-starts-$scope"
@@ -499,7 +501,7 @@ evaluate_scope() {
     # **1 度も始まっていない。** **記録が無いことを「異常なし」へ倒さない**
     # ——**足したばかりの worker が、永久に見えなくなる。**
     # **`never` も止まっている側である**——**`--quiet` でも出す。**
-    echo "scope=${scope:0:12} last_cron=- last_poke=- last_unknown=- age=- interval=${INTERVAL:-unknown} never"
+    echo "scope=${scope:0:12} last_cron=- last_poke=- last_unknown=- age=- interval=${INTERVAL:-unknown} window=- never"
     show_workspace "$workspace"
     # **記録が 1 行も無い**——**引く先のセッションが、そもそも居ない。**
     show_reading "-" "-" ""
@@ -577,6 +579,9 @@ evaluate_scope() {
       # **それ以上待っても始まらないなら、鳴っていない。**
       # **「長いかもしれない」で全部を黙らせない。**
       window=$((interval * MISSED_TICKS))
+      # **何が窓を決めたか** (#601)。**広さだけでは次の一手が決まらない**——
+      # **「2 刻み」なら予定表を、「直前の間」「最長周回」なら記録の欠落を見る。**
+      window_from="2 刻み"
       # **直前の間が長かったなら、その 1 回ぶんは待つ** (#441)。**周期が伸びたのと、
       # 鳴り損ねたのは、記録からは同じ形に見える**——**待つのは 1 回ぶんだけ**である。
       #
@@ -586,11 +591,15 @@ evaluate_scope() {
       if [[ -z $INTERVAL ]] && gap="$(last_gap "${cron_at[@]}")" &&
         ((gap + interval > window)); then
         window=$((gap + interval))
+        window_from="直前の間"
       fi
       if [[ -f "$common_dir/valence-loop-roundlen-$scope" ]] &&
         read -r longest <"$common_dir/valence-loop-roundlen-$scope" 2>/dev/null &&
         [[ $longest =~ ^[0-9]+$ ]]; then
-        ((longest + interval <= window)) || window=$((longest + interval))
+        if ((longest + interval > window)); then
+          window=$((longest + interval))
+          window_from="最長周回"
+        fi
       fi
       # **いま回している周回のぶんは待つ** (#444。#446 のレビュー)。**走っている最中に
       # 鳴った cron は `acquire` が exit 1 で終わる**ので、**記録が 1 行も増えない。**
@@ -608,6 +617,9 @@ evaluate_scope() {
         read -r running_since <"$common_dir/valence-loop-rounds-$scope" 2>/dev/null &&
         [[ $running_since =~ ^[0-9]+$ ]] && ((NOW > running_since)); then
         window=$((window + NOW - running_since))
+        # **足し算なので、土台に重ねる** (#601)——**置き換えると、窓を決めた
+        # 元の項が隠れる**（**周回の中から呼ぶ**ので、ここはほぼ毎回通る）。
+        window_from="$window_from+走行中"
       fi
       ((age > window)) && verdict="stale"
     fi
@@ -619,7 +631,11 @@ evaluate_scope() {
     # 並べても読む人の役に立たない**——**「何回あったか」は、あった作業場でだけ要る。**
     blocked_shown=""
     ((blocked_rings == 0)) || blocked_shown=" blocked=$blocked_rings"
-    echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age${blocked_shown} ${interval_shown:-interval=${INTERVAL:-unknown}} $verdict"
+    # **窓は、判定が `ok` の間こそ読めなければ意味が無い** (#601)——**広がった
+    # ことに気づけるのは、広がっている間だけ**である。**決まらない行は `-`。**
+    window_shown="window=-"
+    [[ -z $window ]] || window_shown="window=$window($window_from)"
+    echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age${blocked_shown} ${interval_shown:-interval=${INTERVAL:-unknown}} $window_shown $verdict"
   fi
   # **`unknown` でも黙らない** (#575)。**`stale` のときだけ読みを出していた**ので、
   # **記録が押し出されて `unknown` へ落ちた瞬間、次の一手がまるごと消えた**
