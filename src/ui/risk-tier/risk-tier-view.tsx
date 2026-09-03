@@ -69,7 +69,18 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
     <details>
       <summary>
         <strong>{text.label}</strong>
-        {ciNeedsAttention && <span>{CI_TEXT[change.ciStatus]}</span>}
+        {ciNeedsAttention && (
+          <>
+            {/* **区切りは文字で置く。** **`globals.css` は色とフォントだけ**で、
+                **`summary` / `strong` / `span` の間隔を付ける規則が 1 つも無い**
+                ——**JSX は行をまたぐ空白を削る**ので、**そのままだと
+                `先に人が見るCI: 落ちています…` と繋がって読める**（#605 のレビュー）。
+                **class で空けると、出ていなくても markup は同じ**なので、
+                **試験では気づけない**（#585 で、配信中の CSS を見るまで分からなかった形）。 */}
+            <span aria-hidden="true">／</span>
+            <span>{CI_TEXT[change.ciStatus]}</span>
+          </>
+        )}
       </summary>
       <p>{text.meaning}</p>
       <ul>

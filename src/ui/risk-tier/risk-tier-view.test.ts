@@ -179,6 +179,29 @@ describe("RiskTierView", () => {
       expect(summaryOf(markup), "普通でない CI が畳まれている").toContain("CI:");
     });
 
+    it("Tier の札と CI の間に、区切りがある", () => {
+      // **タグを外すと `先に人が見るCI: 落ちています…` と繋がって読める**
+      // （#605 のレビュー）——**常時見せるようにした意味が減る。**
+      //
+      // **区切りは文字で置く。** **`globals.css` は色とフォントだけ**で、
+      // **`summary` / `strong` / `span` の間隔を付ける規則が 1 つも無い**
+      // ——**class に頼ると、出ていなくても markup は同じ**なので、
+      // **試験では気づけない**（#585 で、配信中の CSS を見るまで分からなかった形）。
+      const text = (markup: string) => summaryOf(markup).replace(/<[^>]+>/g, "");
+
+      expect(text(viewFor(change({ ciStatus: "failing" }))), "札と CI が繋がっている").toMatch(
+        // **札は判定が決める**（`viewFor`）——**`failing` は `high-risk` になる**
+        /先に人が見る／CI:/,
+      );
+    });
+
+    it("CI を出さない行に、区切りだけが残らない", () => {
+      // **`passing` の行には CI が出ない**——**区切りだけが浮くと、何の区切りか読めない。**
+      const summary = summaryOf(viewFor(change({ ciStatus: "passing" })));
+
+      expect(summary, "区切りだけが残っている").not.toContain("／");
+    });
+
     it("CI の行は、常時出す側と畳む側の片方にしか無い", () => {
       // **同じことを 2 箇所で言うと、片方が事実と違う日が来る**（`TIER_TEXT` の但し書き）。
       for (const ciStatus of ["passing", "failing", "pending"] as const) {
