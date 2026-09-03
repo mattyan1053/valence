@@ -115,6 +115,51 @@ describe("bin/loop-silent-park", () => {
     expect(result.stdout).toBe("");
   });
 
+  /**
+   * **手順どおりに保留すると挙がっていた**（#588）。
+   *
+   * **手順は「投稿してから保留にする」**（`loop/procedure/master.md` 447 / 712 行。
+   * **`parked` は錠ではない**ので**理由が先にあるほうが穴が無い**。#163）——
+   * **コメントは必ず label より前**である。**この判定はその逆を求めていた。**
+   *
+   * **実測**（2026-09-03、PR #585）: **手順どおりに実行して exit 1**。
+   * **間に `bin/loop-parked-head record` が挟まる**ので、**秒がずれると落ちる**
+   * ——**手順どおりにやるほど落ちやすい。**
+   */
+  it("投稿してから保留にした PR は、挙げない", () => {
+    // **手順の順序そのもの**——**投稿 → 記録 → label** で、**数秒ずれる。**
+    const result = run(withRows([row(42, "2026-08-12T04:00:03Z", "2026-08-12T04:00:00Z")]));
+
+    expect(result.status, "手順どおりの保留を偽物と呼んでいる").toBe(0);
+    expect(result.stdout).toBe("");
+  });
+
+  it("date が使えなくても、保留の後の発言は理由と読む", () => {
+    // **前側（保留より前の発言）だけが `date` に頼る**——**後ろ側は文字列で比べる**
+    // ので、**道具が無くても、これまでどおり動く。**
+    const stub = withRows([row(42, "2026-08-12T04:00:00Z", "2026-08-12T04:00:01Z")]);
+    writeFileSync(join(stub, "date"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+
+    expect(run(stub).status, "date が無いだけで正常な保留を挙げている").toBe(0);
+  });
+
+  it("date が使えなければ、前側は数えない", () => {
+    // **倒れる先は「挙げる」**——**黙るより、うるさいほうが安い。**
+    const stub = withRows([row(42, "2026-08-12T04:00:03Z", "2026-08-12T04:00:00Z")]);
+    writeFileSync(join(stub, "date"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+
+    expect(run(stub).status, "測れないのに理由があると読んでいる").toBe(1);
+  });
+
+  it("保留と関わりの無い古い発言は、理由と数えない", () => {
+    // **緩めない**（#588 の完了条件 2）——**「理由がどこにも無い」を見たい**ので、
+    // **保留から離れた発言まで数えると、何も見なくなる。**
+    const result = run(withRows([row(42, "2026-08-12T04:00:00Z", "2026-08-12T03:00:00Z")]));
+
+    expect(result.status, "古い発言を理由として数えている").toBe(1);
+    expect(result.stdout).toContain("42");
+  });
+
   it("発言が 1 つも無い保留も挙げる", () => {
     // **投稿が落ちた PR には、そもそも発言が無いことがある**（作った直後に保留）
     expect(run(withRows([row(42, "2026-08-12T04:00:00Z", "")])).status).toBe(1);
