@@ -37,6 +37,7 @@
  * ——**追えないことを、追えるふりで隠さない。**
  */
 
+import * as childProcess from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,8 +48,27 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 /** **実物の `task` を指す式**（**書かれている形**）。 */
 const REAL_TASK = String.raw`join\(\s*REPO_ROOT\s*,\s*"task"\s*\)`;
 
-/** **子プロセスを起こす口**（`node:child_process`）。 */
-const SPAWNS = "(?:spawnSync|spawn|execFileSync|execSync|exec|fork)";
+/**
+ * **子プロセスを起こす口の名前**。
+ *
+ * **手で並べない**——**並べた側が古くなる**（**`execFileSync` は並べたのに
+ * `execFile` を落とした**）。**`node:child_process` が export しているものから引く**
+ * ——**閉じた集合**なので、**並べ落としが構造的に消える。**
+ */
+function spawnNames(): string[] {
+  return Object.entries(childProcess)
+    .filter(([, value]) => typeof value === "function")
+    .map(([name]) => name);
+}
+
+/**
+ * **子プロセスを起こす口**（`node:child_process`）。
+ *
+ * **並べる順は効かない**（測った）——**選択肢は後戻りする**ので、
+ * **`exec` を先に置いても `execFile(` に当たる。** **抜けの正体は順ではなく、
+ * `execFile` が一覧に無かったこと**である。**だから一覧を手で持たない。**
+ */
+const SPAWNS = `(?:${spawnNames().join("|")})`;
 
 /**
  * **実物の `task` を spawn している行**を返す。
@@ -129,6 +149,20 @@ describe("試験は、実物の task を呼ばない（#587）", () => {
     const source = 'const help = execFileSync(join(REPO_ROOT, "task"), ["help"], {});';
 
     expect(spawnsRealTask(source), "execFileSync を見ていない").toHaveLength(1);
+  });
+
+  it("子プロセスを起こす口は、どれでも捕まる", () => {
+    // **手で並べない** (#590 のレビュー 2 周目)——**`execFileSync` は並んでいたのに
+    // `execFile` だけが抜けていた。** **並べた側が古くなる**のは、
+    // **下位コマンドの軸で退けたのと同じ形**である。
+    //
+    // **口ごとに当て、落ちたものを全部出す**——**1 つ目で止めると、
+    // 何が抜けているかが 1 件しか分からない。**
+    const missed = spawnNames().filter(
+      (name) => spawnsRealTask(`${name}(join(REPO_ROOT, "task"), ["loop:stop"]);`).length !== 1,
+    );
+
+    expect(missed, "見ていない口がある").toEqual([]);
   });
 
   it("状態を変える下位コマンドで呼ぶ形は、捕まる", () => {
