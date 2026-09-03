@@ -95,6 +95,12 @@ case "$args" in
     [[ -n \${FAKE_THREADS_FAIL:-} ]] && exit 1
     printf '%s\\n' "\${FAKE_THREADS:-0}"
     ;;
+  *"rules/branches"*)
+    # **--jq の式まで見る**（他の枝と同じ）。**取り出しているのは gh 側である**
+    require "--jq" "required_status_checks" ".context"
+    [[ -n \${FAKE_RULES_FAIL:-} ]] && exit 1
+    [[ -z \${FAKE_RULES:-} ]] || printf '%s\\n' "\${FAKE_RULES}"
+    ;;
   *) exit 1 ;;
 esac
 exit 0
@@ -109,6 +115,14 @@ exit 0
   writeFileSync(
     join(bin, "loop-ci-status"),
     `#!/usr/bin/env bash
+# **一覧の問い合わせと、PR の判定は別の口である**（本物と同じ）
+if [[ \${1-} == --required-checks ]]; then
+  printf '%s\\n' "\${FAKE_REQUIRED:-alpha}"
+  exit 0
+fi
+# **受け取った一覧を標準エラーへ出す**（\`loop-fixup-lines\` と同じ形）。
+# **ゲートは標準出力しか読まない**ので、出力を汚さずに「何を渡したか」を確かめられる
+printf 'required-env: %s\\n' "$(printf '%s' "\${LOOP_REQUIRED_CHECKS-}" | tr '\\n' ',')" >&2
 printf '%s\\n' "\${FAKE_CI_OUT:-必須 6 件すべて決着して成功}"
 exit \${FAKE_CI_EXIT:-0}
 `,
@@ -164,6 +178,73 @@ exit \${FAKE_REQUESTS_EXIT:-0}
   rmSync(dir, { recursive: true, force: true });
   return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
+
+/**
+ * **ゲートの必須一覧が、GitHub の branch protection と食い違っていた**（#608）。
+ *
+ * **`GATE PASS` と出たのに `the base branch policy prohibits the merge` で拒否された**
+ * ——**`CodeQL` が ruleset の必須に入っているのに、ゲートの一覧に無かった。**
+ *
+ * **一覧は 2 つある。** **`bin/loop-ci-status` の定数は workflow から導いたもの**で
+ * （`bin/required-checks.test.ts` が両方向で見ている）、**`CodeQL` は workflow ではなく
+ * GitHub 側の仕組みが出す**ので、**そちらには入りようがない。**
+ *
+ * **併せる。** **どちらか一方へ寄せない**——**定数側には ruleset に無いものがあり**
+ * （実測で `database policies` / `fixup limit basis`）、**外すとゲートが緩む。**
+ *
+ * **判定は増やさない。** **決着したか・成功したかは `bin/loop-ci-status` が持つ**ので、
+ * **ここは一覧を渡すだけ**である（`LOOP_REQUIRED_CHECKS`）。
+ */
+describe("必須の一覧を、GitHub 側と併せる（#608）", () => {
+  /** `bin/loop-ci-status` へ渡した一覧（偽物が標準エラーへ出す）。 */
+  function requiredEnvOf(gate: Run): string {
+    const line = gate.stderr.split("\n").find((each) => each.startsWith("required-env: "));
+    expect(line, "一覧を渡していない").toBeDefined();
+    return (line ?? "").replace("required-env: ", "");
+  }
+
+  it("ruleset が要求する検査を、判定へ渡す", () => {
+    // **これが本題。** **`CodeQL` は workflow から導けない**ので、
+    // **ruleset から読まないと、ゲートは永久に見ない。**
+    const gate = runGate({ FAKE_RULES: "CodeQL" });
+
+    expect(requiredEnvOf(gate), "ruleset の必須が渡っていない").toContain("CodeQL");
+  });
+
+  it("こちらの一覧も残す", () => {
+    // **ruleset に無いものが定数側にある**（`database policies` / `fixup limit basis`）
+    // ——**入れ替えると、そこが待たれなくなる。**
+    const gate = runGate({ FAKE_RULES: "CodeQL", FAKE_REQUIRED: "alpha" });
+
+    expect(requiredEnvOf(gate), "こちらの一覧が消えている").toContain("alpha");
+  });
+
+  it("ruleset が何も要求していなくても、こちらの一覧は残る", () => {
+    // **空で返るのは「ruleset が何も要求していない」**である
+    // ——**「必須なし」へ倒さない**（`AGENTS.md`）。
+    const gate = runGate({ FAKE_REQUIRED: "alpha" });
+
+    expect(requiredEnvOf(gate), "必須なしへ倒れている").toContain("alpha");
+  });
+
+  it("ruleset を読めなければ、通さない", () => {
+    // **判定不能を健全へ倒さない**（`AGENTS.md`）——**読めないまま通すと、
+    // ゲートが「マージしてよい」と言った先で拒否される。**
+    const gate = runGate({ FAKE_RULES_FAIL: "1" });
+
+    expect(gate.status, "読めないのに通している").toBe(1);
+    expect(gate.stdout + gate.stderr, "理由が出ていない").toMatch(/branch protection/);
+  });
+
+  it("同じ名前を二重に渡さない", () => {
+    // **両方に在る名前**（実測では `build` など 6 件がそう）。
+    // **重複すると、同じ検査を 2 回待つ**——**`bin/loop-ci-status` は名前で数える。**
+    const gate = runGate({ FAKE_RULES: "alpha", FAKE_REQUIRED: "alpha" });
+
+    // **`,` で繋いだ形で見る**（偽物が `tr` で潰している）——**1 件なら区切りは出ない**
+    expect(requiredEnvOf(gate), "同じ名前を二重に渡している").toBe("alpha");
+  });
+});
 
 describe("外出しした指摘の残量", () => {
   it("溜まりすぎていればマージさせない", () => {

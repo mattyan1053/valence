@@ -24,6 +24,10 @@ set -uo pipefail
 # **持っているのは `bin/loop-ci-status` である** (#206)。**判定と一覧を同じ側に置く**
 # ——**2 箇所に持つと片方だけ直して食い違う** (#159 で踏んだ形)。ここは口だけを残す。
 #
+# **並ぶのは workflow から導いた側だけ**である (#608)。**ruleset が要求する context は
+# 出てこない**——**あちらは PR ごとに base を見て読む**ので、**PR 番号を取らないこの口
+# では答えられない。** **判定に使う一覧は、下の「GHA CI」で併せたもの**である。
+#
 # **入口の確認より前に返す。** これは周回の判定ではなく**定数の問い合わせ**である——
 # 後ろに置くと、**尋ねるたびに `bin/loop-lease check` が走り、偽の「飛ばした」が積まれる**。
 if [[ ${1-} == "--required-checks" ]]; then
@@ -138,8 +142,42 @@ fi
 #
 # **待つ / 人を呼ぶ / 直させる を、終了コードで分ける。** **文面で分けない**——
 # **読む側が語を写すと、片方だけ変わって食い違う** (`bin/loop-stall` と同じ判断)。
+# **必須の一覧は 2 つある** (#608)。**`bin/loop-ci-status` の一覧は workflow から
+# 導いたもの**で（`bin/required-checks.test.ts` が両方向で見ている）、
+# **branch protection（ruleset）が要求する context はそこに入りようがない**
+# ——**`CodeQL` は workflow ではなく GitHub 側の仕組みが出す。**
+#
+# **実測**: **`GATE PASS` と出たのに `the base branch policy prohibits the merge`**
+# で拒否された。**`CodeQL` が FAILURE で、それが ruleset の必須**だった。
+#
+# **併せる。どちらか一方へ寄せない。** **定数側には ruleset に無いものがある**
+# （実測で `database policies` / `fixup limit basis`）——**外すとゲートが緩む。**
+#
+# **判定は増やさない。** **決着したか・成功したかは `bin/loop-ci-status` が持つ**
+# （#206。**2 箇所に持つと片方だけ直して食い違う**）——**ここは一覧を渡すだけ**である。
+#
+# **読めなければ止まる**（`AGENTS.md`。**判定不能を健全へ倒さない**）。
+# **空で返るのは「ruleset が何も要求していない」**であって、読めなかったのとは別である
+# ——**そのときも定数側は残る**ので、**「必須なし」へは倒れない。**
+required_union="$("${BASH_SOURCE[0]%/*}/loop-ci-status" --required-checks)" || required_union=""
+if ! ruleset_required="$(gh api "repos/{owner}/{repo}/rules/branches/${base-}" \
+  --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+  2>/dev/null)"; then
+  fail "必須の一覧: branch protection を読めません。ゲートが GitHub と食い違ったままになります"
+  ruleset_required=""
+fi
+while IFS= read -r ruleset_context; do
+  [[ -n $ruleset_context ]] || continue
+  # **同じ名前を二重に渡さない**——**`bin/loop-ci-status` は名前で数える。**
+  case $'\n'"$required_union"$'\n' in
+    *$'\n'"$ruleset_context"$'\n'*) ;;
+    *) required_union+=$'\n'"$ruleset_context" ;;
+  esac
+done <<<"$ruleset_required"
+
 ci_status=0
-ci_out="$("${BASH_SOURCE[0]%/*}/loop-ci-status" "$PR")" || ci_status=$?
+ci_out="$(LOOP_REQUIRED_CHECKS="$required_union" \
+  "${BASH_SOURCE[0]%/*}/loop-ci-status" "$PR")" || ci_status=$?
 case "$ci_status" in
   0) pass "GHA CI: $ci_out" ;;
   1) fail "GHA CI: $ci_out" ;;

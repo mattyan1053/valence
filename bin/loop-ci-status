@@ -4,10 +4,16 @@
 #   bin/loop-ci-status <PR番号>
 #   bin/loop-ci-status --fingerprint <PR番号>   決着の別だけを、必須の並び順で返す
 #   bin/loop-ci-status --conflicting <PR番号>   コンフリクトしているか (#347)
-#   bin/loop-ci-status --required-checks        `main` 側の必須チェック名を並べる
+#   bin/loop-ci-status --required-checks        workflow から導いた必須チェック名を並べる
 #
 # **PR を見るときの必須は、`main` の一覧と PR の head の一覧の**和**である** (#219)。
 # **`--required-checks` は PR 番号を取らない**ので、**答えるのは `main` 側だけ**である。
+#
+# **ここが答えるのは、workflow から導いた側だけ**である (#608)。**branch protection
+# （ruleset）が要求する context は入っていない**——**`CodeQL` のように、workflow ではなく
+# GitHub 側の仕組みが出すものがある**ので、**そちらは `bin/loop-gate` が読んで併せる。**
+# **ここで読まないのは、この口が定数の問い合わせだから**である（**`gh` の要らない
+# 開発コンテナから `bin/required-checks.test.ts` が引く**）。
 #
 #   exit 0 = 必須がすべて決着して成功
 #   exit 1 = 決着して失敗 / 必須の一部が見つからない (worker に直させる)
