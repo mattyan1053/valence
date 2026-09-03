@@ -31,7 +31,10 @@ function linesWith(path: string, phrase: string): string[] {
 describe("届いた配送を、1 周にまとめない", () => {
   for (const entry of ENTRIES) {
     it(`${entry.role} の入口が、1 通ずつ通すと言っている`, () => {
-      const hits = linesWith(entry.path, "1 通ずつ");
+      // **選ぶ側も向きを持たせる**（#607 のレビュー 2 周目）——**「1 通ずつ」だけで
+      // 選ぶと、「1 通ずつ入口を通さない」に変えてもこの行が選ばれ**、
+      // **後段の判定まで通ってしまう。** **片方だけ向きを持っても守れない。**
+      const hits = linesWith(entry.path, "1 通ずつ入口を通す");
 
       expect(hits.length, `言っている行が ${hits.length} 行ある（1 行のはず）`).toBe(1);
       // **語の有無ではなく、向きを見る**（#607 のレビュー）——**`acquire` があること
