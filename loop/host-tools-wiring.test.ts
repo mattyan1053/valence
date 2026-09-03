@@ -98,6 +98,13 @@ function scanCode(text: string, from: number, nested: boolean): Scan {
   let at = from;
   for (; at < text.length; at++) {
     const char = text[at] ?? "";
+    if (char === "\\") {
+      // **引用の外の `\\"` は、リテラルの引用符である**——**引用の始まりと読むと、
+      // 次の `"` までの実行が丸ごと文字列として落ちる**（#599 のレビュー 2 周目）。
+      out += text.slice(at, at + 2);
+      at += 1;
+      continue;
+    }
     if (char === "'" || char === '"') {
       const inner = skipQuoted(text, char, at + 1);
       out += ` ${inner.out} `;
@@ -213,6 +220,14 @@ describe("ホストで走るスクリプトの道具", () => {
     const source = "printf '%s' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"";
 
     expect(executablePartsOf(source), "実行を落としている").toMatch(/date\s+-u/);
+  });
+
+  it("引用符の外のエスケープは、引用の始まりではない", () => {
+    // **`bin/db-config-drift` の正規表現がこの形**で、**続く 1414 文字が
+    // 文字列として落ちていた**（#599 のレビュー 2 周目。数えてから直した）。
+    const source = `${String.raw`[[ $line =~ \"([^\"]+)\" ]] || continue`}\nsha256sum </dev/null`;
+
+    expect(executablePartsOf(source), "エスケープを引用の始まりと読んでいる").toMatch(/sha256sum/);
   });
 
   it("単引用符の中は、実行ではない", () => {
