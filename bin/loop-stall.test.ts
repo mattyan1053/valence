@@ -10,6 +10,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -2167,6 +2168,54 @@ describe("再開の順番", () => {
     const [from, to] = spans[0] ?? [];
     expect(from, "始まりが STOP の時刻でない（いまの時刻を書いている）").toBe(placed);
     expect(to, "終わりが始まりより前にある").toBeGreaterThan(placed);
+  });
+
+  it("2 度止めても、区間の始まりは最初のまま", () => {
+    // **`cmd_loop_stop` は既存の STOP も `>` で書き直す**ので、**`%Y` は
+    // 「最初に止まった時刻」ではなく「最後に上書きした時刻」になる。**
+    //
+    // **再開前に 2 度止まる道は実在する**——**識別子ごとに上限へ達する時刻が違う**ので、
+    // **別の役が後から届けば上書きされ**、**その間の枠が区間から漏れる。**
+    // **実物の `./task` を、実物のリポジトリで走らせない** (#186)——**`cmd_loop_stop` は
+    // `git worktree list` を見る**ので、**走っているループへ STOP を配ってしまう**
+    // （**踏んだ。実物の `loop/STOP` を作った**）。**砂場へ複製して、そこで走らせる。**
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+    const stop = join(repo, "loop", "STOP");
+    const first = Math.floor(Date.now() / 1000) - 9 * 60 * 60;
+    utimesSync(stop, first, first);
+
+    // **2 度目の停止**（本物の `cmd_loop_stop` が通る道）
+    const again = spawnSync("./task", ["loop:stop", "あとから"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    expect(again.status, again.stderr).toBe(0);
+
+    expect(
+      Math.floor(statSync(stop).mtimeMs / 1000),
+      "2 度目の停止が、最初に止まった時刻を上書きした",
+    ).toBe(first);
+  });
+
+  it("記録は、書きかけを読ませない（置き換えで差し替える）", () => {
+    // **読み手（`bin/loop-cadence`）はこのロックを取らない**ので、**切り詰めてから
+    // 書き終わるまでに読むと空か途中**である——**止まっていた枠が暇に化ける。**
+    //
+    // **兄弟のスクリプトに、その形が既にある**——**`bin/loop-lease` の `record_start` /
+    // `record_held` / `record_end` は、どれも `>"$X.tmp"` してから `mv -f`。**
+    //
+    // **置き換えなら、読み手が開いた側は最後まで完成している**（**inode が入れ替わる**）。
+    const spans = join(repo, ".git", "valence-loop-stop-spans");
+    writeFileSync(spans, "1\t2\n");
+    const before = statSync(spans).ino;
+    counted();
+    withTask();
+
+    expect(resume().status).toBe(0);
+
+    expect(statSync(spans).ino, "同じ入れ物を書き換えている（切り詰めが見える）").not.toBe(before);
+    expect(existsSync(`${spans}.tmp`), "作りかけが残っている").toBe(false);
   });
 
   it("STOP が無ければ、区間を残さない", () => {

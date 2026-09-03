@@ -249,12 +249,38 @@ fresh_round() {
 # 配られる**ので、**止まっていたのはどの scope も同じ**である。
 readonly STOP_SPANS="$common_dir/valence-loop-stop-spans"
 
+# **いま在る `loop/STOP`**（#586 のレビュー）。**記録に行が入るのは再開のとき**なので、
+# **止まっている最中は、その区間がどこにも無い**——**そこがいちばん踏みやすい場面**である
+# （**止まっているループを調べるときに打つのが `./task loop:status`** で、
+# **`show_cadence` は STOP の表示より先に走る**）。
+#
+# **未完了の区間として扱う**——**始まりは STOP が置かれた時刻、終わりはいま**である。
+#
+# **置き場所は `./task` が答える**（**配っているのがあちら**）——**規則をここへ写さない。**
+# **いちばん古いものを採る**：**配りかけで人が足したぶんもある**ので、
+# **短いほうを採ると枠を数え漏らす。**
+#
+# **読めなければ、無いものとして進む**（**変更前と同じ読み**）——**ここで止めると、
+# 見張りそのものが黙る。**
+stop_open_from=""
+if stop_paths="$("$(git rev-parse --show-toplevel)/task" loop:stop:paths 2>/dev/null)"; then
+  while read -r stop_path; do
+    [[ -n $stop_path && -f $stop_path ]] || continue
+    stop_placed="$(stat -c %Y "$stop_path" 2>/dev/null)" || continue
+    [[ $stop_placed =~ ^[0-9]+$ ]] || continue
+    [[ -n $stop_open_from ]] && ((stop_open_from <= stop_placed)) || stop_open_from="$stop_placed"
+  done <<<"$stop_paths"
+fi
+readonly stop_open_from
+
 # **その時刻、ループは止まっていたか。**
 #
 # **記録が無いなら「止まっていなかった」**——**これは推定ではなく、
 # 変更前と同じ読み**である（**記録を持たない版から上げた直後がそれ**）。
 stopped_at() {
   local at="$1" from to
+  # **いま止まっているなら、そこから先は全部この中**である。
+  [[ -n $stop_open_from ]] && ((stop_open_from <= at)) && return 0
   [[ -f $STOP_SPANS ]] || return 1
   while IFS=$'\t' read -r from to; do
     [[ $from =~ ^[0-9]+$ && $to =~ ^[0-9]+$ ]] || continue

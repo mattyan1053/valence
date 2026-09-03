@@ -21,6 +21,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,15 +75,23 @@ function workspace(): { dir: string; stamp: string } {
  * 作業場**を出す（**登録されていなければ exit 1**）——**master を除いているのは
  * あちら**なので、**この試験でも 2 つの口に分けて答える。**
  */
-function taskAnswers(dir: string, answers: { workerPaths?: string[]; masterPath?: string }): void {
+function taskAnswers(
+  dir: string,
+  answers: { workerPaths?: string[]; masterPath?: string; stopPaths?: string[] },
+): void {
   const workers = (answers.workerPaths ?? []).map((path) => JSON.stringify(path)).join(" ");
   const master =
     answers.masterPath === undefined
       ? "exit 1"
       : `printf '%s\\n' ${JSON.stringify(answers.masterPath)}`;
+  // **`loop/STOP` の置き場所**（本物は `./task loop:stop:paths`）。**既定は
+  // 「この作業場のぶん 1 つ」**——**置いていなければ、在るものが無いだけである。**
+  const stops = (answers.stopPaths ?? [join(dir, "loop", "STOP")])
+    .map((path) => JSON.stringify(path))
+    .join(" ");
   writeFileSync(
     join(dir, "task"),
-    `#!/usr/bin/env bash\ncase "$1" in\n  loop:worker:paths) printf '%s\\n' ${workers} ;;\n  loop:master:path) ${master} ;;\nesac\n`,
+    `#!/usr/bin/env bash\ncase "$1" in\n  loop:worker:paths) printf '%s\\n' ${workers} ;;\n  loop:master:path) ${master} ;;\n  loop:stop:paths) printf '%s\\n' ${stops} ;;\nesac\n`,
     { mode: 0o755 },
   );
 }
@@ -1649,6 +1658,34 @@ describe("暇な枠を跨いだかで、次の一手を決める（#575）", () 
 
     // **倒してはいけないのはこちら**——**生きている予定表を死んだと断定する側。**
     expect(done.stdout, "止まっていた枠を暇だと数えている").not.toMatch(/予定表が死んでいる/);
+  });
+
+  it("いま止まっている最中も、暇だったと数えない", () => {
+    // **記録に入るのは再開のとき**なので、**止まっている最中は区間がどこにも無い**
+    // ——**そこがいちばん踏みやすい場面**である（**止まっているループを調べるときに
+    // 打つのが `./task loop:status` で、`show_cadence` は STOP の表示より先に走る**）。
+    //
+    // **#584 の完了条件は「置いたあと」**であって、**「消したあと」ではない。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+    held(dir, [
+      [1_000, 1_100],
+      [9_000, 9_100],
+      [9_500, 9_600],
+    ]);
+    // **記録は空のまま**——**まだ再開していない。**
+    mkdirSync(join(dir, "loop"), { recursive: true });
+    const stop = join(dir, "loop", "STOP");
+    writeFileSync(stop, "no-work\n");
+    utimesSync(stop, 1_100, 1_100);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "9800", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "止まっている最中を暇だと数えている").not.toMatch(/予定表が死んでいる/);
   });
 
   it("止まっていた枠を外しても、残りが暇なら、これまでどおり言う", () => {

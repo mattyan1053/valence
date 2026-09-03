@@ -689,11 +689,20 @@ readonly STOP_SPANS="$common_dir/valence-loop-stop-spans"
 readonly STOP_SPANS_KEEP=50
 
 # **止まっていた区間を 1 本足す。** **失敗したら 1 を返す**——**握りつぶさない。**
+# **読み手は、このロックを取らない** (#586 のレビュー)。**追記してから同じ入れ物を
+# 切り詰めると、その間に読んだ側は空か途中を見る**——**止まっていた枠が暇に化ける。**
+#
+# **兄弟と同じ書き方にする**——**`bin/loop-lease` の `record_start` / `record_held` /
+# `record_end` は、どれも `>"$X.tmp"` してから `mv -f`。** **置き換えなら、
+# 読み手が開いた側は最後まで完成している。**
 record_stop_span() {
-  local from="$1" kept
-  printf '%s\t%s\n' "$from" "$(date +%s)" >>"$STOP_SPANS" || return 1
-  kept="$(tail -n "$STOP_SPANS_KEEP" "$STOP_SPANS")" || return 1
-  printf '%s\n' "$kept" >"$STOP_SPANS" || return 1
+  local from="$1" kept=""
+  [[ -f $STOP_SPANS ]] && { kept="$(tail -n "$((STOP_SPANS_KEEP - 1))" "$STOP_SPANS")" || return 1; }
+  {
+    [[ -n $kept ]] && printf '%s\n' "$kept"
+    printf '%s\t%s\n' "$from" "$(date +%s)"
+  } >"$STOP_SPANS.tmp" || { rm -f "$STOP_SPANS.tmp"; return 1; }
+  mv -f "$STOP_SPANS.tmp" "$STOP_SPANS" || { rm -f "$STOP_SPANS.tmp"; return 1; }
 }
 
 # **master と worker は同じカウンタを、同じ周期で書きうる。** 読んでから書くまでを
