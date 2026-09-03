@@ -1682,6 +1682,25 @@ describe("bin/loop-lease", () => {
           expect(second.stderr).not.toContain("引き継ぎます");
         });
 
+        it("切れていない lease でも、活動が新しくなる", () => {
+          // **上の試験は「取得を過去へずらす」ので、期限切れの枝を通る**
+          // ——**切れる前に伸ばすのが本題**なのに、**普通に握っている道が
+          // 空いていた**（**変異で見つけた。渡す記録を消しても緑だった**）。
+          //
+          // **活動だけを古くする**——**取得は新しいまま**なので、**期限は切れていない。**
+          expect(acquire().status).toBe(0);
+          const scope = activityScope();
+          const long_ago = Math.floor(Date.now() / 1000) - 100_000;
+          ageActivity(scope, 100_000);
+
+          expect(run(["check"]).status).toBe(0);
+
+          expect(
+            Number(activityAt(scope)),
+            "握っている lease の活動が、更新されていない",
+          ).toBeGreaterThan(long_ago);
+        });
+
         it("master の周回にも届く", () => {
           // **`./task` が打つのは worker 固定**（実測）。**master にはレビュー待ち以外に
           // 心拍が無い**ので、**ここで届かなければ master は毎回 TTL で外れる。**
@@ -2652,6 +2671,49 @@ describe("bin/loop-lease", () => {
         ),
         "誰も握っていない名前の活動を作っている",
       ).toEqual([`valence-loop-activity-${scope}`]);
+    });
+
+    it("現行名が期限切れでも、いま握っている旧名へ打つ", () => {
+      // **`round_holds` が 0 を返す道は 1 つではない** (#604 のレビュー 2 周目)。
+      // **期限切れの現行名が自分のものなら、そこで 0 を返して打ち切る**ので、
+      // **旧名を見にいく枝へ届かない**——**`check` は期限切れの現行名へ心拍を打ち**、
+      // **死んだ記録を生き返らせたうえ、実際に握っている旧名は伸びない。**
+      //
+      // **`beat_activity` は「期限切れの記録でも持ち主なら伸ばす」と決めてある**ので、
+      // **そこでは止まらない**（**長い周回が静かだっただけ、を殺さないため**）。
+      //
+      // **根は、どの記録で持っているかを呼び側が知らないこと**である
+      // ——**判定した当人（`round_holds`）が、その記録を渡す。**
+      const older = olderVersion();
+      // **現行名で取って、期限の外へ出す**（**跡は残る**——`expired_owner` は自分）
+      expect(acquire().status).toBe(0);
+      const [current = ""] = leaseRecords();
+      const long_ago = Math.floor(Date.now() / 1000) - 100_000;
+      const currentLease = join(sandbox, ".git", current);
+      const currentLines = readFileSync(currentLease, "utf8").split("\n");
+      const [currentToken = ""] = (currentLines[0] ?? "").split("\t");
+      currentLines[0] = `${currentToken}\t${long_ago}`;
+      writeFileSync(currentLease, currentLines.join("\n"));
+      writeFileSync(join(sandbox, ".git", current.replace("lease", "activity")), `${long_ago}\n`);
+      // **旧名で取り直す**（**こちらが、いま握っている有効な lease**）
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+      const [other = ""] = leaseRecords().filter((entry) => entry !== current);
+      expect(other, "旧名の記録が置かれていない").not.toBe("");
+      const otherActivity = join(sandbox, ".git", other.replace("lease", "activity"));
+      writeFileSync(otherActivity, `${long_ago}\n`);
+
+      expect(runWith(SCRIPT, ["check"]).status).toBe(0);
+
+      expect(
+        Number(readFileSync(otherActivity, "utf8").trim()),
+        "いま握っている旧名の活動が、更新されていない",
+      ).toBeGreaterThan(long_ago);
+      expect(
+        Number(
+          readFileSync(join(sandbox, ".git", current.replace("lease", "activity")), "utf8").trim(),
+        ),
+        "期限切れの現行名を生き返らせている",
+      ).toBe(long_ago);
     });
 
     it("別の作業場が持っている lease を、この周回のものと読まない", () => {

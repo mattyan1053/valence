@@ -1167,15 +1167,18 @@ fi
 held_under_other_name() {
   local role="$1" want_owner="$2" candidate candidate_scope found=1
   local saved_state="$STATE" saved_activity="$ACTIVITY" saved_label="$SCOPE_LABEL"
-  # **見つけた記録の単位を、呼んだ側へ渡す** (#602。#604 のレビュー)。**口は下で
-  # 元へ戻す**ので、**心拍を打つ側は自分で乗り換える**——**戻したまま打つと、
-  # 握っている当の lease ではなく、使われていない新しい名前のほうを伸ばす。**
-  #
-  # **消すのはここだけ**（`AGENTS.md` §5。**判定を 2 箇所に持たない**）。
-  # **見つけたときは、そのまま `round_holds` が 0 を返して `check` が終わる**ので、
-  # **非空のまま次の役へ持ち越す道が無い**——**呼ぶ側で消し直すと、写した側が
-  # 古くなったときに気づけない**（**変異させても、どの試験も落ちなかった**）。
-  other_name_scope=""
+  # **読んだ結果も借り物である** (#604 のレビュー 2 周目)。**候補を `read_lease` で
+  # 読むと、呼んだ側が既に読んでいた値を上書きする**——**当たったのは、期限切れの
+  # 現行名を見る枝**で、**候補の `expired_*` を現行名のものとして読み**、
+  # **記録が 1 つも無いのに「この周回の lease は期限切れです」と言った。**
+  # **口と一緒に、読んだ結果も返す。**
+  local saved_held_token="$held_token" saved_held_since="$held_since"
+  local saved_held_owner="$held_owner" saved_held_workspace="$held_workspace"
+  local saved_expired_token="$expired_token" saved_expired_owner="$expired_owner"
+  local saved_expired_over="$expired_over" saved_last_activity="$last_activity"
+  # **見つけた記録の単位は、`round_holds` が `holds_scope` へ入れて渡す**
+  # (#602。#604 のレビュー)。**ここでは口を下で元へ戻す**（**呼んだ側は自分の記録を
+  # 指したまま続ける**）ので、**乗り換えは打つ側が行う。**
   for candidate in "$common_dir/valence-loop-lease-$role"*; do
     [[ -f $candidate ]] || continue
     [[ $candidate != *.lock && $candidate != *.tmp ]] || continue
@@ -1201,13 +1204,21 @@ held_under_other_name() {
       [[ -n ${WORKSPACE_PATH-} && $held_workspace == "${WORKSPACE_PATH-}" ]] || continue
     fi
     found=0
-    other_name_scope="$candidate_scope"
+    holds_scope="$candidate_scope"
     break
   done
   # **借りた口を返す。** **呼んだ側は自分の記録を指したまま続ける**
   STATE="$saved_state"
   ACTIVITY="$saved_activity"
   SCOPE_LABEL="$saved_label"
+  held_token="$saved_held_token"
+  held_since="$saved_held_since"
+  held_owner="$saved_held_owner"
+  held_workspace="$saved_held_workspace"
+  expired_token="$saved_expired_token"
+  expired_owner="$saved_expired_owner"
+  expired_over="$saved_expired_over"
+  last_activity="$saved_last_activity"
   return "$found"
 }
 
@@ -1226,6 +1237,15 @@ held_under_other_name() {
 # **どこで見たかを `taken` に残す**（`check` の案内が使う）。
 round_holds() {
   local role="$1" owner="$2"
+  # **どの記録で持っているかを、判定した当人が渡す** (#604 のレビュー 2 周目)。
+  #
+  # **0 を返す道は 4 つある**——**現行名で持っている / 前の版の名前で持っている /
+  # 期限切れだが自分のものだった / 取り直された跡がある。** **呼ぶ側（`check` の心拍）が
+  # 「どれで持っているか」を知らないと、別の記録へ打つ**——**2 周続けて同じ場所に
+  # 穴が出たのは、口が 1 つでなかったため**である。
+  #
+  # **空は「打つ先が無い」**（取り直された跡だけがある場合）。**判定と同じ場所から出す。**
+  holds_scope=""
   set_role_paths "$role" || return 2
   lock_state || return 2
   read_lease quiet || {
@@ -1241,29 +1261,40 @@ round_holds() {
     # **気づけるのがここしかない。** **期限を見るのは `acquire` だけ**で、
     # **走っている本人は出口の `release` まで気づけない**——**そのときには
     # 重なりは既に起きている。** **`bin/loop-*` を打つたびにここを通る。**
+    # **前の版の名前で、いま有効に持っていないかを先に見る** (#383。#240 / #290 / #291
+    # と同じ形)。**名前の作り方は版で変わる**——**新しい名前だけを見ると、健全な周回が
+    # 「入口を飛ばした」として記録され**、**その記録が読めなくなる**
+    # （**偽の記録より取りこぼしのほうが安い**、が崩れる）。**実地で踏んだ。**
+    #
+    # **期限切れの現行名より先に見る** (#604 のレビュー 2 周目)。**同じ作業場に
+    # 「期限切れの現行名」と「有効な旧名」が同時に在りうる**（**版が戻って取り直した**）
+    # ——**先に期限切れのほうで打ち切ると、心拍が死んだ記録を生き返らせ**、
+    # **いま握っている旧名は伸びない。** **有効に握っている記録のほうが、強い事実である。**
+    if [[ -n $owner ]] && held_under_other_name "$role" "$owner"; then
+      echo "[WARN] この周回の lease は、いまと違う名前で置かれています（版が入れ替わりました）" >&2
+      echo "       返すときは、そのまま同じ token で返せます" >&2
+      return 0
+    fi
     if [[ -n $expired_token && -n $owner && -n $expired_owner && $expired_owner == "$owner" ]]; then
       echo "[WARN] この周回の lease は期限切れです（${expired_over} 秒超過）。走っている最中に外れました" >&2
       echo "       切れている間は空いて見えるので、別の周回が入っているかもしれません" >&2
       echo "       出口では、同じ token でそのまま返せます（期限切れだったと言われます）" >&2
       # **持っていた側として答える。** **飛ばしてはいない**ので、`./task loop:status` の
       # 「入口を飛ばした周回」に混ぜると、**数えているものが濁る。**
+      #
+      # **打つ先はこの記録**——**切れていても持ち主なら伸ばす**（`beat_activity`）。
+      # **長い周回が静かだっただけ**ということがある。
+      holds_scope="$lease_scope"
       return 0
     fi
     # **記録そのものが消えていても、跡は残っている** (#278 のレビュー)。
     # **`expired_*` はプロセス内の変数**なので**この経路では必ず空**——
     # **見にいく者がここにいないと、返した後の窓では誰も言えない。**
+    #
+    # **打つ先は無い**（`holds_scope` は空のまま）——**いま持っているのは別の周回**である。
     if [[ -n $owner ]] && superseded_has "" "$owner"; then
       echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
       echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
-      return 0
-    fi
-    # **前の版の名前で持っていないかを見る** (#383。#240 / #290 / #291 と同じ形)。
-    # **名前の作り方は版で変わる**——**新しい名前だけを見ると、健全な周回が
-    # 「入口を飛ばした」として記録され**、**その記録が読めなくなる**
-    # （**偽の記録より取りこぼしのほうが安い**、が崩れる）。**実地で踏んだ。**
-    if [[ -n $owner ]] && held_under_other_name "$role" "$owner"; then
-      echo "[WARN] この周回の lease は、いまと違う名前で置かれています（版が入れ替わりました）" >&2
-      echo "       返すときは、そのまま同じ token で返せます" >&2
       return 0
     fi
     return 1
@@ -1283,6 +1314,7 @@ round_holds() {
     return 3
   fi
   [[ $held_owner == "$owner" ]] || return 1
+  holds_scope="$lease_scope"
   return 0
 }
 
@@ -1363,17 +1395,19 @@ if [[ $ACTION == "check" ]]; then
       # **打てなくても、この検査は落とさない。** **入口を飛ばしたかどうかの答えと、
       # 活動を書けたかどうかは別のことである**（**理由は `beat_activity` が言う**）。
       0)
-        # **旧名で持っていたなら、その記録へ乗り換えてから打つ** (#604 のレビュー)。
-        # **`held_under_other_name` は見つけたあと口を元へ戻す**（**呼んだ側は自分の
-        # 記録を指したまま続ける**）ので、**戻したまま打つと、握っている当の lease は
-        # 伸びず**、**`check` を通り続けても期限切れになる**——**空いて見えた窓へ
-        # 別の周回が入る。** **返すときと同じで、資格は名前ではなく token が持つ。**
-        if [[ -n ${other_name_scope-} ]]; then
-          STATE="$common_dir/valence-loop-lease-$other_name_scope"
-          ACTIVITY="$common_dir/valence-loop-activity-$other_name_scope"
-          SCOPE_LABEL="$other_name_scope"
+        # **打つ先は、`round_holds` が実際に確かめた記録である** (#604 のレビュー 2 周目)。
+        # **0 を返す道は 4 つあり、どの記録で持っているかは判定した当人しか知らない**
+        # ——**呼ぶ側で組み立て直すと、別の記録へ打つ**（**旧名で持っているのに新名へ、
+        # 有効な旧名があるのに期限切れの現行名へ、と 2 周続けて外した**）。
+        #
+        # **空なら打たない**——**取り直された跡があるだけで、いま持っているのは別の周回**
+        # である。**返すときと同じで、資格は名前ではなく token が持つ。**
+        if [[ -n ${holds_scope-} ]]; then
+          STATE="$common_dir/valence-loop-lease-$holds_scope"
+          ACTIVITY="$common_dir/valence-loop-activity-$holds_scope"
+          SCOPE_LABEL="$holds_scope"
+          beat_activity || true
         fi
-        beat_activity || true
         exit 0
         ;;
       1) ;;
