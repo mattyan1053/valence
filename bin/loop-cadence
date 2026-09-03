@@ -684,7 +684,14 @@ evaluate_scope() {
     # **窓は、判定が `ok` の間こそ読めなければ意味が無い** (#601)——**広がった
     # ことに気づけるのは、広がっている間だけ**である。**決まらない行は `-`。**
     window_shown="window=-"
-    [[ -z $window ]] || window_shown="window=$window($window_from)"
+    if [[ -n $window ]]; then
+      # **2 つの物差しが違う窓を出したら、帯で出す** (#606 のレビュー 3 周目)。
+      # **高いほうだけ出すと `age < window` に見え**、**`unknown` の理由が
+      # 読めない**——**見えている値だけでは `ok` と区別が付かない。**
+      window_shown="window=$window($window_from)"
+      ((window_low == window)) ||
+        window_shown="window=$window_low..$window($window_from)"
+    fi
     echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age${blocked_shown} ${interval_shown:-interval=${INTERVAL:-unknown}} $window_shown $verdict"
   fi
   # **`unknown` でも黙らない** (#575)。**`stale` のときだけ読みを出していた**ので、

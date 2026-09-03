@@ -771,6 +771,9 @@ describe("周回が始まったことを、どう始まったかごと残す", (
 
       expect(done.status, `正常だと言っている: ${done.stdout}`).not.toBe(0);
       expect(done.stdout, "正常だと言っている").not.toMatch(/ ok$/m);
+      // **割れた理由が読めること**（#606 のレビュー 3 周目）——**高いほうの窓だけ
+      // 出すと `age < window` に見え**、**見えている値だけでは `ok` と読める。**
+      expect(done.stdout, "割れた帯が出ていない").toMatch(/window=5400\.\.7200\(/);
     });
 
     it("物差しが実測だと分かる形で出す", () => {
