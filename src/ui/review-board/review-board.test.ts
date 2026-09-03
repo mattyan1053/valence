@@ -63,6 +63,85 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
  * **材料（リスク Tier）が揃っていないことと、承認済みかどうかは別**である
  * ——**片方の行にだけ出すと、「押した結果が出ない」行が残る。**
  */
+/**
+ * **10 本並べて見た**（#597。**実物の PR は積まない**——#186。**表示の入力を作る**）。
+ *
+ * **数えた**——**畳む前は 67 行**（**1 件あたり 6〜8 行**）。**Tier の説明文が
+ * 同じ Tier の行に何度も出て**、**「どれから見るか」を決めるのに全部読むことになった。**
+ *
+ * **畳む先は `RiskTierView`** で、**そちらが「何を常時出すか」を持っている**
+ * ——**ここは、10 本並んだときにそれが効いているか**を見る（**1 本では、
+ * 同じ文が何度も出ることそのものが起きない**）。
+ */
+describe("10 本並べても、順番が決まる（#597）", () => {
+  const MANY: readonly PullRequestRef[] = Array.from({ length: 10 }, (_, index) =>
+    pullRequest(index + 1, "main", `feat/${index + 1}`),
+  );
+
+  /** 常時見えている部分（`<summary>` の中身）を、行のぶんだけ並べる。 */
+  function summaries(markup: string): readonly string[] {
+    return [...markup.matchAll(/<summary[^>]*>([\s\S]*?)<\/summary>/g)].map(
+      (found) => found[1] ?? "",
+    );
+  }
+
+  function manyProps(): ReviewBoardProps {
+    return props({
+      pullRequests: MANY,
+      edges: [],
+      order: { ordered: MANY.map((each) => each.number), cyclic: [] },
+      changes: new Map(
+        MANY.map((each, index) => [
+          each.number,
+          change({
+            changedFileCount: index + 1,
+            changedLineCount: index * 40 + 5,
+            // **大半は通っている**——**それが背景であることが、10 本で初めて分かる**
+            ciStatus: index === 3 ? "failing" : "passing",
+          }),
+        ]),
+      ),
+    });
+  }
+
+  it("行のぶんだけ畳まれている", () => {
+    const found = summaries(render(manyProps()));
+
+    expect(found, "畳まれていない行がある").toHaveLength(MANY.length);
+  });
+
+  it("10 本とも、畳んだ状態で始まる", () => {
+    // **`<summary>` の中身だけを見ると、`<details open>` にしても全部緑になる**
+    // ——**67 行に戻っても気づけない**（#605 のレビュー）。**開始タグの属性を見る。**
+    const markup = render(manyProps());
+    const opened = [...markup.matchAll(/<details(\s[^>]*)?>/g)].map((found) => found[1] ?? "");
+
+    expect(opened, "畳まれていない行がある").toHaveLength(MANY.length);
+    for (const attributes of opened) {
+      expect(attributes, "開いた状態で始まっている行がある").not.toMatch(/(^|\s)open(=|\s|$)/);
+    }
+  });
+
+  it("同じ Tier の説明文が、10 回並ばない", () => {
+    // **順番を決める材料にならない文が、行の数だけ出ていた。**
+    const markup = render(manyProps());
+
+    for (const summary of summaries(markup)) {
+      expect(summary, "説明文が常時出ている").not.toContain("いつもどおり中身を読んでください");
+    }
+    // **消してはいない**——**開けば読める**（`AGENTS.md`。理由が追えること）
+    expect(markup, "説明文を消している").toContain("いつもどおり中身を読んでください");
+  });
+
+  it("通っていない CI は、1 行だけ常時見える", () => {
+    // **10 本のうち 1 本だけが落ちている**——**そこへ目が行かないと、順番が決まらない。**
+    const shown = summaries(render(manyProps())).filter((summary) => summary.includes("CI:"));
+
+    expect(shown, "落ちている CI が埋もれている").toHaveLength(1);
+    expect(shown[0], "待つのか直すのかが読めない").toContain("直さないと進みません");
+  });
+});
+
 describe("各行へ状態を足す", () => {
   it("材料がある行にも、無い行にも出る", () => {
     const html = render(
