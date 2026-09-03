@@ -187,12 +187,22 @@ describe("RiskTierView", () => {
       // **`summary` / `strong` / `span` の間隔を付ける規則が 1 つも無い**
       // ——**class に頼ると、出ていなくても markup は同じ**なので、
       // **試験では気づけない**（#585 で、配信中の CSS を見るまで分からなかった形）。
-      const text = (markup: string) => summaryOf(markup).replace(/<[^>]+>/g, "");
+      // **タグは空白へ置き換える**（**この試験群の他の 4 箇所と同じ形**）。
+      // **空文字にすると、CodeQL が「不完全なサニタイズ」として鳴る**
+      // ——**`<` と後ろの語が繋がって読める形になるため**である（#605 のレビュー）。
+      // **ここは出力を無害化しているのではなく、読める形を取り出しているだけ**だが、
+      // **同じ書き方が 4 箇所で通っている**のだから、**そちらへ揃える。**
+      const words = (markup: string) =>
+        summaryOf(markup)
+          .replace(/<[^>]*>/g, " ")
+          .split(/\s+/)
+          .filter(Boolean);
 
-      expect(text(viewFor(change({ ciStatus: "failing" }))), "札と CI が繋がっている").toMatch(
+      expect(
         // **札は判定が決める**（`viewFor`）——**`failing` は `high-risk` になる**
-        /先に人が見る／CI:/,
-      );
+        words(viewFor(change({ ciStatus: "failing" }))).slice(0, 3),
+        "札と CI の間に区切りが無い",
+      ).toEqual(["先に人が見る", "／", "CI:"]);
     });
 
     it("CI を出さない行に、区切りだけが残らない", () => {
