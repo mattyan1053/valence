@@ -45,6 +45,28 @@ export function changeUnavailableNote(kind: string): string {
   }
 }
 
+/**
+ * **押すものと、押した結果を、横に並べる**（#585 のレビュー。**人が見て言った**）。
+ *
+ * > approve と merge が縦にならんでて、ボタンのサイズが文字列長に影響されてズレてる
+ *
+ * **走らせて確かめた**——**行は `<li class="flex flex-col …">`** で、
+ * **`renderActions` が返すのは `<form>` 2 つ**（POST 先が別なので**1 つにまとめられない**）
+ * ——**そのまま flex item になるので縦に積まれる。**
+ *
+ * **器はここに置く**——**両者を合成する唯一の場所**であり、**`ApproveButton` /
+ * `MergeButton` は互いを知らない**（**片方に置くと、もう片方が外に出る**）。
+ *
+ * **`flex-wrap` にする**——**幅が足りない画面で、はみ出すより折り返すほうがよい。**
+ *
+ * **幅もここで揃える**——**`Approve` と `Merge` は字数が違う**ので、**書かなければ
+ * 文字幅で決まり、並べたときにズレる。** **並ぶときに揃えるのは、並べる側の仕事**
+ * である（**部品は互いを知らない**）。
+ */
+function ActionRow({ children }: { readonly children: ReactNode }) {
+  return <div className="flex flex-wrap items-center gap-2 [&_button]:min-w-24">{children}</div>;
+}
+
 export type ReviewBoardProps = {
   readonly pullRequests: readonly PullRequestRef[];
   readonly edges: readonly DependencyEdge[];
@@ -154,16 +176,20 @@ export function ReviewBoard({
                     "リスク判定の材料がありません（まだ取得できていません）"
                   : changeUnavailableNote(kind)}
               </span>
-              {renderStatus?.(number)}
-              {renderActions?.(number)}
+              <ActionRow>
+                {renderStatus?.(number)}
+                {renderActions?.(number)}
+              </ActionRow>
             </>
           );
         }
         return (
           <>
             <RiskTierView tier={classifyRiskTier(change)} change={change} />
-            {renderStatus?.(number)}
-            {renderActions?.(number)}
+            <ActionRow>
+              {renderStatus?.(number)}
+              {renderActions?.(number)}
+            </ActionRow>
           </>
         );
       }}
