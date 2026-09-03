@@ -767,26 +767,26 @@ gh label create awaiting-human --description "人の判断待ち" 2>/dev/null ||
 # **消せないなら保留にしない**（**保留の条件が 1 つでも欠けたら保留にしない**）
 if ! bin/loop-parked-head clear <PR番号>; then
   bin/loop-stall "review-exhausted:<PR番号>@<SHA>"
-# **付いたことを確かめてから進む**（`changes-requested` と同じ順序）。
-# **付いていないのに保留したつもりになると、`ready` は上がらないまま
-# 「進めるようにした」と思い込む**——**いちばん危ない**
-elif gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
-  # 本文には **何が決まれば進むのか**と、**人が何をすれば再開するのか**を書く——
-  # **そのまま通すなら人がスレッドを resolve、直させるならスレッドへ書いて
-  # `changes-requested`**。**label を外すのは最後**である（`loop/README.md` と同じ）
-  if ! gh pr comment <PR番号> --body-file <file>; then
-    # **打つのは人待ちの名前である。** triage が `human` を返した状態は
-    # **worker には解けない**——`awaiting-worker` は `WORKER_FIXES` に入るので、
-    # **worker の周回が動いている間ずっと数えられない**（主体が違う）。
-    #
-    # **理由の無い保留を残さない。** 一覧には PR 番号が出るので、**見た人は
-    # 「人待ちが 1 件ある」と読み、中身が空だとは思わない**——**停止も積まれない**ので
-    # 3 周の経路にも乗らない。**動いているように見えるぶん、こちらのほうが危ない**。
-    # **戻して数える**（`--add-label` が落ちた場合と同じ形に畳める）
-    gh pr edit <PR番号> --remove-label parked --remove-label awaiting-human || true
-    bin/loop-stall "review-exhausted:<PR番号>@<SHA>"
-  fi
-else
+# **投稿してから保留にする**（#588。**ほかの保留と同じ順序**）。**`parked` は錠ではない**
+# ので、**理由が先にあるほうが穴が無い**——**理由の無い保留が、そもそも作れない** (#163)。
+#
+# **前は逆だった。** **label を付けてから投稿し、落ちたら戻す**形で、**戻しも `|| true`
+# で握り潰していた**——**落ちる原因が API 障害なら戻す側も同じ理由で落ちる**（相関する）。
+# **`changes-requested` に合わせた順序**だったが、**あちらは錠なので理由が違う。**
+#
+# 本文には **何が決まれば進むのか**と、**人が何をすれば再開するのか**を書く——
+# **そのまま通すなら人がスレッドを resolve、直させるならスレッドへ書いて
+# `changes-requested`**。**label を外すのは最後**である（`loop/README.md` と同じ）
+elif ! gh pr comment <PR番号> --body-file <file>; then
+  # **打つのは人待ちの名前である。** triage が `human` を返した状態は
+  # **worker には解けない**——`awaiting-worker` は `WORKER_FIXES` に入るので、
+  # **worker の周回が動いている間ずっと数えられない**（主体が違う）。
+  #
+  # **保留にしない**（理由の無い保留を作らない）——数える
+  bin/loop-stall "review-exhausted:<PR番号>@<SHA>"
+# **付いたことを確かめてから進む。** **付いていないのに保留したつもりになると、
+# `ready` は上がらないまま「進めるようにした」と思い込む**——**いちばん危ない**
+elif ! gh pr edit <PR番号> --add-label parked --add-label awaiting-human; then
   # **保留にできなかった。** ループは止まる側にあるので、**これまでどおり数える**——
   # 3 周で人を呼ぶ。**人待ちの名前で打つ**（worker には解けない状態である）
   bin/loop-stall "review-exhausted:<PR番号>@<SHA>"
@@ -1312,8 +1312,8 @@ worker が既に着手している（`in-progress`）ものは、label を戻し
 保留にせず抱えたままだと、worker は「同時に持つ PR は 1 本」に引っかかって先行 PR を作れない。
 
 ```bash
-gh pr edit <PR番号> --add-label parked         # 保留にする
 gh pr comment <PR番号> --body-file <file>      # 理由と、待っている Issue / PR の番号
+gh pr edit <PR番号> --add-label parked         # 投稿してから保留にする (#163 / #588)
 gh issue create --label backlog --title "<先行対応>" --body-file <file>
 ```
 

@@ -206,6 +206,42 @@ describe("理由の無い保留", () => {
     expect(status, "loop:status が理由の無い保留を見ていない").toContain("show_silent_park");
   });
 
+  /**
+   * **保留する箇所の順序が、揃っていること**（#588 のレビュー）。
+   *
+   * **`AGENTS.md` §5 の「変えた側ではなく残る側を数える」を、この PR 自身で外した**
+   * ——**2 箇所を読んで「手順は投稿してから保留」と結論**し、**逆向きの 2 箇所を
+   * 見落とした。** **散文で数えるかぎり、また落とす。**
+   *
+   * **`parked` は錠ではない**（ステップ 2 で選ばれなくするだけで、ゲートは止めない）
+   * ので、**理由が先にあるほうが穴が無い**——**理由の無い保留が、そもそも作れない**
+   * （#163）。**`changes-requested` は錠なので先に付ける**——**そちらとは理由が違う。**
+   */
+  it("保留する箇所は、どれも理由を先に投稿する", () => {
+    // **行の距離では測らない**——**理由を厚く書くので、間に何行入るかは決まらない。**
+    // **囲みブロックの中の順序**で見る（**定数が要らない**）。
+    const blocks = procedureText("master")
+      .split("```")
+      .filter((_, at) => at % 2 === 1)
+      .map((block) => block.split("\n"));
+    const parks = blocks.filter((lines) =>
+      lines.some((line) => /gh pr edit .*--add-label parked/.test(line)),
+    );
+
+    // **0 件で緑にしない**——**保留する箇所ごと消えたら、この検査は何も見ていない。**
+    expect(parks.length, "保留する箇所が 1 つも無い").toBeGreaterThan(0);
+
+    const wrong = parks
+      .filter((lines) => {
+        const park = lines.findIndex((line) => /gh pr edit .*--add-label parked/.test(line));
+        const posted = lines.findIndex((line) => /gh pr comment/.test(line));
+        return posted === -1 || posted > park;
+      })
+      .map((lines) => lines.find((line) => /--add-label parked/.test(line))?.trim() ?? "");
+
+    expect(wrong, "label を付けてから投稿している箇所がある").toEqual([]);
+  });
+
   it("判定は 1 箇所に置く", () => {
     // **同じ判定を 2 箇所に持つと、片方だけ直して食い違う**（#159 で踏んだ）。
     // **`task` も `bin/loop-handoff` も、同じスクリプトを呼ぶ**

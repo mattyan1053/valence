@@ -66,7 +66,6 @@ describe("人の判断待ち", () => {
   it("保留に失敗したら、これまでどおり停止を数える", () => {
     // **付いていないのに保留したつもりになると、`ready` は上がらないまま
     // 「進めるようにした」と思い込む**——**いちばん危ない**。
-    // **label を先に付け、成功を確認してから**（`changes-requested` と同じ順序）。
     //
     // **`|| true` で満たされる表明にしない。** 前の版は `/失敗|\|\|/` で、
     // **`gh label create … || true` の 1 行だけで通っていた**——**`if` を消して
@@ -74,19 +73,26 @@ describe("人の判断待ち", () => {
     // 押さえていたのは 1 本**だった（master の指摘）
     const branch = humanBranch();
 
-    expect(branch, "付いたことを確かめていない").toMatch(/if gh pr edit .*--add-label/);
+    expect(branch, "付いたことを確かめていない").toMatch(/elif ! gh pr edit .*--add-label/);
     expect(branch, "落ちたときの受け皿が無い").toContain("bin/loop-stall");
   });
 
-  it("理由を投稿できなかったら、保留を残さない", () => {
+  it("理由を投稿できなかったら、保留にしない", () => {
     // **番号だけの保留が `loop:status` に出ると、見た人は「人待ちが 1 件ある」と読む**——
     // **中身が空だとは思わない**。**停止も積まれない**ので 3 周の経路にも乗らない。
     // **動いているように見えるぶん、こちらのほうが危ない**。
-    // **戻して数える**（`--add-label` が落ちた場合と同じ形に畳める）
+    //
+    // **戻すのではなく、そもそも付けない** (#588)。**前は label を先に付け、
+    // 落ちたら戻していた**が、**戻しも同じ API 障害で落ちる**（相関する）——
+    // **投稿を先にすれば、理由の無い保留は作れない** (#163)。
     const branch = humanBranch();
+    const posted = branch.indexOf("gh pr comment");
+    const parked = branch.search(/gh pr edit .*--add-label parked/);
 
-    expect(branch, "投稿の失敗を見ていない").toMatch(/if ! gh pr comment|gh pr comment .*\|\|/);
-    expect(branch, "保留を戻していない").toContain("--remove-label");
+    expect(branch, "投稿の失敗を見ていない").toMatch(/elif ! gh pr comment/);
+    expect(posted, "投稿が無い").toBeGreaterThanOrEqual(0);
+    expect(parked, "保留が無い").toBeGreaterThan(posted);
+    expect(branch, "落ちたときの受け皿が無い").toContain("bin/loop-stall");
   });
 
   it("人が判断を記録してから、label を外すと書いてある", () => {
