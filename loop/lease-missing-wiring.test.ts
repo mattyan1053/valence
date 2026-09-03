@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -117,10 +118,16 @@ describe("入口を飛ばした記録", () => {
     // **色の指定そのものが「説明がある」を満たしてしまう**（空振りする）。
     // 制御文字を正規表現のリテラルに書けないので、組み立てて渡す
     const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
-    const help = execFileSync(join(REPO_ROOT, "task"), ["help"], { encoding: "utf8" }).replaceAll(
+    // **実物を呼ばない** (#587)。**砂場へ複製してから走らせる**——**`help` は
+    // 自分の中身を読んで出すだけ**なので、**複製でも同じものが出る。**
+    const box = mkdtempSync(join(tmpdir(), "task-help-"));
+    copyFileSync(join(REPO_ROOT, "task"), join(box, "task"));
+    chmodSync(join(box, "task"), 0o755);
+    const help = execFileSync("./task", ["help"], { cwd: box, encoding: "utf8" }).replaceAll(
       ansi,
       "",
     );
+    rmSync(box, { recursive: true, force: true });
 
     expect(help).toMatch(/^\s+loop:status\s+\S/m);
   });

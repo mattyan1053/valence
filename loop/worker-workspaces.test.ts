@@ -138,9 +138,16 @@ describe("作業場ごとに、compose project とポートを分ける", () => 
     // （`master_worktree_path` を、`loop:worker:paths` の説明と定義の間に置いた）。
     // **口そのものは正しく動く**ので、**出力を見なければ捕まらない**（#155 の家族）。
     const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
-    const help = spawnSync(join(REPO_ROOT, "task"), ["help"], {
+    // **実物を呼ばない** (#587)。**砂場へ複製してから走らせる**——**`help` は
+    // 自分の中身を読んで出すだけ**なので、**複製でも同じものが出る。**
+    const box = mkdtempSync(join(tmpdir(), "task-help-"));
+    copyFileSync(join(REPO_ROOT, "task"), join(box, "task"));
+    chmodSync(join(box, "task"), 0o755);
+    const help = spawnSync("./task", ["help"], {
+      cwd: box,
       encoding: "utf8",
     }).stdout.replaceAll(ansi, "");
+    rmSync(box, { recursive: true, force: true });
 
     expect(help, "worker の一覧の説明が消えている").toMatch(/^\s+loop:worker:paths\s+\S/m);
     expect(help, "master の場所の説明が消えている").toMatch(/^\s+loop:master:path\s+\S/m);
