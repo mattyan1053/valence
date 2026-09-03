@@ -193,6 +193,16 @@ function running(dir: string, stamp: string, since: number): void {
   );
 }
 
+/** その作業場でいちばん長かった周回の秒数（`bin/loop-lease` が書く）。 */
+function roundLength(dir: string, seconds: number): void {
+  const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  expect(scope.status, scope.stderr).toBe(0);
+  writeFileSync(join(dir, ".git", `valence-loop-roundlen-${scope.stdout.trim()}`), `${seconds}\n`);
+}
+
 function cadence(dir: string, env: Record<string, string> = {}, args: string[] = []) {
   return spawnSync(join(dir, "bin/loop-cadence"), args, {
     cwd: dir,
@@ -1028,6 +1038,18 @@ describe("見張りが緩んでいることを、緩んでいる間に見せる"
     expect(done.stdout, "never の行に窓の欄が無い").toMatch(/window=- never/);
   });
 
+  it("最長周回で広がった窓は、その項を名乗る", () => {
+    // **実物の 3 行のうち 2 行がこの根拠で出ている**（#603 のレビュー 3 周目）
+    // ——**足した 3 つの根拠のうち、ここだけ試験が無かった。**
+    const { dir } = workspace();
+    records(dir, [[1_000, "cron"]]);
+    roundLength(dir, 4_800);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "5000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "何が窓を決めたか出ていない").toMatch(/window=6600\(最長周回\)/);
+  });
+
   it("走っているぶんは、土台の項に重ねて名乗る", () => {
     // **`走行中` は足し算である**——**置き換えると土台が隠れる。**
     // **隠れると、いちばん見たい形が読めない**（**実測: 土台は 8758 秒の
@@ -1506,19 +1528,6 @@ describe("間隔が分からなくても、言えることは言う", () => {
  * **向きが逆なだけで、同じ誤診**である。
  */
 describe("長い周回を、来ていないと言わない", () => {
-  /** その作業場でいちばん長かった周回の秒数（`bin/loop-lease` が書く）。 */
-  function roundLength(dir: string, seconds: number): void {
-    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
-      cwd: dir,
-      encoding: "utf8",
-    });
-    expect(scope.status, scope.stderr).toBe(0);
-    writeFileSync(
-      join(dir, ".git", `valence-loop-roundlen-${scope.stdout.trim()}`),
-      `${seconds}\n`,
-    );
-  }
-
   it("間隔の 2 倍より長い周回が走っていても、止まっているとは言わない", () => {
     // **実測があるなら、それで窓を広げる**（`bin/loop-lease alive` と同じもの）
     const { dir } = workspace();
