@@ -28,12 +28,103 @@ function hostScripts(): string[] {
   return [...scripts, "task"];
 }
 
-/** コメントを落とした本文。**理由の中の名前を数えない**（`AGENTS.md` §4）。 */
+/**
+ * **実行の位置だけを残す**（#599 のレビュー）。
+ *
+ * **コメントを落とすだけでは足りない**——**`echo "date -d が使えません"` のような
+ * メッセージにも名前が出る**（**`date -d` は 9 行のうち 2 行がそれだった**）。
+ * **実行を全部消してもメッセージだけで緑になり、逆方向の検出が働かない。**
+ *
+ * **`"..."` の中でも `$( )` は実行である**——**丸ごと落とすと、今度は
+ * `"$(date -u +%s)"` を見落とす**（**測って確かめた。落としたら `date -u` が 0 になった**）。
+ *
+ * **`AGENTS.md` §4 の 10 回目**である。**`\btimeout\b` が `timeout-minutes` に
+ * 食い込むのは自分で見つけたのに、`date -d` で同じことをした**——**数えるのは書く前。**
+ */
+type Scan = { out: string; at: number };
+
+/** 単引用符の中。**置き換えは無いので、閉じるまで丸ごと落とす。** */
+function skipSingle(text: string, from: number): Scan {
+  let out = "";
+  let at = from;
+  for (; at < text.length && text[at] !== "'"; at++) {
+    if (text[at] === "\n") {
+      out += "\n";
+    }
+  }
+  return { out, at };
+}
+
+/** 二重引用符の中。**`$( )` だけは実行なので、そこへ潜る。** */
+function skipDouble(text: string, from: number): Scan {
+  let out = "";
+  let at = from;
+  while (at < text.length && text[at] !== '"') {
+    if (text[at] === "\\") {
+      at += 2;
+      continue;
+    }
+    if (text[at] === "$" && text[at + 1] === "(") {
+      const inner = scanCode(text, at + 2, true);
+      out += ` ${inner.out} `;
+      at = inner.at + 1;
+      continue;
+    }
+    if (text[at] === "\n") {
+      out += "\n";
+    }
+    at += 1;
+  }
+  return { out, at };
+}
+
+/** 括弧の深さの増減。**`$( )` の対応を数えるためだけに要る。** */
+function nesting(char: string): number {
+  if (char === "(") {
+    return 1;
+  }
+  return char === ")" ? -1 : 0;
+}
+
+/** 引用符の中を飛ばす。**単引用符は丸ごと、二重引用符は `$( )` だけ残す。** */
+function skipQuoted(text: string, quote: string, from: number): Scan {
+  return quote === "'" ? skipSingle(text, from) : skipDouble(text, from);
+}
+
+/** 実行の位置。**`nested` なら、対応する `)` で戻る。** */
+function scanCode(text: string, from: number, nested: boolean): Scan {
+  let out = "";
+  let depth = 0;
+  let at = from;
+  for (; at < text.length; at++) {
+    const char = text[at] ?? "";
+    if (char === "'" || char === '"') {
+      const inner = skipQuoted(text, char, at + 1);
+      out += ` ${inner.out} `;
+      at = inner.at;
+      continue;
+    }
+    if (char === ")" && nested && depth === 0) {
+      return { out, at };
+    }
+    depth += nesting(char);
+    out += char;
+  }
+  return { out, at };
+}
+
+function executablePartsOf(text: string): string {
+  return scanCode(text, 0, false).out;
+}
+
+/** コメントと文字列を落とした本文。**理由やメッセージの中の名前を数えない**（§4）。 */
 function codeOf(path: string): string {
-  return readFileSync(join(REPO_ROOT, path), "utf8")
-    .split("\n")
-    .filter((line) => !/^\s*#/.test(line))
-    .join("\n");
+  return executablePartsOf(
+    readFileSync(join(REPO_ROOT, path), "utf8")
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n"),
+  );
 }
 
 /**
@@ -61,6 +152,18 @@ const WATCHED: { name: string; pattern: RegExp; use: "allowed" | "absent"; why: 
   },
   { name: "base64 -d", pattern: /\bbase64\s+-d\b/, use: "allowed", why: "GitHub API の本文を戻す" },
   {
+    name: "flock",
+    pattern: /\bflock\s+-/,
+    use: "allowed",
+    why: "周回の直列化そのもの。#220 で「無い機械」を踏んでいる——sha256sum (#383) と同じ重み",
+  },
+  {
+    name: "mktemp",
+    pattern: /\bmktemp\b/,
+    use: "allowed",
+    why: "作業用の一時ファイル。POSIX に無い",
+  },
+  {
     name: "sha256sum",
     pattern: /\bsha256sum\b/,
     use: "absent",
@@ -85,8 +188,39 @@ const WATCHED: { name: string; pattern: RegExp; use: "allowed" | "absent"; why: 
  * ——**それがこの Issue の出どころ**です。
  *
  * **新しい道具に気づくのは、いまも人**です。**気づいたら、上の一覧へ足してください。**
+ *
+ * ## 何を載せるか（#599 のレビュー）
+ *
+ * **載せるのは「前提として宣言していないのに、実際に要求しているもの」**です。
+ *
+ * **載せない**——**`git` / `gh` / `docker` / `pnpm` / `node`。** **どれも
+ * `AGENTS.md` と `./task` が前提として宣言している**ので、**無ければ最初の 1 行で分かる。**
+ *
+ * **載せる**——**`flock` がまさにそれ**で、**だから #220 で踏みました。**
+ * **`date -d` のような拡張オプションも同じ**です——**道具はあるのに、その使い方だけが無い。**
  */
 describe("ホストで走るスクリプトの道具", () => {
+  it("メッセージに書いただけの名前は、使ったと数えない", () => {
+    // **実行を全部消してもメッセージだけで緑になっていた**（#599 のレビュー）
+    // ——**`date -d` は 9 行のうち 2 行がメッセージ**だった。
+    const source = 'echo "[FAIL] 時刻を作れません（date -d が使えません）" >&2';
+
+    expect(executablePartsOf(source), "メッセージの中まで数えている").not.toMatch(/date\s+-d/);
+  });
+
+  it("二重引用符の中でも、`$( )` は実行である", () => {
+    // **丸ごと落とすと、今度は見落とす**——**測ったら `date -u` が 0 になった。**
+    const source = "printf '%s' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"";
+
+    expect(executablePartsOf(source), "実行を落としている").toMatch(/date\s+-u/);
+  });
+
+  it("単引用符の中は、実行ではない", () => {
+    const source = "printf '%s' 'sha256sum'";
+
+    expect(executablePartsOf(source), "単引用符の中まで数えている").not.toMatch(/sha256sum/);
+  });
+
   it("宣言した使い方は、いまも使われている", () => {
     // **古くなった宣言は、見張っているつもりで何も見ていない。**
     const gone = WATCHED.filter((tool) => tool.use === "allowed").filter(
