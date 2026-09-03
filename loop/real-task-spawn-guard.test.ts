@@ -63,8 +63,15 @@ function spawnsRealTask(source: string): string[] {
     .map((hit) => hit[1])
     .filter((name): name is string => name !== undefined);
   const commands = [REAL_TASK, ...aliases.map((name) => String.raw`${name}\b`)].join("|");
+  // **ソース全体へ当てる** (#590 のレビュー)。**行に割ると `\s*` が改行を食えなくなる**
+  // ——**Biome は長い呼び出しを `(` の直後で折る**ので、**整形 1 回で素通りする。**
   const calls = new RegExp(String.raw`${SPAWNS}\(\s*(?:${commands})`, "g");
-  return source.split("\n").filter((line) => new RegExp(calls.source).test(line));
+  const lines = source.split("\n");
+  // **報告する行は、当たった位置から引き直す**——**呼び出しが始まる行**が、読む人の要る場所。
+  return [...source.matchAll(calls)].map((hit) => {
+    const at = source.slice(0, hit.index).split("\n").length;
+    return `${at}: ${lines[at - 1]?.trim() ?? ""}`;
+  });
 }
 
 /**
@@ -133,6 +140,21 @@ describe("試験は、実物の task を呼ばない（#587）", () => {
     ].join("\n");
 
     expect(spawnsRealTask(source), "踏んだ形を捕まえていない").toHaveLength(1);
+  });
+
+  it("改行をまたぐ呼び出しも、捕まる", () => {
+    // **Biome が長い呼び出しをこの形へ整形する**（#590 のレビュー）——**書いた人が
+    // 改行を選ばなくても、整形が選ぶ。** **しかも整形は緑のまま通る**ので、
+    // **この判定が止めたい事故が、整形 1 回で戻る。**
+    const source = [
+      "spawnSync(",
+      '  join(REPO_ROOT, "task"),',
+      '  ["loop:stop"],',
+      "  { cwd: repo },",
+      ");",
+    ].join("\n");
+
+    expect(spawnsRealTask(source), "改行をまたぐと素通りする").toHaveLength(1);
   });
 
   it("別名で受けてから渡す形も、捕まる", () => {
