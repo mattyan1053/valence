@@ -262,17 +262,30 @@ describe("bin/loop-ci-status", () => {
    * **base と ruleset に答える枝**（#608）。**`--jq` の式まで見る**（他の枝と同じ）
    * ——**取り出しているのは `gh` 側**なので、**式を消しても緑になる形にしない。**
    */
-  function rulesetBranches(baseFails: boolean, rulesFails: boolean): string[] {
+  function rulesetBranches(baseFails: boolean, rulesFails: boolean, base: string): string[] {
     return [
       'if [[ $args == *"baseRefName"* ]]; then',
       ...(baseFails ? ["  exit 1"] : []),
-      `  printf '%s\\n' "main"`,
+      `  printf '%s\\n' ${JSON.stringify(base)}`,
       "  exit 0",
       "fi",
       'if [[ $args == *"rules/branches"* ]]; then',
       '  if [[ $args != *"required_status_checks"* || $args != *".context"* ]]; then',
       '    echo "スタブ: --jq の式が違う: $args" >&2',
       "    exit 1",
+      "  fi",
+      // **素のまま繋いだ `/` は、別のパスになる**（#609 のレビュー）。
+      //
+      // **走らせて確かめた**——**404 にはならない。** **`rules/branches/main/x` も
+      // `rules/branches/feat/583-paint-the-board` も `[]` を返す**（`main` 本体は 7 件）。
+      // **つまり、黙って「何も要求していない」へ倒れる**——**鳴らない。**
+      // **指摘とこちらの読みはどちらも「404」と言っていたが、実物は違った。**
+      //
+      // **ここでも同じ形にする。** **落ちる形にすると、実際には起こらないことを
+      // 試験が守る**ことになる（**倒れる向きも逆**——**あちらは止まり、
+      // こちらは通してしまう**）。
+      '  if [[ $args == *"rules/branches/"*"/"* ]]; then',
+      "    exit 0",
       "  fi",
       ...(rulesFails ? ["  exit 1"] : []),
       `  [[ -z "\${RULES:-}" ]] || printf '%s\\n' "\${RULES}"`,
@@ -289,6 +302,8 @@ describe("bin/loop-ci-status", () => {
     headFails?: boolean;
     /** base を読めない（#608）。 */
     baseFails?: boolean;
+    /** base のブランチ名（#609 のレビュー。`/` を含む形を置く）。 */
+    base?: string;
     /** ruleset を読めない（#608）。 */
     rulesFails?: boolean;
     /** ruleset が要求する context（改行区切り。#608）。 */
@@ -321,7 +336,11 @@ describe("bin/loop-ci-status", () => {
         "  exit 0",
         "fi",
         // **base と ruleset の必須**（#608）
-        ...rulesetBranches(options.baseFails === true, options.rulesFails === true),
+        ...rulesetBranches(
+          options.baseFails === true,
+          options.rulesFails === true,
+          options.base ?? "main",
+        ),
         ...mergeableBranch(options.mergeable ?? "MERGEABLE", options.mergeableFails === true),
         ...headScriptBranch(headScriptPath),
         ...workflowBranches(),
@@ -893,6 +912,34 @@ describe("bin/loop-ci-status", () => {
 
       expect(failing.stdout.trim(), "指紋が ruleset の検査を見ていない").not.toBe(
         passing.stdout.trim(),
+      );
+    });
+
+    it("base に `/` があっても、その ruleset を読む", () => {
+      // **積んだ PR の base は `feat/…` である**（手順書のステップ 2）——**必ず踏む。**
+      //
+      // **倒れる向きを実測した。** **`/` を素のまま繋いでも 404 にはならず、`[]` が返る**
+      // ——**黙って「ruleset は何も要求していない」になる。** **`CodeQL` が落ちていても
+      // ゲートが通る**、という**この PR が消しに来た症状そのもの**へ戻る。**鳴らない。**
+      //
+      // **見るのは合否である。** **呼び方の文字列だけを見ると、`[]` へ倒れることは
+      // 見えない**——**「何を尋ねたか」と「その結果どうなるか」は別**である。
+      workflows([5]);
+
+      const result = run({
+        base: "feat/583-paint-the-board",
+        rules: "CodeQL",
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "CodeQL", status: "completed", conclusion: "failure", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "ruleset を見ないまま通している").toBe(1);
+      const calls = readFileSync(join(sandbox, "gh.calls"), "utf8");
+      expect(calls, "`/` を繋いだままにしている").toContain(
+        "rules/branches/feat%2F583-paint-the-board",
       );
     });
 
