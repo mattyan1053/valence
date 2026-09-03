@@ -1139,7 +1139,15 @@ cmd_loop_preview_up() {
   # #457 が消しに来た誤読をそのまま作る。**
   # **remote を丸ごと取る** (#589)。**渡された ref がどの枝かは、ここでは決められない**
   # ——**`main` だけを取ると、`origin/feat/x` が古いまま「映した」ことになる。**
-  if ! git -C "$wt" fetch --quiet origin; then
+  #
+  # **消えた枝の跡も落とす**（`--prune`。#600 のレビュー）。**`fetch` は remote から
+  # 消えた枝の remote-tracking を残す**ので、**マージ済みの枝を同じ ref で映し直すと
+  # `switch` が成功し、マージ前の内容が映る**——**`bin/loop-merge` は
+  # `--delete-branch` を渡す**ので、**この口のいちばん踏みやすい形**である。
+  #
+  # **`show` は「別の ref」とは言うが、「その枝はもう無い」とは言わない**
+  # ——**名乗れないまま古いものを映すのは、#589 が消しに来たものと同じ**である。
+  if ! git -C "$wt" fetch --prune --quiet origin; then
     echo "==> origin を取ってこられないので、上げ直しません（いまの画面はそのままです）" >&2
     return 1
   fi

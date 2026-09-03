@@ -343,6 +343,31 @@ describe("./task loop:preview", () => {
     );
   });
 
+  it("消えた枝は、映せない", () => {
+    // **`git fetch origin` は、消えた枝の remote-tracking を残す**（#600 のレビュー）
+    // ——**マージされた枝を同じ ref で映し直すと、`switch` が成功し、
+    // マージ前の内容が映る。** **`show` は「別の ref」とは言うが、
+    // 「その枝はもう無い」とは言わない**——**同じ穴の別の口**である。
+    //
+    // **`bin/loop-merge` は `--delete-branch` を渡す**ので、**マージした枝は消える**
+    // ——**この PR が作った口の、いちばん踏みやすい形**である。
+    const { dir, origin, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    pushBranch(origin, "feat/gone", "gone");
+    expect(task(dir, env, ["loop:preview:up", "origin/feat/gone"]).status).toBe(0);
+    // **remote から消す**（マージのあとと同じ状態）
+    expect(
+      spawnSync("git", ["-C", origin, "branch", "--delete", "--force", "feat/gone"], {
+        encoding: "utf8",
+      }).status,
+      "枝を消せていない",
+    ).toBe(0);
+
+    const again = task(dir, env, ["loop:preview:up", "origin/feat/gone"]);
+
+    expect(again.status, "消えた枝を、そのまま映している").not.toBe(0);
+  });
+
   it("origin/main を映しているなら、そう名乗る", () => {
     // **commit を出すだけでは、それが `origin/main` かどうかは言えない**
     // ——**読む人は #457 の契約から `main` だと読む**（**契約は散文にしかない**）。
