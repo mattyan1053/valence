@@ -108,13 +108,20 @@ function PullRequestRow({
   aside?: ReactNode;
 }) {
   return (
-    <li>
-      <span>#{pullRequest.number}</span> <code>{pullRequest.head.branch}</code>
-      {dependsOn.length > 0 ? (
-        <span> ← {dependsOn.map((number) => `#${number}`).join(", ")} の上</span>
-      ) : (
-        <span> ← {pullRequest.base.branch}</span>
-      )}
+    // **行にも強弱を付ける**（#583）。**番号 > 枝 > 依存**——**素の `<li>` が並ぶと、
+    // どこまでが 1 件か分からない。** **色はテーマが決める**（`var(--…)`）。
+    <li className="flex flex-col gap-1 rounded border border-[var(--node-stroke)] bg-[var(--node-fill)] px-3 py-2">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="font-mono font-bold">#{pullRequest.number}</span>
+        <code className="text-sm">{pullRequest.head.branch}</code>
+        {dependsOn.length > 0 ? (
+          <span className="text-sm text-[var(--muted)]">
+            ← {dependsOn.map((number) => `#${number}`).join(", ")} の上
+          </span>
+        ) : (
+          <span className="text-sm text-[var(--muted)]">← {pullRequest.base.branch}</span>
+        )}
+      </div>
       {aside}
     </li>
   );
@@ -206,7 +213,7 @@ export function DependencyGraphView({
               title: titleOf(number),
             })}
           />
-          <ol>{rowsFor(figured)}</ol>
+          <ol className="flex flex-col gap-2">{rowsFor(figured)}</ol>
         </>
       )}
 
@@ -222,7 +229,7 @@ export function DependencyGraphView({
             先にマージすべき順が決まりません。<strong>循環している PR の base</strong>
             を付け替えてください。ここには、その循環の先に積まれているだけの PR も並びます。
           </p>
-          <ul>{rowsFor(order.cyclic)}</ul>
+          <ul className="flex flex-col gap-2">{rowsFor(order.cyclic)}</ul>
         </section>
       )}
 

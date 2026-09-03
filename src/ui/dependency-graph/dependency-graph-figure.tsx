@@ -83,15 +83,19 @@ const TIER_LABEL: Record<RiskTier, string> = {
 };
 
 /**
- * 危なさを、**濃さでも出す**。**読まずに拾えるのは、札より先にこちら**である。
+ * 危なさを、**色でも出す**（#583）。**読まずに拾えるのは、札より先にこちら**である。
  *
- * **色では出せない**（#505）——**テーマが決める `currentColor` しか使えない**ので、
- * **濃さで段を付ける。**
+ * **濃さだけでは並ぶと拾えなかった**（0.2 / 0.5 / 1 の 3 段。利用者の言葉）——
+ * **色を足す**が、**色だけに頼らない**（**札は `TIER_LABEL` が残す**）。
+ *
+ * **値はここで決めない**（#505）。**`var(--…)` はテーマが決める**ので、
+ * **部品はテーマの決められない色を抱え込まない**——**不変条件はそのままである。**
+ * **参照した変数が明・暗の両方で定義されていることは、試験が見る。**
  */
-const TIER_WEIGHT: Record<RiskTier, number> = {
-  "fast-track": 0.2,
-  "needs-review": 0.5,
-  "high-risk": 1,
+const TIER_COLOR: Record<RiskTier, string> = {
+  "fast-track": "var(--tier-fast)",
+  "needs-review": "var(--tier-normal)",
+  "high-risk": "var(--tier-risk)",
 };
 
 /** **材料が届いていない。** **空欄にすると `fast-track` と見分けが付かない。** */
@@ -105,8 +109,8 @@ const UNKNOWN_LABEL = "未判定";
  */
 const UNKNOWN_TITLE = "タイトル不明";
 
-/** 箱の左の余白。**危なさの帯（幅 5）を避けた位置**である。 */
-const TEXT_INSET = 16;
+/** 箱の左の余白。**危なさの帯（幅 6）を避けた位置**である。 */
+const TEXT_INSET = 18;
 
 /** 箱の右の余白。 */
 const TEXT_RIGHT_INSET = 10;
@@ -195,8 +199,8 @@ export function DependencyGraphFigure({
               y1={link.fromY}
               x2={link.toX}
               y2={link.toY}
-              stroke="currentColor"
-              strokeWidth={1}
+              stroke="var(--link)"
+              strokeWidth={1.5}
             />
           ))}
           {layout.nodes.map((node) => {
@@ -209,9 +213,11 @@ export function DependencyGraphFigure({
                   y={node.y}
                   width={layout.nodeWidth}
                   height={layout.nodeHeight}
-                  rx={4}
-                  fill="none"
-                  stroke="currentColor"
+                  rx={6}
+                  // **枠だけの箱は背景と地続きに見える**（#583）——**並ぶと、
+                  // どこまでが 1 件か分からない。** **色はテーマが決める。**
+                  fill="var(--node-fill)"
+                  stroke="var(--node-stroke)"
                   // **判定できていない箱を、判定済みと同じ形にしない**
                   strokeDasharray={tier === undefined ? "3 3" : undefined}
                 />
@@ -224,10 +230,9 @@ export function DependencyGraphFigure({
                   <rect
                     x={node.x + 1}
                     y={node.y + 1}
-                    width={5}
+                    width={6}
                     height={layout.nodeHeight - 2}
-                    fill="currentColor"
-                    fillOpacity={TIER_WEIGHT[tier]}
+                    fill={TIER_COLOR[tier]}
                   />
                 )}
                 {/*
@@ -250,8 +255,11 @@ export function DependencyGraphFigure({
                   y={node.y + 18}
                   textAnchor="end"
                   dominantBaseline="middle"
-                  fill="currentColor"
+                  // **札にも同じ色を当てる**（#583）——**帯と札が同じことを言う。**
+                  // **判定できていないものは、色を持たない側**（`var(--muted)`）。
+                  fill={tier === undefined ? "var(--muted)" : TIER_COLOR[tier]}
                   fontSize={11}
+                  fontWeight="bold"
                 >
                   {tier === undefined ? UNKNOWN_LABEL : TIER_LABEL[tier]}
                 </text>
@@ -278,7 +286,9 @@ export function DependencyGraphFigure({
                   x={node.x + TEXT_INSET}
                   y={node.y + 58}
                   dominantBaseline="middle"
-                  fill="currentColor"
+                  // **強弱を付ける**（#583）——**番号 > タイトル > 状態**。
+                  // **同じ太さ・同じ濃さで 3 行並ぶと、どれが見出しか分からない。**
+                  fill="var(--muted)"
                   fontSize={11}
                 >
                   {markLabel(mark)}

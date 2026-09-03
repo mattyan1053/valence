@@ -66,7 +66,15 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
   const ciNeedsAttention = change.ciStatus !== "passing";
 
   return (
-    <details>
+    // **判断材料は脇に置く**（#583）。**本文と同じ強さで並ぶと、行が読めない。**
+    // **畳みと組み合わせる**（#597）——**常時見えるのは札と、普通でない CI だけ**で、
+    // **色と大きさは、開いたときの中身にも掛ける。**
+    //
+    // **`gap` を足したいまも、文字の区切りは残す**——**class が出ていなくても
+    // 読める形を、試験が守っている。**
+    <details className="text-sm">
+      {/* **`summary` に `display:flex` を掛けない**——**開閉の三角（marker）が消える**。
+          **間隔は文字の区切りが持っている**ので、class は要らない。 */}
       <summary>
         <strong>{text.label}</strong>
         {ciNeedsAttention && (
@@ -82,8 +90,8 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
           </>
         )}
       </summary>
-      <p>{text.meaning}</p>
-      <ul>
+      <p className="text-[var(--muted)]">{text.meaning}</p>
+      <ul className="flex flex-col text-[var(--muted)]">
         <li>
           変更: {change.changedFileCount} ファイル / {change.changedLineCount} 行
         </li>
