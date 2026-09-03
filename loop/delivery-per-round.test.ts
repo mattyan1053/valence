@@ -34,7 +34,14 @@ describe("届いた配送を、1 周にまとめない", () => {
       const hits = linesWith(entry.path, "1 通ずつ");
 
       expect(hits.length, `言っている行が ${hits.length} 行ある（1 行のはず）`).toBe(1);
-      expect(hits[0], "打つものを言っていない").toContain("acquire");
+      // **語の有無ではなく、向きを見る**（#607 のレビュー）——**`acquire` があること
+      // だけを見ると、「`acquire` は打たない」と逆に書いても緑**になる。
+      //
+      // **散文に当てているので、言い回しを変えると赤くなる。** **それでよい**
+      // ——**意味が変わっていないかを、人がそこで見る**（`AGENTS.md` §4）。
+      expect(hits[0], "打つ向きを言っていない").toContain(
+        "走っていると分かっていても `acquire` を打つ",
+      );
     });
   }
 });
