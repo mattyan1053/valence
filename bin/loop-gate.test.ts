@@ -95,6 +95,12 @@ case "$args" in
     [[ -n \${FAKE_THREADS_FAIL:-} ]] && exit 1
     printf '%s\\n' "\${FAKE_THREADS:-0}"
     ;;
+  *"rules/branches"*)
+    # **--jq の式まで見る**（他の枝と同じ）。**取り出しているのは gh 側である**
+    require "--jq" "required_status_checks" ".context"
+    [[ -n \${FAKE_RULES_FAIL:-} ]] && exit 1
+    [[ -z \${FAKE_RULES:-} ]] || printf '%s\\n' "\${FAKE_RULES}"
+    ;;
   *) exit 1 ;;
 esac
 exit 0
@@ -109,6 +115,14 @@ exit 0
   writeFileSync(
     join(bin, "loop-ci-status"),
     `#!/usr/bin/env bash
+# **一覧の問い合わせと、PR の判定は別の口である**（本物と同じ）
+if [[ \${1-} == --required-checks ]]; then
+  printf '%s\\n' "\${FAKE_REQUIRED:-alpha}"
+  exit 0
+fi
+# **受け取った一覧を標準エラーへ出す**（\`loop-fixup-lines\` と同じ形）。
+# **ゲートは標準出力しか読まない**ので、出力を汚さずに「何を渡したか」を確かめられる
+printf 'required-env: %s\\n' "$(printf '%s' "\${LOOP_REQUIRED_CHECKS-}" | tr '\\n' ',')" >&2
 printf '%s\\n' "\${FAKE_CI_OUT:-必須 6 件すべて決着して成功}"
 exit \${FAKE_CI_EXIT:-0}
 `,

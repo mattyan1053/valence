@@ -4,10 +4,16 @@
 #   bin/loop-ci-status <PR番号>
 #   bin/loop-ci-status --fingerprint <PR番号>   決着の別だけを、必須の並び順で返す
 #   bin/loop-ci-status --conflicting <PR番号>   コンフリクトしているか (#347)
-#   bin/loop-ci-status --required-checks        `main` 側の必須チェック名を並べる
+#   bin/loop-ci-status --required-checks        workflow から導いた必須チェック名を並べる
 #
 # **PR を見るときの必須は、`main` の一覧と PR の head の一覧の**和**である** (#219)。
 # **`--required-checks` は PR 番号を取らない**ので、**答えるのは `main` 側だけ**である。
+#
+# **ここが答えるのは、workflow から導いた側だけ**である (#608)。**branch protection
+# （ruleset）が要求する context は入っていない**——**`CodeQL` のように、workflow ではなく
+# GitHub 側の仕組みが出すものがある**ので、**そちらは `bin/loop-gate` が読んで併せる。**
+# **ここで読まないのは、この口が定数の問い合わせだから**である（**`gh` の要らない
+# 開発コンテナから `bin/required-checks.test.ts` が引く**）。
 #
 #   exit 0 = 必須がすべて決着して成功
 #   exit 1 = 決着して失敗 / 必須の一部が見つからない (worker に直させる)
@@ -252,6 +258,62 @@ if head_script="$(gh api -H "Accept: application/vnd.github.raw" \
     required+=("$name")
   done <<<"$head_required"
 fi
+
+# **必須は、GitHub 側にも在る** (#608)。**ここまでの一覧は workflow から導いたもの**
+# （`main` の定数 ∪ head の宣言）で、**branch protection（ruleset）が要求する context は
+# 入りようがない**——**`CodeQL` は workflow ではなく GitHub 側の仕組みが出す。**
+#
+# **実測**: **`GATE PASS` と出たのに `the base branch policy prohibits the merge`**
+# で拒否された。**`CodeQL` が FAILURE で、それが ruleset の必須**だった。
+#
+# **併せる。どちらか一方へ寄せない。** **workflow 側には ruleset に無いものがある**
+# （実測で `database policies` / `fixup limit basis`）——**外すとゲートが緩む。**
+#
+# **ここで読む**（`bin/loop-gate` ではなく）。**指紋も同じ一覧で数える**ためである
+# ——**あちらで併せると、`bin/loop-handoff --fingerprint` はこの一覧を知らないまま**で、
+# **同じ head のまま `CodeQL` が失敗から成功へ変わったとき、ゲートは不合格→合格に
+# 変わるのに指紋が動かない**（**通知が抑止され、マージできるようになった瞬間に黙る**。
+# #609 のレビュー）。
+#
+# **古い `protection` API は使わない。** **この repo では 404**（`Branch not protected`）
+# ——**ruleset のほうを使っている**（実測）。
+#
+# **読めなければ止まる**（**判定不能を健全へ倒さない**）。**空で返るのは
+# 「ruleset が何も要求していない」**であって読めなかったのとは別で、
+# **そのときも workflow 側は残る**ので、**「必須なし」へは倒れない。**
+if ! base_ref="$(gh pr view "$PR" --json baseRefName --jq '.baseRefName' 2>/dev/null)" \
+  || [[ -z $base_ref || $base_ref == "null" ]]; then
+  echo "[FAIL] PR #$PR の base を読み取れません（必須の一覧を GitHub 側と併せられません）" >&2
+  exit 2
+fi
+# **URL のパスへ入れる前に包む** (#609 のレビュー)。**このリポジトリは PR を積む運用が
+# ある**ので（手順書のステップ 2）、**base が `feat/…` の PR で必ず踏む。**
+#
+# **倒れる向きを実測した**——**404 にはならない。** **`rules/branches/main/x` も
+# `rules/branches/feat/583-paint-the-board` も `[]` を返す**（**`main` 本体は 7 件**）。
+# **つまり、黙って「ruleset は何も要求していない」になる**——**`CodeQL` が落ちていても
+# ゲートが通る。** **読めないより悪い**：**読めなければ止まるが、これは鳴らない。**
+#
+# **包むのは 3 文字だけ**である。**git の ref は空白・`~`・`^`・`:`・`?`・`*`・`[`・`\` を
+# 許さない**ので、**URL のパスで意味を持つ文字のうち ref に入りうるのは
+# `%` と `#` と `/` だけ**である。**`%` を先に包む**——**あとにすると、
+# 自分が置いた `%` を二重に包む。**
+encoded_base="${base_ref//%/%25}"
+encoded_base="${encoded_base//\#/%23}"
+encoded_base="${encoded_base//\//%2F}"
+if ! ruleset_required="$(gh api "repos/{owner}/{repo}/rules/branches/$encoded_base" \
+  --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+  2>/dev/null)"; then
+  echo "[FAIL] $base_ref の branch protection を読めません（ゲートが GitHub と食い違います）" >&2
+  exit 2
+fi
+while IFS= read -r name; do
+  [[ -n ${name//[[:space:]]/} ]] || continue
+  for known in "${required[@]}"; do
+    [[ $known == "$name" ]] && continue 2
+  done
+  required+=("$name")
+done <<<"$ruleset_required"
 
 # **`gh pr checks` を使わない。** **`bucket` は `status` から導かれる**ので、
 # **`conclusion` が落ちる**——**この Issue が直しに来たものが、そこで消える** (#206)。

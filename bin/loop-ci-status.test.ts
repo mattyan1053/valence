@@ -250,12 +250,64 @@ describe("bin/loop-ci-status", () => {
     ];
   }
 
+  /** どの口を叩くか。**尋ね方が 3 通りある**（判定 / 指紋 / コンフリクト）。 */
+  function argsFor(conflicting: boolean, fingerprint: boolean): string[] {
+    if (conflicting) {
+      return ["--conflicting", "42"];
+    }
+    return fingerprint ? ["--fingerprint", "42"] : ["42"];
+  }
+
+  /**
+   * **base と ruleset に答える枝**（#608）。**`--jq` の式まで見る**（他の枝と同じ）
+   * ——**取り出しているのは `gh` 側**なので、**式を消しても緑になる形にしない。**
+   */
+  function rulesetBranches(baseFails: boolean, rulesFails: boolean, base: string): string[] {
+    return [
+      'if [[ $args == *"baseRefName"* ]]; then',
+      ...(baseFails ? ["  exit 1"] : []),
+      `  printf '%s\\n' ${JSON.stringify(base)}`,
+      "  exit 0",
+      "fi",
+      'if [[ $args == *"rules/branches"* ]]; then',
+      '  if [[ $args != *"required_status_checks"* || $args != *".context"* ]]; then',
+      '    echo "スタブ: --jq の式が違う: $args" >&2',
+      "    exit 1",
+      "  fi",
+      // **素のまま繋いだ `/` は、別のパスになる**（#609 のレビュー）。
+      //
+      // **走らせて確かめた**——**404 にはならない。** **`rules/branches/main/x` も
+      // `rules/branches/feat/583-paint-the-board` も `[]` を返す**（`main` 本体は 7 件）。
+      // **つまり、黙って「何も要求していない」へ倒れる**——**鳴らない。**
+      // **指摘とこちらの読みはどちらも「404」と言っていたが、実物は違った。**
+      //
+      // **ここでも同じ形にする。** **落ちる形にすると、実際には起こらないことを
+      // 試験が守る**ことになる（**倒れる向きも逆**——**あちらは止まり、
+      // こちらは通してしまう**）。
+      '  if [[ $args == *"rules/branches/"*"/"* ]]; then',
+      "    exit 0",
+      "  fi",
+      ...(rulesFails ? ["  exit 1"] : []),
+      `  [[ -z "\${RULES:-}" ]] || printf '%s\\n' "\${RULES}"`,
+      "  exit 0",
+      "fi",
+    ];
+  }
+
   function run(options: {
     checks?: Check[];
     /** `gh` が落ちる。 */
     ghFails?: boolean;
     /** head を読めない。 */
     headFails?: boolean;
+    /** base を読めない（#608）。 */
+    baseFails?: boolean;
+    /** base のブランチ名（#609 のレビュー。`/` を含む形を置く）。 */
+    base?: string;
+    /** ruleset を読めない（#608）。 */
+    rulesFails?: boolean;
+    /** ruleset が要求する context（改行区切り。#608）。 */
+    rules?: string;
     /** `mergeable` の値（GitHub は計算中に `UNKNOWN` を返す）。 */
     mergeable?: string;
     /** `mergeable` を読めない。 */
@@ -283,6 +335,12 @@ describe("bin/loop-ci-status", () => {
         `  printf '%s\\n' "deadbeef"`,
         "  exit 0",
         "fi",
+        // **base と ruleset の必須**（#608）
+        ...rulesetBranches(
+          options.baseFails === true,
+          options.rulesFails === true,
+          options.base ?? "main",
+        ),
         ...mergeableBranch(options.mergeable ?? "MERGEABLE", options.mergeableFails === true),
         ...headScriptBranch(headScriptPath),
         ...workflowBranches(),
@@ -302,12 +360,7 @@ describe("bin/loop-ci-status", () => {
     rmSync(target);
     spawnSync("cp", [SCRIPT, target]);
     chmodSync(target, 0o755);
-    const args =
-      options.conflicting === true
-        ? ["--conflicting", "42"]
-        : options.fingerprint === true
-          ? ["--fingerprint", "42"]
-          : ["42"];
+    const args = argsFor(options.conflicting === true, options.fingerprint === true);
     const result = spawnSync(target, args, {
       cwd: sandbox,
       encoding: "utf8",
@@ -315,6 +368,7 @@ describe("bin/loop-ci-status", () => {
         ...process.env,
         PATH: `${stub}:${process.env.PATH}`,
         LOOP_REQUIRED_CHECKS: REQUIRED,
+        RULES: options.rules ?? "",
       },
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
@@ -766,6 +820,160 @@ describe("bin/loop-ci-status", () => {
     const result = run({ ghFails: true });
 
     expect(result.status, "読めないのに人を呼んでいる").toBe(2);
+  });
+
+  /**
+   * **必須は、GitHub 側にも在る**（#608）。
+   *
+   * **`GATE PASS` と出たのに `the base branch policy prohibits the merge`** で拒否された
+   * ——**`CodeQL` が FAILURE で、それが branch protection（ruleset）の必須**だった。
+   *
+   * **workflow から導いた一覧には入りようがない**——**`CodeQL` は workflow ではなく
+   * GitHub 側の仕組みが出す。** **出どころが 2 つある**、という形である。
+   *
+   * **読むのはここ**（`bin/loop-gate` ではない）。**指紋も同じ一覧で数える**ためで、
+   * **あちらで併せると `bin/loop-handoff --fingerprint` が知らないまま**になる
+   * （#609 のレビュー）。
+   */
+  describe("必須を GitHub 側と併せる（#608）", () => {
+    it("ruleset が要求する検査も待つ", () => {
+      // **これが本題。** **一覧に無ければ、落ちていても待たれない。**
+      workflows([5]);
+
+      const result = run({
+        rules: "CodeQL",
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "CodeQL", status: "completed", conclusion: "failure", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "ruleset の必須が落ちているのに通している").toBe(1);
+    });
+
+    it("ruleset が何も要求していなくても、こちらの一覧は残る", () => {
+      // **空で返るのは「何も要求していない」**であって、読めなかったのとは別である
+      // ——**「必須なし」へ倒さない。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "failure", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "必須なしへ倒れている").toBe(1);
+    });
+
+    it("同じ名前を二重に数えない", () => {
+      // **両方に在る名前がある**（実測では 6 件）。**二重に数えると、指紋が伸びる**
+      // ——**`bin/loop-handoff` は指紋で「同じ状態か」を見る。**
+      workflows([5]);
+
+      const result = run({
+        fingerprint: true,
+        rules: "alpha",
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.stdout.trim(), "同じ名前を二重に数えている").toBe("ok,ok");
+    });
+
+    it("指紋も、ruleset の検査を数える", () => {
+      // **ここが本題の裏側**（#609 のレビュー）。**指紋に入らないと、同じ head のまま
+      // `CodeQL` が失敗から成功へ変わったとき、ゲートは不合格→合格になるのに
+      // 指紋が動かない**——**既に送った指紋なので通知が出ない。**
+      // **マージできるようになった、まさにその瞬間に黙る。**
+      workflows([5]);
+
+      const failing = run({
+        fingerprint: true,
+        rules: "CodeQL",
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "CodeQL", status: "completed", conclusion: "failure", startedAgo: 10 },
+        ],
+      });
+      const passing = run({
+        fingerprint: true,
+        rules: "CodeQL",
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "CodeQL", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(failing.stdout.trim(), "指紋が ruleset の検査を見ていない").not.toBe(
+        passing.stdout.trim(),
+      );
+    });
+
+    it("base に `/` があっても、その ruleset を読む", () => {
+      // **積んだ PR の base は `feat/…` である**（手順書のステップ 2）——**必ず踏む。**
+      //
+      // **倒れる向きを実測した。** **`/` を素のまま繋いでも 404 にはならず、`[]` が返る**
+      // ——**黙って「ruleset は何も要求していない」になる。** **`CodeQL` が落ちていても
+      // ゲートが通る**、という**この PR が消しに来た症状そのもの**へ戻る。**鳴らない。**
+      //
+      // **見るのは合否である。** **呼び方の文字列だけを見ると、`[]` へ倒れることは
+      // 見えない**——**「何を尋ねたか」と「その結果どうなるか」は別**である。
+      workflows([5]);
+
+      const result = run({
+        base: "feat/583-paint-the-board",
+        rules: "CodeQL",
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "CodeQL", status: "completed", conclusion: "failure", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "ruleset を見ないまま通している").toBe(1);
+      const calls = readFileSync(join(sandbox, "gh.calls"), "utf8");
+      expect(calls, "`/` を繋いだままにしている").toContain(
+        "rules/branches/feat%2F583-paint-the-board",
+      );
+    });
+
+    it("ruleset を読めなければ、判定しない", () => {
+      // **判定不能を健全へ倒さない。** **読めないまま通すと、ゲートが
+      // 「マージしてよい」と言った先で拒否される。**
+      workflows([5]);
+
+      const result = run({
+        rulesFails: true,
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "読めないのに通している").toBe(2);
+    });
+
+    it("base を読めなければ、判定しない", () => {
+      // **base が分からなければ、どの ruleset を見ればよいかも分からない。**
+      // **`main` へ決め打つと、別ブランチ宛ての PR で嘘をつく。**
+      workflows([5]);
+
+      const result = run({
+        baseFails: true,
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "base を読めないのに通している").toBe(2);
+    });
   });
 
   it("指紋は、必須の並び順で決着の別を返す", () => {
