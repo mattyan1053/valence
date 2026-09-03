@@ -147,6 +147,32 @@ describe("./task loop:preview", () => {
     return git(ahead, ["rev-parse", "HEAD"]);
   }
 
+  /**
+   * **`origin` に枝を 1 本作る**（#589）。**preview へ映せる先**である。
+   *
+   * **作業場は動かさない**——**映す先を選ぶ口を見たい**ので、
+   * **こちら側の HEAD は関係ない。**
+   */
+  function pushBranch(origin: string, branch: string, note: string): string {
+    const side = join(mkdtempSync(join(tmpdir(), "preview-branch-")), "side");
+    expect(spawnSync("git", ["clone", "--quiet", origin, side]).status).toBe(0);
+    git(side, ["switch", "--quiet", "-c", branch]);
+    writeFileSync(join(side, `${note}.txt`), `${note}\n`);
+    git(side, ["add", "-A"]);
+    git(side, [
+      "-c",
+      "user.email=loop@example.invalid",
+      "-c",
+      "user.name=loop",
+      "commit",
+      "--quiet",
+      "-m",
+      note,
+    ]);
+    git(side, ["push", "--quiet", "origin", branch]);
+    return git(side, ["rev-parse", "HEAD"]);
+  }
+
   it("人が見る作業場ができる", () => {
     const { dir, env } = repo();
 
@@ -282,6 +308,107 @@ describe("./task loop:preview", () => {
     const shown = task(dir, env, ["loop:preview:show"]);
 
     expect(`${shown.stdout}${shown.stderr}`, "汚れていることを言っていない").toMatch(/変更/);
+  });
+
+  /**
+   * **人が見る窓を 1 つにする**（#589）。
+   *
+   * **マージ前のものを見せる先が毎回別のポートになる**ので、**そのたびに SSH の
+   * ポート転送を足すことになった**（利用者の苦情、2026-09-03）。
+   *
+   * **契約（#457。ここは `origin/main` を映す）は破らない**——**破れるのは、
+   * 名乗らないまま差したとき**である。**だから `show` が名乗る。**
+   */
+  it("映す先を選べる（既定は origin/main のまま）", () => {
+    const { dir, origin, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    const head = pushBranch(origin, "feat/look", "look");
+
+    const up = task(dir, env, ["loop:preview:up", "origin/feat/look"]);
+
+    expect(up.status, up.stderr).toBe(0);
+    expect(git(`${dir}-preview`, ["rev-parse", "HEAD"]), "渡した枝を映していない").toBe(head);
+  });
+
+  it("渡さなければ、これまでどおり origin/main を映す", () => {
+    // **既定を変えない**——**#457 の契約は、渡さなかったときの話である。**
+    const { dir, origin, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    pushBranch(origin, "feat/look", "look");
+
+    expect(task(dir, env, ["loop:preview:up"]).status).toBe(0);
+
+    expect(git(`${dir}-preview`, ["rev-parse", "HEAD"]), "既定が origin/main でない").toBe(
+      git(dir, ["rev-parse", "origin/main"]),
+    );
+  });
+
+  it("消えた枝は、映せない", () => {
+    // **`git fetch origin` は、消えた枝の remote-tracking を残す**（#600 のレビュー）
+    // ——**マージされた枝を同じ ref で映し直すと、`switch` が成功し、
+    // マージ前の内容が映る。** **`show` は「別の ref」とは言うが、
+    // 「その枝はもう無い」とは言わない**——**同じ穴の別の口**である。
+    //
+    // **`bin/loop-merge` は `--delete-branch` を渡す**ので、**マージした枝は消える**
+    // ——**この PR が作った口の、いちばん踏みやすい形**である。
+    const { dir, origin, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    pushBranch(origin, "feat/gone", "gone");
+    expect(task(dir, env, ["loop:preview:up", "origin/feat/gone"]).status).toBe(0);
+    // **remote から消す**（マージのあとと同じ状態）
+    expect(
+      spawnSync("git", ["-C", origin, "branch", "--delete", "--force", "feat/gone"], {
+        encoding: "utf8",
+      }).status,
+      "枝を消せていない",
+    ).toBe(0);
+
+    const again = task(dir, env, ["loop:preview:up", "origin/feat/gone"]);
+
+    expect(again.status, "消えた枝を、そのまま映している").not.toBe(0);
+  });
+
+  it("origin/main を映しているなら、そう名乗る", () => {
+    // **commit を出すだけでは、それが `origin/main` かどうかは言えない**
+    // ——**読む人は #457 の契約から `main` だと読む**（**契約は散文にしかない**）。
+    const { dir, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    expect(task(dir, env, ["loop:preview:up"]).status).toBe(0);
+
+    const shown = task(dir, env, ["loop:preview:show"]);
+
+    expect(shown.status, shown.stderr).toBe(0);
+    expect(shown.stdout, "何を映しているか名乗っていない").toMatch(/origin\/main を映して/);
+  });
+
+  it("origin/main でないなら、そう言う", () => {
+    const { dir, origin, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    pushBranch(origin, "feat/look", "look");
+    expect(task(dir, env, ["loop:preview:up", "origin/feat/look"]).status).toBe(0);
+
+    const shown = task(dir, env, ["loop:preview:show"]);
+
+    expect(shown.status, shown.stderr).toBe(0);
+    expect(shown.stdout, "origin/main だと読める形のままである").toMatch(
+      /origin\/main では ?ありません/,
+    );
+  });
+
+  it("手で差されても、そう言える（作業ツリーは汚れない）", () => {
+    // **`git switch --detach` は木を汚さない**ので、**`[注意] 変更が残っています` は
+    // 出ない**——**この Issue を作った当の操作**である（人が手で枝へ移した）。
+    const { dir, origin, env } = repo();
+    expect(task(dir, env, ["loop:preview:add"]).status).toBe(0);
+    expect(task(dir, env, ["loop:preview:up"]).status).toBe(0);
+    pushBranch(origin, "feat/hand", "hand");
+    git(`${dir}-preview`, ["fetch", "--quiet", "origin", "feat/hand"]);
+    git(`${dir}-preview`, ["switch", "--detach", "--quiet", "FETCH_HEAD"]);
+    expect(git(`${dir}-preview`, ["status", "--porcelain"]), "木が汚れている").toBe("");
+
+    const shown = task(dir, env, ["loop:preview:show"]);
+
+    expect(shown.stdout, "手で差されたことを言っていない").toMatch(/origin\/main では ?ありません/);
   });
 
   it("同じ名前の作業場が別の場所にあれば、衝突として扱う", () => {

@@ -166,8 +166,19 @@ DB を覗くときは `./task db:psql`（studio は無効）。
 ```bash
 ./task loop:preview:add    # 1 度だけ。origin/main に貼った worktree ができる
 ./task loop:preview:up     # 取ってきて、貼り直して、上げる（いつの main かを出す）
-./task loop:preview:show   # いま何を映しているか（commit と URL）
+./task loop:preview:show   # いま何を映しているか（commit と URL、origin/main か否か）
 ```
+
+**マージ前のものを見せるなら、ref を渡す** (#589)。**窓は 1 つのまま**である
+——**別のポートを上げると、そのたびに転送を足すことになる**（利用者の苦情）。
+
+```bash
+./task loop:preview:up origin/feat/583-paint-the-board   # 既定は origin/main
+```
+
+**契約（ここは `origin/main` を映す場所）は破っていない**——**`show` が
+「origin/main を映しています」か「[注意] origin/main ではありません」を名乗る**ので、
+**読む人が取り違えない。** **破れるのは、名乗らないまま差したとき**である。
 
 **既定の作業場は worker のもの**である——**未コミットの実装途中がそのまま映り**、
 **`origin/main` へ追随するのは周回の冒頭だけ**なので、**マージ済みの修正は worker が

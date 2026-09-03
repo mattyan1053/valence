@@ -1103,9 +1103,16 @@ cmd_loop_preview_add() {
   echo "    上げるには: ./task loop:preview:up"
 }
 
-# 人が見る画面を origin/main で上げ直す 例: ./task loop:preview:up
+# 人が見る画面を上げ直す（既定は origin/main） 例: ./task loop:preview:up origin/feat/x
 cmd_loop_preview_up() {
-  local wt
+  # **映す先を選べるようにする** (#589)。**既定は `origin/main` のまま**
+  # ——**#457 の契約は「渡さなかったとき」の話**である。
+  #
+  # **マージ前のものを見せる先が毎回別のポートになると、そのたびに SSH の転送を
+  # 足すことになる**（利用者の苦情、2026-09-03）——**窓は 1 つにする。**
+  #
+  # **契約は、名乗れば破れない**（下の `cmd_loop_preview_show`）。
+  local wt ref="${1:-origin/main}"
   if ! wt="$(preview_worktree_path)" || [[ ! -d $wt ]]; then
     echo "==> 人が見る作業場がありません。先に ./task loop:preview:add" >&2
     return 1
@@ -1130,12 +1137,22 @@ cmd_loop_preview_up() {
   link_preview_env "$wt" || return 1
   # **取ってから移る。** **移れなければ、上げない**——**古い版を「最新」として見せると、
   # #457 が消しに来た誤読をそのまま作る。**
-  if ! git -C "$wt" fetch --quiet origin main; then
-    echo "==> origin/main を取ってこられないので、上げ直しません（いまの画面はそのままです）" >&2
+  # **remote を丸ごと取る** (#589)。**渡された ref がどの枝かは、ここでは決められない**
+  # ——**`main` だけを取ると、`origin/feat/x` が古いまま「映した」ことになる。**
+  #
+  # **消えた枝の跡も落とす**（`--prune`。#600 のレビュー）。**`fetch` は remote から
+  # 消えた枝の remote-tracking を残す**ので、**マージ済みの枝を同じ ref で映し直すと
+  # `switch` が成功し、マージ前の内容が映る**——**`bin/loop-merge` は
+  # `--delete-branch` を渡す**ので、**この口のいちばん踏みやすい形**である。
+  #
+  # **`show` は「別の ref」とは言うが、「その枝はもう無い」とは言わない**
+  # ——**名乗れないまま古いものを映すのは、#589 が消しに来たものと同じ**である。
+  if ! git -C "$wt" fetch --prune --quiet origin; then
+    echo "==> origin を取ってこられないので、上げ直しません（いまの画面はそのままです）" >&2
     return 1
   fi
-  if ! git -C "$wt" switch --detach --quiet origin/main; then
-    echo "==> origin/main へ移れません: $wt（何か残っていないか見ること）" >&2
+  if ! git -C "$wt" switch --detach --quiet "$ref"; then
+    echo "==> $ref へ移れません: $wt（綴りと、取ってこられているかを見ること）" >&2
     return 1
   fi
   (cd "$wt" && ./task up) || return 1
@@ -1163,6 +1180,24 @@ cmd_loop_preview_show() {
   echo "人が見る画面: http://127.0.0.1:${port}/"
   echo "  作業場: $wt"
   echo "  映している commit: $sha $subject"
+  # **commit を出すだけでは、それが `origin/main` かどうかは言えない** (#589)。
+  # **読む人は #457 の契約から `main` だと読む**——**契約は散文にしかない。**
+  #
+  # **手で `git switch --detach` された木は汚れない**ので、**下の `[注意]` では
+  # 出ない**——**この Issue を作った当の操作**である。
+  #
+  # **読めないなら、そう言う**（**どちらへも倒さない**）。
+  local head_sha main_sha
+  if head_sha="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" &&
+    main_sha="$(git -C "$wt" rev-parse origin/main 2>/dev/null)"; then
+    if [[ $head_sha == "$main_sha" ]]; then
+      echo "  origin/main を映しています"
+    else
+      echo "  [注意] origin/main ではありません（別の ref を映しています）"
+    fi
+  else
+    echo "  [注意] origin/main を読めません——映っているものを確かめられません"
+  fi
   # **黙ると、違うものを `origin/main` として読む** (#462 のレビュー)——**止めるだけでは
   # 足りない。** **既に上がっている画面は、ここを読んで判断される。**
   local clean=0
