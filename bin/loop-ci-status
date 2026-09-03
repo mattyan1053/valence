@@ -259,6 +259,47 @@ if head_script="$(gh api -H "Accept: application/vnd.github.raw" \
   done <<<"$head_required"
 fi
 
+# **必須は、GitHub 側にも在る** (#608)。**ここまでの一覧は workflow から導いたもの**
+# （`main` の定数 ∪ head の宣言）で、**branch protection（ruleset）が要求する context は
+# 入りようがない**——**`CodeQL` は workflow ではなく GitHub 側の仕組みが出す。**
+#
+# **実測**: **`GATE PASS` と出たのに `the base branch policy prohibits the merge`**
+# で拒否された。**`CodeQL` が FAILURE で、それが ruleset の必須**だった。
+#
+# **併せる。どちらか一方へ寄せない。** **workflow 側には ruleset に無いものがある**
+# （実測で `database policies` / `fixup limit basis`）——**外すとゲートが緩む。**
+#
+# **ここで読む**（`bin/loop-gate` ではなく）。**指紋も同じ一覧で数える**ためである
+# ——**あちらで併せると、`bin/loop-handoff --fingerprint` はこの一覧を知らないまま**で、
+# **同じ head のまま `CodeQL` が失敗から成功へ変わったとき、ゲートは不合格→合格に
+# 変わるのに指紋が動かない**（**通知が抑止され、マージできるようになった瞬間に黙る**。
+# #609 のレビュー）。
+#
+# **古い `protection` API は使わない。** **この repo では 404**（`Branch not protected`）
+# ——**ruleset のほうを使っている**（実測）。
+#
+# **読めなければ止まる**（**判定不能を健全へ倒さない**）。**空で返るのは
+# 「ruleset が何も要求していない」**であって読めなかったのとは別で、
+# **そのときも workflow 側は残る**ので、**「必須なし」へは倒れない。**
+if ! base_ref="$(gh pr view "$PR" --json baseRefName --jq '.baseRefName' 2>/dev/null)" \
+  || [[ -z $base_ref || $base_ref == "null" ]]; then
+  echo "[FAIL] PR #$PR の base を読み取れません（必須の一覧を GitHub 側と併せられません）" >&2
+  exit 2
+fi
+if ! ruleset_required="$(gh api "repos/{owner}/{repo}/rules/branches/$base_ref" \
+  --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+  2>/dev/null)"; then
+  echo "[FAIL] $base_ref の branch protection を読めません（ゲートが GitHub と食い違います）" >&2
+  exit 2
+fi
+while IFS= read -r name; do
+  [[ -n ${name//[[:space:]]/} ]] || continue
+  for known in "${required[@]}"; do
+    [[ $known == "$name" ]] && continue 2
+  done
+  required+=("$name")
+done <<<"$ruleset_required"
+
 # **`gh pr checks` を使わない。** **`bucket` は `status` から導かれる**ので、
 # **`conclusion` が落ちる**——**この Issue が直しに来たものが、そこで消える** (#206)。
 #

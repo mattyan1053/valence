@@ -246,6 +246,11 @@ describe("bin/loop-handoff", () => {
       `  printf '%s\\n' ${JSON.stringify(pr.mergeable ?? "MERGEABLE")}`,
       "  exit 0",
       "fi",
+      // **base**（#608）。**これも head より先に見る**——**同じ `pr view` で来る**
+      `if [[ $* == *"pr view ${pr.number}"* && $* == *"baseRefName"* ]]; then`,
+      `  printf '%s\\n' "main"`,
+      "  exit 0",
+      "fi",
       `if [[ $* == *"pull/${pr.number}"* || $* == *"pr view ${pr.number}"* ]]; then`,
       `  printf '%s\\n' "head-of-${pr.number}"`,
       "  exit 0",
@@ -333,6 +338,10 @@ describe("bin/loop-handoff", () => {
             ).join("\n"),
           ),
         ),
+        // **ruleset の必須**（#608）。**PR ごとではない**ので、ここに 1 つ置く
+        'if [[ $* == *"rules/branches"* ]]; then',
+        "  exit 0",
+        "fi",
         // **CI は PR ごとに引く**（判定は `bin/loop-ci-status` が持つ）。
         // **名前は @base64 で受け渡す**——区切りを含む job 名で行を増やされないため
         ...(state.prs ?? []).flatMap((pr) => checkLines(pr)),
