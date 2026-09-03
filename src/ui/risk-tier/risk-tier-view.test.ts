@@ -98,6 +98,83 @@ describe("RiskTierView", () => {
     expect(markup).not.toMatch(/影響が大きい/);
   });
 
+  /**
+   * **10 本並ぶと、全部読まないと順番が決まらない**（#597。**人が見て言った**）。
+   *
+   * > あとこれ数が増えたらめっちゃ見づらそう
+   *
+   * **走らせて数えた**——**10 本で 67 行、1 件あたり 6〜8 行**（**Tier の説明文・
+   * 変更の内訳・CI・機密パス・操作**）。**畳まれているものが 1 つも無かった。**
+   *
+   * **「どれから見るか」を決めるのに要るのは、Tier の札と、CI が普通でないこと**である
+   * ——**残りは、その 1 本を開いてから読む。**
+   *
+   * **消さない**（`AGENTS.md`。**理由が追えることが、ルールベースの価値**である）
+   * ——**畳むだけ**にする。**`<details>` は script 無しで開く。**
+   *
+   * **同じことを 2 箇所に出さない。** **CI の行は、常時出すか畳むかのどちらか**で、
+   * **両方には置かない**——**片方が事実と違う日が来る**（`TIER_TEXT` の但し書きと同じ）。
+   */
+  describe("10 本並べても読めるように、畳む（#597）", () => {
+    /** **常時見えている部分**（`<summary>` の中身）。 */
+    function summaryOf(markup: string): string {
+      const at = markup.indexOf("<summary");
+      expect(at, "畳んでいない").toBeGreaterThanOrEqual(0);
+      const from = markup.indexOf(">", at) + 1;
+      const to = markup.indexOf("</summary>", from);
+      expect(to, "summary が閉じていない").toBeGreaterThan(from);
+      return markup.slice(from, to);
+    }
+
+    it("常時見えるのは、Tier の札である", () => {
+      const markup = viewFor(REAL_CASES["high-risk"]);
+
+      expect(summaryOf(markup), "札が畳まれている").toContain("先に人が見る");
+    });
+
+    it("Tier の説明文は、畳む", () => {
+      // **10 本並ぶと、同じ Tier の行には同じ文が 10 回出る**——**順番を決める材料に
+      // ならない。** **消しはしない**（開けば読める）。
+      const markup = viewFor(REAL_CASES["high-risk"]);
+
+      expect(summaryOf(markup), "説明文が常時出ている").not.toContain(
+        "マージの前に人が中身を確認してください",
+      );
+      expect(markup, "説明文を消している").toContain("マージの前に人が中身を確認してください");
+    });
+
+    it("変更の内訳は、畳む", () => {
+      const markup = viewFor(change({ changedFileCount: 7, changedLineCount: 120 }));
+
+      expect(summaryOf(markup), "内訳が常時出ている").not.toContain("変更:");
+      expect(markup, "内訳を消している").toContain("変更:");
+    });
+
+    it("CI が通っているときは、常時出さない", () => {
+      // **10 本のうち 8 本が「CI: 通っています」なら、それは背景である。**
+      const markup = viewFor(change({ ciStatus: "passing" }));
+
+      expect(summaryOf(markup), "通っている CI が常時出ている").not.toContain("CI:");
+      expect(markup, "通っている CI を消している").toContain("CI: 通っています");
+    });
+
+    it.each<CiStatus>(["failing", "pending"])("CI が %s なら、常時出す", (ciStatus) => {
+      // **普通でないほうは、開かずに見えないと順番が決まらない。**
+      const markup = viewFor(change({ ciStatus }));
+
+      expect(summaryOf(markup), "普通でない CI が畳まれている").toContain("CI:");
+    });
+
+    it("CI の行は、常時出す側と畳む側の片方にしか無い", () => {
+      // **同じことを 2 箇所で言うと、片方が事実と違う日が来る**（`TIER_TEXT` の但し書き）。
+      for (const ciStatus of ["passing", "failing", "pending"] as const) {
+        const markup = viewFor(change({ ciStatus }));
+
+        expect(markup.split("CI:").length - 1, `${ciStatus} で CI の行が 2 つある`).toBe(1);
+      }
+    });
+  });
+
   describe("CI の状態", () => {
     function ciPartOf(ciStatus: CiStatus, tier: RiskTier): string {
       return render({ tier, change: change({ ciStatus }) });
