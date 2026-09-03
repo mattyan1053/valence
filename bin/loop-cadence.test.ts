@@ -21,6 +21,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,15 +75,23 @@ function workspace(): { dir: string; stamp: string } {
  * 作業場**を出す（**登録されていなければ exit 1**）——**master を除いているのは
  * あちら**なので、**この試験でも 2 つの口に分けて答える。**
  */
-function taskAnswers(dir: string, answers: { workerPaths?: string[]; masterPath?: string }): void {
+function taskAnswers(
+  dir: string,
+  answers: { workerPaths?: string[]; masterPath?: string; stopPaths?: string[] },
+): void {
   const workers = (answers.workerPaths ?? []).map((path) => JSON.stringify(path)).join(" ");
   const master =
     answers.masterPath === undefined
       ? "exit 1"
       : `printf '%s\\n' ${JSON.stringify(answers.masterPath)}`;
+  // **`loop/STOP` の置き場所**（本物は `./task loop:stop:paths`）。**既定は
+  // 「この作業場のぶん 1 つ」**——**置いていなければ、在るものが無いだけである。**
+  const stops = (answers.stopPaths ?? [join(dir, "loop", "STOP")])
+    .map((path) => JSON.stringify(path))
+    .join(" ");
   writeFileSync(
     join(dir, "task"),
-    `#!/usr/bin/env bash\ncase "$1" in\n  loop:worker:paths) printf '%s\\n' ${workers} ;;\n  loop:master:path) ${master} ;;\nesac\n`,
+    `#!/usr/bin/env bash\ncase "$1" in\n  loop:worker:paths) printf '%s\\n' ${workers} ;;\n  loop:master:path) ${master} ;;\n  loop:stop:paths) printf '%s\\n' ${stops} ;;\nesac\n`,
     { mode: 0o755 },
   );
 }
@@ -142,6 +151,21 @@ function held(dir: string, spans: [number, number][], role = "worker"): void {
   expect(scope.status, scope.stderr).toBe(0);
   writeFileSync(
     join(dir, ".git", `valence-loop-held-${scope.stdout.trim()}`),
+    `${spans.map(([from, to]) => `${from}\t${to}`).join("\n")}\n`,
+  );
+}
+
+/**
+ * **`loop/STOP` が在った時間を置く**（#584）。
+ *
+ * **置き場所と書式は `bin/loop-stall` が決める**ので、**実際に再開した周回が
+ * 書いたものを読めること**（`bin/loop-stall.test.ts` の
+ * `止まっていた間を、再開したときに残す`）で両端を留めてある
+ * ——**ここだけが緑になる形にはならない。**
+ */
+function stopSpans(dir: string, spans: [number, number | "-"][]): void {
+  writeFileSync(
+    join(dir, ".git", "valence-loop-stop-spans"),
     `${spans.map(([from, to]) => `${from}\t${to}`).join("\n")}\n`,
   );
 }
@@ -1598,6 +1622,112 @@ describe("暇な枠を跨いだかで、次の一手を決める（#575）", () 
     // **「引いて見る」は、判定を人へ差し戻す側の言い方**である——**倒せたなら出ない。**
     // **`CronList` そのものでは見分けない**（**倒した側も「引かずに」と言う**）。
     expect(done.stdout, "引いて見ろ、のままになっている").not.toMatch(/引いて見る/);
+  });
+
+  /**
+   * **止まっていた枠を「暇だった」と数えない**（#584）。
+   *
+   * **`loop/STOP` があるあいだ、周回は入口で戻る**（**そういう設計**）ので、
+   * **`bin/loop-lease acquire` へ到達せず、始まりも組も書かれない。**
+   * **`idle_slots` から見ると「誰も握っていない」＝暇だった**になり、
+   * **長く止まるほど強く「予定表が死んでいる」へ倒れる。**
+   *
+   * **実測**（2026-09-03、master）: **9 時間の停止で 18 枠**——**その間も
+   * `/loop-master` は届いていて、9 回「停止しました」と答えている**（**鳴っていた**）。
+   * **従えば予定が 2 本になっていた。**
+   *
+   * **「暇だった」と「止まっていた」は別である。**
+   */
+  it("止まっていた枠は、暇だったと数えない", () => {
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+    held(dir, [
+      [1_000, 1_100],
+      [9_000, 9_100],
+      [9_500, 9_600],
+    ]);
+    // **その間ずっと `loop/STOP` があった**——**枠（2800 / 4600 / 6400 / 8200）は
+    // 全部この中**である。**9000 に人が撤去し、そこから 2 周まわっている**（再開直後）。
+    stopSpans(dir, [[1_100, 9_000]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "9800", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    // **倒してはいけないのはこちら**——**生きている予定表を死んだと断定する側。**
+    expect(done.stdout, "止まっていた枠を暇だと数えている").not.toMatch(/予定表が死んでいる/);
+  });
+
+  it("いま止まっている最中も、暇だったと数えない", () => {
+    // **記録に入るのは再開のとき**なので、**止まっている最中は区間がどこにも無い**
+    // ——**そこがいちばん踏みやすい場面**である（**止まっているループを調べるときに
+    // 打つのが `./task loop:status` で、`show_cadence` は STOP の表示より先に走る**）。
+    //
+    // **#584 の完了条件は「置いたあと」**であって、**「消したあと」ではない。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+    held(dir, [
+      [1_000, 1_100],
+      [9_000, 9_100],
+      [9_500, 9_600],
+    ]);
+    // **記録は空のまま**——**まだ再開していない。**
+    mkdirSync(join(dir, "loop"), { recursive: true });
+    const stop = join(dir, "loop", "STOP");
+    writeFileSync(stop, "no-work\n");
+    utimesSync(stop, 1_100, 1_100);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "9800", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "止まっている最中を暇だと数えている").not.toMatch(/予定表が死んでいる/);
+  });
+
+  it("閉じていない区間は、いまも止まっていると読む", () => {
+    // **止めた時点で区間が開く**（#586 のレビュー 2 周目）——**閉じるのは再開のとき。**
+    // **開いたままなら、そこから先はまだ止まっている。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+    held(dir, [
+      [1_000, 1_100],
+      [9_000, 9_100],
+      [9_500, 9_600],
+    ]);
+    stopSpans(dir, [[1_100, "-"]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "9800", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "開いた区間を読めていない").not.toMatch(/予定表が死んでいる/);
+  });
+
+  it("止まっていた枠を外しても、残りが暇なら、これまでどおり言う", () => {
+    // **全部黙らせない**——**止まっていたのは一部**である
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+    held(dir, [
+      [1_000, 1_100],
+      [9_000, 9_100],
+      [9_500, 9_600],
+    ]);
+    // **止まっていたのは最初の 2 枠（2800 / 4600）だけ**——**6400 と 8200 は暇だった。**
+    stopSpans(dir, [[1_100, 5_000]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "10000", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "残った暇な枠まで黙っている").toMatch(/予定表が死んでいる/);
   });
 
   it("暇な枠を跨いでいないなら、判らないと言う", () => {

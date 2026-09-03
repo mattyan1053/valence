@@ -10,7 +10,9 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2125,6 +2127,15 @@ describe("再開の順番", () => {
     expect(existsSync(state), "カウンタが無い").toBe(true);
   }
 
+  /** 止めた時点で区間を開く（`./task loop:stop` が呼ぶ口）。 */
+  function stopped(): { status: number; stdout: string; stderr: string } {
+    const result = spawnSync(join(repo, "bin", "loop-stall"), ["--stopped"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
   function resume(): { status: number; stdout: string; stderr: string } {
     const result = spawnSync(join(repo, "bin", "loop-stall"), ["--resumed"], {
       cwd: repo,
@@ -2132,6 +2143,266 @@ describe("再開の順番", () => {
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
+
+  /**
+   * **止まっていた間を残す**（#584）。
+   *
+   * **`loop/STOP` があるあいだ、周回は入口で戻る**ので、**`bin/loop-lease acquire`
+   * へ到達せず、始まりも組も書かれない。** **`bin/loop-cadence` から見ると
+   * 「誰も握っていない」＝暇だった**になり、**長く止まるほど強く
+   * 「予定表が死んでいる」へ倒れる**（**実測で 18 枠。従えば予定が 2 本になる**）。
+   *
+   * **手がかりは STOP そのもの**である——**置かれた時刻はファイルに残っている**ので、
+   * **消す 1 箇所で区間を閉じられる**（**`./task loop:stop` で人が置いたぶんも同じ**
+   * ——**印を持つのは `bin/loop-stall` が配ったときだけ**である）。
+   */
+  /**
+   * **区間を持つ者が 1 人ではない**（#586 のレビュー 2 周目）。
+   *
+   * **書き手が 1 人ではない**——**旧版の `cmd_loop_stop` は既存の STOP にも無条件で `>`**
+   * する。**mtime を始まりにすると、後から来た版に動かされる**（**版をまたいで同じ
+   * 共有状態を触るのは、このリポジトリでは routine**）。
+   *
+   * **止めた時点で記録に開く**——**そうすれば、あとから mtime が動いても効かない。**
+   */
+  /**
+   * **区間の記録を書く 2 箇所が、同じ順序で排他される**（#586 のレビュー 3 周目）。
+   *
+   * **`--stopped` はカウンタのロックの外で走る**——**`./task loop:stop` は
+   * そのロックの中から呼ばれる**ので、**同じ錠を取ると自己デッドロックする。**
+   * **だが `--resumed` は同じ記録をロックの中から書き直す**ので、
+   * **素で重なる**（**人が `./task loop:stop` を打つとき、カウンタの錠は誰も持っていない**）。
+   *
+   * **倒れる先が 2 つあり、片方が静か**である——**開いたぶんが消えれば元の症状**、
+   * **閉じたぶんが消えれば区間が開いたまま残り、そこから先が全部「止まっていた」**
+   * になって**何も言わなくなる。**
+   */
+  it("区間の記録は、握られている間は書かない", () => {
+    counted();
+    withTask();
+    const lock = `${join(repo, ".git", "valence-loop-stop-spans")}.lock`;
+    writeFileSync(lock, "");
+    const held = holdLock({ dir: repo, lock, limitSeconds: 10 });
+
+    try {
+      const blocked = spawnSync(join(repo, "bin", "loop-stall"), ["--stopped"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
+      });
+
+      expect(blocked.status, "握られているのに書けている").not.toBe(0);
+      expect(existsSync(join(repo, ".git", "valence-loop-stop-spans")), "錠を無視して書いた").toBe(
+        false,
+      );
+    } finally {
+      held.release();
+    }
+  });
+
+  it("再開の側も、握られている間は区間を書き換えない", () => {
+    // **2 箇所とも同じ錠で守る**——**片方だけだと、素で重なる側が残る。**
+    // **再開は落とさない**（**再開そのものは済んでいる**）ので、**言うだけ**である
+    // ——**observable は「書き換えていないこと」。**
+    counted();
+    withTask();
+    const spans = join(repo, ".git", "valence-loop-stop-spans");
+    writeFileSync(spans, "100\t-\n");
+    const lock = `${spans}.lock`;
+    writeFileSync(lock, "");
+    const held = holdLock({ dir: repo, lock, limitSeconds: 10 });
+
+    try {
+      const done = spawnSync(join(repo, "bin", "loop-stall"), ["--resumed"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
+      });
+
+      expect(done.stderr, "握られているのに黙っている").toContain("残せません");
+      expect(readFileSync(spans, "utf8"), "錠を無視して書き換えた").toBe("100\t-\n");
+    } finally {
+      held.release();
+    }
+  });
+
+  it("./task loop:stop が、止めた時点で区間を開く", () => {
+    // **口を足しただけでは効かない**——**呼ぶ側と繋がっていること**を見る。
+    // **`bin/loop-stall --stopped` は識別子の一覧に無い引数**なので、
+    // **検査に弾かれると `cmd_loop_stop` ごと落ちる。**
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+    rmSync(join(repo, "loop", "STOP"));
+
+    const stop = spawnSync("./task", ["loop:stop", "ためし"], { cwd: repo, encoding: "utf8" });
+
+    expect(stop.status, stop.stderr).toBe(0);
+    expect(stop.stderr, "区間を残せていない").not.toContain("残せません");
+    expect(
+      readFileSync(join(repo, ".git", "valence-loop-stop-spans"), "utf8").trim(),
+      "止めたのに区間が開いていない",
+    ).toMatch(/^\d+\t-$/);
+  });
+
+  it("止めた時点で区間が開き、2 度打っても増えない", () => {
+    counted();
+    withTask();
+    const spans = join(repo, ".git", "valence-loop-stop-spans");
+
+    expect(stopped().status, "開けていない").toBe(0);
+    expect(stopped().status, "2 度目が落ちた").toBe(0);
+
+    const lines = readFileSync(spans, "utf8").trim().split("\n").filter(Boolean);
+    expect(lines, "2 度打つと増える（冪等でない）").toHaveLength(1);
+    expect(lines[0], "開いた区間の形になっていない").toMatch(/^\d+\t-$/);
+  });
+
+  it("旧版が STOP を上書きしても、区間の始まりは動かない", () => {
+    counted();
+    withTask();
+    const stop = join(repo, "loop", "STOP");
+    expect(stopped().status).toBe(0);
+    const opened = Number(
+      readFileSync(join(repo, ".git", "valence-loop-stop-spans"), "utf8").split("\t")[0],
+    );
+    // **旧版の `cmd_loop_stop` が既存の STOP を書き直した**（mtime が後ろへ動く）
+    const later = Math.floor(Date.now() / 1000);
+    utimesSync(stop, later, later);
+
+    expect(resume().status).toBe(0);
+
+    const [from] = (readFileSync(join(repo, ".git", "valence-loop-stop-spans"), "utf8")
+      .trim()
+      .split("\t") ?? []) as string[];
+    expect(Number(from), "mtime のほうを採っている").toBe(opened);
+  });
+
+  it("STOP を消せなくても、区間は確定している", () => {
+    // **消してから書くと、その隙間は読み手に STOP も区間も無い**——**さらに、
+    // 消したあとに落ちれば区間は永久に書かれない。** **隙間は次の周回で埋まるが、
+    // 欠落は埋まらない。**
+    counted();
+    withTask();
+    expect(stopped().status).toBe(0);
+    const loopDir = join(repo, "loop");
+    chmodSync(loopDir, 0o555);
+    const failed = resume();
+    chmodSync(loopDir, 0o755);
+
+    expect(failed.status, "消せていないのに成功している").not.toBe(0);
+    expect(
+      readFileSync(join(repo, ".git", "valence-loop-stop-spans"), "utf8").trim(),
+      "消せなかったので、区間が開いたまま欠けた",
+    ).toMatch(/^\d+\t\d+$/);
+  });
+
+  it("まだ参照されうる区間を、件数で捨てない", () => {
+    // **記録は全 scope で共有**だが、**参照の開始は scope ごとの `last_cron`** である
+    // ——**ある作業場の cron が長く止まっている間に停止・再開が何度も起きると、
+    // 件数で刈る形はその作業場にまだ要る区間を押し出す。**
+    counted();
+    withTask();
+    const spans = join(repo, ".git", "valence-loop-stop-spans");
+    const now = Math.floor(Date.now() / 1000);
+    // **60 本、どれも新しい**（**日付では捨てられない**）
+    const oldest = now - 60 * 60;
+    writeFileSync(
+      spans,
+      `${Array.from({ length: 60 }, (_, i) => `${oldest + i}\t${oldest + i + 1}`).join("\n")}\n`,
+    );
+    expect(stopped().status).toBe(0);
+
+    expect(resume().status).toBe(0);
+
+    const lines = readFileSync(spans, "utf8").trim().split("\n").filter(Boolean);
+    expect(lines[0], "まだ新しい区間を件数で捨てた").toBe(`${oldest}\t${oldest + 1}`);
+  });
+
+  it("止まっていた間を、再開したときに残す", () => {
+    counted();
+    withTask();
+    const stop = join(repo, "loop", "STOP");
+    // **置かれた時刻を、いまから離す**——**同じ秒だと「置かれた時刻」と「いまの時刻」が
+    // 見分けられず、取り違えても緑になる**（**9 時間止まっていた、が実測の形**）。
+    const placed = Math.floor(Date.now() / 1000) - 9 * 60 * 60;
+    utimesSync(stop, placed, placed);
+
+    expect(resume().status).toBe(0);
+
+    const spans = readFileSync(join(repo, ".git", "valence-loop-stop-spans"), "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.split("\t").map(Number));
+
+    expect(spans, "止まっていた区間が残っていない").toHaveLength(1);
+    const [from, to] = spans[0] ?? [];
+    expect(from, "始まりが STOP の時刻でない（いまの時刻を書いている）").toBe(placed);
+    expect(to, "終わりが始まりより前にある").toBeGreaterThan(placed);
+  });
+
+  it("2 度止めても、区間の始まりは最初のまま", () => {
+    // **`cmd_loop_stop` は既存の STOP も `>` で書き直す**ので、**`%Y` は
+    // 「最初に止まった時刻」ではなく「最後に上書きした時刻」になる。**
+    //
+    // **再開前に 2 度止まる道は実在する**——**識別子ごとに上限へ達する時刻が違う**ので、
+    // **別の役が後から届けば上書きされ**、**その間の枠が区間から漏れる。**
+    // **実物の `./task` を、実物のリポジトリで走らせない** (#186)——**`cmd_loop_stop` は
+    // `git worktree list` を見る**ので、**走っているループへ STOP を配ってしまう**
+    // （**踏んだ。実物の `loop/STOP` を作った**）。**砂場へ複製して、そこで走らせる。**
+    copyFileSync(join(REPO_ROOT, "task"), join(repo, "task"));
+    chmodSync(join(repo, "task"), 0o755);
+    const stop = join(repo, "loop", "STOP");
+    const first = Math.floor(Date.now() / 1000) - 9 * 60 * 60;
+    utimesSync(stop, first, first);
+
+    // **2 度目の停止**（本物の `cmd_loop_stop` が通る道）
+    const again = spawnSync("./task", ["loop:stop", "あとから"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    expect(again.status, again.stderr).toBe(0);
+
+    expect(
+      Math.floor(statSync(stop).mtimeMs / 1000),
+      "2 度目の停止が、最初に止まった時刻を上書きした",
+    ).toBe(first);
+  });
+
+  it("記録は、書きかけを読ませない（置き換えで差し替える）", () => {
+    // **読み手（`bin/loop-cadence`）はこのロックを取らない**ので、**切り詰めてから
+    // 書き終わるまでに読むと空か途中**である——**止まっていた枠が暇に化ける。**
+    //
+    // **兄弟のスクリプトに、その形が既にある**——**`bin/loop-lease` の `record_start` /
+    // `record_held` / `record_end` は、どれも `>"$X.tmp"` してから `mv -f`。**
+    //
+    // **置き換えなら、読み手が開いた側は最後まで完成している**（**inode が入れ替わる**）。
+    const spans = join(repo, ".git", "valence-loop-stop-spans");
+    writeFileSync(spans, "1\t2\n");
+    const before = statSync(spans).ino;
+    counted();
+    withTask();
+
+    expect(resume().status).toBe(0);
+
+    expect(statSync(spans).ino, "同じ入れ物を書き換えている（切り詰めが見える）").not.toBe(before);
+    expect(existsSync(`${spans}.tmp`), "作りかけが残っている").toBe(false);
+  });
+
+  it("STOP が無ければ、区間を残さない", () => {
+    // **止まっていなかったのに「止まっていた」と残すと、暇な枠が黙る**
+    // ——**倒してはいけないのは、そちら**である（#584 の完了条件 2）
+    counted();
+    withTask();
+    rmSync(join(repo, "loop", "STOP"));
+
+    expect(resume().status).toBe(0);
+
+    expect(
+      existsSync(join(repo, ".git", "valence-loop-stop-spans")),
+      "止まっていないのに残した",
+    ).toBe(false);
+  });
 
   it("カウンタを消してから STOP を消す", () => {
     // **逆だと、隙間に入った周回が STOP を作り直したあとでカウンタが消える**
