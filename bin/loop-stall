@@ -673,6 +673,29 @@ readonly RESUMED="$common_dir/valence-loop-resumed"
 # 他人の前進で消え、分けた意味が無くなる。**
 readonly STOPPED_MARK="$common_dir/valence-loop-stopped-$workspace_scope"
 
+# **`loop/STOP` が在った区間** (#584)。**読むのは `bin/loop-cadence`**（**枠を
+# 「暇だった」と数えないため**）。**書くのはここ 1 箇所**——**STOP を消す場所**である。
+#
+# **役でも作業場でも分けない。** **STOP は全 worktree へ配られる**ので、
+# **止まっていたのはループ全体**である。
+#
+# **別の記録に足さない** (#537)。**窓を持つ記録へ違う種類の行を入れると、
+# 元からあった行が押し出される**——**押し出された `cron` は「鳴っていない」と
+# 同じ顔になる**ので、**この仕組みが塞ごうとした当のものが返ってくる。**
+readonly STOP_SPANS="$common_dir/valence-loop-stop-spans"
+
+# **区間は増え続けない。** **古いぶんは、もう枠に当たらない**（**`bin/loop-cadence`
+# が見るのは直近の cron から先だけ**）ので、**落としてよい。**
+readonly STOP_SPANS_KEEP=50
+
+# **止まっていた区間を 1 本足す。** **失敗したら 1 を返す**——**握りつぶさない。**
+record_stop_span() {
+  local from="$1" kept
+  printf '%s\t%s\n' "$from" "$(date +%s)" >>"$STOP_SPANS" || return 1
+  kept="$(tail -n "$STOP_SPANS_KEEP" "$STOP_SPANS")" || return 1
+  printf '%s\n' "$kept" >"$STOP_SPANS" || return 1
+}
+
 # **master と worker は同じカウンタを、同じ周期で書きうる。** 読んでから書くまでを
 # 排他しないと、後から書いた側が相手の増分を消す (lost update)。記録が増えないまま
 # 周回だけ進むので、**どちらの識別子も上限に届かず第 4 層が効かなくなる**。
@@ -860,8 +883,19 @@ if [[ $ID == "--resumed" ]]; then
     exit 2
   fi
   resume_found=0
+  resume_placed=""
   while read -r stop_path; do
     [[ -f $stop_path ]] || continue
+    # **置かれた時刻は、ファイルが持っている** (#584)。**消す前に読む**
+    # ——**消したあとでは、どこにも残らない。**
+    #
+    # **いちばん古いものを採る。** **STOP は全 worktree へ配られる**が、
+    # **作られた時刻は 1 つずつ違いうる**（**途中で落ちた配りを人が足したぶんもある**）
+    # ——**短いほうを採ると、止まっていた枠を数え漏らす。**
+    if stop_placed="$(stat -c %Y "$stop_path" 2>/dev/null)" &&
+      [[ $stop_placed =~ ^[0-9]+$ ]]; then
+      [[ -n $resume_placed ]] && ((resume_placed <= stop_placed)) || resume_placed="$stop_placed"
+    fi
     rm "$stop_path" || {
       echo "[FAIL] STOP を消せません: $stop_path" >&2
       exit 2
@@ -870,6 +904,15 @@ if [[ $ID == "--resumed" ]]; then
     resume_found=1
   done <<<"$stop_paths"
   ((resume_found == 1)) || echo "==> STOP は無い（停止していない）"
+  # **止まっていた間を残す** (#584)。**`bin/loop-cadence` は、この区間の枠を
+  # 「暇だった」と数えない**——**止まっている間は、鳴っても何もしない**（そういう設計）
+  # ので、**そこを「鳴らなかった」と読むと、生きている予定表を死んだと断定する。**
+  #
+  # **消せたときだけ書く**——**STOP が無かった周回は、止まっていない。**
+  # **書けなくても止めない**（**再開そのものは済んでいる**）。**言うだけにする。**
+  if ((resume_found == 1)) && [[ -n $resume_placed ]]; then
+    record_stop_span "$resume_placed" || echo "[WARN] 止まっていた間を残せません: $STOP_SPANS" >&2
+  fi
   exit 0
 fi
 

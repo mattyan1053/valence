@@ -11,6 +11,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2132,6 +2133,56 @@ describe("再開の順番", () => {
     });
     return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
+
+  /**
+   * **止まっていた間を残す**（#584）。
+   *
+   * **`loop/STOP` があるあいだ、周回は入口で戻る**ので、**`bin/loop-lease acquire`
+   * へ到達せず、始まりも組も書かれない。** **`bin/loop-cadence` から見ると
+   * 「誰も握っていない」＝暇だった**になり、**長く止まるほど強く
+   * 「予定表が死んでいる」へ倒れる**（**実測で 18 枠。従えば予定が 2 本になる**）。
+   *
+   * **手がかりは STOP そのもの**である——**置かれた時刻はファイルに残っている**ので、
+   * **消す 1 箇所で区間を閉じられる**（**`./task loop:stop` で人が置いたぶんも同じ**
+   * ——**印を持つのは `bin/loop-stall` が配ったときだけ**である）。
+   */
+  it("止まっていた間を、再開したときに残す", () => {
+    counted();
+    withTask();
+    const stop = join(repo, "loop", "STOP");
+    // **置かれた時刻を、いまから離す**——**同じ秒だと「置かれた時刻」と「いまの時刻」が
+    // 見分けられず、取り違えても緑になる**（**9 時間止まっていた、が実測の形**）。
+    const placed = Math.floor(Date.now() / 1000) - 9 * 60 * 60;
+    utimesSync(stop, placed, placed);
+
+    expect(resume().status).toBe(0);
+
+    const spans = readFileSync(join(repo, ".git", "valence-loop-stop-spans"), "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.split("\t").map(Number));
+
+    expect(spans, "止まっていた区間が残っていない").toHaveLength(1);
+    const [from, to] = spans[0] ?? [];
+    expect(from, "始まりが STOP の時刻でない（いまの時刻を書いている）").toBe(placed);
+    expect(to, "終わりが始まりより前にある").toBeGreaterThan(placed);
+  });
+
+  it("STOP が無ければ、区間を残さない", () => {
+    // **止まっていなかったのに「止まっていた」と残すと、暇な枠が黙る**
+    // ——**倒してはいけないのは、そちら**である（#584 の完了条件 2）
+    counted();
+    withTask();
+    rmSync(join(repo, "loop", "STOP"));
+
+    expect(resume().status).toBe(0);
+
+    expect(
+      existsSync(join(repo, ".git", "valence-loop-stop-spans")),
+      "止まっていないのに残した",
+    ).toBe(false);
+  });
 
   it("カウンタを消してから STOP を消す", () => {
     // **逆だと、隙間に入った周回が STOP を作り直したあとでカウンタが消える**

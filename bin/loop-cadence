@@ -239,6 +239,30 @@ fresh_round() {
 # **数えられないなら `-` を返す**——**0 へ倒さない**（**「暇な枠は無かった」と
 # 「分からない」は別**である）。**終わりの記録を持たない版から上げた直後がそれ**で、
 # **そこで断定すると、#531 で踏んだ形に戻る。**
+# **`loop/STOP` が在った区間**（#584）。**止まっている間は、鳴っても何もしない**
+# （**そういう設計**）ので、**その枠を「暇だった」と読むと、止まっていた時間の長さが
+# そのまま「予定表が死んでいる」の確信になる**——**長く止まるほど、強く間違える。**
+#
+# **書くのは `bin/loop-stall`**（**STOP を消す 1 箇所**）。**ここでは読むだけ**である。
+#
+# **役ではなく作業場でもなく、ループ全体で 1 つ**——**`loop/STOP` は全 worktree へ
+# 配られる**ので、**止まっていたのはどの scope も同じ**である。
+readonly STOP_SPANS="$common_dir/valence-loop-stop-spans"
+
+# **その時刻、ループは止まっていたか。**
+#
+# **記録が無いなら「止まっていなかった」**——**これは推定ではなく、
+# 変更前と同じ読み**である（**記録を持たない版から上げた直後がそれ**）。
+stopped_at() {
+  local at="$1" from to
+  [[ -f $STOP_SPANS ]] || return 1
+  while IFS=$'\t' read -r from to; do
+    [[ $from =~ ^[0-9]+$ && $to =~ ^[0-9]+$ ]] || continue
+    ((from <= at && at <= to)) && return 0
+  done <"$STOP_SPANS"
+  return 1
+}
+
 idle_slots() {
   local scope="$1" last_cron="$2" interval="$3"
   local held="$common_dir/valence-loop-held-$scope"
@@ -294,6 +318,10 @@ idle_slots() {
     # **組が残っている範囲だけを見る** (#578 のレビュー)。**それより前は、
     # 握っていたかどうかが分からない**——**刈られたぶんを「暇だった」と読まない。**
     ((slot >= floor)) || continue
+    # **止まっていた枠は、暇ではない** (#584)。**入口で戻る周回は
+    # `bin/loop-lease acquire` へ到達しない**ので、**組も始まりも書かれない**
+    # ——**その穴を「暇だった」と読むと、生きている予定表を死んだと断定する。**
+    stopped_at "$slot" && continue
     busy=0
     for i in "${!held_from[@]}"; do
       ((held_from[i] <= slot && slot <= held_to[i])) && busy=1 && break
