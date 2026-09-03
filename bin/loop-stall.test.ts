@@ -2165,6 +2165,67 @@ describe("再開の順番", () => {
    *
    * **止めた時点で記録に開く**——**そうすれば、あとから mtime が動いても効かない。**
    */
+  /**
+   * **区間の記録を書く 2 箇所が、同じ順序で排他される**（#586 のレビュー 3 周目）。
+   *
+   * **`--stopped` はカウンタのロックの外で走る**——**`./task loop:stop` は
+   * そのロックの中から呼ばれる**ので、**同じ錠を取ると自己デッドロックする。**
+   * **だが `--resumed` は同じ記録をロックの中から書き直す**ので、
+   * **素で重なる**（**人が `./task loop:stop` を打つとき、カウンタの錠は誰も持っていない**）。
+   *
+   * **倒れる先が 2 つあり、片方が静か**である——**開いたぶんが消えれば元の症状**、
+   * **閉じたぶんが消えれば区間が開いたまま残り、そこから先が全部「止まっていた」**
+   * になって**何も言わなくなる。**
+   */
+  it("区間の記録は、握られている間は書かない", () => {
+    counted();
+    withTask();
+    const lock = `${join(repo, ".git", "valence-loop-stop-spans")}.lock`;
+    writeFileSync(lock, "");
+    const held = holdLock({ dir: repo, lock, limitSeconds: 10 });
+
+    try {
+      const blocked = spawnSync(join(repo, "bin", "loop-stall"), ["--stopped"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
+      });
+
+      expect(blocked.status, "握られているのに書けている").not.toBe(0);
+      expect(existsSync(join(repo, ".git", "valence-loop-stop-spans")), "錠を無視して書いた").toBe(
+        false,
+      );
+    } finally {
+      held.release();
+    }
+  });
+
+  it("再開の側も、握られている間は区間を書き換えない", () => {
+    // **2 箇所とも同じ錠で守る**——**片方だけだと、素で重なる側が残る。**
+    // **再開は落とさない**（**再開そのものは済んでいる**）ので、**言うだけ**である
+    // ——**observable は「書き換えていないこと」。**
+    counted();
+    withTask();
+    const spans = join(repo, ".git", "valence-loop-stop-spans");
+    writeFileSync(spans, "100\t-\n");
+    const lock = `${spans}.lock`;
+    writeFileSync(lock, "");
+    const held = holdLock({ dir: repo, lock, limitSeconds: 10 });
+
+    try {
+      const done = spawnSync(join(repo, "bin", "loop-stall"), ["--resumed"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, LOOP_STALL_LOCK_WAIT_SEC: "1" },
+      });
+
+      expect(done.stderr, "握られているのに黙っている").toContain("残せません");
+      expect(readFileSync(spans, "utf8"), "錠を無視して書き換えた").toBe("100\t-\n");
+    } finally {
+      held.release();
+    }
+  });
+
   it("./task loop:stop が、止めた時点で区間を開く", () => {
     // **口を足しただけでは効かない**——**呼ぶ側と繋がっていること**を見る。
     // **`bin/loop-stall --stopped` は識別子の一覧に無い引数**なので、

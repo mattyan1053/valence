@@ -720,6 +720,51 @@ kept_stop_spans() {
 }
 
 # **止まっていた区間を 1 本足す。** **失敗したら 1 を返す**——**握りつぶさない。**
+# **開いている区間を閉じる。** **開いていなければ、渡された時刻で 1 本足す**
+# ——**旧版が止めたぶんは記録が無い**ので、**そこだけ STOP の mtime を使う。**
+close_stop_span() {
+  local fallback="$1" spans=() line from to closed=0
+  lock_stop_spans || return 1
+  while IFS= read -r line; do spans+=("$line"); done < <(kept_stop_spans)
+  for i in "${!spans[@]}"; do
+    IFS=$'\t' read -r from to <<<"${spans[i]}"
+    [[ $to == "-" ]] || continue
+    spans[i]="$from"$'\t'"$(date +%s)"
+    closed=1
+  done
+  ((closed == 1)) || spans+=("$fallback"$'\t'"$(date +%s)")
+  write_stop_spans "${spans[@]}"
+}
+
+# **master と worker は同じカウンタを、同じ周期で書きうる。** 読んでから書くまでを
+# 排他しないと、後から書いた側が相手の増分を消す (lost update)。記録が増えないまま
+# 周回だけ進むので、**どちらの識別子も上限に届かず第 4 層が効かなくなる**。
+# 排他しないほうへ倒れると気づけないので、**取れないときは数えずに失敗する**。
+readonly LOCK_WAIT_SEC="${LOOP_STALL_LOCK_WAIT_SEC:-10}"
+if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_STALL_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
+  exit 2
+fi
+
+# **区間の記録も、読んでから書くまでを排他する** (#586 のレビュー 3 周目)——**理由は
+# 上と同じ (lost update)** で、**倒れる先が 2 つある**：**開いたぶんが消えれば元の症状**、
+# **閉じたぶんが消えれば区間が開いたまま残り、そこから先が全部「止まっていた」**
+# になって**何も言わなくなる**（**静かなほうが危ない**）。
+#
+# **カウンタとは別の錠にする。** **`--stopped` は `"$TASK" loop:stop` から呼ばれ、
+# その `loop:stop` はカウンタの錠の中から呼ばれる**ので、**同じ錠を取ると自己デッドロック**
+# する。**順序は「カウンタ → 区間」に固定する**（**逆に取る経路が無いので輪にならない**）。
+lock_stop_spans() {
+  exec 8>"$STOP_SPANS.lock" || {
+    echo "[FAIL] 停止区間のロックを作成できません: $STOP_SPANS.lock" >&2
+    return 2
+  }
+  flock -w "$LOCK_WAIT_SEC" 8 || {
+    echo "[FAIL] 停止区間のロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+    return 2
+  }
+}
+
 # **止めた時点で区間を開く** (#586 のレビュー 2 周目)。**`./task loop:stop` が呼ぶ。**
 #
 # **mtime を始まりにしない**——**旧版の `cmd_loop_stop` は既存の STOP にも無条件で `>`**
@@ -728,6 +773,7 @@ kept_stop_spans() {
 # **既に開いているなら足さない**（**冪等**）——**2 度目の停止は「まだ止まっている」
 # としか言っていない。**
 if [[ $ID == "--stopped" ]]; then
+  lock_stop_spans || exit 2
   open_stop_span && exit 0
   # **語分割に任せない**——**行にタブが入っている**ので、**1 行ずつ受ける。**
   stop_spans=()
@@ -740,26 +786,6 @@ if [[ $ID == "--stopped" ]]; then
   exit 0
 fi
 
-# **開いている区間を閉じる。** **開いていなければ、渡された時刻で 1 本足す**
-# ——**旧版が止めたぶんは記録が無い**ので、**そこだけ STOP の mtime を使う。**
-close_stop_span() {
-  local fallback="$1" spans=() line from to closed=0
-  while IFS= read -r line; do spans+=("$line"); done < <(kept_stop_spans)
-  for i in "${!spans[@]}"; do
-    IFS=$'\t' read -r from to <<<"${spans[i]}"
-    [[ $to == "-" ]] || continue
-    spans[i]="$from"$'\t'"$(date +%s)"
-    closed=1
-  done
-  ((closed == 1)) || spans+=("$fallback"$'\t'"$(date +%s)")
-  write_stop_spans "${spans[@]}"
-}
-
-readonly LOCK_WAIT_SEC="${LOOP_STALL_LOCK_WAIT_SEC:-10}"
-if ! [[ $LOCK_WAIT_SEC =~ ^[0-9]+$ ]]; then
-  echo "[FAIL] 設定: LOOP_STALL_LOCK_WAIT_SEC は 0 以上の整数（秒）で指定してください" >&2
-  exit 2
-fi
 exec 9>"$STATE.lock" || {
   echo "[FAIL] 停止カウンタのロックを作成できません: $STATE.lock" >&2
   exit 2
