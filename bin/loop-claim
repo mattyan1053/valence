@@ -169,6 +169,7 @@ has_label() {
 readonly TAKEN_FROM="ready"
 readonly TAKEN_TO="in-progress"
 
+
 # **付け替えて、読み直して確かめる。** **`gh` は通らなくても成功を返しうる**ので、
 # **確かめずに進むと、label が動いていないのに動いたことにする。**
 #
@@ -199,10 +200,15 @@ move_label() {
 # **引数で渡すのは呼ぶ側**である。**take だけが新しく決め**、**resume と pr は
 # 読んだ値をそのまま渡す**——**「保つ」を既定にすると、`take` で書き忘れたときに
 # 前の着手の時刻が残る。**
+# **3 行目に「どの口で取ったか」を残す** (#592 のレビュー)。**`take` は label を
+# 倒すが、`resume` / `pr` は倒さない**——**返すときに戻してよいのは倒した口だけ**である。
+#
+# **足すのは行**（`AGENTS.md` §5）。**`read_record` は 1 行目と 2 行目を名指しで読む**
+# ので、**3 行目を足しても前の版は何も見ない**（**列を足すと 1 行目の解釈が変わる**）。
 write_record() {
   local taken="${1-}"
   [[ -n $taken ]] || taken="$(date +%s)"
-  printf '%s\t%s\n%s\n' "$OWNER" "$(date +%s)" "$taken" >"$RECORD" || {
+  printf '%s\t%s\n%s\n%s\n' "$OWNER" "$(date +%s)" "$taken" "$ACTION" >"$RECORD" || {
     echo "[FAIL] #$ISSUE の持ち主を記録できません: $RECORD" >&2
     exit 2
   }
@@ -222,10 +228,14 @@ read_record() {
   held_owner=""
   held_since=""
   held_taken=""
+  # **この列を持たない版が書いた記録がある** (#592 のレビュー)——**空のまま**にして、
+  # **分からないものを「`take` だった」へ倒さない。**
+  held_how=""
   [[ -f $record ]] || return 0
   {
     IFS=$'\t' read -r held_owner held_since _
     read -r held_taken
+    read -r held_how
   } <"$record"
   if ! [[ $held_since =~ ^[0-9]+$ ]]; then
     return 1
@@ -813,7 +823,11 @@ if [[ $ACTION == "release" || $ACTION == "release-issue" ]]; then
   # あとかもしれない**ので、**盤面を上書きしない。**
   #
   # **記録を消してから戻す。** **先に戻すと、記録が消える前に別の作業場が取れてしまう。**
-  if [[ $ACTION == "release-issue" ]]; then
+  # **戻してよいのは `take` で倒した claim だけ** (#592 のレビュー)。
+  # **`resume` は倒していない**——**別の作業場が既存 PR を直している間に記録だけ
+  # 期限切れになったぶんを引き継ぐ口**である。**そこで `ready` へ戻すと、
+  # 次の worker が `take` し、同じ Issue を二重に実装する。**
+  if [[ $ACTION == "release-issue" && $held_how == "take" ]]; then
     if ! labels="$(labels_of)"; then
       echo "[FAIL] #$ISSUE の label を読めません（claim は返しています）" >&2
       exit 2

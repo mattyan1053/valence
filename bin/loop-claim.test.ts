@@ -850,6 +850,47 @@ describe("bin/loop-claim", () => {
       expect(labelState(), "着手中が外れていない").not.toContain("in-progress");
     });
 
+    it("2.2 の経路で返しても、着手中のままにする", () => {
+      // **`take` を通らない `release-issue` がある** (#592 のレビュー)——
+      // **`loop/procedure/worker.md` の 2.2**：**`resume` exit 0 → `bin/loop-claim pr`
+      // exit 1 → `release-issue`。**
+      //
+      // **2.2 では `in-progress` が正しい**（**PR を持っている作業場が実際に着手中**）
+      // ——**空いているのは Issue 側の記録だけ**である。**そこで `ready` へ戻すと、
+      // 次の worker が `take` し、同じ Issue の実装がもう 1 本始まる。**
+      //
+      // **経路そのものを入力に置く**——**`take` から入る試験では、守りたい行に
+      // この入力が届かない。**
+      withGh({ labels: ["in-progress"] });
+      const owner = addWorkspace("PR を持っている作業場");
+      startRound(owner);
+      expect(run(["pr", "42"], { cwd: owner }).status, "PR を取れていない").toBe(0);
+
+      startRound(repo);
+      expect(run(["resume", "42"]).status, "引き継げていない").toBe(0);
+      expect(run(["pr", "42"]).status, "PR が空いている（2.2 の前提が崩れている）").toBe(1);
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "2.2 の経路なのに ready へ戻した").toContain("in-progress");
+    });
+
+    it("取得の経路が分からない記録では、戻さない", () => {
+      // **記録はループを跨いで残る**（`AGENTS.md` §5）——**この列を持たない版が
+      // 書いた記録**がある。**分からないものを「take だった」へ倒さない。**
+      withGh({ labels: ["in-progress"] });
+      startRound(repo);
+      run(["resume", "42"]);
+      // **前の書式**（2 行だけ）へ書き戻す
+      const record = issueRecord(42);
+      const [owner = "", taken = ""] = readFileSync(record, "utf8").split("\n");
+      writeFileSync(record, `${owner}\n${taken}\n`);
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "分からないのに ready へ戻した").toContain("in-progress");
+    });
+
     it("label を戻せなければ、返せたと言わない", () => {
       // **黙って成功と言わない**——**記録は消えているのに label は倒れたまま**である。
       // **言わないと、返した本人が気づけないまま人が呼ばれる。**
