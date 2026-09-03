@@ -164,6 +164,25 @@ has_label() {
   return 1
 }
 
+# **`take` が倒す向き** (#591)。**戻す側もここから引く**——**倒し方を知っているのは
+# 取る側だけ**なので、**戻し方をそこから離すと、片方だけ直して食い違う**（`AGENTS.md` §5）。
+readonly TAKEN_FROM="ready"
+readonly TAKEN_TO="in-progress"
+
+
+# **付け替えて、読み直して確かめる。** **`gh` は通らなくても成功を返しうる**ので、
+# **確かめずに進むと、label が動いていないのに動いたことにする。**
+#
+#   exit 0 = 付け替わった / exit 1 = 打てなかった / exit 2 = 読み直せない・変わっていない
+move_label() {
+  local from="$1" to="$2" after
+  gh issue edit "$ISSUE" --remove-label "$from" --add-label "$to" >/dev/null || return 1
+  after="$(labels_of)" || return 2
+  has_label "$from" "$after" && return 2
+  has_label "$to" "$after" || return 2
+  return 0
+}
+
 # **持ち主を書き残す。** 記録が無ければ、2.2 は「誰の作業か」を判定できない。
 #
 # **時刻は 2 つ書く** (#264)。**1 行目の 2 列目は「最後に触った時刻」**で、
@@ -181,10 +200,21 @@ has_label() {
 # **引数で渡すのは呼ぶ側**である。**take だけが新しく決め**、**resume と pr は
 # 読んだ値をそのまま渡す**——**「保つ」を既定にすると、`take` で書き忘れたときに
 # 前の着手の時刻が残る。**
+# **3 行目に「この作業場が label を倒したか」を残す** (#592 のレビュー 2 周目)。
+#
+# **口の名前ではない。** **最初は `$ACTION` を書いていた**が、**`take` して実装中に
+# 周回が終われば、次の周回は 2.2 の `resume` へ入る**（`loop/procedure/worker.md` 194 行）
+# ——**そこで上書きされ、#591 の症状が 2 周目以降に戻る。**
+#
+# **`resume` には 2 つの顔がある**——**自分の中断を続けるぶん**（**倒したのは自分**）と、
+# **他人の落ちた周回を引き継ぐぶん**（**倒したのは前の持ち主**）。**持ち越すのは前者だけ。**
+#
+# **足すのは行**（`AGENTS.md` §5）。**`read_record` は 1 行目と 2 行目を名指しで読む**
+# ので、**3 行目を足しても前の版は何も見ない**（**列を足すと 1 行目の解釈が変わる**）。
 write_record() {
-  local taken="${1-}"
+  local taken="${1-}" how="${2-$ACTION}"
   [[ -n $taken ]] || taken="$(date +%s)"
-  printf '%s\t%s\n%s\n' "$OWNER" "$(date +%s)" "$taken" >"$RECORD" || {
+  printf '%s\t%s\n%s\n%s\n' "$OWNER" "$(date +%s)" "$taken" "$how" >"$RECORD" || {
     echo "[FAIL] #$ISSUE の持ち主を記録できません: $RECORD" >&2
     exit 2
   }
@@ -204,10 +234,14 @@ read_record() {
   held_owner=""
   held_since=""
   held_taken=""
+  # **この列を持たない版が書いた記録がある** (#592 のレビュー)——**空のまま**にして、
+  # **分からないものを「`take` だった」へ倒さない。**
+  held_how=""
   [[ -f $record ]] || return 0
   {
     IFS=$'\t' read -r held_owner held_since _
     read -r held_taken
+    read -r held_how
   } <"$record"
   if ! [[ $held_since =~ ^[0-9]+$ ]]; then
     return 1
@@ -787,6 +821,33 @@ if [[ $ACTION == "release" || $ACTION == "release-issue" ]]; then
     exit 2
   }
   echo "[INFO] $what #$ISSUE の claim を返しました" >&2
+  # **取る前の状態へ戻す** (#591)。**`take` が倒したのなら、返すときは戻す**
+  # ——**戻さないと「着手中だが持ち主が居ない」で止まり、誰も取れない。**
+  #
+  # **PR は触らない**（**この label は Issue のもの**）。
+  # **着手中でなければ触らない**——**master が別の状態（`blocked` など）へ動かした
+  # あとかもしれない**ので、**盤面を上書きしない。**
+  #
+  # **記録を消してから戻す。** **先に戻すと、記録が消える前に別の作業場が取れてしまう。**
+  # **戻してよいのは `take` で倒した claim だけ** (#592 のレビュー)。
+  # **`resume` は倒していない**——**別の作業場が既存 PR を直している間に記録だけ
+  # 期限切れになったぶんを引き継ぐ口**である。**そこで `ready` へ戻すと、
+  # 次の worker が `take` し、同じ Issue を二重に実装する。**
+  if [[ $ACTION == "release-issue" && $held_how == "take" ]]; then
+    if ! labels="$(labels_of)"; then
+      echo "[FAIL] #$ISSUE の label を読めません（claim は返しています）" >&2
+      exit 2
+    fi
+    if has_label "$TAKEN_TO" "$labels"; then
+      move_label "$TAKEN_TO" "$TAKEN_FROM" || {
+        # **黙って成功と言わない。** **記録は消えているのに label は倒れたまま**である
+        # ——**言わないと、返した本人が気づけないまま人が呼ばれる**（`claim idle` の `unowned`）。
+        echo "[FAIL] #$ISSUE の label を $TAKEN_TO から $TAKEN_FROM へ戻せません" >&2
+        echo "       claim は返しています。label は手で戻すこと" >&2
+        exit 2
+      }
+    fi
+  fi
   exit 0
 fi
 
@@ -874,21 +935,19 @@ take)
     exit 1
   fi
 
-  if ! gh issue edit "$ISSUE" --remove-label ready --add-label in-progress >/dev/null; then
-    echo "[FAIL] #$ISSUE の label を付け替えられません" >&2
-    exit 2
-  fi
-
-  # **書いたら読み直して確かめる。** 付け替えが通らなくても `gh` は成功を返しうる。
-  # 確かめずに進むと、**label は ready のまま実装が始まり**、次の周回が同じものを取る。
-  if ! after="$(labels_of)"; then
-    echo "[FAIL] #$ISSUE の label を読み直せません" >&2
-    exit 2
-  fi
-  if has_label "ready" "$after" || ! has_label "in-progress" "$after"; then
-    echo "[FAIL] #$ISSUE の label が変わっていません（取れたとみなしません）" >&2
-    exit 2
-  fi
+  # **付け替えて確かめるところは `move_label` が持つ** (#591)——**戻す側と同じ 1 箇所。**
+  move_label "$TAKEN_FROM" "$TAKEN_TO"
+  case "$?" in
+    0) ;;
+    1)
+      echo "[FAIL] #$ISSUE の label を付け替えられません" >&2
+      exit 2
+      ;;
+    *)
+      echo "[FAIL] #$ISSUE の label が変わっていません（取れたとみなしません）" >&2
+      exit 2
+      ;;
+  esac
 
   write_record
   ;;
@@ -941,6 +1000,15 @@ resume)
   #
   # **着手した時刻は持ち越す** (#264)。**引き継ぎでも書き直さない**——
   # **持ち主が代わっても、その Issue が着手されたのは最初の 1 回**である。
-  write_record "$held_taken"
+  #
+  # **倒した印は、自分の続きのときだけ持ち越す** (#592 のレビュー 2 周目)。
+  # **他人から引き継いだぶんは、倒したのが前の持ち主**なので**引き継がない**
+  # ——**戻すと、その作業場の実装と重複する。**
+  #
+  # **`held_owner` が空なら、記録が無かった**（**誰が倒したか分からない**）
+  # ——**そこも引き継がない**（**分からないものを「自分が倒した」へ倒さない**）。
+  resumed_how="$ACTION"
+  [[ $held_owner == "$OWNER" && -n $held_how ]] && resumed_how="$held_how"
+  write_record "$held_taken" "$resumed_how"
   ;;
 esac

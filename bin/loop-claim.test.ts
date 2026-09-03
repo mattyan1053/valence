@@ -53,7 +53,16 @@ describe("bin/loop-claim", () => {
         "fi",
         'if [[ $* == *"issue edit"* ]]; then',
         `  echo "edit" >>${JSON.stringify(log)}`,
-        ...(options.editIsNoop === true ? [] : [`  echo "in-progress" >${JSON.stringify(state)}`]),
+        // **渡された向きを反映する** (#591)——**`in-progress` 固定だと、戻す側を試せない。**
+        ...(options.editIsNoop === true
+          ? []
+          : [
+              '  if [[ $* == *"--add-label ready"* ]]; then',
+              `    echo "ready" >${JSON.stringify(state)}`,
+              "  else",
+              `    echo "in-progress" >${JSON.stringify(state)}`,
+              "  fi",
+            ]),
         "  exit 0",
         "fi",
         'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
@@ -758,6 +767,18 @@ describe("bin/loop-claim", () => {
       expect(run(["mine", "42"]).status, "返したのに自分のものになっている").toBe(1);
     });
 
+    it("PR を返しても、label は触らない", () => {
+      // **`ready` / `in-progress` は Issue のもの** (#591)——**同じ番号空間なので、
+      // PR を返したときに触ると、たまたま同じ番号の Issue が盤面から動く。**
+      withGh({ labels: ["in-progress"] });
+      startRound(repo);
+      run(["pr", "42"]);
+
+      expect(run(["release", "42"]).status, "返せていない").toBe(0);
+
+      expect(editCount(), "PR を返したのに label を書き換えた").toBe(0);
+    });
+
     it("別の作業場の claim は返せない", () => {
       // **返せるのは自分のものだけ。** **他人のものを消せると、排他が意味を失う**
       withGh({ labels: [] });
@@ -797,10 +818,146 @@ describe("bin/loop-claim", () => {
       return result.stdout.trim();
     }
 
+    /** いまの label（偽の `gh` が持っている状態）。 */
+    function labelState(): string {
+      return readFileSync(state, "utf8");
+    }
+
     /** その Issue の claim の記録。**PR のぶんとは置き場が違う。** */
     function issueRecord(number: number): string {
       return join(repo, ".git", `valence-loop-claim-${number}`);
     }
+
+    /**
+     * **取る口が label を倒すのに、返す口が戻さなかった**（#591）。
+     *
+     * **返したあとの Issue は「着手中だが持ち主が居ない」で止まる**——**`take` は
+     * `ready` を見る**ので**誰も取れず**、**`ready` + `in-progress` の枠を 1 つ食う。**
+     *
+     * **見張りはある**（`bin/loop-claim idle` の `unowned`）が、**鳴るのは `IDLE_SEC`
+     * を過ぎてから**で、**鳴った先は「人を呼ぶ」**——**返しただけで人が呼ばれる。**
+     *
+     * **2026-09-03 に実際に踏んだ**（**取り違えて `take` し、返したら残った**）。
+     */
+    it("返したら、ready に戻る", () => {
+      withGh({ labels: ["ready"] });
+      startRound(repo);
+      expect(run(["take", "42"]).status, "取れていない").toBe(0);
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "着手中のまま残っている").toContain("ready");
+      expect(labelState(), "着手中が外れていない").not.toContain("in-progress");
+    });
+
+    /**
+     * **見分けたいのは「どの口で取ったか」ではなく「この作業場が label を倒したか」**
+     * である（#592 のレビュー 2 周目）。
+     *
+     * **`resume` には 2 つの顔がある**——**自分の中断を続けるぶん**（倒したのは自分）と、
+     * **他人の落ちた周回を引き継ぐぶん**（倒したのは前の持ち主、または誰も倒していない）。
+     *
+     * **2 つの向きを 1 つの describe に並べる**——**片方だけなら、これまでに 2 回とも
+     * 通っている。**
+     */
+    it("take で取ったものを resume で続けても、返せば ready に戻る", () => {
+      // **`take` して実装中に周回が終われば、次の周回は必ず 2.2 の `resume` へ入る**
+      // （`loop/procedure/worker.md` 194 行。**「自分の中断した作業である」**）。
+      // **そこで経路が上書きされると、#591 の症状が 2 周目以降に戻る。**
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      startRound(repo);
+      expect(run(["take", "42"]).status, "取れていない").toBe(0);
+      expect(run(["resume", "42"]).status, "自分の中断を続けられていない").toBe(0);
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "resume を挟むと戻らない").toContain("ready");
+      expect(labelState(), "着手中が外れていない").not.toContain("in-progress");
+    });
+
+    it("他人から引き継いだ resume は、返しても着手中のまま", () => {
+      // **倒したのは前の持ち主**である——**戻すと、その作業場の実装と重複する。**
+      // **上の試験と同時に立つこと**（**片方だけなら、どちらの向きも作れる**）。
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      const other = addWorkspace("落ちた作業場");
+      expect(run(["take", "42"], { cwd: other }).status, "取れていない").toBe(0);
+
+      startRound(repo);
+      const resumed = run(["resume", "42"]);
+      expect(resumed.status, "引き継げていない").toBe(0);
+      expect(resumed.stderr, "引き継ぎになっていない").toContain("WARN");
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "他人から引き継いだのに ready へ戻した").toContain("in-progress");
+    });
+
+    it("2.2 の経路で返しても、着手中のままにする", () => {
+      // **`take` を通らない `release-issue` がある** (#592 のレビュー)——
+      // **`loop/procedure/worker.md` の 2.2**：**`resume` exit 0 → `bin/loop-claim pr`
+      // exit 1 → `release-issue`。**
+      //
+      // **2.2 では `in-progress` が正しい**（**PR を持っている作業場が実際に着手中**）
+      // ——**空いているのは Issue 側の記録だけ**である。**そこで `ready` へ戻すと、
+      // 次の worker が `take` し、同じ Issue の実装がもう 1 本始まる。**
+      //
+      // **経路そのものを入力に置く**——**`take` から入る試験では、守りたい行に
+      // この入力が届かない。**
+      withGh({ labels: ["in-progress"] });
+      const owner = addWorkspace("PR を持っている作業場");
+      startRound(owner);
+      expect(run(["pr", "42"], { cwd: owner }).status, "PR を取れていない").toBe(0);
+
+      startRound(repo);
+      expect(run(["resume", "42"]).status, "引き継げていない").toBe(0);
+      expect(run(["pr", "42"]).status, "PR が空いている（2.2 の前提が崩れている）").toBe(1);
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "2.2 の経路なのに ready へ戻した").toContain("in-progress");
+    });
+
+    it("取得の経路が分からない記録では、戻さない", () => {
+      // **記録はループを跨いで残る**（`AGENTS.md` §5）——**この列を持たない版が
+      // 書いた記録**がある。**分からないものを「take だった」へ倒さない。**
+      withGh({ labels: ["in-progress"] });
+      startRound(repo);
+      run(["resume", "42"]);
+      // **前の書式**（2 行だけ）へ書き戻す
+      const record = issueRecord(42);
+      const [owner = "", taken = ""] = readFileSync(record, "utf8").split("\n");
+      writeFileSync(record, `${owner}\n${taken}\n`);
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "分からないのに ready へ戻した").toContain("in-progress");
+    });
+
+    it("label を戻せなければ、返せたと言わない", () => {
+      // **黙って成功と言わない**——**記録は消えているのに label は倒れたまま**である。
+      // **言わないと、返した本人が気づけないまま人が呼ばれる。**
+      withGh({ labels: ["ready"] });
+      startRound(repo);
+      run(["take", "42"]);
+      withGh({ labels: ["in-progress"], editIsNoop: true });
+
+      const done = run(["release-issue", "42"]);
+
+      expect(done.status, "戻せていないのに成功している").not.toBe(0);
+      expect(done.stderr, "何が残っているか言っていない").toContain("in-progress");
+    });
+
+    it("別の作業場の claim では、label を触らない", () => {
+      // **返せるのは自分のものだけ**——**触れると、他人の作業が盤面から消える。**
+      withGh({ labels: ["ready"] });
+      startRound(repo);
+      run(["take", "42"]);
+
+      const other = run(["release-issue", "42"], { cwd: addWorkspace("よその作業場") });
+
+      expect(other.status, "他人のものを返している").toBe(1);
+      expect(labelState(), "他人の Issue の label を触った").toContain("in-progress");
+    });
 
     it("返したら、記録が残らない", () => {
       withGh({ labels: ["ready"] });
@@ -813,18 +970,19 @@ describe("bin/loop-claim", () => {
     });
 
     it("返せば、別の作業場が続きを取れる", () => {
-      // **周回を回したままでも空く**（`alive` の窓を待たない。`release` と同じ）
+      // **周回を回したままでも空く**（`alive` の窓を待たない。`release` と同じ）。
+      //
+      // **取り直す口は `take` である** (#591)——**返すと `ready` に戻る**ので、
+      // **`resume`（着手中を続ける口）ではなく、取る口から入る。**
+      // **以前は `in-progress` のまま残っていたので `resume` だった。**
       withGh({ labels: ["ready"] });
       startRound(repo);
       run(["take", "42"]);
 
       run(["release-issue", "42"]);
 
-      const other = run(["resume", "42"], { cwd: addWorkspace("次の作業場") });
-      expect(other.status, "空いていない").toBe(0);
-      expect(other.stderr, "引き継ぎとして扱っている（空いているはず）").not.toContain(
-        "引き継ぎます",
-      );
+      const other = run(["take", "42"], { cwd: addWorkspace("次の作業場") });
+      expect(other.status, `空いていない: ${other.stderr}`).toBe(0);
     });
 
     it("別の作業場の claim は返せない", () => {
