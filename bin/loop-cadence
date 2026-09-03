@@ -427,35 +427,62 @@ show_reading() {
 # **足した案内が鳴る場面に到達しない**（**cron が 1 本も無いときを除いて、いつも
 # `unknown`**）。
 #
-# **いちばん短い間を採る。ただし下限を置く。**
+# **真ん中の間を採る。ただし下限を置く。**
 #
 # **上を採ってはいけない** (#439 のレビュー)——**過去に 1 度落ちていると、その欠落が
 # そのまま物差しになる**（**3 時間空いた記録があれば、次の停止は 6 時間 `ok`**）。
 # **記録から押し出されるまで続く**ので、**止めるために足したものが、止めなくなる。**
+# **真ん中はここを守る**——**欠落は少数なので、真ん中まで届かない**
+# （**実測: 37914 秒の間が入っていても、真ん中は 1802 秒**）。
 #
 # **下限が要る** ——**実測の記録には数十秒の間がある**（`35 49 …`）。**あれは
 # 「捨てて呼び直した周回」**で、**同じ cron の中で 2 回 `acquire` している。**
 # **周期として読むと窓が数十秒になり、正常な周回で鳴り続ける。**
 # **cron の刻みは 1 分より細かくならない**ので、**それより短い間は周期ではない。**
 #
-# **落とした回は、上へずれるだけ**である——**最小は周期のほうに残る。**
+# **最小をやめた理由は、その下限が漏れるからである** (#601)。**呼び直した周回の間は
+# 数十秒とは限らない**——**実測で 231 / 330 / 397 秒**であり、**どれも下限を越える。**
+# **最小は 1 本で決まる**ので、**正しい 19 本を誤記録 1 本が上書きする**
+# （**実測: 3 作業場とも狂っていた。231s / 810s / 1419s、真値は 1800s。
+# 真ん中はどれも 1800±7s**）。
+#
+# **窓は広がる側にしか動かない**——**真ん中は定義上つねに最小以上**なので、
+# **新しい誤報は作れない**（#584 の向きへ倒れない）。**代わりに気づくのが少し遅くなる**
+# ——**実測で master の作業場が +147 秒、worker-1 が +1569 秒**である。
+#
+# **周期を変えたときの追随も測った**（20 本の窓で回した）。**伸ばす向きでは真ん中のほうが
+# 速い**（**10 刻み目 / 最小は 19 刻み目**。**`last_gap` の「最大 20 回」がこれ**）。
+# **縮める向きだけ最小が速い**（**1 刻み目 / 真ん中は 10 刻み目**）——**そのあいだ窓が
+# 広いままなのは、人が意図して縮めたときだけ**である。
+#
+# **偶数本なら下の真ん中を採る**（**2 本しか無いときは、これまでと同じ「短いほう」**）。
 #
 # **2 本要る。** **1 本では間が測れない**ので、**そこは「分からない」のまま**である。
 readonly SHORTEST_TICK=60
 
 measured_interval() {
-  local previous="" at gap shortest=""
+  local previous="" at gap gaps=() i j key
   for at in "$@"; do
     if [[ -n $previous ]]; then
       gap=$((at - previous))
-      if ((gap >= SHORTEST_TICK)) && { [[ -z $shortest ]] || ((gap < shortest)); }; then
-        shortest="$gap"
-      fi
+      ((gap >= SHORTEST_TICK)) && gaps+=("$gap")
     fi
     previous="$at"
   done
-  [[ -n $shortest ]] || return 1
-  printf '%s' "$shortest"
+  ((${#gaps[@]} > 0)) || return 1
+  # **挿入ソート。** **並べる本数は `RECENT_STARTS` までで、外の道具を増やさない**
+  # （`loop/host-tools-wiring.test.ts` の台帳）。
+  for ((i = 1; i < ${#gaps[@]}; i++)); do
+    key="${gaps[i]}"
+    for ((j = i - 1; j >= 0 && gaps[j] > key; j--)); do
+      gaps[j + 1]="${gaps[j]}"
+    done
+    gaps[j + 1]="$key"
+  done
+  # **2 つ返す**（#606 のレビュー）——**最小と真ん中は、逆向きに外れる。**
+  # **最小は誤記録 1 本に弱く**（実測 −87%）、**真ん中は欠落が過半数だと真値の
+  # 整数倍になる**（**`1800, 3600, 3600` → 3600**）。**どちらか一方は選べない。**
+  printf '%s %s' "${gaps[0]}" "${gaps[$(((${#gaps[@]} - 1) / 2))]}"
 }
 
 # **直前の間**（周期の下限より短いものは、周期ではないので飛ばす）。
@@ -485,13 +512,66 @@ last_gap() {
   printf '%s' "$last"
 }
 
+# **その物差しでの窓**（#601 / #606）。**`window` と `window_from` を置く。**
+#
+# **2 つの物差しで 2 回呼ぶ**ので、**判定はここ 1 箇所が持つ**（`AGENTS.md` §5）
+# ——**片方だけ古くなる形にしない。**
+compute_window() {
+  local interval="$1" gap longest running_since
+  window=$((interval * MISSED_TICKS))
+  # **何が窓を決めたか** (#601)。**広さだけでは次の一手が決まらない**——
+  # **「2 刻み」なら予定表を、「直前の間」「最長周回」なら記録の欠落を見る。**
+  window_from="2 刻み"
+  # **直前の間が長かったなら、その 1 回ぶんは待つ** (#441)。**周期が伸びたのと、
+  # 鳴り損ねたのは、記録からは同じ形に見える**——**待つのは 1 回ぶんだけ**である。
+  #
+  # **測ったときだけである** (#443 のレビュー)。**渡されたものが正**（#378）なので、
+  # **渡されているなら、記録の大きな間で窓を広げない**——**広げると、落ちていた
+  # 記録がそのまま「待ってよい時間」になり、止まっても `ok` になる**（**黙る側**）。
+  if [[ -z $INTERVAL ]] && gap="$(last_gap "${cron_at[@]}")" &&
+    ((gap + interval > window)); then
+    window=$((gap + interval))
+    window_from="直前の間"
+  fi
+  if [[ -f "$common_dir/valence-loop-roundlen-$scope" ]] &&
+    read -r longest <"$common_dir/valence-loop-roundlen-$scope" 2>/dev/null &&
+    [[ $longest =~ ^[0-9]+$ ]]; then
+    if ((longest + interval > window)); then
+      window=$((longest + interval))
+      window_from="最長周回"
+    fi
+  fi
+  # **いま回している周回のぶんは待つ** (#444。#446 のレビュー)。**走っている最中に
+  # 鳴った cron は `acquire` が exit 1 で終わる**ので、**記録が 1 行も増えない。**
+  #
+  # **待つのは「その周回の中に入った刻み」だけ**である——**`bin/loop-cadence` は
+  # 周回の中から呼ばれる**ので、**呼んだ役は必ず自分の lease を握っている。**
+  # **「回っている」と「cron が生きている」は別**で、**2 分前に始まった周回は、
+  # 60 分前からの沈黙を説明しない**（**実測: 3 つとも cron が死んで、突かれるだけで
+  # 回っていた日がある**）。
+  #
+  # **始まりは `bin/loop-lease` が書いている**（`valence-loop-rounds-`）。
+  # **読めなければ広げない**——**読めないことで黙る見張りにしない。**
+  if is_running "$scope" &&
+    [[ -f "$common_dir/valence-loop-rounds-$scope" ]] &&
+    read -r running_since <"$common_dir/valence-loop-rounds-$scope" 2>/dev/null &&
+    [[ $running_since =~ ^[0-9]+$ ]] && ((NOW > running_since)); then
+    window=$((window + NOW - running_since))
+    # **足し算なので、土台に重ねる** (#601)——**置き換えると、窓を決めた
+    # 元の項が隠れる**（**周回の中から呼ぶ**ので、ここはほぼ毎回通る）。
+    window_from="$window_from+走行中"
+  fi
+}
+
 evaluate_scope() {
   local scope="$1" workspace="${2-}"
   local starts last_cron last_poke last_unknown age verdict longest
   # **窓は、間隔が分かったときにしか決まらない** ——**空のまま読む道がある**
   # （**cron の記録が 1 本も無い行**）ので、**先に置く**（`set -u`）。
   local window=""
-  local at trigger _where interval interval_shown gap running_since cron_at=()
+  local at trigger _where interval interval_low interval_shown measured cron_at=()
+  # **割れる帯の判定に使う、狭いほうの窓**（#606 のレビュー）。
+  local window_low=0
   # **窓を決めた項**（#601）。**窓が決まらない行もある**ので、先に置く（`set -u`）。
   local window_from=""
   # **枠のとき暇だったか** (#575)。**数えられない行もある**ので、先に置く（`set -u`）。
@@ -555,7 +635,10 @@ evaluate_scope() {
     # ——**起動した人が決めたもの**が、いちばん確かである。
     interval="$INTERVAL"
     interval_shown="interval=${INTERVAL:-unknown}"
-    if [[ -z $interval ]] && interval="$(measured_interval "${cron_at[@]}")"; then
+    interval_low="$INTERVAL"
+    if [[ -z $interval ]] && measured="$(measured_interval "${cron_at[@]}")"; then
+      interval_low="${measured%% *}"
+      interval="${measured##* }"
       # **測ったものだと分かる形で出す**——**渡された値と混ぜない**
       # （**読む人が、どちらで判定したか分かるように**）。
       interval_shown="interval=~$interval"
@@ -578,50 +661,17 @@ evaluate_scope() {
       # のは、前のが終わってから**で、**そこから次の cron までは最大で間隔 1 つ**——
       # **それ以上待っても始まらないなら、鳴っていない。**
       # **「長いかもしれない」で全部を黙らせない。**
-      window=$((interval * MISSED_TICKS))
-      # **何が窓を決めたか** (#601)。**広さだけでは次の一手が決まらない**——
-      # **「2 刻み」なら予定表を、「直前の間」「最長周回」なら記録の欠落を見る。**
-      window_from="2 刻み"
-      # **直前の間が長かったなら、その 1 回ぶんは待つ** (#441)。**周期が伸びたのと、
-      # 鳴り損ねたのは、記録からは同じ形に見える**——**待つのは 1 回ぶんだけ**である。
-      #
-      # **測ったときだけである** (#443 のレビュー)。**渡されたものが正**（#378）なので、
-      # **渡されているなら、記録の大きな間で窓を広げない**——**広げると、落ちていた
-      # 記録がそのまま「待ってよい時間」になり、止まっても `ok` になる**（**黙る側**）。
-      if [[ -z $INTERVAL ]] && gap="$(last_gap "${cron_at[@]}")" &&
-        ((gap + interval > window)); then
-        window=$((gap + interval))
-        window_from="直前の間"
+      compute_window "$interval_low"
+      window_low="$window"
+      compute_window "$interval"
+      # **割れる帯は「分からない」**（#606 のレビュー）——**健全へ倒さない。**
+      # **どちらの物差しでも古いなら古い**、**どちらでも新しいなら新しい**、
+      # **その間は、どちらが正しいか記録からは言えない。**
+      if ((age > window)); then
+        verdict="stale"
+      elif ((age > window_low)); then
+        verdict="unknown"
       fi
-      if [[ -f "$common_dir/valence-loop-roundlen-$scope" ]] &&
-        read -r longest <"$common_dir/valence-loop-roundlen-$scope" 2>/dev/null &&
-        [[ $longest =~ ^[0-9]+$ ]]; then
-        if ((longest + interval > window)); then
-          window=$((longest + interval))
-          window_from="最長周回"
-        fi
-      fi
-      # **いま回している周回のぶんは待つ** (#444。#446 のレビュー)。**走っている最中に
-      # 鳴った cron は `acquire` が exit 1 で終わる**ので、**記録が 1 行も増えない。**
-      #
-      # **待つのは「その周回の中に入った刻み」だけ**である——**`bin/loop-cadence` は
-      # 周回の中から呼ばれる**ので、**呼んだ役は必ず自分の lease を握っている。**
-      # **「回っている」と「cron が生きている」は別**で、**2 分前に始まった周回は、
-      # 60 分前からの沈黙を説明しない**（**実測: 3 つとも cron が死んで、突かれるだけで
-      # 回っていた日がある**）。
-      #
-      # **始まりは `bin/loop-lease` が書いている**（`valence-loop-rounds-`）。
-      # **読めなければ広げない**——**読めないことで黙る見張りにしない。**
-      if is_running "$scope" &&
-        [[ -f "$common_dir/valence-loop-rounds-$scope" ]] &&
-        read -r running_since <"$common_dir/valence-loop-rounds-$scope" 2>/dev/null &&
-        [[ $running_since =~ ^[0-9]+$ ]] && ((NOW > running_since)); then
-        window=$((window + NOW - running_since))
-        # **足し算なので、土台に重ねる** (#601)——**置き換えると、窓を決めた
-        # 元の項が隠れる**（**周回の中から呼ぶ**ので、ここはほぼ毎回通る）。
-        window_from="$window_from+走行中"
-      fi
-      ((age > window)) && verdict="stale"
     fi
   fi
   # **続いている行は、`--quiet` では出さない** (#530)——**毎回鳴る検査は読まれなくなる。**
@@ -634,7 +684,14 @@ evaluate_scope() {
     # **窓は、判定が `ok` の間こそ読めなければ意味が無い** (#601)——**広がった
     # ことに気づけるのは、広がっている間だけ**である。**決まらない行は `-`。**
     window_shown="window=-"
-    [[ -z $window ]] || window_shown="window=$window($window_from)"
+    if [[ -n $window ]]; then
+      # **2 つの物差しが違う窓を出したら、帯で出す** (#606 のレビュー 3 周目)。
+      # **高いほうだけ出すと `age < window` に見え**、**`unknown` の理由が
+      # 読めない**——**見えている値だけでは `ok` と区別が付かない。**
+      window_shown="window=$window($window_from)"
+      ((window_low == window)) ||
+        window_shown="window=$window_low..$window($window_from)"
+    fi
     echo "scope=${scope:0:12} last_cron=$last_cron last_poke=$last_poke last_unknown=$last_unknown age=$age${blocked_shown} ${interval_shown:-interval=${INTERVAL:-unknown}} $window_shown $verdict"
   fi
   # **`unknown` でも黙らない** (#575)。**`stale` のときだけ読みを出していた**ので、
