@@ -1585,19 +1585,23 @@ describe("bin/loop-lease", () => {
         //
         // **競り自体は試験にしない**（時間に依存する。#131 で直した形を作り直すことになる）
         // ——**代わりに、錠を開ける位置を見る。** **書き込みより前に開けていたら赤。**
+        //
+        // **見る先は `beat_activity`** (#602)。**`heartbeat` の分岐から関数へ出した**
+        // ——**`check` も同じものを打つ**ので、**判定と錠の作法は 1 箇所にある。**
         const script = readFileSync(SCRIPT, "utf8");
-        const from = script.indexOf('if [[ $ACTION == "heartbeat" ]]; then');
-        expect(from, "心拍のブロックが見つからない").toBeGreaterThanOrEqual(0);
-        const block = script.slice(from).split("\nfi\n")[0] ?? "";
+        const from = script.indexOf("\nbeat_activity() {\n");
+        expect(from, "心拍の関数が見つからない").toBeGreaterThanOrEqual(0);
+        const block = script.slice(from + 1).split("\n}\n")[0] ?? "";
         const opened = block.indexOf("lock_state");
         const closed = block.indexOf("exec 9>&-");
         const written = block.indexOf("$ACTIVITY.tmp");
 
         expect(opened, "ロックを取っていない").toBeGreaterThanOrEqual(0);
         expect(written, "書き込みが見つからない").toBeGreaterThan(opened);
-        if (closed >= 0) {
-          expect(closed, "照合と書き込みの間で錠を開けている").toBeGreaterThan(written);
-        }
+        expect(closed, "錠を開けていない").toBeGreaterThan(written);
+        // **開ける場所は 1 つだけ** (#602)。**2 つ以上あると、書く前に開ける道が
+        // できる**——**位置だけを見ていると、後ろの 1 つが当たって緑になる。**
+        expect(block.split("exec 9>&-").length - 1, "錠を開ける場所が 2 つ以上ある").toBe(1);
       });
 
       it("持ち主が分からない記録は、伸ばす側へ倒す", () => {
@@ -1612,6 +1616,159 @@ describe("bin/loop-lease", () => {
         const second = acquire();
 
         expect(second.status, "持ち主が分からない周回を奪っている").toBe(1);
+      });
+
+      /**
+       * **`./task` を打たない周回でも、心拍が要る** (#602)。
+       *
+       * **数えた**（**読んだだけの推測を、走らせて確かめた**）。**`bin/loop-lease heartbeat`
+       * を呼んでいるのは 2 箇所だけ**である——**`task` の `heartbeat()`** と
+       * **`bin/loop-await-review`（master のレビュー待ち）。**
+       *
+       * **`task` が打つのは `worker` 固定**である（`./bin/loop-lease heartbeat worker`）
+       * ——**実測: `./task help` を打つと worker の活動だけが新しくなり、master は
+       * 動かなかった。** **master は `./task` を打っても伸びない**ので、**レビューを
+       * 待っていない周回には心拍が 1 つも無い。**
+       *
+       * **`./task` を一度も打たない周回は普通にある**——**レビューを読むだけの周回、
+       * 何もせず終わる周回、master のほとんどの周回。** **そこへ「1 ターンが長い」が
+       * 重なると期限が切れ**、**切れている間は空いて見える**ので、**別の周回が入れば
+       * 走っている側が上書きされる**（**2026-09-03 に実際に踏んだ。5144 秒超過**）。
+       *
+       * **打つ場所は増やさない。** **`bin/loop-lease check` は、もともと
+       * 「この周回が持っているか」を役ごとに判定している**（#161）——
+       * **答えを既に持っているのに、捨てていた。** **`bin/loop-claim` /
+       * `bin/loop-head` / `bin/loop-gate` / `bin/loop-handoff` /
+       * `bin/loop-close-candidates` が周回のあいだ何度も通る**ので、
+       * **1 箇所を直すだけで、両方の役に届く。**
+       *
+       * **無音の周回は、これでも救えない**——**コマンドを 1 つも打たない周回**
+       * （実測 8839 秒）**には、前景で打つどの心拍も届かない。**
+       */
+      describe("ループの道具を打てば、心拍になる（#602）", () => {
+        /** 別の周回として打つ。**`setsid` で切り離して初めて別の周回になる。** */
+        function asOtherRound(args: string[]): number {
+          const other = spawnSync("setsid", ["--wait", SCRIPT, ...args], {
+            cwd: sandbox,
+            encoding: "utf8",
+            env: { ...process.env },
+          });
+          return other.status ?? -1;
+        }
+
+        /** 活動の記録に、過去の時刻を置く。**待たずに古い状態を作る。** */
+        function ageActivity(scope: string, secondsAgo: number): void {
+          writeFileSync(
+            join(sandbox, ".git", `valence-loop-activity-${scope}`),
+            `${Math.floor(Date.now() / 1000) - secondsAgo}\n`,
+          );
+        }
+
+        /** 活動の記録を読む。**無ければ空。** */
+        function activityAt(scope: string): string {
+          const file = join(sandbox, ".git", `valence-loop-activity-${scope}`);
+          return readFileSync(file, "utf8").trim();
+        }
+
+        it("持っている周回が check を通れば、期限は伸びる", () => {
+          // **これが本題。** **`./task` を打たない周回でも、ループの道具は打つ。**
+          expect(acquire().status).toBe(0);
+          ageLease(3600);
+
+          expect(run(["check"]).status, "check そのものを落とさない").toBe(0);
+          const second = acquire();
+
+          expect(second.status, "走っている周回が奪われている").toBe(1);
+          expect(second.stderr).not.toContain("引き継ぎます");
+        });
+
+        it("master の周回にも届く", () => {
+          // **`./task` が打つのは worker 固定**（実測）。**master にはレビュー待ち以外に
+          // 心拍が無い**ので、**ここで届かなければ master は毎回 TTL で外れる。**
+          expect(run(["acquire", "master", stampFor("master")]).status).toBe(0);
+          const master = join(sandbox, ".git", "valence-loop-lease-master");
+          const lines = readFileSync(master, "utf8").split("\n");
+          const token = (lines[0] ?? "").split("\t")[0] ?? "";
+          lines[0] = `${token}\t${Math.floor(Date.now() / 1000) - 3600}`;
+          writeFileSync(master, lines.join("\n"));
+
+          expect(run(["check"]).status).toBe(0);
+          const second = run(["acquire", "master", stampFor("master")]);
+
+          expect(second.status, "走っている master が奪われている").toBe(1);
+          expect(second.stderr).not.toContain("引き継ぎます");
+        });
+
+        it("別の周回の check では伸びない", () => {
+          // **取り落とした lease が伸び続けると、いつまでも切れない**（#283 と同じ形）。
+          // **`bin/loop-*` は周回の外からも打たれる。**
+          expect(acquire().status).toBe(0);
+          ageLease(3600);
+
+          expect(asOtherRound(["check"]), "check そのものを落とさない").toBe(0);
+          const second = acquire();
+
+          expect(second.status, "取り落とした lease が伸び続けている").toBe(0);
+          expect(second.stderr).toContain("引き継ぎます");
+        });
+
+        it("取り直された後の check は、新しい持ち主の期限を伸ばさない", () => {
+          // **重なった後、前の持ち主も `bin/loop-*` を打ち続ける** (#278)。
+          // **そこで伸ばすと、他人の lease を自分の活動で生かす**ことになる。
+          expect(acquire().status).toBe(0);
+          const scope = activityScope();
+          ageLease(3600);
+          expect(asOtherRound(["acquire", "worker", stampFor("worker")]), "取り直せていない").toBe(
+            0,
+          );
+          ageActivity(scope, 3600);
+
+          expect(run(["check"]).status).toBe(0);
+
+          expect(
+            Number(activityAt(scope)),
+            "別の周回が持っている lease を伸ばしている",
+          ).toBeLessThan(Math.floor(Date.now() / 1000) - 3000);
+        });
+
+        it("役を渡して心拍を打つ場所は、2 つだけである", () => {
+          // **この Issue は「読んだだけの推測」から始まった** (#602)。**`bin/loop-lease` の
+          // 但し書きは「打っているのは `./task` の 1 箇所だけ」と言っていた**が、
+          // **数えたら `bin/loop-await-review` もあった**——**master の心拍は、
+          // そちらにしか無かった。**
+          //
+          // **数える側を試験にする** (`AGENTS.md` §5)。**足した本人の diff には、
+          // 但し書きは出てこない**——**増えたときに、ここが言う。**
+          const files = [
+            "task",
+            ...readdirSync(join(REPO_ROOT, "bin"))
+              .filter((entry) => !entry.endsWith(".test.ts"))
+              .map((entry) => `bin/${entry}`),
+          ];
+          const beats = files.filter((file) =>
+            readFileSync(join(REPO_ROOT, file), "utf8")
+              .split("\n")
+              // **注釈は数えない。** **この但し書き自体が `heartbeat` の話をしている。**
+              .filter((line) => !/^\s*#/.test(line))
+              .some((line) => /loop-lease"? heartbeat (worker|master)/.test(line)),
+          );
+
+          expect(
+            beats.sort(),
+            "心拍を打つ場所が変わった。bin/loop-lease の TTL の但し書きを直すこと",
+          ).toEqual(["bin/loop-await-review", "task"]);
+        });
+
+        it("持っていない周回は、記録を作らない", () => {
+          // **入口を飛ばした周回が心拍だけ打つと、誰も持っていない lease の活動が
+          // 新しくなる**——**`acquire` の「最後の活動」が、走っていない周回を指す。**
+          expect(run(["check"]).status).toBe(0);
+
+          const made = readdirSync(join(sandbox, ".git")).filter((entry) =>
+            entry.startsWith("valence-loop-activity-"),
+          );
+          expect(made, "持っていないのに活動を記録している").toEqual([]);
+        });
       });
     });
 
