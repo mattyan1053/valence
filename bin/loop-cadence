@@ -283,7 +283,11 @@ stopped_at() {
   [[ -n $stop_open_from ]] && ((stop_open_from <= at)) && return 0
   [[ -f $STOP_SPANS ]] || return 1
   while IFS=$'\t' read -r from to; do
-    [[ $from =~ ^[0-9]+$ && $to =~ ^[0-9]+$ ]] || continue
+    [[ $from =~ ^[0-9]+$ ]] || continue
+    # **閉じていない区間は、いまも止まっている** (#586 のレビュー 2 周目)
+    # ——**開くのは止めた時点、閉じるのは再開のとき**である。
+    [[ $to == "-" ]] && { ((from <= at)) && return 0; continue; }
+    [[ $to =~ ^[0-9]+$ ]] || continue
     ((from <= at && at <= to)) && return 0
   done <"$STOP_SPANS"
   return 1

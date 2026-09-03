@@ -163,7 +163,7 @@ function held(dir: string, spans: [number, number][], role = "worker"): void {
  * `止まっていた間を、再開したときに残す`）で両端を留めてある
  * ——**ここだけが緑になる形にはならない。**
  */
-function stopSpans(dir: string, spans: [number, number][]): void {
+function stopSpans(dir: string, spans: [number, number | "-"][]): void {
   writeFileSync(
     join(dir, ".git", "valence-loop-stop-spans"),
     `${spans.map(([from, to]) => `${from}\t${to}`).join("\n")}\n`,
@@ -1686,6 +1686,27 @@ describe("暇な枠を跨いだかで、次の一手を決める（#575）", () 
     const done = cadence(dir, { LOOP_CADENCE_NOW: "9800", LOOP_CRON_INTERVAL_SEC: "1800" });
 
     expect(done.stdout, "止まっている最中を暇だと数えている").not.toMatch(/予定表が死んでいる/);
+  });
+
+  it("閉じていない区間は、いまも止まっていると読む", () => {
+    // **止めた時点で区間が開く**（#586 のレビュー 2 周目）——**閉じるのは再開のとき。**
+    // **開いたままなら、そこから先はまだ止まっている。**
+    const { dir } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [9_000, "poke"],
+      [9_500, "poke"],
+    ]);
+    held(dir, [
+      [1_000, 1_100],
+      [9_000, 9_100],
+      [9_500, 9_600],
+    ]);
+    stopSpans(dir, [[1_100, "-"]]);
+
+    const done = cadence(dir, { LOOP_CADENCE_NOW: "9800", LOOP_CRON_INTERVAL_SEC: "1800" });
+
+    expect(done.stdout, "開いた区間を読めていない").not.toMatch(/予定表が死んでいる/);
   });
 
   it("止まっていた枠を外しても、残りが暇なら、これまでどおり言う", () => {
