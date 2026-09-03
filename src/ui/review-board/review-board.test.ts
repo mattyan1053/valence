@@ -110,6 +110,18 @@ describe("10 本並べても、順番が決まる（#597）", () => {
     expect(found, "畳まれていない行がある").toHaveLength(MANY.length);
   });
 
+  it("10 本とも、畳んだ状態で始まる", () => {
+    // **`<summary>` の中身だけを見ると、`<details open>` にしても全部緑になる**
+    // ——**67 行に戻っても気づけない**（#605 のレビュー）。**開始タグの属性を見る。**
+    const markup = render(manyProps());
+    const opened = [...markup.matchAll(/<details(\s[^>]*)?>/g)].map((found) => found[1] ?? "");
+
+    expect(opened, "畳まれていない行がある").toHaveLength(MANY.length);
+    for (const attributes of opened) {
+      expect(attributes, "開いた状態で始まっている行がある").not.toMatch(/(^|\s)open(=|\s|$)/);
+    }
+  });
+
   it("同じ Tier の説明文が、10 回並ばない", () => {
     // **順番を決める材料にならない文が、行の数だけ出ていた。**
     const markup = render(manyProps());

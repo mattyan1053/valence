@@ -132,6 +132,20 @@ describe("RiskTierView", () => {
       expect(summaryOf(markup), "札が畳まれている").toContain("先に人が見る");
     });
 
+    it("畳んだ状態で始まる", () => {
+      // **`<summary>` の中身だけを見ると、`<details open>` にしても全部緑になる**
+      // ——**全行が初期表示に戻り、この Issue の症状がそのまま戻る**（#605 のレビュー）。
+      //
+      // **見るのは開始タグの属性**である——**中身ではなく、開いているかどうか。**
+      const markup = viewFor(REAL_CASES["high-risk"]);
+      const opened = [...markup.matchAll(/<details(\s[^>]*)?>/g)].map((found) => found[1] ?? "");
+
+      expect(opened, "畳んでいない").toHaveLength(1);
+      for (const attributes of opened) {
+        expect(attributes, "開いた状態で始まっている").not.toMatch(/(^|\s)open(=|\s|$)/);
+      }
+    });
+
     it("Tier の説明文は、畳む", () => {
       // **10 本並ぶと、同じ Tier の行には同じ文が 10 回出る**——**順番を決める材料に
       // ならない。** **消しはしない**（開けば読める）。
