@@ -130,14 +130,37 @@ function markup(
   return markupFor([1, 2], [{ dependent: 2, dependsOn: 1 }], marks);
 }
 
+/** **危なさの段が、これで全部**である。**足したらここで型検査が落ちる。** */
+const EVERY_TIER: readonly RiskTier[] = ["fast-track", "needs-review", "high-risk"];
+
+/**
+ * **すべての危なさが 1 つずつ出ている図**（#585 のレビュー）。
+ *
+ * **既定の `markup()` は 2 段しか描かない**——**`needs-review` の色は、綴りを
+ * 間違えても片方のテーマから消しても、そこには現れない**（**通常 Tier だけ
+ * 透明で描かれる**）。**色を見る試験は、段を全部通してから数える。**
+ *
+ * **判定できていない箱も入れる**——**そちらにも色（`var(--muted)`）が当たる。**
+ */
+function everyTierMarkup(): string {
+  const numbers = [...EVERY_TIER.map((_, index) => index + 1), EVERY_TIER.length + 1];
+  const marks = new Map<number, NodeMark>([
+    ...EVERY_TIER.map((tier, index): [number, NodeMark] => [index + 1, mark(tier)]),
+    [EVERY_TIER.length + 1, mark(undefined)],
+  ]);
+  return markupFor(numbers, [], marks);
+}
+
 /**
  * **`<svg>` の中で塗っている要素**を、属性ごと取り出す。
  *
  * **図の外は見ない**（**説明文は色を指定しない**）。**1 つも見つからないなら、
  * この試験は何も見ていない**ので、そこで落とす。
+ *
+ * **既定は「段を全部描いた図」**である（#585 のレビュー）——**2 段しか描かない図で
+ * 数えると、残りの段の色は一度も見られない。**
  */
-function painted(): Painted[] {
-  const rendered = markup();
+function painted(rendered: string = everyTierMarkup()): Painted[] {
   const from = rendered.indexOf("<svg");
   expect(from, "図が出ていない").toBeGreaterThanOrEqual(0);
   const to = rendered.indexOf("</svg>", from);
@@ -279,15 +302,33 @@ describe("盤面に見た目が当たっている（#583）", () => {
 
   it("番号・タイトル・状態に強弱がある", () => {
     // **同じ太さ・同じ濃さで 3 行並ぶと、どれが見出しか分からない。**
-    const texts = painted().filter(({ tag }) => tag === "text");
-    const looks = new Set(
-      texts.map(
-        ({ attrs }) =>
-          `${attrs["font-size"] ?? ""}/${attrs["font-weight"] ?? ""}/${attrs.fill ?? ""}`,
-      ),
-    );
+    //
+    // **一括で種類を数えない**（#585 のレビュー）——**Tier の札が段ごとに違う色**
+    // なので、**状態をタイトルと同じ見た目へ戻しても種類数は 3 を超える。**
+    // **守りたい 3 つを、同じ箱から名指しで取り出して比べる。**
+    const rendered = markupFor([1], [], new Map([[1, mark("high-risk")]]));
+    const look = (content: string) => {
+      const found = [...rendered.matchAll(/<text([^>]*)>([^<]*)<\/text>/g)].filter(
+        ([, , text]) => (text ?? "").trim() === content,
+      );
+      expect(found, `箱の中に「${content}」が 1 つに定まらない`).toHaveLength(1);
+      const attrs = Object.fromEntries(
+        [...(found[0]?.[1] ?? "").matchAll(/([a-zA-Z-]+)="([^"]*)"/g)].map(([, name, value]) => [
+          name ?? "",
+          value ?? "",
+        ]),
+      );
+      return `${attrs["font-size"] ?? ""}/${attrs["font-weight"] ?? ""}/${attrs.fill ?? ""}`;
+    };
 
-    expect(looks.size, "文字の見た目が 1 種類しかない").toBeGreaterThanOrEqual(3);
+    // **`mark()` の既定**（タイトル `依存の図を出す` / `ready` かつ head 既知 → `押せる`）
+    const number = look("#1");
+    const title = look("依存の図を出す");
+    const status = look("押せる");
+
+    expect(number, "番号とタイトルが同じ見た目である").not.toBe(title);
+    expect(title, "タイトルと状態が同じ見た目である").not.toBe(status);
+    expect(number, "番号と状態が同じ見た目である").not.toBe(status);
   });
 });
 
