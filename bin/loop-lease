@@ -1167,6 +1167,15 @@ fi
 held_under_other_name() {
   local role="$1" want_owner="$2" candidate candidate_scope found=1
   local saved_state="$STATE" saved_activity="$ACTIVITY" saved_label="$SCOPE_LABEL"
+  # **見つけた記録の単位を、呼んだ側へ渡す** (#602。#604 のレビュー)。**口は下で
+  # 元へ戻す**ので、**心拍を打つ側は自分で乗り換える**——**戻したまま打つと、
+  # 握っている当の lease ではなく、使われていない新しい名前のほうを伸ばす。**
+  #
+  # **消すのはここだけ**（`AGENTS.md` §5。**判定を 2 箇所に持たない**）。
+  # **見つけたときは、そのまま `round_holds` が 0 を返して `check` が終わる**ので、
+  # **非空のまま次の役へ持ち越す道が無い**——**呼ぶ側で消し直すと、写した側が
+  # 古くなったときに気づけない**（**変異させても、どの試験も落ちなかった**）。
+  other_name_scope=""
   for candidate in "$common_dir/valence-loop-lease-$role"*; do
     [[ -f $candidate ]] || continue
     [[ $candidate != *.lock && $candidate != *.tmp ]] || continue
@@ -1192,6 +1201,7 @@ held_under_other_name() {
       [[ -n ${WORKSPACE_PATH-} && $held_workspace == "${WORKSPACE_PATH-}" ]] || continue
     fi
     found=0
+    other_name_scope="$candidate_scope"
     break
   done
   # **借りた口を返す。** **呼んだ側は自分の記録を指したまま続ける**
@@ -1353,6 +1363,16 @@ if [[ $ACTION == "check" ]]; then
       # **打てなくても、この検査は落とさない。** **入口を飛ばしたかどうかの答えと、
       # 活動を書けたかどうかは別のことである**（**理由は `beat_activity` が言う**）。
       0)
+        # **旧名で持っていたなら、その記録へ乗り換えてから打つ** (#604 のレビュー)。
+        # **`held_under_other_name` は見つけたあと口を元へ戻す**（**呼んだ側は自分の
+        # 記録を指したまま続ける**）ので、**戻したまま打つと、握っている当の lease は
+        # 伸びず**、**`check` を通り続けても期限切れになる**——**空いて見えた窓へ
+        # 別の周回が入る。** **返すときと同じで、資格は名前ではなく token が持つ。**
+        if [[ -n ${other_name_scope-} ]]; then
+          STATE="$common_dir/valence-loop-lease-$other_name_scope"
+          ACTIVITY="$common_dir/valence-loop-activity-$other_name_scope"
+          SCOPE_LABEL="$other_name_scope"
+        fi
         beat_activity || true
         exit 0
         ;;

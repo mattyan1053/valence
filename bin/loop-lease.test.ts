@@ -1731,7 +1731,7 @@ describe("bin/loop-lease", () => {
           ).toBeLessThan(Math.floor(Date.now() / 1000) - 3000);
         });
 
-        it("役を渡して心拍を打つ場所は、2 つだけである", () => {
+        it("役を渡して心拍を打つ場所は、2 箇所だけである", () => {
           // **この Issue は「読んだだけの推測」から始まった** (#602)。**`bin/loop-lease` の
           // 但し書きは「打っているのは `./task` の 1 箇所だけ」と言っていた**が、
           // **数えたら `bin/loop-await-review` もあった**——**master の心拍は、
@@ -1739,18 +1739,23 @@ describe("bin/loop-lease", () => {
           //
           // **数える側を試験にする** (`AGENTS.md` §5)。**足した本人の diff には、
           // 但し書きは出てこない**——**増えたときに、ここが言う。**
+          //
+          // **数えるのは行であって、ファイルではない** (#604 のレビュー)。**ファイルで
+          // 数えると、`task` に 3 つ目を足しても「`task` が 1 件」のまま**で、
+          // **「2 箇所」が壊れても緑になる**——**塞いだつもりの道が開いたままになる。**
           const files = [
             "task",
             ...readdirSync(join(REPO_ROOT, "bin"))
               .filter((entry) => !entry.endsWith(".test.ts"))
               .map((entry) => `bin/${entry}`),
           ];
-          const beats = files.filter((file) =>
+          const beats = files.flatMap((file) =>
             readFileSync(join(REPO_ROOT, file), "utf8")
               .split("\n")
               // **注釈は数えない。** **この但し書き自体が `heartbeat` の話をしている。**
               .filter((line) => !/^\s*#/.test(line))
-              .some((line) => /loop-lease"? heartbeat (worker|master)/.test(line)),
+              .filter((line) => /loop-lease"? heartbeat (worker|master)/.test(line))
+              .map(() => file),
           );
 
           expect(
@@ -2613,6 +2618,40 @@ describe("bin/loop-lease", () => {
         ),
         "健全な周回を、飛ばしとして記録している",
       ).toBe(false);
+    });
+
+    it("前の版の名前で持っているとき、心拍はその記録へ打つ", () => {
+      // **`check` は心拍も打つ** (#602)。**旧名で持っていると分かったのに、新しい名前の
+      // 記録へ書くと、握っている当の lease は伸びない**——**`check` を通り続けても
+      // 期限切れになり、空いて見えた窓へ別の周回が入る**（#604 のレビュー）。
+      //
+      // **`held_under_other_name` は、見つけたあと口を元へ戻す**（**呼んだ側は自分の
+      // 記録を指したまま続ける**）ので、**乗り換えは打つ側が明示的に行う。**
+      //
+      // **期限を跨がせない。** **活動だけを古くする**——**取得も一緒に古くすると、
+      // その時点で既に期限切れ**で、**`held_under_other_name` は期限切れの記録を
+      // 飛ばす**ので、**心拍の話にならない**（**防ぎたいのは「切れる前」である**）。
+      const older = olderVersion();
+      expect(runWith(older, ["acquire", "worker", stampFor("worker")]).status).toBe(0);
+      const [held = ""] = leaseRecords();
+      const scope = held.replace("valence-loop-lease-", "");
+      const activity = join(sandbox, ".git", `valence-loop-activity-${scope}`);
+      const long_ago = Math.floor(Date.now() / 1000) - 100_000;
+      writeFileSync(activity, `${long_ago}\n`);
+
+      expect(runWith(SCRIPT, ["check"]).status).toBe(0);
+
+      expect(
+        Number(readFileSync(activity, "utf8").trim()),
+        "旧名で握っている lease の活動が、更新されていない",
+      ).toBeGreaterThan(long_ago);
+      // **新しい名前のほうへ書いていない**——**そちらは誰も握っていない。**
+      expect(
+        readdirSync(join(sandbox, ".git")).filter((entry) =>
+          entry.startsWith("valence-loop-activity-"),
+        ),
+        "誰も握っていない名前の活動を作っている",
+      ).toEqual([`valence-loop-activity-${scope}`]);
     });
 
     it("別の作業場が持っている lease を、この周回のものと読まない", () => {
