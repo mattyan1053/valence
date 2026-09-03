@@ -121,9 +121,17 @@ not_a_token() {
 # **いまは「最後に何かが起きてからの経過」を測る。** 賭けているのは**周回の長さではなく、
 # 活動と活動の間隔**である。
 #
-# **打っているのは `./task` の 1 箇所だけ**である（`heartbeat()`）。**だから正確には、
-# 賭けているのは「周回が TTL のあいだに `./task` を 1 度は通ること」**——
-# **「長い処理はすべて `./task` を通る」ではない** (#456)。
+# **打っている場所は数えてある** (#602。**それまでは「`./task` の 1 箇所だけ」と
+# 書いてあったが、走らせて数えたら違った**)。**役を渡して呼ぶのは 2 つ**——
+# **`task` の `heartbeat()`** と **`bin/loop-await-review`（master のレビュー待ち）**
+# ——**それに加えて、`check` が「この周回が持っている」と分かったときに打つ。**
+#
+# **`task` が打つのは `worker` 固定**である（`./bin/loop-lease heartbeat worker`）
+# ——**master は `./task` を叩いても伸びない。** **だから `check` からの心拍が要る**：
+# **master のほとんどの周回は `./task` を打たず**、**レビュー待ち以外に心拍が無かった。**
+#
+# **だから正確には、賭けているのは「周回が TTL のあいだに `bin/loop-*` を 1 度は
+# 通ること」**——**「長い処理はすべて `./task` を通る」ではない** (#456)。
 #
 # **測った** (#456)。**周回の尾**（commit・push・`gh`・出口のスクリプト）**は
 # `./task` を通らないが、2〜3 分で終わる**ので、**ここには届かない。**
@@ -820,9 +828,17 @@ now="$(date +%s)"
 # **書けなかったことを黙らない。** 書けない状態は「安全な側」ではない——
 # **期限が取得時刻だけで決まる状態**、つまり**この仕組みが直した当の壊れ方**に戻る。
 # 呼ぶ側 (`./task`) が**コマンド自体は落とさない**のは別の判断で、そこは変えない。
-if [[ $ACTION == "heartbeat" ]]; then
-  [[ $# -eq 2 ]] || usage
-  set_role_paths "$ROLE" || exit 2
+# **心拍を打つ**（`heartbeat` と `check` が同じものを使う。#602）。
+#
+# **判定を 2 箇所に持たない。** **`check` は「この周回が持っているか」を役ごとに
+# 既に判定している**（#161）——**そこで打つのに、持ち主の見分けを書き写すと、
+# 片方だけ直したときに食い違う。**
+#
+# **前提: `set_role_paths` を通していること**（`STATE` と `ACTIVITY` がその役のもの）。
+#
+#   0 = 打った（打つべきでなかった場合も含む）/ 1 = 書けなかった
+beat_activity() {
+  local holder="" beating rc=0
   # **読むのでロックを取る。** **読んだ値が途中の状態だと、持ち主を取り違える。**
   #
   # **読めなくても止めない。** **ここで落とすと、心拍そのものが打たれなくなる**
@@ -831,7 +847,6 @@ if [[ $ACTION == "heartbeat" ]]; then
   # **照合と書き込みを、同じ区間の中で行う** (#280 のレビュー)。**読んだ時点と書く時点が
   # 別だと、間に `acquire` / `recover` が入れる**——**古い周回の心拍が、新しい持ち主の
   # 期限を伸ばす**。**この節が立てた保証が、そこだけ抜ける。**
-  holder=""
   if lock_state 2>/dev/null; then
     # **期限切れの記録でも、持ち主なら伸ばす**（`expired_owner`）——**長い周回が
     # 静かだっただけ**ということがある。**他人が生き返らせるのだけを止める。**
@@ -841,18 +856,33 @@ if [[ $ACTION == "heartbeat" ]]; then
     fi
   fi
   beating="$(round_owner)" || beating=""
-  if [[ -n $holder && -n $beating && $holder != "$beating" ]]; then
-    # **別の周回が打った。** **黙って終える**——**`./task` は周回の外からも打たれるので、
-    # ここで言うと、関係のない作業に毎回警告が出る。**
-    exit 0
+  # **打つのは、持ち主の周回だけ。** **別の周回が打ったなら黙って終える**——
+  # **`./task` は周回の外からも打たれる**ので、**ここで言うと、関係のない作業に
+  # 毎回警告が出る。**
+  #
+  # **`check` から来た場合も同じ**——**取り直された後の前の持ち主**がここへ来る (#278)。
+  # **他人の lease を、自分の活動で生かさない。**
+  #
+  # **早期 return にしない。** **錠を開ける場所が 2 つ以上あると、書く前に開ける道が
+  # できる**——**そうなっても、壊れるのは競り合ったときだけ**なので、**試験では
+  # 見つからない。** **開ける場所は下の 1 つだけにして、それを試験が数える。**
+  if [[ -z $holder || -z $beating || $holder == "$beating" ]]; then
+    if ! date +%s >"$ACTIVITY.tmp" 2>/dev/null || ! mv -f "$ACTIVITY.tmp" "$ACTIVITY" 2>/dev/null; then
+      rm -f "$ACTIVITY.tmp" 2>/dev/null || true
+      echo "[WARN] $SCOPE_LABEL の活動を記録できません: $ACTIVITY" >&2
+      echo "       この周回は、取得時刻だけで期限を判定されます（長い周回は途中で奪われます）" >&2
+      rc=1
+    fi
   fi
-  if ! date +%s >"$ACTIVITY.tmp" 2>/dev/null || ! mv -f "$ACTIVITY.tmp" "$ACTIVITY" 2>/dev/null; then
-    rm -f "$ACTIVITY.tmp" 2>/dev/null || true
-    echo "[WARN] $SCOPE_LABEL の活動を記録できません: $ACTIVITY" >&2
-    echo "       この周回は、取得時刻だけで期限を判定されます（長い周回は途中で奪われます）" >&2
-    exit 1
-  fi
-  # **錠は、書き終えるまで持ったまま**——**exit が閉じるので、ここでは開けない。**
+  # **錠は、書き終えるまで持ったまま**——**開けるのはここだけ**である。
+  exec 9>&-
+  return "$rc"
+}
+
+if [[ $ACTION == "heartbeat" ]]; then
+  [[ $# -eq 2 ]] || usage
+  set_role_paths "$ROLE" || exit 2
+  beat_activity || exit 1
   exit 0
 fi
 
@@ -1137,6 +1167,18 @@ fi
 held_under_other_name() {
   local role="$1" want_owner="$2" candidate candidate_scope found=1
   local saved_state="$STATE" saved_activity="$ACTIVITY" saved_label="$SCOPE_LABEL"
+  # **読んだ結果も借り物である** (#604 のレビュー 2 周目)。**候補を `read_lease` で
+  # 読むと、呼んだ側が既に読んでいた値を上書きする**——**当たったのは、期限切れの
+  # 現行名を見る枝**で、**候補の `expired_*` を現行名のものとして読み**、
+  # **記録が 1 つも無いのに「この周回の lease は期限切れです」と言った。**
+  # **口と一緒に、読んだ結果も返す。**
+  local saved_held_token="$held_token" saved_held_since="$held_since"
+  local saved_held_owner="$held_owner" saved_held_workspace="$held_workspace"
+  local saved_expired_token="$expired_token" saved_expired_owner="$expired_owner"
+  local saved_expired_over="$expired_over" saved_last_activity="$last_activity"
+  # **見つけた記録の単位は、`round_holds` が `holds_scope` へ入れて渡す**
+  # (#602。#604 のレビュー)。**ここでは口を下で元へ戻す**（**呼んだ側は自分の記録を
+  # 指したまま続ける**）ので、**乗り換えは打つ側が行う。**
   for candidate in "$common_dir/valence-loop-lease-$role"*; do
     [[ -f $candidate ]] || continue
     [[ $candidate != *.lock && $candidate != *.tmp ]] || continue
@@ -1162,12 +1204,21 @@ held_under_other_name() {
       [[ -n ${WORKSPACE_PATH-} && $held_workspace == "${WORKSPACE_PATH-}" ]] || continue
     fi
     found=0
+    holds_scope="$candidate_scope"
     break
   done
   # **借りた口を返す。** **呼んだ側は自分の記録を指したまま続ける**
   STATE="$saved_state"
   ACTIVITY="$saved_activity"
   SCOPE_LABEL="$saved_label"
+  held_token="$saved_held_token"
+  held_since="$saved_held_since"
+  held_owner="$saved_held_owner"
+  held_workspace="$saved_held_workspace"
+  expired_token="$saved_expired_token"
+  expired_owner="$saved_expired_owner"
+  expired_over="$saved_expired_over"
+  last_activity="$saved_last_activity"
   return "$found"
 }
 
@@ -1186,6 +1237,15 @@ held_under_other_name() {
 # **どこで見たかを `taken` に残す**（`check` の案内が使う）。
 round_holds() {
   local role="$1" owner="$2"
+  # **どの記録で持っているかを、判定した当人が渡す** (#604 のレビュー 2 周目)。
+  #
+  # **0 を返す道は 4 つある**——**現行名で持っている / 前の版の名前で持っている /
+  # 期限切れだが自分のものだった / 取り直された跡がある。** **呼ぶ側（`check` の心拍）が
+  # 「どれで持っているか」を知らないと、別の記録へ打つ**——**2 周続けて同じ場所に
+  # 穴が出たのは、口が 1 つでなかったため**である。
+  #
+  # **空は「打つ先が無い」**（取り直された跡だけがある場合）。**判定と同じ場所から出す。**
+  holds_scope=""
   set_role_paths "$role" || return 2
   lock_state || return 2
   read_lease quiet || {
@@ -1201,29 +1261,40 @@ round_holds() {
     # **気づけるのがここしかない。** **期限を見るのは `acquire` だけ**で、
     # **走っている本人は出口の `release` まで気づけない**——**そのときには
     # 重なりは既に起きている。** **`bin/loop-*` を打つたびにここを通る。**
+    # **前の版の名前で、いま有効に持っていないかを先に見る** (#383。#240 / #290 / #291
+    # と同じ形)。**名前の作り方は版で変わる**——**新しい名前だけを見ると、健全な周回が
+    # 「入口を飛ばした」として記録され**、**その記録が読めなくなる**
+    # （**偽の記録より取りこぼしのほうが安い**、が崩れる）。**実地で踏んだ。**
+    #
+    # **期限切れの現行名より先に見る** (#604 のレビュー 2 周目)。**同じ作業場に
+    # 「期限切れの現行名」と「有効な旧名」が同時に在りうる**（**版が戻って取り直した**）
+    # ——**先に期限切れのほうで打ち切ると、心拍が死んだ記録を生き返らせ**、
+    # **いま握っている旧名は伸びない。** **有効に握っている記録のほうが、強い事実である。**
+    if [[ -n $owner ]] && held_under_other_name "$role" "$owner"; then
+      echo "[WARN] この周回の lease は、いまと違う名前で置かれています（版が入れ替わりました）" >&2
+      echo "       返すときは、そのまま同じ token で返せます" >&2
+      return 0
+    fi
     if [[ -n $expired_token && -n $owner && -n $expired_owner && $expired_owner == "$owner" ]]; then
       echo "[WARN] この周回の lease は期限切れです（${expired_over} 秒超過）。走っている最中に外れました" >&2
       echo "       切れている間は空いて見えるので、別の周回が入っているかもしれません" >&2
       echo "       出口では、同じ token でそのまま返せます（期限切れだったと言われます）" >&2
       # **持っていた側として答える。** **飛ばしてはいない**ので、`./task loop:status` の
       # 「入口を飛ばした周回」に混ぜると、**数えているものが濁る。**
+      #
+      # **打つ先はこの記録**——**切れていても持ち主なら伸ばす**（`beat_activity`）。
+      # **長い周回が静かだっただけ**ということがある。
+      holds_scope="$lease_scope"
       return 0
     fi
     # **記録そのものが消えていても、跡は残っている** (#278 のレビュー)。
     # **`expired_*` はプロセス内の変数**なので**この経路では必ず空**——
     # **見にいく者がここにいないと、返した後の窓では誰も言えない。**
+    #
+    # **打つ先は無い**（`holds_scope` は空のまま）——**いま持っているのは別の周回**である。
     if [[ -n $owner ]] && superseded_has "" "$owner"; then
       echo "[WARN] この周回の lease は期限切れのあと、別の周回が取り直しています" >&2
       echo "       この周回が走っている間、別の周回も走っていた可能性があります" >&2
-      return 0
-    fi
-    # **前の版の名前で持っていないかを見る** (#383。#240 / #290 / #291 と同じ形)。
-    # **名前の作り方は版で変わる**——**新しい名前だけを見ると、健全な周回が
-    # 「入口を飛ばした」として記録され**、**その記録が読めなくなる**
-    # （**偽の記録より取りこぼしのほうが安い**、が崩れる）。**実地で踏んだ。**
-    if [[ -n $owner ]] && held_under_other_name "$role" "$owner"; then
-      echo "[WARN] この周回の lease は、いまと違う名前で置かれています（版が入れ替わりました）" >&2
-      echo "       返すときは、そのまま同じ token で返せます" >&2
       return 0
     fi
     return 1
@@ -1243,6 +1314,7 @@ round_holds() {
     return 3
   fi
   [[ $held_owner == "$owner" ]] || return 1
+  holds_scope="$lease_scope"
   return 0
 }
 
@@ -1304,8 +1376,40 @@ if [[ $ACTION == "check" ]]; then
     # しか書かれていない**
     round_holds "$role" "$owner"
     case "$?" in
-      # **自分の周回が持っていた。** ここだけが黙ってよい場合である
-      0) exit 0 ;;
+      # **自分の周回が持っていた。** ここだけが黙ってよい場合である。
+      #
+      # **持っていると分かったなら、そのまま心拍を打つ** (#602)。**`./task` を
+      # 一度も打たない周回がある**——**レビューを読むだけの周回、何もせず終わる周回、
+      # master のほとんどの周回**（**`task` の `heartbeat()` が打つのは `worker` 固定**
+      # なので、**master は `./task` を叩いても伸びない**。実測）。**そこへ「1 ターンが
+      # 長い」が重なると、走っている最中に期限が切れ**、**空いて見えた窓へ別の周回が
+      # 入る**（**2026-09-03 に 5144 秒超過を踏んだ**）。
+      #
+      # **打つ場所を増やさない。** **この検査は `bin/loop-claim` / `bin/loop-head` /
+      # `bin/loop-gate` / `bin/loop-handoff` / `bin/loop-close-candidates` が
+      # 周回のあいだ何度も通る**——**答えを既に持っているのに、捨てていた。**
+      #
+      # **無音の周回は、これでも救えない**（`TTL_SEC` の但し書き）——**コマンドを
+      # 1 つも打たない周回には、前景で打つどの心拍も届かない。**
+      #
+      # **打てなくても、この検査は落とさない。** **入口を飛ばしたかどうかの答えと、
+      # 活動を書けたかどうかは別のことである**（**理由は `beat_activity` が言う**）。
+      0)
+        # **打つ先は、`round_holds` が実際に確かめた記録である** (#604 のレビュー 2 周目)。
+        # **0 を返す道は 4 つあり、どの記録で持っているかは判定した当人しか知らない**
+        # ——**呼ぶ側で組み立て直すと、別の記録へ打つ**（**旧名で持っているのに新名へ、
+        # 有効な旧名があるのに期限切れの現行名へ、と 2 周続けて外した**）。
+        #
+        # **空なら打たない**——**取り直された跡があるだけで、いま持っているのは別の周回**
+        # である。**返すときと同じで、資格は名前ではなく token が持つ。**
+        if [[ -n ${holds_scope-} ]]; then
+          STATE="$common_dir/valence-loop-lease-$holds_scope"
+          ACTIVITY="$common_dir/valence-loop-activity-$holds_scope"
+          SCOPE_LABEL="$holds_scope"
+          beat_activity || true
+        fi
+        exit 0
+        ;;
       1) ;;
       # **分からないものを飛ばしと呼ばない**——**偽の記録より取りこぼしのほうが安い**
       # （この記録は「同じ癖が続いていること」を読むためのもので、汚れると読めなくなる）
