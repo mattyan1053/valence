@@ -156,7 +156,11 @@ function MissingNote({ missing }: { missing: MissingFromFigure }) {
   if (parts.length === 0) {
     return null;
   }
-  return <p>この図には出ていないものがあります: {parts.join("、")}。下に並べてあります。</p>;
+  return (
+    <p className="text-sm text-[var(--muted)]">
+      この図には出ていないものがあります: {parts.join("、")}。下に並べてあります。
+    </p>
+  );
 }
 
 export function DependencyGraphFigure({
@@ -178,7 +182,9 @@ export function DependencyGraphFigure({
     return <MissingNote missing={missing} />;
   }
   return (
-    <figure>
+    // **図の外にも見た目を当てる**（#583 のレビュー）——**説明文が本文と地続きだと、
+    // どこまでが図の話か分からない。**
+    <figure className="flex flex-col gap-2">
       {/*
        **横へ溢れさせる。** **深く積まれた列は右へ伸びる**ので、
        **縮めて読めなくするより、そのまま置いてスクロールさせる。**
@@ -298,7 +304,7 @@ export function DependencyGraphFigure({
           })}
         </svg>
       </div>
-      <figcaption>
+      <figcaption className="text-sm text-[var(--muted)]">
         左が土台、右へ行くほど上に積まれている。箱には番号・タイトル・危なさ・何待ちかが入っている。
         <MissingNote missing={missing} />
       </figcaption>

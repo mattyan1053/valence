@@ -141,9 +141,13 @@ function PullRequestRow({
  */
 function EmptyNotice({ unreadable }: { unreadable: number }) {
   if (unreadable > 0) {
-    return <p>読めた PR が 1 件もありません。</p>;
+    return <p className="text-[var(--muted)]">読めた PR が 1 件もありません。</p>;
   }
-  return <p>open な PR が 1 件もありません。GitHub で PR を出すと、依存の順にここへ並びます。</p>;
+  return (
+    <p className="text-[var(--muted)]">
+      open な PR が 1 件もありません。GitHub で PR を出すと、依存の順にここへ並びます。
+    </p>
+  );
 }
 
 export function DependencyGraphView({
@@ -184,8 +188,11 @@ export function DependencyGraphView({
   const blocks = mergeBlocksFor(figured, edges, order, invalid.length);
 
   return (
-    <section>
-      <h2>PR の依存</h2>
+    // **見出しと本文が同じ見た目で出ていた**（#583 のレビュー）——**preflight が
+    // `h1..h6` の大きさと太さを `inherit` へ落とし**、**`*` の margin を 0 にする**
+    // （**配信中の CSS で確かめた**）。**書かなければ、段落は詰まって左端に並ぶ。**
+    <section className="flex flex-col gap-4">
+      <h2 className="text-lg font-bold">PR の依存</h2>
       {pullRequests.length === 0 ? (
         <EmptyNotice unreadable={invalid.length} />
       ) : (
@@ -218,14 +225,14 @@ export function DependencyGraphView({
       )}
 
       {order.cyclic.length > 0 && (
-        <section>
+        <section className="flex flex-col gap-2 border-t border-[var(--node-stroke)] pt-4">
           {/*
             **「循環している」と言い切らない。** `cyclic` には循環に含まれる PR だけでなく、
             **その先に積まれた PR** も入る（順序が決まらない点は同じだが、原因ではない）。
             言い切ると半分について事実と違ううえ、**その PR の base を付け替えても直らない**。
           */}
-          <h3>並べられなかった（循環、またはその先に積まれている）</h3>
-          <p>
+          <h3 className="font-bold">並べられなかった（循環、またはその先に積まれている）</h3>
+          <p className="text-sm text-[var(--muted)]">
             先にマージすべき順が決まりません。<strong>循環している PR の base</strong>
             を付け替えてください。ここには、その循環の先に積まれているだけの PR も並びます。
           </p>
@@ -234,10 +241,12 @@ export function DependencyGraphView({
       )}
 
       {invalid.length > 0 && (
-        <section>
-          <h3>この図には抜けがあります</h3>
-          <p>読めなかった PR が {invalid.length} 件あります。依存が欠けている可能性があります。</p>
-          <ul>
+        <section className="flex flex-col gap-2 border-t border-[var(--node-stroke)] pt-4">
+          <h3 className="font-bold">この図には抜けがあります</h3>
+          <p className="text-sm text-[var(--muted)]">
+            読めなかった PR が {invalid.length} 件あります。依存が欠けている可能性があります。
+          </p>
+          <ul className="flex list-disc flex-col gap-1 pl-5 text-sm text-[var(--muted)]">
             {invalid.map((entry) => (
               <li key={entry.index}>
                 {entry.index + 1} 件目: {entry.reason}

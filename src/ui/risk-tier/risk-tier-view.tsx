@@ -76,7 +76,7 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
       {/* **`summary` に `display:flex` を掛けない**——**開閉の三角（marker）が消える**。
           **間隔は文字の区切りが持っている**ので、class は要らない。 */}
       <summary>
-        <strong>{text.label}</strong>
+        <strong className="font-semibold">{text.label}</strong>
         {ciNeedsAttention && (
           <>
             {/* **区切りは文字で置く。** **`globals.css` は色とフォントだけ**で、
@@ -91,7 +91,7 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
         )}
       </summary>
       <p className="text-[var(--muted)]">{text.meaning}</p>
-      <ul className="flex flex-col text-[var(--muted)]">
+      <ul className="flex list-disc flex-col gap-0.5 pl-5 text-[var(--muted)]">
         <li>
           変更: {change.changedFileCount} ファイル / {change.changedLineCount} 行
         </li>
