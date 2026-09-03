@@ -38,10 +38,19 @@
  */
 
 import * as childProcess from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -118,7 +127,24 @@ function testFiles(skip: ReadonlySet<string> = new Set([SELF]), dir: string = RE
       continue;
     }
     const path = join(dir, name);
-    if (statSync(path).isDirectory()) {
+    // **symlink は辿らない** (#596)。**歩きたいのはディレクトリだけ**で、
+    // **リポジトリの外を指す symlink は、そもそも歩く先ではない。**
+    //
+    // **`statSync` は辿る**ので、**リンク先がコンテナの中に無いと ENOENT で throw**
+    // し、**その作業場の `./task check` が全部赤になった**（**歩かれる側を数えて
+    // いなかった**。`AGENTS.md` §5）。
+    //
+    // **ディレクトリだけを外すのでは足りない** (#598 のレビュー)——**名前が
+    // `.test.ts` で終わる symlink は、下の枝で `found` に入り**、**`readFileSync` が
+    // 辿る**（**同じ落ち方が 1 段先にある**）。
+    //
+    // **指す先が repo の中なら、根から歩けば同じものが拾える**（**二重に歩くだけ**）
+    // ——**外を指すなら、そこは我々のファイルではない。** **どちらにせよ、辿らない。**
+    const entry = lstatSync(path);
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+    if (entry.isDirectory()) {
       found.push(...testFiles(skip, path));
     } else if (name.endsWith(".test.ts")) {
       found.push(path);
@@ -128,6 +154,57 @@ function testFiles(skip: ReadonlySet<string> = new Set([SELF]), dir: string = RE
 }
 
 describe("試験は、実物の task を呼ばない（#587）", () => {
+  const walked: string[] = [];
+
+  afterEach(() => {
+    for (const dir of walked.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * **歩く側を足したとき、歩かれる側を数えていなかった**（#596。`AGENTS.md` §5）。
+   *
+   * **実測（2026-09-03）**: **`valence-worker-b` と `valence-preview` の `.env` は
+   * `valence/.env` への symlink** で、**`compose.yaml` がマウントするのは `${PWD}` だけ**
+   * ——**コンテナの中から辿れない。** **`statSync` は symlink を辿る**ので、
+   * **`ENOENT` で throw し、その作業場の `./task check` が必ず赤になった。**
+   *
+   * **緑のままマージされたのは、踏む形がどこにも無かったから**である
+   * ——**`valence` は実体を持ち**、**`valence-master` には `.env` が無く**、
+   * **CI にも無い。**
+   */
+  it("宙に浮いた symlink があっても、歩き切る", () => {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-guard-walk-"));
+    walked.push(dir);
+    writeFileSync(join(dir, "some.test.ts"), "// 何も呼ばない\n");
+    // **リンク先を作らない**——**それが、コンテナから見た `.env` の形**である。
+    symlinkSync(join(dir, "does-not-exist"), join(dir, ".env"));
+
+    expect(testFiles(new Set(), dir), "宙に浮いた symlink で歩けなくなっている").toEqual([
+      join(dir, "some.test.ts"),
+    ]);
+  });
+
+  it("`.test.ts` で終わる symlink も、辿らない", () => {
+    // **同じ落ち方が 1 段先にある**（#598 のレビュー）——**`lstatSync` はディレクトリ
+    // かどうかしか見ていない**ので、**名前が `.test.ts` で終わる symlink は `found` に
+    // 入り**、**`readFileSync` が辿る。** **リンク切れなら、また ENOENT である。**
+    //
+    // **指す先が repo の中なら、根から歩けば同じものが拾える**（**二重に歩くだけ**）。
+    // **外を指すなら、そこは我々のファイルではない。** **どちらにせよ、辿らない。**
+    const dir = mkdtempSync(join(tmpdir(), "spawn-guard-link-"));
+    walked.push(dir);
+    writeFileSync(join(dir, "real.test.ts"), "// 何も呼ばない\n");
+    symlinkSync(join(dir, "does-not-exist"), join(dir, "external.test.ts"));
+
+    const found = testFiles(new Set(), dir);
+
+    expect(found, "symlink の試験ファイルを拾っている").toEqual([join(dir, "real.test.ts")]);
+    // **拾ってしまうと、ここで落ちる**——**歩き切れても、読む側で同じ形になる。**
+    expect(() => found.map((path) => readFileSync(path, "utf8"))).not.toThrow();
+  });
+
   it("実物の task を spawn している試験は無い", () => {
     const guilty = testFiles().flatMap((path) =>
       spawnsRealTask(readFileSync(path, "utf8")).map(
