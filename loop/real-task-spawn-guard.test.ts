@@ -38,10 +38,19 @@
  */
 
 import * as childProcess from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -118,7 +127,12 @@ function testFiles(skip: ReadonlySet<string> = new Set([SELF]), dir: string = RE
       continue;
     }
     const path = join(dir, name);
-    if (statSync(path).isDirectory()) {
+    // **symlink を辿らない** (#596)。**辿る必要が無い**——**歩きたいのは
+    // ディレクトリだけ**で、**リポジトリの外を指す symlink は、そもそも歩く先ではない。**
+    //
+    // **`statSync` は辿る**ので、**リンク先がコンテナの中に無いと ENOENT で throw**
+    // し、**その作業場の `./task check` が全部赤になった**（**歩かれる側を数えていなかった**）。
+    if (lstatSync(path).isDirectory()) {
       found.push(...testFiles(skip, path));
     } else if (name.endsWith(".test.ts")) {
       found.push(path);
@@ -128,6 +142,38 @@ function testFiles(skip: ReadonlySet<string> = new Set([SELF]), dir: string = RE
 }
 
 describe("試験は、実物の task を呼ばない（#587）", () => {
+  const walked: string[] = [];
+
+  afterEach(() => {
+    for (const dir of walked.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * **歩く側を足したとき、歩かれる側を数えていなかった**（#596。`AGENTS.md` §5）。
+   *
+   * **実測（2026-09-03）**: **`valence-worker-b` と `valence-preview` の `.env` は
+   * `valence/.env` への symlink** で、**`compose.yaml` がマウントするのは `${PWD}` だけ**
+   * ——**コンテナの中から辿れない。** **`statSync` は symlink を辿る**ので、
+   * **`ENOENT` で throw し、その作業場の `./task check` が必ず赤になった。**
+   *
+   * **緑のままマージされたのは、踏む形がどこにも無かったから**である
+   * ——**`valence` は実体を持ち**、**`valence-master` には `.env` が無く**、
+   * **CI にも無い。**
+   */
+  it("宙に浮いた symlink があっても、歩き切る", () => {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-guard-walk-"));
+    walked.push(dir);
+    writeFileSync(join(dir, "some.test.ts"), "// 何も呼ばない\n");
+    // **リンク先を作らない**——**それが、コンテナから見た `.env` の形**である。
+    symlinkSync(join(dir, "does-not-exist"), join(dir, ".env"));
+
+    expect(testFiles(new Set(), dir), "宙に浮いた symlink で歩けなくなっている").toEqual([
+      join(dir, "some.test.ts"),
+    ]);
+  });
+
   it("実物の task を spawn している試験は無い", () => {
     const guilty = testFiles().flatMap((path) =>
       spawnsRealTask(readFileSync(path, "utf8")).map(
