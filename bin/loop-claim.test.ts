@@ -850,6 +850,48 @@ describe("bin/loop-claim", () => {
       expect(labelState(), "着手中が外れていない").not.toContain("in-progress");
     });
 
+    /**
+     * **見分けたいのは「どの口で取ったか」ではなく「この作業場が label を倒したか」**
+     * である（#592 のレビュー 2 周目）。
+     *
+     * **`resume` には 2 つの顔がある**——**自分の中断を続けるぶん**（倒したのは自分）と、
+     * **他人の落ちた周回を引き継ぐぶん**（倒したのは前の持ち主、または誰も倒していない）。
+     *
+     * **2 つの向きを 1 つの describe に並べる**——**片方だけなら、これまでに 2 回とも
+     * 通っている。**
+     */
+    it("take で取ったものを resume で続けても、返せば ready に戻る", () => {
+      // **`take` して実装中に周回が終われば、次の周回は必ず 2.2 の `resume` へ入る**
+      // （`loop/procedure/worker.md` 194 行。**「自分の中断した作業である」**）。
+      // **そこで経路が上書きされると、#591 の症状が 2 周目以降に戻る。**
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      startRound(repo);
+      expect(run(["take", "42"]).status, "取れていない").toBe(0);
+      expect(run(["resume", "42"]).status, "自分の中断を続けられていない").toBe(0);
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "resume を挟むと戻らない").toContain("ready");
+      expect(labelState(), "着手中が外れていない").not.toContain("in-progress");
+    });
+
+    it("他人から引き継いだ resume は、返しても着手中のまま", () => {
+      // **倒したのは前の持ち主**である——**戻すと、その作業場の実装と重複する。**
+      // **上の試験と同時に立つこと**（**片方だけなら、どちらの向きも作れる**）。
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      const other = addWorkspace("落ちた作業場");
+      expect(run(["take", "42"], { cwd: other }).status, "取れていない").toBe(0);
+
+      startRound(repo);
+      const resumed = run(["resume", "42"]);
+      expect(resumed.status, "引き継げていない").toBe(0);
+      expect(resumed.stderr, "引き継ぎになっていない").toContain("WARN");
+
+      expect(run(["release-issue", "42"]).status, "返せていない").toBe(0);
+
+      expect(labelState(), "他人から引き継いだのに ready へ戻した").toContain("in-progress");
+    });
+
     it("2.2 の経路で返しても、着手中のままにする", () => {
       // **`take` を通らない `release-issue` がある** (#592 のレビュー)——
       // **`loop/procedure/worker.md` の 2.2**：**`resume` exit 0 → `bin/loop-claim pr`
