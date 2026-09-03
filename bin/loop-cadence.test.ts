@@ -1145,6 +1145,30 @@ describe("手順と表示が、この記録につながっている", () => {
     expect(shown, "cadence の stderr を捨てている").toContain("2>&1");
   });
 
+  it("続いているときも、行そのものを出す", () => {
+    // **窓は `ok` の間こそ読めなければ意味が無い** (#601 / #603 のレビュー)。
+    // **`show_cadence` は成功の分岐で `$out` を捨てていた**ので、
+    // **足した欄は `bin/loop-cadence` を直に叩く人にしか見えなかった**
+    // ——**周回の出口は `--quiet` で `ok` 行を抑止する**ため、**導線が 1 本も無い。**
+    const runner = readFileSync(join(REPO_ROOT, "task"), "utf8");
+    const shown = runner.slice(runner.indexOf("show_cadence() {")).split("\n}")[0] ?? "";
+    const dir = mkdtempSync(join(tmpdir(), "loop-cadence-status-ok-"));
+    sandboxes.push(dir);
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    writeFileSync(
+      join(dir, "bin", "loop-cadence"),
+      "#!/usr/bin/env bash\necho 'scope=zz window=9999(2 刻み) ok'\n",
+      { mode: 0o755 },
+    );
+
+    const done = spawnSync("bash", ["-e", "-c", `${shown}\n}\nshow_cadence`], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+
+    expect(done.stdout, "続いている行を捨てている").toContain("window=9999(2 刻み)");
+  });
+
   it("判定できなくても、その先の表示を止めない", () => {
     // **`set -e` の下では、代入の失敗がそのまま打ち切りになる**——**判定できない側で
     // 止まると、この下の全部（STOP・PR・Issue）が出なくなる**（実測で踏んだ）

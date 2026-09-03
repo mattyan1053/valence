@@ -1430,7 +1430,14 @@ show_cadence() {
   # 止まると、この下の全部（STOP・PR・Issue）が出なくなる。**
   if out="$(bin/loop-cadence 2>&1)"; then status=0; else status=$?; fi
   case "$status" in
-    0) echo "周回: cron で回っています" ;;
+    0)
+      # **行そのものを出す** (#603 のレビュー)。**`ok` の間こそ窓が読めないと意味が無い**
+      # ——**周回の出口は `--quiet` で `ok` 行を抑止する**ので、**ここを捨てると
+      # 導線が 1 本も残らない**（**#248 が言うのは毎周回鳴る検査**で、**人が自分で
+      # 打つ現在地の表示は別**である）。
+      echo "周回: cron で回っています"
+      printf '%s\n' "$out" | sed 's/^/  /'
+      ;;
     1)
       echo "周回: cron の周回が来ていない作業場があります"
       printf '%s\n' "$out" | sed 's/^/  /'
