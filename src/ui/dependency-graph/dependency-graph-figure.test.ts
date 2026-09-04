@@ -13,6 +13,9 @@
  * ——**番号しか入っていない箱は、読めても決められない。**
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -24,8 +27,79 @@ import { DependencyGraphFigure } from "./dependency-graph-figure";
 import { estimateLabelWidth } from "./fit-label";
 import { layoutDependencyGraph } from "./graph-layout";
 
+const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+
 /** **親から受け取る**（`currentColor`）か、**塗らない**（`none`）か。 */
 const FROM_PARENT = new Set(["currentColor", "none"]);
+
+/**
+ * **テーマが決める色**（#583）。**`var(--…)` は、値をここで決めていない**
+ * ——**決めているのは `globals.css`** で、**そちらが明・暗の両方を持つ。**
+ *
+ * **守っている不変条件は「テーマが決められない色を部品が抱え込まない」**であって、
+ * **単色であること自体ではない**（#505）。**ただし、片方のテーマにしか無い変数を
+ * 参照すると、`var(--typo)` は透明で描かれて #505 が再発する**——**参照先が
+ * 両方で定義されていることまで見る**（下の `themeVariables`）。
+ */
+const THEME_VARIABLE = /^var\(\s*(--[a-zA-Z0-9-]+)\s*\)$/;
+
+function themeVariableOf(value: string): string | undefined {
+  return THEME_VARIABLE.exec(value)?.[1];
+}
+
+/**
+ * **テーマごとに定義されている変数の名前。**
+ *
+ * **明るいほうは `:root { … }`**、**暗いほうは `@media (prefers-color-scheme: dark)`
+ * の中の `:root { … }`** である。**中身の値は見ない**——**見るのは「両方にあるか」**
+ * だけ（**値はテーマが決めるもの**で、この試験からは正しさを言えない）。
+ */
+function themeVariables(): { light: Set<string>; dark: Set<string> } {
+  const css = readFileSync(join(REPO_ROOT, "src/app/globals.css"), "utf8");
+  const darkFrom = css.indexOf("@media (prefers-color-scheme: dark)");
+  expect(darkFrom, "暗いテーマの節が globals.css に無い").toBeGreaterThanOrEqual(0);
+  return { light: declaredIn(css.slice(0, darkFrom)), dark: declaredIn(css.slice(darkFrom)) };
+}
+
+/**
+ * **その節の `:root { … }` で宣言されている変数の名前。**
+ *
+ * **コメントを先に落とす**（#585 のレビュー 2 周目）——**`/* --tier-risk: … *\/` と
+ * コメントアウトしても、素で数えると「在る」ことになる。** **その状態では
+ * `var(--tier-risk)` が解決されず、帯と札が描かれない。**
+ *
+ * **`:root` の中だけを見る**——**`@theme inline` は別の名前を作る場所**で、
+ * **そこを混ぜると「宣言されている」の意味がぼやける。**
+ */
+function declaredIn(text: string): Set<string> {
+  return new Set(declarationsIn(text).keys());
+}
+
+/** **その節の `:root { … }` の宣言**（名前 → 値）。**値まで要るのは色を比べるとき。** */
+function declarationsIn(text: string): Map<string, string> {
+  const clean = text.replace(/\/\*[\s\S]*?\*\//g, "");
+  const at = clean.indexOf(":root");
+  expect(at, ":root が無い").toBeGreaterThanOrEqual(0);
+  const from = clean.indexOf("{", at);
+  const to = clean.indexOf("}", from);
+  expect(to, ":root が閉じていない").toBeGreaterThan(from);
+  return new Map(
+    [...clean.slice(from, to).matchAll(/(--[a-zA-Z0-9-]+)\s*:\s*([^;]+);/g)].map(
+      ([, name, value]) => [name ?? "", (value ?? "").trim()],
+    ),
+  );
+}
+
+/** **テーマごとの宣言**（名前 → 値）。 */
+function themeDeclarations(): { light: Map<string, string>; dark: Map<string, string> } {
+  const css = readFileSync(join(REPO_ROOT, "src/app/globals.css"), "utf8");
+  const darkFrom = css.indexOf("@media (prefers-color-scheme: dark)");
+  expect(darkFrom, "暗いテーマの節が globals.css に無い").toBeGreaterThanOrEqual(0);
+  return {
+    light: declarationsIn(css.slice(0, darkFrom)),
+    dark: declarationsIn(css.slice(darkFrom)),
+  };
+}
 
 /** 塗る要素。**`g` / `title` は塗らない**ので、ここには入れない。 */
 const PAINTING = new Set([
@@ -95,13 +169,50 @@ function markup(
 }
 
 /**
+ * **危なさの段が、これで全部**である。**足したらここで型検査が落ちる。**
+ *
+ * **`readonly RiskTier[]` では落ちない**（#585 のレビュー）——**あれは「並んでいる
+ * ものが union に属するか」しか見ない**ので、**段を足しても型は通り**、
+ * **`everyTierMarkup()` は新しい段を描かないまま緑**になる。
+ * **色が片方のテーマにしか無くても気づけない。**
+ *
+ * **`Record<RiskTier, …>` の鍵で並べる**——**足りない鍵は型検査が落とす。**
+ */
+const EVERY_TIER_KEY: Record<RiskTier, true> = {
+  "fast-track": true,
+  "needs-review": true,
+  "high-risk": true,
+};
+const EVERY_TIER = Object.keys(EVERY_TIER_KEY) as readonly RiskTier[];
+
+/**
+ * **すべての危なさが 1 つずつ出ている図**（#585 のレビュー）。
+ *
+ * **既定の `markup()` は 2 段しか描かない**——**`needs-review` の色は、綴りを
+ * 間違えても片方のテーマから消しても、そこには現れない**（**通常 Tier だけ
+ * 透明で描かれる**）。**色を見る試験は、段を全部通してから数える。**
+ *
+ * **判定できていない箱も入れる**——**そちらにも色（`var(--muted)`）が当たる。**
+ */
+function everyTierMarkup(): string {
+  const numbers = [...EVERY_TIER.map((_, index) => index + 1), EVERY_TIER.length + 1];
+  const marks = new Map<number, NodeMark>([
+    ...EVERY_TIER.map((tier, index): [number, NodeMark] => [index + 1, mark(tier)]),
+    [EVERY_TIER.length + 1, mark(undefined)],
+  ]);
+  return markupFor(numbers, [], marks);
+}
+
+/**
  * **`<svg>` の中で塗っている要素**を、属性ごと取り出す。
  *
  * **図の外は見ない**（**説明文は色を指定しない**）。**1 つも見つからないなら、
  * この試験は何も見ていない**ので、そこで落とす。
+ *
+ * **既定は「段を全部描いた図」**である（#585 のレビュー）——**2 段しか描かない図で
+ * 数えると、残りの段の色は一度も見られない。**
  */
-function painted(): Painted[] {
-  const rendered = markup();
+function painted(rendered: string = everyTierMarkup()): Painted[] {
   const from = rendered.indexOf("<svg");
   expect(from, "図が出ていない").toBeGreaterThanOrEqual(0);
   const to = rendered.indexOf("</svg>", from);
@@ -154,7 +265,12 @@ describe("依存グラフの図の色", () => {
     // 暗いほうでも読める。** **固定の色を置くと、片方で背景と同じになりうる。**
     const fixed = painted().flatMap(({ tag, attrs }) =>
       (["fill", "stroke"] as const)
-        .filter((name) => name in attrs && !FROM_PARENT.has(attrs[name] ?? ""))
+        .filter(
+          (name) =>
+            name in attrs &&
+            !FROM_PARENT.has(attrs[name] ?? "") &&
+            themeVariableOf(attrs[name] ?? "") === undefined,
+        )
         .map((name) => `${tag}: ${name}="${attrs[name]}"`),
     );
 
@@ -171,6 +287,133 @@ describe("依存グラフの図の色", () => {
       .map(({ tag }) => tag);
 
     expect(bare, "fill を書いていない要素がある（既定の黒で描かれる）").toEqual([]);
+  });
+});
+
+describe("盤面に見た目が当たっている（#583）", () => {
+  it("参照した変数は、明・暗の両方で定義されている", () => {
+    // **`var(--typo)` は透明で描かれる**——**#505 が消しに来た「見えない文字」**が、
+    // **綴り違いと片側だけの定義で戻る。**
+    const referenced = [
+      ...new Set(
+        painted().flatMap(({ attrs }) =>
+          (["fill", "stroke"] as const)
+            .map((name) => themeVariableOf(attrs[name] ?? ""))
+            .filter((name): name is string => name !== undefined),
+        ),
+      ),
+    ];
+
+    // **数える側が空になったことを、緑と混ぜない**——**変数を 1 つも使っていなければ、
+    // この試験は何も見ていない**（**単色へ戻った日に黙る**）。
+    expect(referenced, "テーマの変数を 1 つも使っていない").not.toEqual([]);
+
+    const { light, dark } = themeVariables();
+    expect(
+      referenced.filter((name) => !light.has(name) || !dark.has(name)),
+      "片方のテーマにしか無い変数を参照している",
+    ).toEqual([]);
+  });
+
+  it("危なさは色でも拾える。札は残す", () => {
+    // **濃さだけでは、並ぶと拾えない**（#583）。**色を足す**が、
+    // **色だけに頼らない**——**札（すぐ / 通常 / 要注意）はそのまま残す。**
+    const bandOf = (tier: RiskTier) => {
+      const rendered = markupFor([1], [], new Map([[1, mark(tier)]]));
+      const from = rendered.indexOf("<svg");
+      const bands = [...rendered.slice(from).matchAll(/<rect[^>]*width="[56]"[^>]*>/g)].map(
+        ([tag]) => /fill="([^"]*)"/.exec(tag)?.[1] ?? "",
+      );
+      expect(bands, `${tier} の帯が 1 本ではない`).toHaveLength(1);
+      return bands[0] ?? "";
+    };
+
+    const tiers = EVERY_TIER;
+    const colors = tiers.map(bandOf);
+
+    expect(new Set(colors).size, "危なさの色が見分けられない").toBe(tiers.length);
+    // **参照の名前が違うだけでは足りない**（#585 のレビュー 3 周目）。
+    // **`--tier-fast` と `--tier-normal` に同じ色を書いても、ここまでは通る**
+    // ——**実際の画面では帯が同色**になり、**「色でも拾える」が消える。**
+    //
+    // **テーマごとに解く**——**明と暗で別々に一意であればよい**（**色はテーマが決める**）。
+    const themes = themeDeclarations();
+    for (const [theme, declared] of Object.entries(themes)) {
+      const resolved = colors.map((color) => {
+        const name = themeVariableOf(color);
+        expect(name, `帯の色が変数ではない: ${color}`).toBeDefined();
+        const value = declared.get(name ?? "");
+        expect(value, `${theme} に ${name} の値が無い`).toBeDefined();
+        return value;
+      });
+
+      expect(new Set(resolved).size, `${theme} で危なさの色が見分けられない`).toBe(tiers.length);
+    }
+    // **段ごとに、その段の札だけを見る**（#585 のレビュー 2 周目）。
+    // **3 つに同じ正規表現を当てると、`needs-review` を `すぐ` にしても通る**
+    // ——**通常 Tier が fast-track と誤表示されても分からない。**
+    //
+    // **期待する札は、ここに書く**（**実装から取ると、実装を実装で確かめることになる**）。
+    const EXPECTED_LABEL: Record<RiskTier, string> = {
+      "fast-track": "すぐ",
+      "needs-review": "通常",
+      "high-risk": "要注意",
+    };
+    for (const tier of tiers) {
+      const box = boxOf(markupFor([1], [], new Map([[1, mark(tier)]])), 1);
+      expect(box, `${tier} の札が出ていない`).toContain(EXPECTED_LABEL[tier]);
+      // **他の段の札が出ていない**——**取り違えは「出ている」だけでは見えない。**
+      for (const other of tiers) {
+        if (other === tier) {
+          continue;
+        }
+        expect(box, `${tier} に ${other} の札が出ている`).not.toContain(EXPECTED_LABEL[other]);
+      }
+    }
+  });
+
+  it("箱に塗りがある", () => {
+    // **枠だけの箱は、背景と地続きに見える**——**並ぶと、どこまでが 1 件か分からない。**
+    const body = painted().filter(
+      ({ tag, attrs }) => tag === "rect" && attrs.width !== "5" && attrs.width !== "6",
+    );
+
+    expect(body, "箱が 1 つも無い").not.toEqual([]);
+    expect(
+      body.filter(({ attrs }) => (attrs.fill ?? "none") === "none").map(({ attrs }) => attrs.width),
+      "塗っていない箱がある",
+    ).toEqual([]);
+  });
+
+  it("番号・タイトル・状態に強弱がある", () => {
+    // **同じ太さ・同じ濃さで 3 行並ぶと、どれが見出しか分からない。**
+    //
+    // **一括で種類を数えない**（#585 のレビュー）——**Tier の札が段ごとに違う色**
+    // なので、**状態をタイトルと同じ見た目へ戻しても種類数は 3 を超える。**
+    // **守りたい 3 つを、同じ箱から名指しで取り出して比べる。**
+    const rendered = markupFor([1], [], new Map([[1, mark("high-risk")]]));
+    const look = (content: string) => {
+      const found = [...rendered.matchAll(/<text([^>]*)>([^<]*)<\/text>/g)].filter(
+        ([, , text]) => (text ?? "").trim() === content,
+      );
+      expect(found, `箱の中に「${content}」が 1 つに定まらない`).toHaveLength(1);
+      const attrs = Object.fromEntries(
+        [...(found[0]?.[1] ?? "").matchAll(/([a-zA-Z-]+)="([^"]*)"/g)].map(([, name, value]) => [
+          name ?? "",
+          value ?? "",
+        ]),
+      );
+      return `${attrs["font-size"] ?? ""}/${attrs["font-weight"] ?? ""}/${attrs.fill ?? ""}`;
+    };
+
+    // **`mark()` の既定**（タイトル `依存の図を出す` / `ready` かつ head 既知 → `押せる`）
+    const number = look("#1");
+    const title = look("依存の図を出す");
+    const status = look("押せる");
+
+    expect(number, "番号とタイトルが同じ見た目である").not.toBe(title);
+    expect(title, "タイトルと状態が同じ見た目である").not.toBe(status);
+    expect(number, "番号と状態が同じ見た目である").not.toBe(status);
   });
 });
 
@@ -210,20 +453,21 @@ describe("箱の中で決められる", () => {
     expect(boxOf(rendered, 1), "切らずに置いている").not.toContain(long);
   });
 
-  it("危なさは、札だけでなく濃さでも出す", () => {
-    // **10 本並んだとき、札より先に目へ入るのは濃さ**である——**色は使えない**（#505。
-    // **テーマが決める `currentColor` しか置けない**）ので、**段は濃さで付ける。**
-    function weightOf(tier: RiskTier): string {
+  it("危なさは、札だけでなく帯でも出す", () => {
+    // **10 本並んだとき、札より先に目へ入るのは帯**である（#540）。
+    //
+    // **段の付け方は濃さから色へ移した**（#583。**濃さ 3 段は並ぶと拾えなかった**）
+    // ——**守っている不変条件は「札だけに頼らない」**で、**そこは変えていない。**
+    // **色そのものが見分けられるかは、`盤面に見た目が当たっている` の側で見る。**
+    function bandOf(tier: RiskTier): string {
       // **帯は危なさが分かっている箱にだけ出る**ので、#2 を渡さなければ 1 つに定まる
-      const found = [
-        ...markup(new Map([[1, mark(tier)]])).matchAll(/fill-opacity="([\d.]+)"/g),
-      ].map(([, value]) => value ?? "");
-      expect(found, `${tier} の濃さが 1 つに定まらない`).toHaveLength(1);
-      return found[0] ?? "";
+      const found = [...markup(new Map([[1, mark(tier)]])).matchAll(/<rect[^>]*width="6"[^>]*>/g)];
+      expect(found, `${tier} の帯が 1 つに定まらない`).toHaveLength(1);
+      return found[0]?.[0] ?? "";
     }
 
-    expect(weightOf("high-risk"), "危なさが違うのに、同じ濃さで出ている").not.toBe(
-      weightOf("fast-track"),
+    expect(bandOf("high-risk"), "危なさが違うのに、同じ帯で出ている").not.toBe(
+      bandOf("fast-track"),
     );
   });
 

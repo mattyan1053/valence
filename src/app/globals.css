@@ -3,6 +3,23 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /*
+   * **盤面の色**（#583）。**部品は値を持たない**——**`var(--…)` で受けるだけ**で、
+   * **決めるのはここ 1 箇所**である（#505 の不変条件を保ったまま色を入れる）。
+   *
+   * **明・暗の両方で定義する。** **片方にしか無いと `var()` は透明で描かれ**、
+   * **#505 が消しに来た「見えない文字」に戻る**（`dependency-graph-figure.test.ts`）。
+   */
+  --node-fill: #f6f8fa;
+  --node-stroke: #d0d7de;
+  --link: #8c959f;
+  --muted: #57606a;
+
+  /* 危なさ。**色だけに頼らない**（札は図の側が出す）。 */
+  --tier-fast: #1a7f37;
+  --tier-normal: #9a6700;
+  --tier-risk: #cf222e;
 }
 
 @theme inline {
@@ -16,6 +33,16 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+
+    /* **明るいほうと同じ名前を、必ず全部置く**（#583。上のコメント）。 */
+    --node-fill: #161b22;
+    --node-stroke: #30363d;
+    --link: #6e7681;
+    --muted: #8b949e;
+
+    --tier-fast: #3fb950;
+    --tier-normal: #d29922;
+    --tier-risk: #f85149;
   }
 }
 

@@ -59,6 +59,73 @@ function props(overrides: Partial<DependencyGraphViewProps> = {}): DependencyGra
   };
 }
 
+/**
+ * **見出しと本文が、同じ見た目で出ていた**（#583 のレビュー。**人が見て言った**）。
+ *
+ * > 行間がなかったりとか、全部左寄せになってたりとかして見づらい。
+ * > あとそれぞれなんの内容が書いてあるのか段落分けもなくて見づらい
+ *
+ * **原因は「書いていない」こと**である。**Tailwind の preflight は
+ * `h1..h6 { font-size: inherit; font-weight: inherit }` を当て**、
+ * **`*` の `margin` / `padding` を 0 にする**——**配信中の CSS で確かめた。**
+ * **`<h2>PR の依存</h2>` は、本文と 1 ピクセルも違わない。**
+ *
+ * **図の中だけ強弱を付けていた**（#583）——**画面には図の外のほうが多い。**
+ */
+describe("図の外にも、見た目が当たっている（#583 のレビュー）", () => {
+  /** 開いているタグを、属性ごと拾う。 */
+  function opening(markup: string, tag: string): string[] {
+    return [...markup.matchAll(new RegExp(`<${tag}(\\s[^>]*)?>`, "g"))].map(([found]) => found);
+  }
+
+  /** **循環の節と、抜けの節も出す**——**節はそこにもある。** */
+  const rendered = () =>
+    render(
+      props({
+        order: { ordered: [1], cyclic: [2] },
+        invalid: [{ index: 0, reason: "読めません" }],
+      }),
+    );
+
+  /**
+   * **本文より強く出ているか。**
+   *
+   * **`text-` では見分けられない**（変異で見つけた）——**`text-[var(--muted)]` は色**で、
+   * **大きさも太さも変えない**（**弱くする側である**）。**`text-sm` も同じ向き**なので、
+   * **入れない。**
+   *
+   * **先に数えた**——**`src/ui` と `src/app` が使っているのは
+   * `text-sm` / `text-[var(--muted)]` / `text-lg` / `text-2xl` / `text-3xl` /
+   * `font-bold` / `font-semibold` / `font-mono`** である。**当てたいのは、
+   * 太い側と大きい側だけ。**
+   */
+  const STRONGER = /class="[^"]*(\bfont-(bold|semibold)\b|\btext-(lg|xl|[2-9]xl)\b)/;
+
+  it("見出しは、本文より強く出る", () => {
+    // **preflight が `inherit` へ落とすので、書かなければ本文と同じ**である。
+    const headings = ["h2", "h3"].flatMap((tag) => opening(rendered(), tag));
+
+    // **数える側が空になったことを、緑と混ぜない。**
+    expect(headings, "見出しが 1 つも出ていない").not.toEqual([]);
+    expect(
+      headings.filter((tag) => !STRONGER.test(tag)),
+      "本文と同じ見た目の見出しがある（preflight が inherit へ落とす）",
+    ).toEqual([]);
+  });
+
+  it("節に余白がある", () => {
+    // **`*` の margin が 0 なので、書かなければ段落は詰まって出る**
+    // ——**「段落分けもなくて見づらい」の出どころ**である。
+    const sections = opening(rendered(), "section");
+
+    expect(sections, "節が 1 つも出ていない").not.toEqual([]);
+    expect(
+      sections.filter((tag) => !/class="[^"]*\b(gap-|space-y-)/.test(tag)),
+      "中身が詰まって出る節がある",
+    ).toEqual([]);
+  });
+});
+
 describe("DependencyGraphView の図", () => {
   it("依存が図として出る", () => {
     // **箇条書きだけでは、深さも枝分かれも見えない** (#471)——**関係を目で追える形**が要る

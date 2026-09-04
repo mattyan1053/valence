@@ -1,4 +1,4 @@
-import { createElement } from "react";
+import { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
@@ -476,5 +476,130 @@ describe("理由が、行に出る（#577 のレビュー）", () => {
 
   it("打ち切りと読めなかったを、行の上で取り違えない", () => {
     expect(render(props("timedout"))).not.toContain("読めませんでした");
+  });
+});
+
+/**
+ * **操作が縦に積まれ、幅が文字数で決まっていた**（#585 のレビュー。**人が見て言った**）。
+ *
+ * > approve と merge が縦にならんでて、ボタンのサイズが文字列長に影響されてズレてる
+ *
+ * **走らせて確かめた**（実測）。**行は `<li class="flex flex-col …">`** で、
+ * **`renderActions` が返すのは `<form>` 2 つ**（`ApproveButton` / `MergeButton`）
+ * ——**そのまま flex item になるので縦に積まれる。** **`<button>` の class は
+ * `rounded border px-2 py-1 text-sm`** で、**幅を持たない**ので**文字幅で決まる。**
+ *
+ * **`<form>` は 1 つにまとめられない**（**POST 先が別**）——**横に並べる器が要る。**
+ */
+describe("操作が横に並ぶ（#585 のレビュー）", () => {
+  /** **押すもの 2 つ**（**実物と同じく、それぞれ `<form>` を持つ**）。 */
+  const ACTIONS = () =>
+    createElement(
+      "form",
+      { action: "/approve", method: "post" },
+      createElement(
+        "button",
+        { className: "rounded border px-2 py-1 text-sm", type: "submit" },
+        "Approve",
+      ),
+    );
+
+  const MORE = () =>
+    createElement(
+      "form",
+      { action: "/merge", method: "post" },
+      createElement(
+        "button",
+        { className: "rounded border px-2 py-1 text-sm", type: "submit" },
+        "Merge",
+      ),
+    );
+
+  /**
+   * **その `<form>` を包んでいる器**の class。
+   *
+   * **開いたまま残っているものだけを見る**（#585 のレビュー）。**「直前に開いた要素」
+   * だと、閉じ済みの器を返す**——**空の `ActionRow` を残して中身を後ろへ移すと、
+   * 閉じた器の class が返り、判定は全部通る**（**form は縦に積まれたまま**）。
+   *
+   * **開始と終了を数えて、まだ閉じていない いちばん内側**を返す。
+   * **1 つも開いていなければ空が返り、下の判定が落ちる。**
+   */
+  function wrapperOf(markup: string): string {
+    const at = markup.indexOf("<form");
+    expect(at, "操作が出ていない").toBeGreaterThanOrEqual(0);
+    const before = markup.slice(0, at);
+    const open: string[] = [];
+    for (const tag of before.matchAll(/<div(?:\s+class="([^"]*)")?\s*>|<\/div>/g)) {
+      if (tag[0] === "</div>") {
+        open.pop();
+      } else {
+        open.push(tag[1] ?? "");
+      }
+    }
+    return open[open.length - 1] ?? "";
+  }
+
+  it("押すものは、横に並ぶ", () => {
+    const markup = render(
+      props({
+        // **実物と同じ形**——**`renderActions` は fragment を返す**（`page.tsx`）。
+        // **器で包んで渡すと、測っているのは自分の器になる。**
+        renderActions: (number) =>
+          number === 1 ? createElement(Fragment, null, ACTIONS(), MORE()) : undefined,
+      }),
+    );
+
+    const wrapper = wrapperOf(markup);
+
+    expect(wrapper, "器が flex になっていない").toMatch(/\bflex\b/);
+    expect(wrapper, "縦に積む器のままである").not.toMatch(/\bflex-col\b/);
+  });
+
+  it("押すものの幅が、文字数で決まらない", () => {
+    // **「ボタンのサイズが文字列長に影響されてズレてる」**——**`Approve` と `Merge` は
+    // 字数が違う**ので、**幅を書かなければ揃わない。**
+    //
+    // **器の側で揃える**——**`ApproveButton` と `MergeButton` は互いを知らない**ので、
+    // **片方に書いても、もう片方が付いてこない。** **並ぶときに揃えるのは、並べる側の仕事。**
+    const markup = render(
+      props({
+        // **実物と同じ形**——**`renderActions` は fragment を返す**（`page.tsx`）。
+        // **器で包んで渡すと、測っているのは自分の器になる。**
+        renderActions: (number) =>
+          number === 1 ? createElement(Fragment, null, ACTIONS(), MORE()) : undefined,
+      }),
+    );
+
+    // **子の button を名指しする variant まで見る**（#585 のレビュー）。
+    // **`min-w-` がどこかに 1 度出れば通る形だと、`min-w-24` へ変えても緑**
+    // ——**最小幅が付くのは器だけ**になり、**button は文字列長ごとの幅に戻る。**
+    // **`&` は markup では実体参照になる**（`&amp;`）——**素の `&` で照合すると、
+    // 実装が正しくても落ちる。** **緩い `min-w-` のままでは、ここに気づけなかった。**
+    expect(wrapperOf(markup), "押すものの幅を揃えていない").toMatch(
+      /\[&(?:amp;)?_button\]:min-w-\d/,
+    );
+  });
+
+  it("状態と操作が、同じ器に入る", () => {
+    // **押すものと、押した結果**は**同じ行に並ぶ**——**別々の器に入れると、
+    // また縦に割れる。**
+    const markup = render(
+      props({
+        renderStatus: (number) =>
+          number === 1 ? createElement("span", null, "承認済み") : undefined,
+        renderActions: (number) => (number === 1 ? ACTIONS() : undefined),
+      }),
+    );
+
+    const at = markup.indexOf("承認済み");
+    const form = markup.indexOf("<form");
+    expect(at, "状態が出ていない").toBeGreaterThanOrEqual(0);
+    expect(form, "操作が出ていない").toBeGreaterThanOrEqual(0);
+    // **間で器が閉じても、開いてもいない**——**どちらでも、別の器に入っている。**
+    // **閉じだけを見ると、状態を器の外へ出した形が素通りする**（変異で見つけた）。
+    const between = markup.slice(at, form);
+    expect(between, "状態と操作の間で器が閉じている").not.toContain("</div>");
+    expect(between, "状態と操作の間で別の器が開いている").not.toContain("<div");
   });
 });
