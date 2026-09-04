@@ -183,6 +183,83 @@ describe("bin/loop-review-budget", () => {
     });
   });
 
+  /**
+   * **要求の前に head を記録する手順が、飛ばされた**（#614。**master が今日踏んだ**）。
+   *
+   * **ゲートの FAIL 行は「レビューを要求してください」としか言わない**——**手順の本体は
+   * `bin/loop-procedure-body` で読む側**にあるので、**ゲートの出力だけを読んで動くと
+   * 記録が抜ける。**
+   *
+   * **抜けたことは、その周回では分からない。** **困るのは 👍 だけで返ったとき**——
+   * **`--pair` は SHA の無い応答を「未消費の最も古い記録」へ寄せ、無ければ結び付けない**
+   * （安全側）。**記録が無ければその往復は数えられず、2 回しかない枠が 1 回消える。**
+   *
+   * **判定するのはここ**である——**`[OK]` を出す口が、投げる直前に読まれる最後の行**
+   * だからである。**ゲートには書かない**（**あちらは判定器で、手順を書くところではない**）。
+   *
+   * **記録そのものはさせない。** **判定器に副作用を入れると、判定だけしたい呼び出し
+   * （ゲートの内側など）でも記録が積まれる**——**次の応答が、投げてもいない要求へ寄る。**
+   */
+  describe("要求の前に、head を記録させる（#614）", () => {
+    it("要求してよいとき、記録する手順を出す", () => {
+      const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+      expect(budget.status).toBe(0);
+      // **貼れば走る形にする**（`bin/loop-lease check` の案内と同じ判断）
+      // ——**場所取りのまま出すと、読んだ側が組み立て直すことになる。**
+      // **PR 番号は、この試験群が使っているもの**（`run` が `12` で呼ぶ）
+      expect(budget.stdout, "記録する手順が出ていない").toContain(
+        `bin/loop-review-head 12 ${HEAD}`,
+      );
+    });
+
+    it("現 head がレビュー済みなら、出さない", () => {
+      // **平常時に鳴る検査は読まれなくなる**（#248）。**投げない周回に出すと、
+      // 「打つべき手順」と「打ってはいけない周回」が同じ顔になる。**
+      const budget = run({ reviews: [`${minutesAgo(60)}\t${HEAD}\tlive`] });
+
+      expect(budget.status).toBe(1);
+      expect(budget.stdout, "投げない周回に手順を出している").not.toContain("bin/loop-review-head");
+    });
+
+    it("上限に達していても、出さない", () => {
+      // **exit 1 の道は 2 つある**（現 head がレビュー済み / 上限）——**片方だけ見ると、
+      // もう片方へ足しても緑のまま**である（**変異で見つけた**）。
+      const budget = run(
+        {
+          reviews: [
+            `${minutesAgo(90)}\t${"b".repeat(40)}\tlive`,
+            `${minutesAgo(60)}\t${"c".repeat(40)}\tlive`,
+          ],
+          createdAt: minutesAgo(120),
+        },
+        { LOOP_MAX_REVIEW_ROUNDS: "2" },
+      );
+
+      expect(budget.status).toBe(1);
+      expect(budget.stdout, "上限の周回に手順を出している").not.toContain("bin/loop-review-head");
+    });
+
+    it("待つだけの周回にも、出さない", () => {
+      const budget = run({ reviews: [], createdAt: minutesAgo(1) });
+
+      expect(budget.status).toBe(3);
+      expect(budget.stdout, "待つ周回に手順を出している").not.toContain("bin/loop-review-head");
+    });
+
+    it("判定器は、記録を積まない", () => {
+      // **副作用を判定器へ入れない**（完了条件）。**ゲートの内側から呼んでも、
+      // 投げてもいない要求の記録が残ってはいけない。**
+      //
+      // **隣を呼んでいないことで見る**——**記録は `bin/loop-review-head` が持つ**ので、
+      // **呼んでいなければ積みようがない。**
+      const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+      expect(budget.status).toBe(0);
+      expect(budget.calls.join("\n"), "判定器が記録を積んでいる").not.toContain("loop-review-head");
+    });
+  });
+
   describe("exit 1 — 要求してはいけない", () => {
     it("現 head が既にレビュー済み", () => {
       // **何も変わっていないものを二度レビューさせない。** ここが浪費を止める本丸
