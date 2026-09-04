@@ -28,9 +28,6 @@
  */
 
 import type { VisibleRepository } from "../../application/ports/visible-repositories";
-// **判定は `domain` が持つ** (#621)——**盤面を描く `app` は `infrastructure` を
-// import できない**ので、**両方から呼べる場所へ置いた**（`AGENTS.md` §3 / §5）。
-import { pathSegment as segment } from "../../domain/repository/github-url";
 
 const API_ORIGIN = "https://api.github.com";
 
@@ -41,5 +38,21 @@ const API_ORIGIN = "https://api.github.com";
  * 危なくないと分かっているものを、この関数の中へ隠さない。**
  */
 export function repositoryUrl(repository: VisibleRepository): string {
-  return `${API_ORIGIN}/repos/${segment(repository.owner)}/${segment(repository.name)}`;
+  return `${API_ORIGIN}/repos/${pathSegment(repository.owner)}/${pathSegment(repository.name)}`;
+}
+
+/**
+ * 経路の 1 区切りへ入れられる形にする。
+ *
+ * **`.` と `..` は包んでも安全にならない**（上記）ので、**投げる。**
+ * **空も同じ**——**区切りが消えて、上の階層が繋がる。**
+ *
+ * **`pull-request-page-url.ts` も同じものを使う** (#622)——**写すと 2 箇所になる。**
+ */
+export function pathSegment(value: string): string {
+  const encoded = encodeURIComponent(value);
+  if (encoded === "" || encoded === "." || encoded === "..") {
+    throw new Error(`URL の経路へ入れられない値です: ${JSON.stringify(value)}`);
+  }
+  return encoded;
 }

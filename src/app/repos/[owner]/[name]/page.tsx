@@ -12,12 +12,12 @@ import { notFound } from "next/navigation";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
 import type { RepositoryBoardResult } from "../../../../application/review-order/view-repository-board";
 import {
+  pullRequestPageUrl,
   reportBoardActionUnavailable,
   repositoryBoardForCurrentUser,
 } from "../../../../composition/auth";
 import type { MergeBlock } from "../../../../domain/graph/merge-block";
 import { mergeBlocksFor } from "../../../../domain/graph/merge-block";
-import { pullRequestPageUrl } from "../../../../domain/repository/github-url";
 import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge";
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
@@ -270,7 +270,8 @@ export async function renderRepositoryBoard(
             titleOf={(number) => result.plan.titles.get(number)}
             // **押す場所から現物へ行けるようにする**（#621）——**枝名は書いた人にしか
             // 読めない**ので、**何を approve / merge するのかが行に無かった。**
-            // **組み立ては `domain` が持つ**（**`.` / `..` を断る判定を写さない**）
+            // **組み立ては `infrastructure` が持ち、合成ルートを通す**（#622 の
+            // レビュー 2 周目）——**`.` / `..` を断る判定を写さない**
             urlOf={(number) => pullRequestPageUrl({ owner, name }, number)}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）

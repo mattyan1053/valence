@@ -37,6 +37,10 @@ import { refreshUserTokens } from "../infrastructure/github/user-token";
 import { createUserVisibleRepositories } from "../infrastructure/github/user-visible-repositories";
 import { reportLoginFailure } from "../infrastructure/observability/login-failure";
 
+// **盤面の行から PR へ飛ばす** (#621)。**`app` は `infrastructure` を import できない**
+// ので、**合成ルートを通す**（`AGENTS.md` §3）——**URL は外部サービスの詳細**なので、
+// **`domain` には置かない**（#622 のレビュー 2 周目）。
+export { pullRequestPageUrl } from "../infrastructure/github/pull-request-page-url";
 // **押せなかった理由を残す口** (#506 の 2)。**画面では 1 語にまとめてある**（§6）
 export { reportBoardActionUnavailable } from "../infrastructure/observability/board-action";
 // **戻ってこなかったコールバックを残す口** (#455)。**adapter を束ねるのはここ**である

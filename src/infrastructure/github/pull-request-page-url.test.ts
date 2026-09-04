@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { pathSegment, pullRequestPageUrl } from "./github-url";
+import { pullRequestPageUrl } from "./pull-request-page-url";
+import { pathSegment } from "./repository-url";
 
 describe("GitHub 上の場所を指す URL", () => {
   it("PR の画面を指す", () => {
