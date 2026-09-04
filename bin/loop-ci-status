@@ -494,7 +494,25 @@ for required_index in "${!required[@]}"; do
 
   # **決着しているか**は `conclusion` で決まる。**`status` は見ない**——
   # **実物が食い違っていた**（`in_progress` + `success`）。
-  if [[ -n $conclusion ]]; then
+  #
+  # **`cancelled` は決着ではない** (#618)。**落ちた検査と同じ扱いにすると
+  # 「worker に直させる」へ倒れる**が、**押し直しても直らない**
+  # ——**原因は「pending のまま予算を超えた」と同じ**（**あちらは人へ渡す側**）。
+  #
+  # **実測**（PR #615 の run `33832261624`）: **`timeout-minutes: 10` の job が
+  # 03:23:36 → 03:33:51 で `cancelled`**。**registry へ届かないまま切られている。**
+  #
+  # **`cancelled` は 2 種類ある。** **時間切れ**と、**押し直しに切られたぶん**
+  # （`concurrency: cancel-in-progress`）——**後者は異常ではない**（**新しい run が
+  # 走っている**）ので、**同じ扱いにすると正常な押し直しのたびに人が呼ばれる。**
+  #
+  # **`conclusion` はどちらも `cancelled` で、見分けられない。**
+  # **そこで、決着していない側へ倒す**——**既にある猶予の時計に乗せる。**
+  # **猶予の内なら待ち**（**新しい run が来れば置き換わる**）、**超えたら人へ渡す。**
+  #
+  # **新しい配線は足さない**——**`UNKNOWN` と「1 件も作られていない」で既に
+  # 使っている形**（#305）と同じである。**「待つ → 届く」がそこで閉じている。**
+  if [[ -n $conclusion && $conclusion != "cancelled" ]]; then
     if [[ " $OK_CONCLUSIONS " == *" $conclusion "* ]]; then
       states+="ok,"
       continue

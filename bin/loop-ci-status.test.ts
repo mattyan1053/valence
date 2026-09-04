@@ -868,6 +868,83 @@ describe("bin/loop-ci-status", () => {
    * **あちらで併せると `bin/loop-handoff --fingerprint` が知らないまま**になる
    * （#609 のレビュー）。
    */
+  /**
+   * **時間切れで切られた検査を、落ちた検査と同じ扱いにしていた**（#618。
+   * **master が PR #615 で踏んだ**）。
+   *
+   * **`cancelled` は「決着した失敗」ではない。** **手順の分岐表では fail が
+   * 「worker に直させる」へ倒れる**が、**押し直しても直らない**
+   * ——**原因は「pending のまま予算を超えた」と同じ**（**あちらは人へ渡す側**）。
+   *
+   * **実測**（PR #615 の run `33832261624`）:
+   *
+   * ```
+   * attempt=1 dependency vulnerabilities completed/failure   03:11:00 → 03:19:18
+   * attempt=2 dependency vulnerabilities completed/cancelled 03:23:36 → 03:33:51  ← 10 分 15 秒
+   * attempt=3 dependency vulnerabilities completed/success   04:24:34 → 04:27:24
+   * ```
+   *
+   * **`timeout-minutes: 10` に達して切られている**（`audit.yml`）。
+   *
+   * **`cancelled` は 2 種類ある。** **時間切れ**と、**押し直しに切られたぶん**
+   * （`concurrency: cancel-in-progress`）——**後者は異常ではない**（**新しい run が
+   * 走っている**）ので、**同じ扱いにすると正常な押し直しのたびに人が呼ばれる。**
+   *
+   * **`conclusion` はどちらも `cancelled`** で、**見分けられない。**
+   * **そこで、決着していない側へ倒す**——**既にある猶予の時計に乗せる。**
+   * **猶予の内なら待ち**（**新しい run が来れば置き換わる**）、
+   * **超えたら人へ渡す**（**「予算を超えた」と同じ行き先**）。
+   *
+   * **新しい配線を足していない**——**`UNKNOWN` と「1 件も作られていない」で
+   * 既に使っている形**（#305）と同じである。
+   */
+  describe("切られた検査は、落ちた検査ではない（#618）", () => {
+    it("予算を超えていれば、人へ渡す", () => {
+      // **時間切れで切られたぶん**——**押し直しても、届かないままなら同じところで切られる。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 3600 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "worker へ渡している").toBe(4);
+    });
+
+    it("予算の内なら、待つ", () => {
+      // **押し直しに切られたぶん**——**新しい run が走っている**ので、
+      // **次の周回で置き換わる。** **ここで人を呼ばない。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "正常な押し直しで人を呼んでいる").toBe(3);
+    });
+
+    it("指紋でも、決着として数えない", () => {
+      // **`bin/loop-handoff` は指紋で「同じ状態か」を見る**——**切られたぶんを
+      // 決着として数えると、置き換わって成功したときに指紋が動かない。**
+      workflows([5]);
+
+      const result = run({
+        fingerprint: true,
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.stdout.trim(), "決着として数えている").toBe("pending,ok");
+    });
+  });
+
   describe("必須を GitHub 側と併せる（#608）", () => {
     it("ruleset が要求する検査も待つ", () => {
       // **これが本題。** **一覧に無ければ、落ちていても待たれない。**
