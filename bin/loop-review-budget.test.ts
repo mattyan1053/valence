@@ -213,6 +213,69 @@ describe("bin/loop-review-budget", () => {
       );
     });
 
+    /**
+     * **貼った文字列を、そのまま走らせて見る**（#615 のレビュー）。
+     *
+     * **出ていることだけを見ると、手順の一部しか出していなくても緑**である
+     * ——**この案内が直しに来たのは「ゲートの FAIL 行が手順の一部しか言わない」**で、
+     * **一部だけを貼れる形は、飛ばせる形**である。
+     *
+     * **`head_sha` を読んでから貼るまでに push されると、古い SHA を記録したまま
+     * 新しい head へ投げる**——**SHA を持たない 👍 はその古い記録へ寄り、
+     * 現 head は未レビューのまま枠だけ減る。** **#614 の「結び付かない」（安全側）より
+     * 悪い**——**見てもいない head がレビュー済みになる。**
+     */
+    describe("案内を貼って走らせる", () => {
+      /** 案内の行から、貼る部分だけを取り出す。 */
+      function pasted(stdout: string): string {
+        const line = stdout.split("\n").find((each) => each.includes("bin/loop-review-head"));
+        expect(line, "案内が出ていない").toBeDefined();
+        return (line ?? "").trim();
+      }
+
+      /**
+       * 貼った文字列を走らせる。**隣の 2 つは偽物**——**見たいのは繋ぎ方**であって、
+       * **中身は各スクリプトの試験が固定している。**
+       */
+      function paste(command: string, headMoved: boolean): { recorded: boolean; status: number } {
+        const dir = mkdtempSync(join(tmpdir(), "review-budget-paste-"));
+        mkdirSync(join(dir, "bin"));
+        const record = join(dir, "recorded");
+        writeFileSync(
+          join(dir, "bin", "loop-head"),
+          `#!/usr/bin/env bash\nexit ${headMoved ? 1 : 0}\n`,
+          { mode: 0o755 },
+        );
+        writeFileSync(
+          join(dir, "bin", "loop-review-head"),
+          `#!/usr/bin/env bash\necho "$*" > ${JSON.stringify(record)}\n`,
+          { mode: 0o755 },
+        );
+        const ran = spawnSync("bash", ["-c", command], { cwd: dir, encoding: "utf8" });
+        const recorded = existsSync(record);
+        rmSync(dir, { recursive: true, force: true });
+        return { recorded, status: ran.status ?? -1 };
+      }
+
+      it("head が動いていなければ、記録まで行く", () => {
+        const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+        const ran = paste(pasted(budget.stdout), false);
+
+        expect(ran.recorded, "記録まで行っていない").toBe(true);
+      });
+
+      it("head が動いていたら、記録まで行かない", () => {
+        // **これが本題。** **`bin/loop-head same` が exit 1 なら、記録も投稿もしない**
+        // ——**貼った人が片方だけ実行してしまえる形にしない。**
+        const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+        const ran = paste(pasted(budget.stdout), true);
+
+        expect(ran.recorded, "動いた head の記録を残している").toBe(false);
+      });
+    });
+
     it("現 head がレビュー済みなら、出さない", () => {
       // **平常時に鳴る検査は読まれなくなる**（#248）。**投げない周回に出すと、
       // 「打つべき手順」と「打ってはいけない周回」が同じ顔になる。**
