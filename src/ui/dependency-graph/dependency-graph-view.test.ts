@@ -168,7 +168,9 @@ describe("行から、その PR に辿り着ける", () => {
     // `className="underline"` を持たないのはここだけだった**（数えた）。
     const markup = render(props());
 
-    expect(rowsOf(markup)[0], "リンクだと見て分からない").toContain('class="underline"');
+    // **クラスは増える**（#583 が強弱を足した）ので、**完全一致では見ない**
+    // ——**その語を持つか**で見る（**取り込み直しで実際に落ちた**）。
+    expect(rowsOf(markup)[0], "リンクだと見て分からない").toMatch(/<a class="[^"]*\bunderline\b/);
   });
 
   it("タイトルが取れなくても、飛べる", () => {
