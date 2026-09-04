@@ -22,6 +22,8 @@ type Check = {
   conclusion?: string;
   /** 何秒前に始まったか。 */
   startedAgo?: number;
+  /** その check を出した App（#610。**実測では Actions=15368 / CodeQL=57789**）。 */
+  appId?: number;
 };
 
 /**
@@ -180,6 +182,8 @@ describe("bin/loop-ci-status", () => {
         check.startedAgo === undefined
           ? ""
           : new Date((now - check.startedAgo) * 1000).toISOString(),
+        // **発行元**（#610）。**無い形も置ける**——**GitHub 側で任意**である
+        check.appId === undefined ? "" : String(check.appId),
       ].join("\\u001f");
     const row = (name: string, check: Check) =>
       `    printf '%b\\n' ${JSON.stringify(`${name}\\u001f${tail(check)}`)}`;
@@ -192,6 +196,12 @@ describe("bin/loop-ci-status", () => {
       "  fi",
       '  if [[ $args != *".status"* ]]; then',
       '    echo "スタブ: status を問い合わせていない: $args" >&2',
+      "    exit 1",
+      "  fi",
+      // **発行元も問い合わせているか**（#610）。**名前だけで採ると、同名で別 App の
+      // ものを数える**——**式に無ければ、こちらは答えない。**
+      '  if [[ $args != *".app.id"* ]]; then',
+      '    echo "スタブ: app.id を問い合わせていない: $args" >&2',
       "    exit 1",
       "  fi",
       '  if [[ $args == *"@base64"* ]]; then',
@@ -250,6 +260,19 @@ describe("bin/loop-ci-status", () => {
     ];
   }
 
+  /**
+   * ruleset が返す行（#610）。**`context` と `integration_id` の組**である。
+   *
+   * **区切りは `\u001f` で書く**——**スタブは `printf '%b'` で展開する**。
+   *
+   * **8 進（`\037`）は使えない。** **後ろに数字が続くと `\0nnn` として 4 桁まで
+   * 食う**ので、**`\03757789` は `\0375` + `7789` になり、App の先頭が消える**
+   * （**手で走らせて踏んだ**）。**`\uHHHH` はちょうど 4 桁**なので、揺れない。
+   */
+  function rulesetLines(entries: ReadonlyArray<{ context: string; app?: number }>): string {
+    return entries.map((entry) => `${entry.context}\\u001f${entry.app ?? ""}`).join("\\n");
+  }
+
   /** どの口を叩くか。**尋ね方が 3 通りある**（判定 / 指紋 / コンフリクト）。 */
   function argsFor(conflicting: boolean, fingerprint: boolean): string[] {
     if (conflicting) {
@@ -284,11 +307,21 @@ describe("bin/loop-ci-status", () => {
       // **ここでも同じ形にする。** **落ちる形にすると、実際には起こらないことを
       // 試験が守る**ことになる（**倒れる向きも逆**——**あちらは止まり、
       // こちらは通してしまう**）。
-      '  if [[ $args == *"rules/branches/"*"/"* ]]; then',
-      "    exit 0",
+      // **見るのは URL の部分だけ**である。**`$args` には `--jq` の式も入っている**
+      // ——**`.integration_id // ""` の `//` に当たり、どの呼び出しでもここで返していた**
+      // （**手で走らせて踏んだ**）。**空白までを切り出して、その中の `/` を見る。**
+      "  if [[ $args =~ rules/branches/([^[:space:]]*) ]]; then",
+      '    if [[ ${BASH_REMATCH[1]} == *"/"* ]]; then',
+      "      exit 0",
+      "    fi",
+      "  fi",
+      // **`integration_id` も問い合わせているか**（#610）
+      '  if [[ $args != *"integration_id"* ]]; then',
+      '    echo "スタブ: integration_id を問い合わせていない: $args" >&2',
+      "    exit 1",
       "  fi",
       ...(rulesFails ? ["  exit 1"] : []),
-      `  [[ -z "\${RULES:-}" ]] || printf '%s\\n' "\${RULES}"`,
+      `  [[ -z "\${RULES:-}" ]] || printf '%b\\n' "\${RULES}"`,
       "  exit 0",
       "fi",
     ];
@@ -841,7 +874,7 @@ describe("bin/loop-ci-status", () => {
       workflows([5]);
 
       const result = run({
-        rules: "CodeQL",
+        rules: rulesetLines([{ context: "CodeQL" }]),
         checks: [
           { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
           { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
@@ -874,7 +907,7 @@ describe("bin/loop-ci-status", () => {
 
       const result = run({
         fingerprint: true,
-        rules: "alpha",
+        rules: rulesetLines([{ context: "alpha" }]),
         checks: [
           { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
           { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
@@ -893,7 +926,7 @@ describe("bin/loop-ci-status", () => {
 
       const failing = run({
         fingerprint: true,
-        rules: "CodeQL",
+        rules: rulesetLines([{ context: "CodeQL" }]),
         checks: [
           { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
           { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
@@ -902,7 +935,7 @@ describe("bin/loop-ci-status", () => {
       });
       const passing = run({
         fingerprint: true,
-        rules: "CodeQL",
+        rules: rulesetLines([{ context: "CodeQL" }]),
         checks: [
           { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
           { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
@@ -928,7 +961,7 @@ describe("bin/loop-ci-status", () => {
 
       const result = run({
         base: "feat/583-paint-the-board",
-        rules: "CodeQL",
+        rules: rulesetLines([{ context: "CodeQL" }]),
         checks: [
           { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
           { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
@@ -941,6 +974,92 @@ describe("bin/loop-ci-status", () => {
       expect(calls, "`/` を繋いだままにしている").toContain(
         "rules/branches/feat%2F583-paint-the-board",
       );
+    });
+
+    it("ruleset が App を指していれば、その App の check を見る", () => {
+      // **ruleset は「どの App が出した check か」まで指す**（#610。`integration_id`）。
+      // **この repo は全件に付いている**（実測: Actions=15368 / CodeQL=57789）。
+      //
+      // **名前で最初の一致を採ると、同名で別 App のものを数える**——**指された App の
+      // ほうが落ちていても、別 App の成功を見て通る。**
+      workflows([5]);
+
+      const result = run({
+        rules: rulesetLines([{ context: "CodeQL", app: 57_789 }]),
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          // **同じ名前で、別の App のものが先に並ぶ**（**成功している**）
+          { name: "CodeQL", status: "completed", conclusion: "success", startedAgo: 10, appId: 1 },
+          {
+            name: "CodeQL",
+            status: "completed",
+            conclusion: "failure",
+            startedAgo: 10,
+            appId: 57_789,
+          },
+        ],
+      });
+
+      expect(result.status, "別 App の成功を数えている").toBe(1);
+    });
+
+    it("両方に在る名前にも、App の指定が効く", () => {
+      // **重なる名前がある**（実測で 6 件）。**workflow から導いた側は発行元を知らない**
+      // ——**ruleset のほうが強い**ので、**同じ名前なら指定を足す。**
+      // **足さないと、両方に在る名前だけが素通りする**（**変異で見つけた**）。
+      workflows([5]);
+
+      const result = run({
+        rules: rulesetLines([{ context: "alpha", app: 15_368 }]),
+        checks: [
+          // **別の App のものが先に並ぶ**（**成功している**）
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10, appId: 1 },
+          {
+            name: "alpha",
+            status: "completed",
+            conclusion: "failure",
+            startedAgo: 10,
+            appId: 15_368,
+          },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "重なる名前に指定が効いていない").toBe(1);
+    });
+
+    it("`integration_id` が無ければ、名前で見る", () => {
+      // **GitHub 側で任意**である（#610）——**無いときに「一致しない」へ倒すと、
+      // 付けていない ruleset で全部が「作られていない」になる。**
+      workflows([5]);
+
+      const result = run({
+        rules: rulesetLines([{ context: "CodeQL" }]),
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "CodeQL", status: "completed", conclusion: "success", startedAgo: 10, appId: 1 },
+        ],
+      });
+
+      expect(result.status, "App の指定が無いのに弾いている").toBe(0);
+    });
+
+    it("workflow から導いた側は、App を問わない", () => {
+      // **ruleset に無い名前**（`database policies` / `fixup limit basis`）**は、
+      // 発行元の指定を持たない**——**そこへ App の縛りを持ち込むと、
+      // ruleset に載っていない検査が全部「作られていない」になる。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10, appId: 1 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10, appId: 2 },
+        ],
+      });
+
+      expect(result.status, result.stderr).toBe(0);
     });
 
     it("ruleset を読めなければ、判定しない", () => {

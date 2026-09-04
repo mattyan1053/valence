@@ -302,17 +302,40 @@ encoded_base="${base_ref//%/%25}"
 encoded_base="${encoded_base//\#/%23}"
 encoded_base="${encoded_base//\//%2F}"
 if ! ruleset_required="$(gh api "repos/{owner}/{repo}/rules/branches/$encoded_base" \
-  --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+  --jq ".[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[] \
+    | \"\(.context)$FIELD\(.integration_id // \"\")\"" \
   2>/dev/null)"; then
   echo "[FAIL] $base_ref の branch protection を読めません（ゲートが GitHub と食い違います）" >&2
   exit 2
 fi
-while IFS= read -r name; do
+
+# **ruleset は「どの App が出した check か」まで指す** (#610)。**`integration_id`。**
+# **実測**: **この repo は全件に付いている**（Actions=15368 / CodeQL=57789）。
+#
+# **名前で最初の一致を採ると、同名で別 App のものを数える**——**指された App のほうが
+# 落ちていても、別 App の成功を見て通る。** **GitHub はマージを拒否するのに、である。**
+#
+# **並びで持つ。** **`required` と同じ位置**が、その名前の発行元である
+# （**空は「どの App でもよい」**）。**連想配列にしない**——**名前は PR 側で決められる**
+# ので、**添字に使うと `[` を含む名前で崩れる。**
+required_app=()
+for _known in "${required[@]}"; do
+  required_app+=("")
+done
+while IFS="$FIELD" read -r name app_id; do
   [[ -n ${name//[[:space:]]/} ]] || continue
-  for known in "${required[@]}"; do
-    [[ $known == "$name" ]] && continue 2
+  matched=0
+  for index in "${!required[@]}"; do
+    [[ ${required[index]} == "$name" ]] || continue
+    # **ruleset のほうが強い。** **workflow から導いた側は発行元を知らない**ので、
+    # **同じ名前が両方に在るなら、指定を足す**——**GitHub と同じ厳しさになる。**
+    required_app[index]="$app_id"
+    matched=1
+    break
   done
+  ((matched == 1)) && continue
   required+=("$name")
+  required_app+=("$app_id")
 done <<<"$ruleset_required"
 
 # **`gh pr checks` を使わない。** **`bucket` は `status` から導かれる**ので、
@@ -322,7 +345,7 @@ done <<<"$ruleset_required"
 # **PR 側で決められる**——区切りを含む名前で行を増やされないようにする
 # (`bin/loop-gate` と同じ判断。**復号はしない**)。
 if ! checks_out="$(gh api --paginate "repos/{owner}/{repo}/commits/$head_sha/check-runs" \
-  --jq ".check_runs[]? | \"\\(.name | @base64)$FIELD\\(.status)$FIELD\\(.conclusion // \"\")$FIELD\\(.started_at // \"\")\"" \
+  --jq ".check_runs[]? | \"\\(.name | @base64)$FIELD\\(.status)$FIELD\\(.conclusion // \"\")$FIELD\\(.started_at // \"\")$FIELD\\(.app.id // \"\")\"" \
   2>/dev/null)"; then
   echo "[FAIL] PR #$PR の check-runs を取得できません" >&2
   exit 2
@@ -425,7 +448,11 @@ missing=()
 bad=()
 waiting=()
 overdue=()
-for name in "${required[@]}"; do
+for required_index in "${!required[@]}"; do
+  name="${required[required_index]}"
+  # **その名前を出すべき App** (#610)。**空なら、どの App でもよい**
+  # ——**`integration_id` は GitHub 側で任意**で、**workflow から導いた側は持たない。**
+  want_app="${required_app[required_index]-}"
   # 比較する側も同じ符号化に揃える。base64 は 76 桁で折り返す実装があるので改行を落とす。
   if ! want="$(printf '%s' "$name" | base64 | tr -d '\n')" || [[ -z $want ]]; then
     echo "[FAIL] 必須チェック名を符号化できません: $name" >&2
@@ -435,8 +462,12 @@ for name in "${required[@]}"; do
   status=""
   conclusion=""
   started=""
-  while IFS="$FIELD" read -r got_name got_status got_conclusion got_started; do
+  while IFS="$FIELD" read -r got_name got_status got_conclusion got_started got_app; do
     [[ $got_name == "$want" ]] || continue
+    # **指された App のものだけを見る。** **読めない（空）なら、そこは飛ばす**
+    # ——**判定不能を「一致した」へ倒さない**（**倒すと、指定した意味が消える**）。
+    # **飛ばした結果は「作られていない」**で、**そちらは止まる側**である。
+    [[ -z $want_app || $got_app == "$want_app" ]] || continue
     found=1
     status="$got_status"
     conclusion="$got_conclusion"
