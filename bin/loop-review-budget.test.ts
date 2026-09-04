@@ -47,7 +47,14 @@ type State = {
   reviewsExit?: number;
 };
 
-type Run = { status: number; stdout: string; stderr: string; calls: string[] };
+type Run = {
+  status: number;
+  stdout: string;
+  stderr: string;
+  calls: string[];
+  /** **隣の `bin/loop-review-head` が呼ばれたか**（#615 のレビュー）。 */
+  recorded: boolean;
+};
 
 /**
  * 偽の `bin/loop-review-commits`。
@@ -132,6 +139,16 @@ function run(state: State, env: Record<string, string> = {}): Run {
     mode: 0o755,
   });
 
+  // **副作用の先を、隣に置く**（#615 のレビュー）。**判定器が呼んだかどうかは、
+  // 呼ばれる側を置かないと観測できない**——**無いものを呼んでも、`set -e` が無いので
+  // 判定器はそのまま先へ進み、どこにも跡が残らない。**
+  const recordLog = join(dir, "recorded.log");
+  writeFileSync(
+    join(bin, "loop-review-head"),
+    `#!/usr/bin/env bash\necho "$*" >> ${JSON.stringify(recordLog)}\n`,
+    { mode: 0o755 },
+  );
+
   const result = spawnSync(script, ["12"], {
     encoding: "utf8",
     env: { ...process.env, PATH: path, ...env },
@@ -140,8 +157,15 @@ function run(state: State, env: Record<string, string> = {}): Run {
   const calls = existsSync(callLog)
     ? readFileSync(callLog, "utf8").split("\n").filter(Boolean)
     : [];
+  const recorded = existsSync(recordLog);
   rmSync(dir, { recursive: true, force: true });
-  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr, calls };
+  return {
+    status: result.status ?? -1,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    calls,
+    recorded,
+  };
 }
 
 /** いまから `minutes` 分前の時刻。**猶予の境目を跨がせるのに使う。** */
@@ -314,12 +338,14 @@ describe("bin/loop-review-budget", () => {
       // **副作用を判定器へ入れない**（完了条件）。**ゲートの内側から呼んでも、
       // 投げてもいない要求の記録が残ってはいけない。**
       //
-      // **隣を呼んでいないことで見る**——**記録は `bin/loop-review-head` が持つ**ので、
-      // **呼んでいなければ積みようがない。**
+      // **呼ばれる側を隣に置いて見る**（#615 のレビュー）。**前は偽の
+      // `loop-review-commits` の引数を見ていた**——**そこに `loop-review-head` は
+      // 一度も現れない**ので、**判定器へ呼び出しを足しても緑のまま**だった
+      // （**無いものを呼んでも、`set -e` が無いので判定器は先へ進む**）。
       const budget = run({ reviews: [], createdAt: minutesAgo(60) });
 
       expect(budget.status).toBe(0);
-      expect(budget.calls.join("\n"), "判定器が記録を積んでいる").not.toContain("loop-review-head");
+      expect(budget.recorded, "判定器が記録を積んでいる").toBe(false);
     });
   });
 
