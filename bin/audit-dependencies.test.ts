@@ -44,7 +44,10 @@ afterEach(() => {
  * ——**`--audit-level` を落として既定（`low`）へ戻しても**、**`--json` を落として
  * 正常な監査まで registry 障害扱いにしても**、**この試験は緑のままだった。**
  */
-function withPnpm(stdout: string, status: number): { bin: string; args: () => string } {
+function withPnpm(
+  stdout: string,
+  status: number,
+): { bin: string; args: () => string; words: () => string[] } {
   const dir = mkdtempSync(join(tmpdir(), "audit-deps-"));
   sandboxes.push(dir);
   mkdirSync(join(dir, "bin"), { recursive: true });
@@ -58,6 +61,12 @@ function withPnpm(stdout: string, status: number): { bin: string; args: () => st
   return {
     bin: join(dir, "bin"),
     args: () => (existsSync(argsLog) ? readFileSync(argsLog, "utf8") : ""),
+    /**
+     * **語に割ったもの**（#620 のレビュー）。**`toContain` は途中一致**なので、
+     * **`--config.fetch-retries=1` は `=10` や `=100` でも通る**
+     * ——**上限が崩れても気づけない。**
+     */
+    words: () => (existsSync(argsLog) ? readFileSync(argsLog, "utf8").split(/\s+/) : []),
   };
 }
 
@@ -87,7 +96,8 @@ describe("依存の脆弱性を見る", () => {
 
     run(pnpm);
 
-    expect(pnpm.args(), "段を渡していない").toContain("--audit-level moderate");
+    expect(pnpm.words(), "段を渡していない").toContain("--audit-level");
+    expect(pnpm.words(), "段を渡していない").toContain("moderate");
   });
 
   it("報告の形で受け取っている", () => {
@@ -97,7 +107,7 @@ describe("依存の脆弱性を見る", () => {
 
     run(pnpm);
 
-    expect(pnpm.args(), "報告で受け取っていない").toContain("--json");
+    expect(pnpm.words(), "報告で受け取っていない").toContain("--json");
   });
 
   it("試行の回数を絞っている", () => {
@@ -112,7 +122,7 @@ describe("依存の脆弱性を見る", () => {
 
     run(pnpm);
 
-    expect(pnpm.args(), "試行の回数を渡していない").toContain("--config.fetch-retries=1");
+    expect(pnpm.words(), "試行の回数を渡していない").toContain("--config.fetch-retries=1");
   });
 
   it("見つかったら、止める", () => {
