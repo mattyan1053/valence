@@ -152,6 +152,14 @@ const WATCHED: { name: string; pattern: RegExp; use: "allowed" | "absent"; why: 
   },
   { name: "date -u", pattern: /\bdate\s+-u\b/, use: "allowed", why: "記録の時刻を UTC で揃える" },
   {
+    name: "timeout",
+    // **語だけでは広すぎる**——**`timeout` は 13 行に出るが、外の道具として
+    // 呼んでいるのは 1 行だけ**（残りは変数名・`--timeout`・説明）。**数えてから書いた。**
+    pattern: /(?<!-)\btimeout\s/,
+    use: "allowed",
+    why: "pnpm audit を壁時計で打ち切る。再試行の回数だけでは時間の上限にならない（#620）",
+  },
+  {
     name: "stat -c",
     pattern: /\bstat\s+-c\b/,
     use: "allowed",

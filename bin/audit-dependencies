@@ -31,6 +31,16 @@ set -uo pipefail
 
 readonly LEVEL="${AUDIT_LEVEL:-moderate}"
 
+# **壁時計の上限** (#620 のレビュー)。**`fetch-retries` は回数の上限で、
+# 時間の上限ではない**——**registry がヘッダーだけ返して本文を止めれば、
+# 1 回の試行が何分でも続く**（**`fetch-timeout` もコマンド全体には掛からない**）。
+# **そのままだとジョブごと切られ、下の `exit 2` がまた出ない。**
+#
+# **値は測って決めた**——**正常時でも 74〜133 秒**（**3 回中 2 回は再試行を
+# 1 度挟む**）、**切られた周回で監査に与えられていたのは 198 秒**（#617）。
+# **その間に置く。**
+readonly TIMEOUT_SEC=180
+
 # **試行を 1 回に絞る** (#617)。**既定（2 回）は、届かないときに最悪 4 分 10 秒**
 # ——**1 回 60 秒（`fetch-timeout` の既定）× 3 回 ＋ 待ち 10 秒 ＋ 60 秒**である。
 # **CI の実測もこの刻みだった**（**+60 秒で 1 回目の WARN、+130 秒で 2 回目、
@@ -42,9 +52,17 @@ readonly LEVEL="${AUDIT_LEVEL:-moderate}"
 #
 # **待つ回数を減らすぶん、瞬きのような障害では落ちやすくなる**——**そのときは
 # `exit 2` で「registry へ届かなかった」と言うので、押し直せば済むと分かる。**
-report="$(pnpm audit --audit-level "$LEVEL" --json --ignore-registry-errors \
-  --config.fetch-retries=1 2>/dev/null)"
+report="$(timeout "$TIMEOUT_SEC" pnpm audit --audit-level "$LEVEL" --json \
+  --ignore-registry-errors --config.fetch-retries=1 2>/dev/null)"
 audited=$?
+
+# **打ち切ったぶんは registry の側へ倒す** (#620 のレビュー)——**`timeout` は
+# 124 を返す**。**「脆弱性が見つかった」と同じ顔にしない。**
+if ((audited == 124)); then
+  echo "[FAIL] npm registry へ ${TIMEOUT_SEC} 秒で届かず、脆弱性を判定できていません" >&2
+  echo "       依存に問題があるとは言っていません。時間をおいて打ち直してください" >&2
+  exit 2
+fi
 
 # **報告かどうかだけを見る。** **中身の解釈は `pnpm` に任せる**（終了コードが答えである）。
 if ! printf '%s' "$report" | node -e '

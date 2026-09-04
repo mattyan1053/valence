@@ -52,6 +52,18 @@ function withPnpm(
   sandboxes.push(dir);
   mkdirSync(join(dir, "bin"), { recursive: true });
   const argsLog = join(dir, "args");
+  // **偽の `timeout`**（#620 のレビュー 2 周目）。**引数を書き残し、
+  // `TIMEOUT_EXIT` があればその値で返す**——**壁時計を待たずに測るため。**
+  const clock = join(dir, "bin", "timeout");
+  writeFileSync(
+    clock,
+    `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >>${JSON.stringify(argsLog)}\n` +
+      // **打ち切られても、途中までの出力は出ている**——**報告として読めるまま
+      // 124 で終わる形**を作る。**走らせずに返すと、出力が空になり「形が違う」側で
+      // 落ちる**ので、**124 の分岐に届かない**（変異が緑のままだった）。
+      `shift\n"$@"\ncode=$?\n[[ -z \${TIMEOUT_EXIT:-} ]] || exit "$TIMEOUT_EXIT"\nexit "$code"\n`,
+  );
+  chmodSync(clock, 0o755);
   const stub = join(dir, "bin", "pnpm");
   writeFileSync(
     stub,
@@ -75,10 +87,10 @@ const REPORT = JSON.stringify({
   metadata: { vulnerabilities: { moderate: 0 }, totalDependencies: 248 },
 });
 
-function run(pnpm: { bin: string }) {
+function run(pnpm: { bin: string }, env: Record<string, string> = {}) {
   return spawnSync(SCRIPT, [], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${pnpm.bin}:${process.env.PATH}` },
+    env: { ...process.env, ...env, PATH: `${pnpm.bin}:${process.env.PATH}` },
   });
 }
 
@@ -123,6 +135,33 @@ describe("依存の脆弱性を見る", () => {
     run(pnpm);
 
     expect(pnpm.words(), "試行の回数を渡していない").toContain("--config.fetch-retries=1");
+  });
+
+  it("壁時計で打ち切っている", () => {
+    // **`fetch-retries` は回数の上限で、壁時計の上限ではない**（#620 のレビュー）
+    // ——**registry がヘッダーだけ返して本文を止めれば、1 回の試行が何分でも続く。**
+    // **`fetch-timeout` もコマンド全体の上限ではない。**
+    //
+    // **上限は測って決めた**——**正常時でも 74〜133 秒**（**3 回中 2 回は再試行を
+    // 1 度挟む**）、**切られた周回で監査に与えられていたのは 198 秒。**
+    const pnpm = withPnpm(REPORT, 0);
+
+    run(pnpm);
+
+    expect(pnpm.words(), "壁時計で打ち切っていない").toContain("timeout");
+    expect(pnpm.words(), "上限を渡していない").toContain("180");
+  });
+
+  it("打ち切られたら、脆弱性と混ぜずに止める", () => {
+    // **`timeout` は打ち切ったとき 124 を返す**——**「脆弱性が見つかった」と
+    // 同じ顔にしない。** **判定できなかったぶんは registry の側である。**
+    const pnpm = withPnpm(REPORT, 0);
+
+    const done = run(pnpm, { TIMEOUT_EXIT: "124" });
+
+    expect(done.status, "打ち切られたのに通している").toBe(2);
+    expect(done.stderr, "届かなかったと言っていない").toContain("registry");
+    expect(done.stderr, "脆弱性と読めてしまう").not.toContain("脆弱性が見つかりました");
   });
 
   it("見つかったら、止める", () => {
