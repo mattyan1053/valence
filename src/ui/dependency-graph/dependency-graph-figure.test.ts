@@ -130,8 +130,22 @@ function markup(
   return markupFor([1, 2], [{ dependent: 2, dependsOn: 1 }], marks);
 }
 
-/** **危なさの段が、これで全部**である。**足したらここで型検査が落ちる。** */
-const EVERY_TIER: readonly RiskTier[] = ["fast-track", "needs-review", "high-risk"];
+/**
+ * **危なさの段が、これで全部**である。**足したらここで型検査が落ちる。**
+ *
+ * **`readonly RiskTier[]` では落ちない**（#585 のレビュー）——**あれは「並んでいる
+ * ものが union に属するか」しか見ない**ので、**段を足しても型は通り**、
+ * **`everyTierMarkup()` は新しい段を描かないまま緑**になる。
+ * **色が片方のテーマにしか無くても気づけない。**
+ *
+ * **`Record<RiskTier, …>` の鍵で並べる**——**足りない鍵は型検査が落とす。**
+ */
+const EVERY_TIER_KEY: Record<RiskTier, true> = {
+  "fast-track": true,
+  "needs-review": true,
+  "high-risk": true,
+};
+const EVERY_TIER = Object.keys(EVERY_TIER_KEY) as readonly RiskTier[];
 
 /**
  * **すべての危なさが 1 つずつ出ている図**（#585 のレビュー）。

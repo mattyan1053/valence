@@ -518,16 +518,26 @@ describe("操作が横に並ぶ（#585 のレビュー）", () => {
   /**
    * **その `<form>` を包んでいる器**の class。
    *
-   * **直前に開いた要素を見る**——**器は `<form>` のすぐ外側に置く**ので、
-   * **間に別の開始タグがあれば、それは包んでいない**（**そのときは空が返り、
-   * 下の判定が落ちる**）。
+   * **開いたまま残っているものだけを見る**（#585 のレビュー）。**「直前に開いた要素」
+   * だと、閉じ済みの器を返す**——**空の `ActionRow` を残して中身を後ろへ移すと、
+   * 閉じた器の class が返り、判定は全部通る**（**form は縦に積まれたまま**）。
+   *
+   * **開始と終了を数えて、まだ閉じていない いちばん内側**を返す。
+   * **1 つも開いていなければ空が返り、下の判定が落ちる。**
    */
   function wrapperOf(markup: string): string {
     const at = markup.indexOf("<form");
     expect(at, "操作が出ていない").toBeGreaterThanOrEqual(0);
     const before = markup.slice(0, at);
-    const opened = [...before.matchAll(/<div class="([^"]*)">/g)];
-    return opened[opened.length - 1]?.[1] ?? "";
+    const open: string[] = [];
+    for (const tag of before.matchAll(/<div(?:\s+class="([^"]*)")?\s*>|<\/div>/g)) {
+      if (tag[0] === "</div>") {
+        open.pop();
+      } else {
+        open.push(tag[1] ?? "");
+      }
+    }
+    return open[open.length - 1] ?? "";
   }
 
   it("押すものは、横に並ぶ", () => {
@@ -561,7 +571,14 @@ describe("操作が横に並ぶ（#585 のレビュー）", () => {
       }),
     );
 
-    expect(wrapperOf(markup), "押すものの幅を揃えていない").toMatch(/min-w-/);
+    // **子の button を名指しする variant まで見る**（#585 のレビュー）。
+    // **`min-w-` がどこかに 1 度出れば通る形だと、`min-w-24` へ変えても緑**
+    // ——**最小幅が付くのは器だけ**になり、**button は文字列長ごとの幅に戻る。**
+    // **`&` は markup では実体参照になる**（`&amp;`）——**素の `&` で照合すると、
+    // 実装が正しくても落ちる。** **緩い `min-w-` のままでは、ここに気づけなかった。**
+    expect(wrapperOf(markup), "押すものの幅を揃えていない").toMatch(
+      /\[&(?:amp;)?_button\]:min-w-\d/,
+    );
   });
 
   it("状態と操作が、同じ器に入る", () => {

@@ -74,7 +74,7 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
     // 読める形を、試験が守っている。**
     <details className="text-sm">
       {/* **`summary` に `display:flex` を掛けない**——**開閉の三角（marker）が消える**。
-          **間隔は文字の区切りが持っている**ので、class は要らない。 */}
+       **間隔は文字の区切りが持っている**ので、class は要らない。 */}
       <summary>
         <strong className="font-semibold">{text.label}</strong>
         {ciNeedsAttention && (
