@@ -126,8 +126,10 @@ function PullRequestRow({
       <div className="flex flex-wrap items-baseline gap-2">
         {/* **番号とタイトルを 1 つのリンクにする**（#621）——**タイトルが取れなくても
             飛べる**（**取れなかったぶんは `undefined` で来る**。#542）。
-            **強弱は #583 のものを引き継ぐ**——**行の主役は変わっていない。** */}
-        <a className="font-mono font-bold" href={url}>
+            **強弱は #583 のものを引き継ぐ**——**行の主役は変わっていない。**
+            **`underline` は「押せる」を見せるぶん**（#622 のレビュー）——
+            **Preflight が当たるので、書かなければ本文と同じ顔になる。** */}
+        <a className="font-mono font-bold underline" href={url}>
           #{pullRequest.number}
           {title === undefined ? "" : ` ${title}`}
         </a>
