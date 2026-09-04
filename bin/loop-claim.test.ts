@@ -1054,7 +1054,11 @@ describe("bin/loop-claim", () => {
      * **`race` が在れば、最初の `edit` の直前に master の遷移を差し込む**
      * ——**時間ではなく順序で再現する**（**待って起きなければ、変異が赤くならない**）。
      */
-    function withRacingGh(labels: string[], moved: string[]): void {
+    function withRacingGh(
+      labels: string[],
+      moved: string[],
+      undo: "works" | "fails" | "noop" = "works",
+    ): void {
       const race = join(repo, "race.marker");
       writeFileSync(state, `${labels.join("\n")}\n`);
       writeFileSync(race, "");
@@ -1072,6 +1076,15 @@ describe("bin/loop-claim", () => {
           `    printf '%s\\n' ${moved.map((l) => JSON.stringify(l)).join(" ")} >${JSON.stringify(state)}`,
           "  fi",
           '  remove=""; add=""',
+          // **取り消しだけを別扱いにする**（#611 のレビュー）——**`--add-label` が無い
+          // `edit` が取り消しである。** **落ちる／効かない、の 2 通りを作る。**
+          ...(undo === "works"
+            ? []
+            : [
+                '  if [[ $* != *"--add-label"* ]]; then',
+                undo === "fails" ? "    exit 1" : "    exit 0",
+                "  fi",
+              ]),
           "  while (($# > 0)); do",
           '    case "$1" in',
           '      --remove-label) remove="$2"; shift 2 ;;',
@@ -1129,9 +1142,36 @@ describe("bin/loop-claim", () => {
 
       const done = run(["release-issue", "42"]);
 
-      expect(done.status, "返せたことにしている").not.toBe(0);
+      // **claim は返せている**——**盤面も正しい**（`blocked` だけ）。**言うことだけが残る。**
+      expect(done.status, `返せていない: ${done.stderr}`).toBe(0);
       expect(labelState(), "止められた Issue が ready に並ぶ").not.toContain("ready");
       expect(labelState(), "master が付けた blocked を消している").toContain("blocked");
+      expect(done.stderr, "何が起きたか言っていない").toContain("blocked");
+    });
+
+    it("取り消しが打てなければ、成功と同じ顔にしない", () => {
+      // **`gh` はどんな理由でも 1 を返す**（`gh help exit-codes`）——**取り消しが
+      // 落ちた周回と、取り消せた周回を同じ終了コードにすると**、**`blocked` と
+      // `in-progress` が並んだまま、claim も無く、`[FAIL]` も出ない。**
+      withRacingGh(["ready"], ["blocked"], "fails");
+      startRound(repo);
+
+      const done = run(["take", "42"]);
+
+      expect(done.status, "取り消せていないのに譲っている").toBe(2);
+      expect(done.stderr, "手で直す必要があると言っていない").toContain("[FAIL]");
+    });
+
+    it("取り消しが通っても、効いていなければ言う", () => {
+      // **`gh` は通らなくても 0 を返しうる**（`move_label` が本体で同じ理由から
+      // 読み直している）——**取り消しの側だけ確かめないのは片手落ちである。**
+      withRacingGh(["ready"], ["blocked"], "noop");
+      startRound(repo);
+
+      const done = run(["take", "42"]);
+
+      expect(done.status, "効いていないのに譲っている").toBe(2);
+      expect(done.stderr, "手で直す必要があると言っていない").toContain("[FAIL]");
     });
   });
 
