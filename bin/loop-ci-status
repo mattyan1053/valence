@@ -566,7 +566,12 @@ for required_index in "${!required[@]}"; do
     continue
   fi
   if ((now_epoch - clock_epoch > bound * 60)); then
-    overdue+=("$name=${conclusion:-$status}")
+    # **使った幅を添える** (#619 のレビュー 2 周目)。**判定に使った数と、出す文が
+    # 食い違わない**ため——**予算が空のまま `bound` だけを補うと、文のほうは
+    # 空の予算を出し**、**読む側は workflow の予算超過だと読む。**
+    # **検査ごとに違いうる**（`cancelled` は既定の猶予、走っているものは予算）ので、
+    # **1 つにまとめない。**
+    overdue+=("$name=${conclusion:-$status}(${bound} 分)")
   else
     waiting+=("$name=${conclusion:-$status}")
   fi
@@ -680,7 +685,8 @@ if ((${#bad[@]} > 0)); then
   exit 1
 fi
 if ((${#overdue[@]} > 0)); then
-  echo "決着しないまま ${budget_min} 分を超えました: ${overdue[*]}"
+  # **幅は検査ごとに添えてある**（上）——**ここで 1 つの数を出さない。**
+  echo "決着しないまま猶予を超えました: ${overdue[*]}"
   exit 4
 fi
 if ((${#waiting[@]} > 0)); then

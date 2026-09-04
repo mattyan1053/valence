@@ -984,6 +984,38 @@ describe("bin/loop-ci-status", () => {
       expect(result.status, "終わった時刻を時計にしていない").toBe(3);
     });
 
+    it("使った猶予を、そのまま報告する", () => {
+      // **判定に使った幅と、出す文が食い違わない**（#619 のレビュー 2 周目）。
+      // **予算が空のまま `bound` だけを補うと、文のほうは空の予算を出す**
+      // ——**「決着しないまま  分を超えました」**になり、
+      // **読む側は workflow の予算超過だと読む。**
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 3600 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status).toBe(4);
+      // **既定は 10 分**（`MISSING_GRACE_MIN`）——**そちらを使ったと言う**
+      expect(result.stdout, "使った猶予を出していない").toMatch(/alpha[^\n]*10 分/);
+    });
+
+    it("予算で測ったときは、その予算を報告する", () => {
+      // **もう片方も見る**——**片方だけだと、いつも同じ数を出す形でも緑になる。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "in_progress", startedAgo: 3600 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status).toBe(4);
+      expect(result.stdout, "予算を出していない").toMatch(/alpha[^\n]*5 分/);
+    });
+
     it("時計が 1 つも無ければ、人へ渡す", () => {
       // **判定不能を「待つ」へ倒さない**——**待ち続けても、誰も来ない。**
       workflows([5]);
