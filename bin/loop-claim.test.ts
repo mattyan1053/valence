@@ -1033,6 +1033,148 @@ describe("bin/loop-claim", () => {
     });
   });
 
+  /**
+   * **読んでから書くまでの間に、別の役が動かせる**（#593。#592 のレビューで外出し）。
+   *
+   * **ローカルの `flock` は届かない**——**master は `gh issue edit` を直接打つ**
+   * （**`loop/procedure/master.md` に 13 箇所ある**）。**GitHub の label に
+   * 条件付き更新は無い**——**返る ETag は弱い検証子（`W/"…"`）で、
+   * `If-Match` の前提条件には使えない。**
+   *
+   * **打てるのは「書いたあとに、想定外の label が増えていないかを見る」側**である。
+   *
+   * **見るのは `blocked` だけ**——**「ループは触らない」を意味する label** で、
+   * **この script は既にそれを見ている**（`idle` と no-work の数え方）。
+   * **他の label は見ない**（**語彙をここへ写すと、3 箇所目になる**。`AGENTS.md` §5）。
+   */
+  describe("読んでから書くまでの間に、別の役が動かしたら", () => {
+    /**
+     * **`gh issue edit` に本物と同じ足し引きをさせる偽の `gh`。**
+     *
+     * **`race` が在れば、最初の `edit` の直前に master の遷移を差し込む**
+     * ——**時間ではなく順序で再現する**（**待って起きなければ、変異が赤くならない**）。
+     */
+    function withRacingGh(
+      labels: string[],
+      moved: string[],
+      undo: "works" | "fails" | "noop" = "works",
+    ): void {
+      const race = join(repo, "race.marker");
+      writeFileSync(state, `${labels.join("\n")}\n`);
+      writeFileSync(race, "");
+      writeFileSync(
+        join(path, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          'if [[ $* == *"issue view"* ]]; then',
+          `  cat ${JSON.stringify(state)}`,
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"issue edit"* ]]; then',
+          `  if [[ -e ${JSON.stringify(race)} ]]; then`,
+          `    rm -f ${JSON.stringify(race)}`,
+          `    printf '%s\\n' ${moved.map((l) => JSON.stringify(l)).join(" ")} >${JSON.stringify(state)}`,
+          "  fi",
+          '  remove=""; add=""',
+          // **取り消しだけを別扱いにする**（#611 のレビュー）——**`--add-label` が無い
+          // `edit` が取り消しである。** **落ちる／効かない、の 2 通りを作る。**
+          ...(undo === "works"
+            ? []
+            : [
+                '  if [[ $* != *"--add-label"* ]]; then',
+                undo === "fails" ? "    exit 1" : "    exit 0",
+                "  fi",
+              ]),
+          "  while (($# > 0)); do",
+          '    case "$1" in',
+          '      --remove-label) remove="$2"; shift 2 ;;',
+          '      --add-label) add="$2"; shift 2 ;;',
+          "      *) shift ;;",
+          "    esac",
+          "  done",
+          `  kept="$(grep -v -x -F "$remove" ${JSON.stringify(state)} || true)"`,
+          `  { [[ -z $kept ]] || printf '%s\\n' "$kept"; } >${JSON.stringify(state)}`,
+          `  if [[ -n $add ]] && ! grep -q -x -F "$add" ${JSON.stringify(state)}; then`,
+          `    printf '%s\\n' "$add" >>${JSON.stringify(state)}`,
+          "  fi",
+          "  exit 0",
+          "fi",
+          'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+          "exit 2",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+    }
+
+    function startRound(cwd: string): string {
+      const result = spawnSync(LEASE, ["acquire", "worker", workerStamp()], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    }
+
+    function labelState(): string {
+      return readFileSync(state, "utf8");
+    }
+
+    it("take は、blocked にされた Issue を着手中にしない", () => {
+      // **`ready` を読んだ直後に master が `ready` → `blocked` へ動かす。**
+      withRacingGh(["ready"], ["blocked"]);
+      startRound(repo);
+
+      const done = run(["take", "42"]);
+
+      expect(done.status, "取れたことにしている").not.toBe(0);
+      expect(labelState(), "止められた Issue を着手中にしている").not.toContain("in-progress");
+      expect(labelState(), "master が付けた blocked を消している").toContain("blocked");
+    });
+
+    it("release-issue は、blocked にされた Issue を ready へ戻さない", () => {
+      // **これが指摘の形**である——**`in-progress` を読んだ直後に master が
+      // `in-progress` → `blocked` へ動かすと、返却が `ready` を足して同時保有になる。**
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      startRound(repo);
+      expect(run(["take", "42"]).status, "取れていない").toBe(0);
+      withRacingGh(["in-progress"], ["blocked"]);
+
+      const done = run(["release-issue", "42"]);
+
+      // **claim は返せている**——**盤面も正しい**（`blocked` だけ）。**言うことだけが残る。**
+      expect(done.status, `返せていない: ${done.stderr}`).toBe(0);
+      expect(labelState(), "止められた Issue が ready に並ぶ").not.toContain("ready");
+      expect(labelState(), "master が付けた blocked を消している").toContain("blocked");
+      expect(done.stderr, "何が起きたか言っていない").toContain("blocked");
+    });
+
+    it("取り消しが打てなければ、成功と同じ顔にしない", () => {
+      // **`gh` はどんな理由でも 1 を返す**（`gh help exit-codes`）——**取り消しが
+      // 落ちた周回と、取り消せた周回を同じ終了コードにすると**、**`blocked` と
+      // `in-progress` が並んだまま、claim も無く、`[FAIL]` も出ない。**
+      withRacingGh(["ready"], ["blocked"], "fails");
+      startRound(repo);
+
+      const done = run(["take", "42"]);
+
+      expect(done.status, "取り消せていないのに譲っている").toBe(2);
+      expect(done.stderr, "手で直す必要があると言っていない").toContain("[FAIL]");
+    });
+
+    it("取り消しが通っても、効いていなければ言う", () => {
+      // **`gh` は通らなくても 0 を返しうる**（`move_label` が本体で同じ理由から
+      // 読み直している）——**取り消しの側だけ確かめないのは片手落ちである。**
+      withRacingGh(["ready"], ["blocked"], "noop");
+      startRound(repo);
+
+      const done = run(["take", "42"]);
+
+      expect(done.status, "効いていないのに譲っている").toBe(2);
+      expect(done.stderr, "手で直す必要があると言っていない").toContain("[FAIL]");
+    });
+  });
+
   describe("mine — その PR を自分の作業場が持っているか", () => {
     it("自分が取った PR は、自分のもの", () => {
       withGh({ labels: [] });
