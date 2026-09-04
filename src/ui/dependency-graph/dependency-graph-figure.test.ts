@@ -72,15 +72,33 @@ function themeVariables(): { light: Set<string>; dark: Set<string> } {
  * **そこを混ぜると「宣言されている」の意味がぼやける。**
  */
 function declaredIn(text: string): Set<string> {
+  return new Set(declarationsIn(text).keys());
+}
+
+/** **その節の `:root { … }` の宣言**（名前 → 値）。**値まで要るのは色を比べるとき。** */
+function declarationsIn(text: string): Map<string, string> {
   const clean = text.replace(/\/\*[\s\S]*?\*\//g, "");
   const at = clean.indexOf(":root");
   expect(at, ":root が無い").toBeGreaterThanOrEqual(0);
   const from = clean.indexOf("{", at);
   const to = clean.indexOf("}", from);
   expect(to, ":root が閉じていない").toBeGreaterThan(from);
-  return new Set(
-    [...clean.slice(from, to).matchAll(/(--[a-zA-Z0-9-]+)\s*:/g)].map(([, n]) => n ?? ""),
+  return new Map(
+    [...clean.slice(from, to).matchAll(/(--[a-zA-Z0-9-]+)\s*:\s*([^;]+);/g)].map(
+      ([, name, value]) => [name ?? "", (value ?? "").trim()],
+    ),
   );
+}
+
+/** **テーマごとの宣言**（名前 → 値）。 */
+function themeDeclarations(): { light: Map<string, string>; dark: Map<string, string> } {
+  const css = readFileSync(join(REPO_ROOT, "src/app/globals.css"), "utf8");
+  const darkFrom = css.indexOf("@media (prefers-color-scheme: dark)");
+  expect(darkFrom, "暗いテーマの節が globals.css に無い").toBeGreaterThanOrEqual(0);
+  return {
+    light: declarationsIn(css.slice(0, darkFrom)),
+    dark: declarationsIn(css.slice(darkFrom)),
+  };
 }
 
 /** 塗る要素。**`g` / `title` は塗らない**ので、ここには入れない。 */
@@ -314,6 +332,23 @@ describe("盤面に見た目が当たっている（#583）", () => {
     const colors = tiers.map(bandOf);
 
     expect(new Set(colors).size, "危なさの色が見分けられない").toBe(tiers.length);
+    // **参照の名前が違うだけでは足りない**（#585 のレビュー 3 周目）。
+    // **`--tier-fast` と `--tier-normal` に同じ色を書いても、ここまでは通る**
+    // ——**実際の画面では帯が同色**になり、**「色でも拾える」が消える。**
+    //
+    // **テーマごとに解く**——**明と暗で別々に一意であればよい**（**色はテーマが決める**）。
+    const themes = themeDeclarations();
+    for (const [theme, declared] of Object.entries(themes)) {
+      const resolved = colors.map((color) => {
+        const name = themeVariableOf(color);
+        expect(name, `帯の色が変数ではない: ${color}`).toBeDefined();
+        const value = declared.get(name ?? "");
+        expect(value, `${theme} に ${name} の値が無い`).toBeDefined();
+        return value;
+      });
+
+      expect(new Set(resolved).size, `${theme} で危なさの色が見分けられない`).toBe(tiers.length);
+    }
     // **段ごとに、その段の札だけを見る**（#585 のレビュー 2 周目）。
     // **3 つに同じ正規表現を当てると、`needs-review` を `すぐ` にしても通る**
     // ——**通常 Tier が fast-track と誤表示されても分からない。**
