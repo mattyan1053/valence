@@ -44,11 +44,26 @@ afterEach(() => {
  * ——**`--audit-level` を落として既定（`low`）へ戻しても**、**`--json` を落として
  * 正常な監査まで registry 障害扱いにしても**、**この試験は緑のままだった。**
  */
-function withPnpm(stdout: string, status: number): { bin: string; args: () => string } {
+function withPnpm(
+  stdout: string,
+  status: number,
+): { bin: string; args: () => string; words: () => string[] } {
   const dir = mkdtempSync(join(tmpdir(), "audit-deps-"));
   sandboxes.push(dir);
   mkdirSync(join(dir, "bin"), { recursive: true });
   const argsLog = join(dir, "args");
+  // **偽の `timeout`**（#620 のレビュー 2 周目）。**引数を書き残し、
+  // `TIMEOUT_EXIT` があればその値で返す**——**壁時計を待たずに測るため。**
+  const clock = join(dir, "bin", "timeout");
+  writeFileSync(
+    clock,
+    `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >>${JSON.stringify(argsLog)}\n` +
+      // **打ち切られても、途中までの出力は出ている**——**報告として読めるまま
+      // 124 で終わる形**を作る。**走らせずに返すと、出力が空になり「形が違う」側で
+      // 落ちる**ので、**124 の分岐に届かない**（変異が緑のままだった）。
+      `shift\n"$@"\ncode=$?\n[[ -z \${TIMEOUT_EXIT:-} ]] || exit "$TIMEOUT_EXIT"\nexit "$code"\n`,
+  );
+  chmodSync(clock, 0o755);
   const stub = join(dir, "bin", "pnpm");
   writeFileSync(
     stub,
@@ -58,6 +73,12 @@ function withPnpm(stdout: string, status: number): { bin: string; args: () => st
   return {
     bin: join(dir, "bin"),
     args: () => (existsSync(argsLog) ? readFileSync(argsLog, "utf8") : ""),
+    /**
+     * **語に割ったもの**（#620 のレビュー）。**`toContain` は途中一致**なので、
+     * **`--config.fetch-retries=1` は `=10` や `=100` でも通る**
+     * ——**上限が崩れても気づけない。**
+     */
+    words: () => (existsSync(argsLog) ? readFileSync(argsLog, "utf8").split(/\s+/) : []),
   };
 }
 
@@ -66,10 +87,10 @@ const REPORT = JSON.stringify({
   metadata: { vulnerabilities: { moderate: 0 }, totalDependencies: 248 },
 });
 
-function run(pnpm: { bin: string }) {
+function run(pnpm: { bin: string }, env: Record<string, string> = {}) {
   return spawnSync(SCRIPT, [], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${pnpm.bin}:${process.env.PATH}` },
+    env: { ...process.env, ...env, PATH: `${pnpm.bin}:${process.env.PATH}` },
   });
 }
 
@@ -87,7 +108,8 @@ describe("依存の脆弱性を見る", () => {
 
     run(pnpm);
 
-    expect(pnpm.args(), "段を渡していない").toContain("--audit-level moderate");
+    expect(pnpm.words(), "段を渡していない").toContain("--audit-level");
+    expect(pnpm.words(), "段を渡していない").toContain("moderate");
   });
 
   it("報告の形で受け取っている", () => {
@@ -97,7 +119,51 @@ describe("依存の脆弱性を見る", () => {
 
     run(pnpm);
 
-    expect(pnpm.args(), "報告で受け取っていない").toContain("--json");
+    expect(pnpm.words(), "報告で受け取っていない").toContain("--json");
+  });
+
+  it("試行の回数は、既定のままにする", () => {
+    // **時間の上限は `timeout` が持っている**（#620 のレビュー）ので、
+    // **回数を絞る理由は消えた。** **絞ると、瞬きのような障害で落ちやすくなる**
+    // ——**実測: `retries=1` を入れた枝だけが 3 回連続で落ち**、
+    // **同じ時間帯に既定の枝は通っていた**（`main` 07:01 / #618 06:55 / #583 08:12）。
+    //
+    // **既定（2 回）でも壁時計は破れない**——**60 ＋ 10 ＋ 60 ＋ 60 で 180 秒に届き**、
+    // **そこで `timeout` が切って `exit 2` を出す。** **回数は渡さない。**
+    const pnpm = withPnpm(REPORT, 0);
+
+    run(pnpm);
+
+    expect(pnpm.words(), "回数を渡している（既定に任せる）").not.toContain(
+      "--config.fetch-retries=1",
+    );
+  });
+
+  it("壁時計で打ち切っている", () => {
+    // **`fetch-retries` は回数の上限で、壁時計の上限ではない**（#620 のレビュー）
+    // ——**registry がヘッダーだけ返して本文を止めれば、1 回の試行が何分でも続く。**
+    // **`fetch-timeout` もコマンド全体の上限ではない。**
+    //
+    // **上限は測って決めた**——**正常時でも 74〜133 秒**（**3 回中 2 回は再試行を
+    // 1 度挟む**）、**切られた周回で監査に与えられていたのは 198 秒。**
+    const pnpm = withPnpm(REPORT, 0);
+
+    run(pnpm);
+
+    expect(pnpm.words(), "壁時計で打ち切っていない").toContain("timeout");
+    expect(pnpm.words(), "上限を渡していない").toContain("180");
+  });
+
+  it("打ち切られたら、脆弱性と混ぜずに止める", () => {
+    // **`timeout` は打ち切ったとき 124 を返す**——**「脆弱性が見つかった」と
+    // 同じ顔にしない。** **判定できなかったぶんは registry の側である。**
+    const pnpm = withPnpm(REPORT, 0);
+
+    const done = run(pnpm, { TIMEOUT_EXIT: "124" });
+
+    expect(done.status, "打ち切られたのに通している").toBe(2);
+    expect(done.stderr, "届かなかったと言っていない").toContain("registry");
+    expect(done.stderr, "脆弱性と読めてしまう").not.toContain("脆弱性が見つかりました");
   });
 
   it("見つかったら、止める", () => {
