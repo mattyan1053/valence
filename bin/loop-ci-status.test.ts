@@ -24,6 +24,8 @@ type Check = {
   startedAgo?: number;
   /** その check を出した App（#610。**実測では Actions=15368 / CodeQL=57789**）。 */
   appId?: number;
+  /** 何秒前に終わったか（#619 のレビュー。**始まった時刻が無いときの時計**）。 */
+  completedAgo?: number;
 };
 
 /**
@@ -184,6 +186,10 @@ describe("bin/loop-ci-status", () => {
           : new Date((now - check.startedAgo) * 1000).toISOString(),
         // **発行元**（#610）。**無い形も置ける**——**GitHub 側で任意**である
         check.appId === undefined ? "" : String(check.appId),
+        // **終わった時刻**（#619 のレビュー）。**切られた検査を測る、もう 1 つの時計**
+        check.completedAgo === undefined
+          ? ""
+          : new Date((now - check.completedAgo) * 1000).toISOString(),
       ].join("\\u001f");
     const row = (name: string, check: Check) =>
       `    printf '%b\\n' ${JSON.stringify(`${name}\\u001f${tail(check)}`)}`;
@@ -202,6 +208,12 @@ describe("bin/loop-ci-status", () => {
       // ものを数える**——**式に無ければ、こちらは答えない。**
       '  if [[ $args != *".app.id"* ]]; then',
       '    echo "スタブ: app.id を問い合わせていない: $args" >&2',
+      "    exit 1",
+      "  fi",
+      // **終わった時刻も問い合わせているか**（#619 のレビュー）。**始まった時刻が
+      // 無い検査は、これでしか測れない**——**式に無ければ、こちらは答えない。**
+      '  if [[ $args != *".completed_at"* ]]; then',
+      '    echo "スタブ: completed_at を問い合わせていない: $args" >&2',
       "    exit 1",
       "  fi",
       '  if [[ $args == *"@base64"* ]]; then',
@@ -868,6 +880,217 @@ describe("bin/loop-ci-status", () => {
    * **あちらで併せると `bin/loop-handoff --fingerprint` が知らないまま**になる
    * （#609 のレビュー）。
    */
+  /**
+   * **時間切れで切られた検査を、落ちた検査と同じ扱いにしていた**（#618。
+   * **master が PR #615 で踏んだ**）。
+   *
+   * **`cancelled` は「決着した失敗」ではない。** **手順の分岐表では fail が
+   * 「worker に直させる」へ倒れる**が、**押し直しても直らない**
+   * ——**原因は「pending のまま予算を超えた」と同じ**（**あちらは人へ渡す側**）。
+   *
+   * **実測**（PR #615 の run `33832261624`）:
+   *
+   * ```
+   * attempt=1 dependency vulnerabilities completed/failure   03:11:00 → 03:19:18
+   * attempt=2 dependency vulnerabilities completed/cancelled 03:23:36 → 03:33:51  ← 10 分 15 秒
+   * attempt=3 dependency vulnerabilities completed/success   04:24:34 → 04:27:24
+   * ```
+   *
+   * **`timeout-minutes: 10` に達して切られている**（`audit.yml`）。
+   *
+   * **`cancelled` は 2 種類ある。** **時間切れ**と、**押し直しに切られたぶん**
+   * （`concurrency: cancel-in-progress`）——**後者は異常ではない**（**新しい run が
+   * 走っている**）ので、**同じ扱いにすると正常な押し直しのたびに人が呼ばれる。**
+   *
+   * **`conclusion` はどちらも `cancelled`** で、**見分けられない。**
+   * **そこで、決着していない側へ倒す**——**既にある猶予の時計に乗せる。**
+   * **猶予の内なら待ち**（**新しい run が来れば置き換わる**）、
+   * **超えたら人へ渡す**（**「予算を超えた」と同じ行き先**）。
+   *
+   * **新しい配線を足していない**——**`UNKNOWN` と「1 件も作られていない」で
+   * 既に使っている形**（#305）と同じである。
+   */
+  /**
+   * **出口の無い待ちを作らない**（#619 のレビュー）。
+   *
+   * **`cancelled` を未決着へ倒した結果、`budget_min` か `started` が読めないと
+   * `waiting` に入り続ける**——**`waiting` は exit 3 で「何もしない」**なので、
+   * **記録が 1 行も積まれず、誰にも渡らない。**
+   *
+   * **#295 と同じ形**である——**「`exit 4` は『始まった時刻』から測るので、
+   * 始まっていないものは永久に超えない」。** **あのときは「そもそも作られていない」**、
+   * **こちらは「作られたが、測る材料が無い」**——**行き着く先は同じ。**
+   *
+   * **`cancelled` は走っていない。** **待つ理由は「新しい run が置き換えるかも
+   * しれない」だけ**なので、**測れないときに黙って待ち続ける理由が無い。**
+   *
+   * **確かめた**: **実測で残っている `cancelled` は `started_at` も `completed_at` も
+   * 持っていた**（run `33832261624` の attempt 2）。**`started_at` が空の実例は
+   * 見つけられていない**——**最近 100 件の run に `cancelled` が 1 件も無い。**
+   * **それでも塞ぐ**のは、**塞がないと「誰にも渡らない」へ倒れる**からである。
+   */
+  describe("測れない切られた検査を、待ち続けない（#619 のレビュー）", () => {
+    it("予算を読めなくても、猶予を超えたら人へ渡す", () => {
+      // **`workflows(...)` を置かない**——**予算が読めない道**である。
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 3600 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "出口の無い待ちに入っている").toBe(4);
+    });
+
+    it("予算を読めないときの猶予の内なら、待つ", () => {
+      // **押し直しに切られたぶんは、新しい run が来て置き換わる。**
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "正常な押し直しで人を呼んでいる").toBe(3);
+    });
+
+    it("始まっていないまま切られたら、終わった時刻で測る", () => {
+      // **キューの中で切られると、始まった時刻が無い**（**`started_at` は null**）。
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", completedAgo: 3600 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "終わった時刻を見ていない").toBe(4);
+    });
+
+    it("始まっていなくても、終わった時刻が新しければ待つ", () => {
+      // **「終わった時刻で測る」を、時計として使っていることを見る**——**落とすと
+      // 「時計が 1 つも無い」枝へ落ち、超えた側の試験だけでは同じ答えになる**
+      // （**変異で見つけた**）。
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", completedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "終わった時刻を時計にしていない").toBe(3);
+    });
+
+    it("使った猶予を、そのまま報告する", () => {
+      // **判定に使った幅と、出す文が食い違わない**（#619 のレビュー 2 周目）。
+      // **予算が空のまま `bound` だけを補うと、文のほうは空の予算を出す**
+      // ——**「決着しないまま  分を超えました」**になり、
+      // **読む側は workflow の予算超過だと読む。**
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 3600 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status).toBe(4);
+      // **既定は 10 分**（`MISSING_GRACE_MIN`）——**そちらを使ったと言う**
+      expect(result.stdout, "使った猶予を出していない").toMatch(/alpha[^\n]*10 分/);
+    });
+
+    it("予算で測ったときは、その予算を報告する", () => {
+      // **もう片方も見る**——**片方だけだと、いつも同じ数を出す形でも緑になる。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "in_progress", startedAgo: 3600 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status).toBe(4);
+      expect(result.stdout, "予算を出していない").toMatch(/alpha[^\n]*5 分/);
+    });
+
+    it("時計が 1 つも無ければ、人へ渡す", () => {
+      // **判定不能を「待つ」へ倒さない**——**待ち続けても、誰も来ない。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled" },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "測れないまま待っている").toBe(4);
+    });
+
+    it("走っている検査は、これまでどおり待つ", () => {
+      // **広げない**（#619 のレビュー）。**`cancelled` でないものは走っている**ので、
+      // **予算が読めないだけで人を呼ばない**——**そこは元の判断のまま。**
+      const result = run({
+        checks: [
+          { name: "alpha", status: "in_progress", startedAgo: 100_000 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 100_000 },
+        ],
+      });
+
+      expect(result.status, "走っている検査で人を呼んでいる").toBe(3);
+    });
+  });
+
+  describe("切られた検査は、落ちた検査ではない（#618）", () => {
+    it("予算を超えていれば、人へ渡す", () => {
+      // **時間切れで切られたぶん**——**押し直しても、届かないままなら同じところで切られる。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 3600 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "worker へ渡している").toBe(4);
+    });
+
+    it("予算の内なら、待つ", () => {
+      // **押し直しに切られたぶん**——**新しい run が走っている**ので、
+      // **次の周回で置き換わる。** **ここで人を呼ばない。**
+      workflows([5]);
+
+      const result = run({
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.status, "正常な押し直しで人を呼んでいる").toBe(3);
+    });
+
+    it("指紋でも、決着として数えない", () => {
+      // **`bin/loop-handoff` は指紋で「同じ状態か」を見る**——**切られたぶんを
+      // 決着として数えると、置き換わって成功したときに指紋が動かない。**
+      workflows([5]);
+
+      const result = run({
+        fingerprint: true,
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "cancelled", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.stdout.trim(), "決着として数えている").toBe("pending,ok");
+    });
+  });
+
   describe("必須を GitHub 側と併せる（#608）", () => {
     it("ruleset が要求する検査も待つ", () => {
       // **これが本題。** **一覧に無ければ、落ちていても待たれない。**

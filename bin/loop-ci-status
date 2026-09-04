@@ -356,7 +356,7 @@ done <<<"$ruleset_required"
 # **PR 側で決められる**——区切りを含む名前で行を増やされないようにする
 # (`bin/loop-gate` と同じ判断。**復号はしない**)。
 if ! checks_out="$(gh api --paginate "repos/{owner}/{repo}/commits/$head_sha/check-runs" \
-  --jq ".check_runs[]? | \"\\(.name | @base64)$FIELD\\(.status)$FIELD\\(.conclusion // \"\")$FIELD\\(.started_at // \"\")$FIELD\\(.app.id // \"\")\"" \
+  --jq ".check_runs[]? | \"\\(.name | @base64)$FIELD\\(.status)$FIELD\\(.conclusion // \"\")$FIELD\\(.started_at // \"\")$FIELD\\(.app.id // \"\")$FIELD\\(.completed_at // \"\")\"" \
   2>/dev/null)"; then
   echo "[FAIL] PR #$PR の check-runs を取得できません" >&2
   exit 2
@@ -473,7 +473,8 @@ for required_index in "${!required[@]}"; do
   status=""
   conclusion=""
   started=""
-  while IFS="$FIELD" read -r got_name got_status got_conclusion got_started got_app; do
+  completed=""
+  while IFS="$FIELD" read -r got_name got_status got_conclusion got_started got_app got_completed; do
     [[ $got_name == "$want" ]] || continue
     # **指された App のものだけを見る。** **読めない（空）なら、そこは飛ばす**
     # ——**判定不能を「一致した」へ倒さない**（**倒すと、指定した意味が消える**）。
@@ -483,6 +484,7 @@ for required_index in "${!required[@]}"; do
     status="$got_status"
     conclusion="$got_conclusion"
     started="$got_started"
+    completed="$got_completed"
     break
   done <<<"$checks_out"
 
@@ -494,7 +496,25 @@ for required_index in "${!required[@]}"; do
 
   # **決着しているか**は `conclusion` で決まる。**`status` は見ない**——
   # **実物が食い違っていた**（`in_progress` + `success`）。
-  if [[ -n $conclusion ]]; then
+  #
+  # **`cancelled` は決着ではない** (#618)。**落ちた検査と同じ扱いにすると
+  # 「worker に直させる」へ倒れる**が、**押し直しても直らない**
+  # ——**原因は「pending のまま予算を超えた」と同じ**（**あちらは人へ渡す側**）。
+  #
+  # **実測**（PR #615 の run `33832261624`）: **`timeout-minutes: 10` の job が
+  # 03:23:36 → 03:33:51 で `cancelled`**。**registry へ届かないまま切られている。**
+  #
+  # **`cancelled` は 2 種類ある。** **時間切れ**と、**押し直しに切られたぶん**
+  # （`concurrency: cancel-in-progress`）——**後者は異常ではない**（**新しい run が
+  # 走っている**）ので、**同じ扱いにすると正常な押し直しのたびに人が呼ばれる。**
+  #
+  # **`conclusion` はどちらも `cancelled` で、見分けられない。**
+  # **そこで、決着していない側へ倒す**——**既にある猶予の時計に乗せる。**
+  # **猶予の内なら待ち**（**新しい run が来れば置き換わる**）、**超えたら人へ渡す。**
+  #
+  # **新しい配線は足さない**——**`UNKNOWN` と「1 件も作られていない」で既に
+  # 使っている形**（#305）と同じである。**「待つ → 届く」がそこで閉じている。**
+  if [[ -n $conclusion && $conclusion != "cancelled" ]]; then
     if [[ " $OK_CONCLUSIONS " == *" $conclusion "* ]]; then
       states+="ok,"
       continue
@@ -506,19 +526,54 @@ for required_index in "${!required[@]}"; do
   states+="pending,"
 
   # ここから先は、まだ決着していない検査である。
-  if [[ -z $budget_min || -z $started ]]; then
-    waiting+=("$name=$status")
+  #
+  # **`cancelled` には出口が要る** (#619 のレビュー)。**測る材料が無いと `waiting` に
+  # 入り続ける**——**あれは exit 3 で「何もしない」**なので、**記録が 1 行も積まれず、
+  # 誰にも渡らない。** **#295 と同じ形**である（**「始まっていないものに始まった時刻は
+  # 無い」ので、永久に `exit 4` へ行かない**）。
+  #
+  # **`cancelled` は走っていない。** **待つ理由は「新しい run が置き換えるかもしれない」
+  # だけ**なので、**測れないときに黙って待ち続ける理由が無い。**
+  #
+  # **走っている検査は、これまでどおり待つ**——**そちらは「読めなければ止めない」**
+  # （#207）。**広げない。**
+  clock="$started"
+  bound="$budget_min"
+  if [[ $conclusion == "cancelled" ]]; then
+    # **始まっていないまま切られたぶんは、終わった時刻で測る**
+    # （**キューの中で切られると `started_at` が無い**）。
+    [[ -n $clock ]] || clock="$completed"
+    # **予算を読めなくても、有限の猶予は要る。** **幅は「1 件も作られていない」と
+    # 同じもの**を使う——**別の数を置くと、調整する所が増える。**
+    [[ -n $bound ]] || bound="$MISSING_GRACE_MIN"
+  fi
+  if [[ -z $bound || -z $clock ]]; then
+    if [[ $conclusion == "cancelled" ]]; then
+      # **時計が 1 つも無い。** **判定不能を「待つ」へ倒さない**——**人へ渡す。**
+      overdue+=("$name=$conclusion")
+    else
+      waiting+=("$name=$status")
+    fi
     continue
   fi
-  if ! started_epoch="$(date -d "$started" +%s 2>/dev/null)" \
-    || ! [[ $started_epoch =~ ^[0-9]+$ ]]; then
-    waiting+=("$name=$status")
+  if ! clock_epoch="$(date -d "$clock" +%s 2>/dev/null)" \
+    || ! [[ $clock_epoch =~ ^[0-9]+$ ]]; then
+    if [[ $conclusion == "cancelled" ]]; then
+      overdue+=("$name=$conclusion")
+    else
+      waiting+=("$name=$status")
+    fi
     continue
   fi
-  if ((now_epoch - started_epoch > budget_min * 60)); then
-    overdue+=("$name=$status")
+  if ((now_epoch - clock_epoch > bound * 60)); then
+    # **使った幅を添える** (#619 のレビュー 2 周目)。**判定に使った数と、出す文が
+    # 食い違わない**ため——**予算が空のまま `bound` だけを補うと、文のほうは
+    # 空の予算を出し**、**読む側は workflow の予算超過だと読む。**
+    # **検査ごとに違いうる**（`cancelled` は既定の猶予、走っているものは予算）ので、
+    # **1 つにまとめない。**
+    overdue+=("$name=${conclusion:-$status}(${bound} 分)")
   else
-    waiting+=("$name=$status")
+    waiting+=("$name=${conclusion:-$status}")
   fi
 done
 
@@ -630,7 +685,8 @@ if ((${#bad[@]} > 0)); then
   exit 1
 fi
 if ((${#overdue[@]} > 0)); then
-  echo "決着しないまま ${budget_min} 分を超えました: ${overdue[*]}"
+  # **幅は検査ごとに添えてある**（上）——**ここで 1 つの数を出さない。**
+  echo "決着しないまま猶予を超えました: ${overdue[*]}"
   exit 4
 fi
 if ((${#waiting[@]} > 0)); then
