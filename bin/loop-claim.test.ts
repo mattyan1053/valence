@@ -1033,6 +1033,108 @@ describe("bin/loop-claim", () => {
     });
   });
 
+  /**
+   * **読んでから書くまでの間に、別の役が動かせる**（#593。#592 のレビューで外出し）。
+   *
+   * **ローカルの `flock` は届かない**——**master は `gh issue edit` を直接打つ**
+   * （**`loop/procedure/master.md` に 13 箇所ある**）。**GitHub の label に
+   * 条件付き更新は無い**——**返る ETag は弱い検証子（`W/"…"`）で、
+   * `If-Match` の前提条件には使えない。**
+   *
+   * **打てるのは「書いたあとに、想定外の label が増えていないかを見る」側**である。
+   *
+   * **見るのは `blocked` だけ**——**「ループは触らない」を意味する label** で、
+   * **この script は既にそれを見ている**（`idle` と no-work の数え方）。
+   * **他の label は見ない**（**語彙をここへ写すと、3 箇所目になる**。`AGENTS.md` §5）。
+   */
+  describe("読んでから書くまでの間に、別の役が動かしたら", () => {
+    /**
+     * **`gh issue edit` に本物と同じ足し引きをさせる偽の `gh`。**
+     *
+     * **`race` が在れば、最初の `edit` の直前に master の遷移を差し込む**
+     * ——**時間ではなく順序で再現する**（**待って起きなければ、変異が赤くならない**）。
+     */
+    function withRacingGh(labels: string[], moved: string[]): void {
+      const race = join(repo, "race.marker");
+      writeFileSync(state, `${labels.join("\n")}\n`);
+      writeFileSync(race, "");
+      writeFileSync(
+        join(path, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          'if [[ $* == *"issue view"* ]]; then',
+          `  cat ${JSON.stringify(state)}`,
+          "  exit 0",
+          "fi",
+          'if [[ $* == *"issue edit"* ]]; then',
+          `  if [[ -e ${JSON.stringify(race)} ]]; then`,
+          `    rm -f ${JSON.stringify(race)}`,
+          `    printf '%s\\n' ${moved.map((l) => JSON.stringify(l)).join(" ")} >${JSON.stringify(state)}`,
+          "  fi",
+          '  remove=""; add=""',
+          "  while (($# > 0)); do",
+          '    case "$1" in',
+          '      --remove-label) remove="$2"; shift 2 ;;',
+          '      --add-label) add="$2"; shift 2 ;;',
+          "      *) shift ;;",
+          "    esac",
+          "  done",
+          `  kept="$(grep -v -x -F "$remove" ${JSON.stringify(state)} || true)"`,
+          `  { [[ -z $kept ]] || printf '%s\\n' "$kept"; } >${JSON.stringify(state)}`,
+          `  if [[ -n $add ]] && ! grep -q -x -F "$add" ${JSON.stringify(state)}; then`,
+          `    printf '%s\\n' "$add" >>${JSON.stringify(state)}`,
+          "  fi",
+          "  exit 0",
+          "fi",
+          'echo "スタブ: 想定外の gh 呼び出し: $*" >&2',
+          "exit 2",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+    }
+
+    function startRound(cwd: string): string {
+      const result = spawnSync(LEASE, ["acquire", "worker", workerStamp()], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: path },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    }
+
+    function labelState(): string {
+      return readFileSync(state, "utf8");
+    }
+
+    it("take は、blocked にされた Issue を着手中にしない", () => {
+      // **`ready` を読んだ直後に master が `ready` → `blocked` へ動かす。**
+      withRacingGh(["ready"], ["blocked"]);
+      startRound(repo);
+
+      const done = run(["take", "42"]);
+
+      expect(done.status, "取れたことにしている").not.toBe(0);
+      expect(labelState(), "止められた Issue を着手中にしている").not.toContain("in-progress");
+      expect(labelState(), "master が付けた blocked を消している").toContain("blocked");
+    });
+
+    it("release-issue は、blocked にされた Issue を ready へ戻さない", () => {
+      // **これが指摘の形**である——**`in-progress` を読んだ直後に master が
+      // `in-progress` → `blocked` へ動かすと、返却が `ready` を足して同時保有になる。**
+      withGh({ labels: ["ready"], viewDelay: "0" });
+      startRound(repo);
+      expect(run(["take", "42"]).status, "取れていない").toBe(0);
+      withRacingGh(["in-progress"], ["blocked"]);
+
+      const done = run(["release-issue", "42"]);
+
+      expect(done.status, "返せたことにしている").not.toBe(0);
+      expect(labelState(), "止められた Issue が ready に並ぶ").not.toContain("ready");
+      expect(labelState(), "master が付けた blocked を消している").toContain("blocked");
+    });
+  });
+
   describe("mine — その PR を自分の作業場が持っているか", () => {
     it("自分が取った PR は、自分のもの", () => {
       withGh({ labels: [] });

@@ -173,11 +173,29 @@ readonly TAKEN_TO="in-progress"
 # **付け替えて、読み直して確かめる。** **`gh` は通らなくても成功を返しうる**ので、
 # **確かめずに進むと、label が動いていないのに動いたことにする。**
 #
+# **読んでから書くまでの間に、別の役が動かせる** (#593)。**ローカルの `flock` は
+# 届かない**——**master は `gh issue edit` を直接打つ**（`loop/procedure/master.md`）。
+# **GitHub の label に条件付き更新は無い**（**返る ETag は弱い検証子 `W/"…"` で、
+# `If-Match` の前提条件にはできない**）ので、**「読んで確かめてから書く」を
+# 原子的にはできない。** **打てるのは、書いたあとに見る側だけ**である。
+#
+# **見るのは `blocked` だけ**——**「ループは触らない」を意味する label** で、
+# **この script は既にそれを見ている**（`idle` と no-work の数え方）。
+# **他の label は見ない**——**語彙をここへ写すと 3 箇所目になる**（`AGENTS.md` §5）。
+#
+# **見つけたら、自分が足したぶんだけ取り消す**（`$to` を外す）。**`$from` は戻さない**
+# ——**master がそれを外したのは意図**であり、**戻すと盤面を奪い合う。**
+#
 #   exit 0 = 付け替わった / exit 1 = 打てなかった / exit 2 = 読み直せない・変わっていない
+#   exit 3 = 書いている間に別の役が止めた（自分のぶんは取り消した）
 move_label() {
-  local from="$1" to="$2" after
+  local from="$1" to="$2" before="$3" after
   gh issue edit "$ISSUE" --remove-label "$from" --add-label "$to" >/dev/null || return 1
   after="$(labels_of)" || return 2
+  if has_label "blocked" "$after" && ! has_label "blocked" "$before"; then
+    gh issue edit "$ISSUE" --remove-label "$to" >/dev/null || return 3
+    return 3
+  fi
   has_label "$from" "$after" && return 2
   has_label "$to" "$after" || return 2
   return 0
@@ -839,7 +857,7 @@ if [[ $ACTION == "release" || $ACTION == "release-issue" ]]; then
       exit 2
     fi
     if has_label "$TAKEN_TO" "$labels"; then
-      move_label "$TAKEN_TO" "$TAKEN_FROM" || {
+      move_label "$TAKEN_TO" "$TAKEN_FROM" "$labels" || {
         # **黙って成功と言わない。** **記録は消えているのに label は倒れたまま**である
         # ——**言わないと、返した本人が気づけないまま人が呼ばれる**（`claim idle` の `unowned`）。
         echo "[FAIL] #$ISSUE の label を $TAKEN_TO から $TAKEN_FROM へ戻せません" >&2
@@ -936,12 +954,17 @@ take)
   fi
 
   # **付け替えて確かめるところは `move_label` が持つ** (#591)——**戻す側と同じ 1 箇所。**
-  move_label "$TAKEN_FROM" "$TAKEN_TO"
+  move_label "$TAKEN_FROM" "$TAKEN_TO" "$labels"
   case "$?" in
     0) ;;
     1)
       echo "[FAIL] #$ISSUE の label を付け替えられません" >&2
       exit 2
+      ;;
+    3)
+      # **master が止めた。** **取れたことにしない**——**`blocked` は人の判断待ちである。**
+      echo "[INFO] #$ISSUE は書いている間に blocked へ動かされました。譲ります" >&2
+      exit 1
       ;;
     *)
       echo "[FAIL] #$ISSUE の label が変わっていません（取れたとみなしません）" >&2
