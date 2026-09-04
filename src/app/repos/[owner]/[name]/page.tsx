@@ -17,6 +17,7 @@ import {
 } from "../../../../composition/auth";
 import type { MergeBlock } from "../../../../domain/graph/merge-block";
 import { mergeBlocksFor } from "../../../../domain/graph/merge-block";
+import { pullRequestPageUrl } from "../../../../domain/repository/github-url";
 import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge";
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
@@ -267,6 +268,10 @@ export async function renderRepositoryBoard(
             // **番号だけの箱では「どれか」が分からない**（#542）——**取れなかったぶんは
             // `undefined` のまま渡す**（**空文字にすると「短いタイトル」に見える**）
             titleOf={(number) => result.plan.titles.get(number)}
+            // **押す場所から現物へ行けるようにする**（#621）——**枝名は書いた人にしか
+            // 読めない**ので、**何を approve / merge するのかが行に無かった。**
+            // **組み立ては `domain` が持つ**（**`.` / `..` を断る判定を写さない**）
+            urlOf={(number) => pullRequestPageUrl({ owner, name }, number)}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

@@ -29,6 +29,14 @@ function list(markup: string): string {
   return markup.slice(from, to);
 }
 
+/** 一覧の行だけに割る。**行ごとに見たいものは、行の中で見る**（#621）。 */
+function rowsOf(markup: string): string[] {
+  return list(markup)
+    .split("<li")
+    .slice(1)
+    .map((row) => `<li${row}`);
+}
+
 function pullRequest(number: number, base: string, head: string): PullRequestRef {
   return {
     number,
@@ -55,6 +63,8 @@ function props(overrides: Partial<DependencyGraphViewProps> = {}): DependencyGra
     headKnown: () => true,
     // **既定はタイトルを返す**（#542）。**同じく、ここで見るところではない**
     titleOf: (number: number) => `#${number} のタイトル`,
+    // **既定は飛べる**（#621）。**この試験群が見ているのは、そこではない**
+    urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
     ...overrides,
   };
 }
@@ -123,6 +133,40 @@ describe("図の外にも、見た目が当たっている（#583 のレビュ�
       sections.filter((tag) => !/class="[^"]*\b(gap-|space-y-)/.test(tag)),
       "中身が詰まって出る節がある",
     ).toEqual([]);
+  });
+});
+
+describe("行から、その PR に辿り着ける", () => {
+  // **押す場所に、何を承認するのかが書かれていない**（#621）。**人が言ったのは
+  // 「なんの変更を approve / merge しようとしているのかここからじゃあまりに
+  // わからなすぎる」**——**枝名は書いた人にしか読めない。**
+  //
+  // **図にはタイトルが出ていて、ボタンの隣の行には出ていなかった**
+  // （**`titleOf` は `markOf` にだけ渡っていた**）。
+  it("行にタイトルが出る", () => {
+    const markup = render(props({ titleOf: (number) => (number === 1 ? "色を直す" : undefined) }));
+
+    expect(rowsOf(markup)[0], "行にタイトルが出ていない").toContain("色を直す");
+  });
+
+  it("行から GitHub の PR へ飛べる", () => {
+    // **判断が付かないときに現物を見に行く道が無いと、番号を読んで
+    // 自分で URL を組み立てることになる。**
+    const markup = render(props());
+
+    expect(rowsOf(markup)[0], "PR へのリンクが無い").toContain(
+      'href="https://github.com/o/n/pull/1"',
+    );
+  });
+
+  it("タイトルが取れなくても、飛べる", () => {
+    // **取れなかったぶんは `undefined` で来る**（#542）——**そのとき番号だけが
+    // 残るが、飛べなくなってはいけない。**
+    const markup = render(props({ titleOf: () => undefined }));
+
+    expect(rowsOf(markup)[0], "PR へのリンクが無い").toContain(
+      'href="https://github.com/o/n/pull/1"',
+    );
   });
 });
 

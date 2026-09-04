@@ -47,6 +47,8 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
     invalid: [],
     // **既定はタイトルを返す**（#542）——**この試験群が見ているのは、そこではない**
     titleOf: (number: number) => `#${number} のタイトル`,
+    // **既定は飛べる**（#621）。**この試験群が見ているのは、そこではない**
+    urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
     changes: new Map([
       [1, change()],
       [2, change()],
@@ -455,6 +457,7 @@ describe("理由が、行に出る（#577 のレビュー）", () => {
     changes: new Map(),
     headKnown: () => true,
     titleOf: () => undefined,
+    urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
     changeUnavailableOf: kind === undefined ? undefined : () => kind,
   });
 

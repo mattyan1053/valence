@@ -129,6 +129,8 @@ export type ReviewBoardProps = {
    * ——**取れているのに取れていないと言う**（`NodeMark.title`）。
    */
   readonly titleOf: (pullRequestNumber: number) => string | undefined;
+  /** **その PR の GitHub 上の場所**（#621）。**渡す先は行である。** */
+  readonly urlOf: (pullRequestNumber: number) => string;
 };
 
 export function ReviewBoard({
@@ -142,6 +144,7 @@ export function ReviewBoard({
   renderStatus,
   headKnown,
   titleOf,
+  urlOf,
 }: ReviewBoardProps) {
   return (
     <DependencyGraphView
@@ -159,6 +162,7 @@ export function ReviewBoard({
       }}
       headKnown={headKnown}
       titleOf={titleOf}
+      urlOf={urlOf}
       renderAside={(number) => {
         const change = changes.get(number);
         // **材料が無い PR を黙って落とさない。** 行は残し、
