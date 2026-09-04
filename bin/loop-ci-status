@@ -324,11 +324,22 @@ for _known in "${required[@]}"; do
 done
 while IFS="$FIELD" read -r name app_id; do
   [[ -n ${name//[[:space:]]/} ]] || continue
+  # **畳むのは (名前, 発行元) が同じときだけ** (#613 のレビュー)。**base には ruleset が
+  # 複数当たりうる**——**同じ名前を別の App で要求されたら、GitHub は両方を要求する。**
+  # **名前だけで畳むと、あとから来たほうで上書きされ**、**残ったほうが成功していれば
+  # もう一方が落ちていても通る**（**食い違いが戻る**）。
   matched=0
   for index in "${!required[@]}"; do
-    [[ ${required[index]} == "$name" ]] || continue
-    # **ruleset のほうが強い。** **workflow から導いた側は発行元を知らない**ので、
-    # **同じ名前が両方に在るなら、指定を足す**——**GitHub と同じ厳しさになる。**
+    [[ ${required[index]} == "$name" && ${required_app[index]} == "$app_id" ]] || continue
+    matched=1
+    break
+  done
+  ((matched == 1)) && continue
+  # **発行元を知らない同名の枠があれば、そこへ入れる。** **ruleset のほうが強い**
+  # ——**workflow から導いた側は発行元を知らない**ので、**指定を足すと GitHub と
+  # 同じ厳しさになる。** **空いている枠は 1 つだけ**なので、**2 つ目からは足す側**へ回る。
+  for index in "${!required[@]}"; do
+    [[ ${required[index]} == "$name" && -z ${required_app[index]} ]] || continue
     required_app[index]="$app_id"
     matched=1
     break

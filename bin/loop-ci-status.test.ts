@@ -1029,6 +1029,71 @@ describe("bin/loop-ci-status", () => {
       expect(result.status, "重なる名前に指定が効いていない").toBe(1);
     });
 
+    it("重なる名前は、App の指定が付いても 1 件のままである", () => {
+      // **workflow から導いた側は「その名前が通ればよい」**——**ruleset が発行元を
+      // 指したら、その枠へ入れる。** **別の要件として足すと、同じ検査を 2 回数える**
+      // ——**指紋が伸びる**（**そこでしか観測できない**。**変異で見つけた**）。
+      workflows([5]);
+
+      const result = run({
+        fingerprint: true,
+        rules: rulesetLines([{ context: "alpha", app: 15_368 }]),
+        checks: [
+          {
+            name: "alpha",
+            status: "completed",
+            conclusion: "success",
+            startedAgo: 10,
+            appId: 15_368,
+          },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+        ],
+      });
+
+      expect(result.stdout.trim(), "同じ検査を 2 回数えている").toBe("ok,ok");
+    });
+
+    it("同じ名前を別の App で要求されたら、両方を見る", () => {
+      // **base には ruleset が複数当たりうる**（#613 のレビュー）——**同じ `context` を
+      // 別の `integration_id` で要求されると、GitHub は両方を要求する。**
+      //
+      // **名前だけで畳むと、あとから来たほうで上書きされる**——**残ったほうが成功して
+      // いれば、もう一方が落ちていても通る。** **食い違いが戻る。**
+      //
+      // **いまの repo に当たっている ruleset は 1 つだけ**である（実測。`20587440`）
+      // ——**条件が揃っていないだけ**で、**組み合わせは GitHub 側で作れる。**
+      workflows([5]);
+
+      const result = run({
+        rules: rulesetLines([
+          { context: "CodeQL", app: 57_789 },
+          { context: "CodeQL", app: 999 },
+        ]),
+        checks: [
+          { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+          { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          // **先に来たほうが落ちている。** **あとから来たほうは成功している**
+          // ——**上書きすると、落ちているほうが一覧から消えて通る。**
+          {
+            name: "CodeQL",
+            status: "completed",
+            conclusion: "failure",
+            startedAgo: 10,
+            appId: 57_789,
+          },
+          {
+            name: "CodeQL",
+            status: "completed",
+            conclusion: "success",
+            startedAgo: 10,
+            appId: 999,
+          },
+        ],
+      });
+
+      expect(result.status, "あとから来たほうで上書きしている").toBe(1);
+    });
+
     it("`integration_id` が無ければ、名前で見る", () => {
       // **GitHub 側で任意**である（#610）——**無いときに「一致しない」へ倒すと、
       // 付けていない ruleset で全部が「作られていない」になる。**
