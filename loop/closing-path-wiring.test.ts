@@ -18,8 +18,13 @@
  * 全部を「読んでから閉じる」1 本へ寄せる。**
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { procedureText } from "./procedure-doc";
+
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /**
  * GitHub が Issue を自動で閉じる語。
@@ -35,6 +40,27 @@ function prSection(): string {
   const from = doc.indexOf("### PR を作る");
   expect(from, "PR を作る節が無い").toBeGreaterThanOrEqual(0);
   return doc.slice(from).split("\n### ")[0] ?? "";
+}
+
+/**
+ * `bin/loop-unlisted-issues` が「一覧に出ている」と認める Issue の label。
+ *
+ * **写さずに読む**（`AGENTS.md` §5）——**片方だけ直すと、鳴る側と付ける側が食い違う。**
+ */
+function listedIssueLabels(): string[] {
+  const script = readFileSync(join(REPO_ROOT, "bin/loop-unlisted-issues"), "utf8");
+  const declaration = script.match(/LISTED_LABELS=\(([^)]*)\)/);
+  expect(declaration?.[1], "一覧の label を宣言している場所が無い").toBeDefined();
+  return (declaration?.[1] ?? "").trim().split(/\s+/);
+}
+
+/** 「閉じないと決めた」枝が Issue に足す label。**分けて打っても拾う。** */
+function addedLabelsOfClosingBranch(): string[] {
+  const section = mergeSection();
+  const from = section.indexOf("閉じずに");
+  expect(from, "閉じない側の枝が無い").toBeGreaterThanOrEqual(0);
+  const block = section.slice(from).split("```")[1] ?? "";
+  return [...block.matchAll(/--add-label\s+(\S+)/g)].map((match) => match[1] ?? "");
 }
 
 /** master がマージする節。**閉じるのはここである**（`loop/close-issue-wiring.test.ts` と同じ切り方）。 */
@@ -62,11 +88,23 @@ describe("閉じる経路を 1 本にする", () => {
     expect(prSection(), "Issue 番号を本文へ書く指示が無い").toMatch(/Refs\s+#/);
   });
 
-  it("マージしたあと、自動で閉じたことを前提にしない", () => {
-    // **`closingIssuesReferences` は `Closes` が在るときしか埋まらない。**
-    // **後始末をそこに繋いだままだと、毎回 0 件を読んで「片付いた」と見える。**
-    expect(mergeSection(), "自動で閉じた前提の後始末が残っている").not.toContain(
-      "closingIssuesReferences",
+  it("マージする前に、その PR が閉じる Issue を見る", () => {
+    // **worker の手順は、ループ外の著者には届かない**——**その PR に閉じる語が
+    // 在れば、マージした瞬間に閉じる。** **`bin/loop-close-candidates` は closed を
+    // 挙げない**ので、**閉じたあとでは読む経路へ入れない。**
+    //
+    // **見るのはマージの前で、1 回だけ**である。**後始末で読み直すと、
+    // 自動で閉じない PR では毎回 0 件が返り**、**反映の遅い「さらう側」だけが残る。**
+    // **`--json` の側だけを数える。** **1 行の中に `--jq '.closingIssuesReferences[]'`
+    // も並ぶ**ので、**語で数えると 1 回の問い合わせが 2 と出る**（実際に外した）。
+    const section = mergeSection();
+    const looks = [...section.matchAll(/--json closingIssuesReferences/g)];
+    expect(looks.length, "閉じる参照を見る場所が 1 つでない").toBe(1);
+
+    const merge = section.indexOf("bin/loop-merge <");
+    expect(merge, "マージする手が無い").toBeGreaterThanOrEqual(0);
+    expect(looks[0]?.index ?? -1, "閉じる参照を見るのがマージより後になっている").toBeLessThan(
+      merge,
     );
   });
 
@@ -81,10 +119,27 @@ describe("閉じる経路を 1 本にする", () => {
     expect(section, "コメントを読む指示が無い").toMatch(/--comments/);
   });
 
-  it("閉じないと決めたら、その Issue に人待ちの印を付ける", () => {
+  it("閉じないと決めたら、ループが触らない状態へ倒す", () => {
     // **止まらないことが分かる形で記録する**（#623 の完了条件）。
-    // **`in-progress` のまま置くと、実装していないのに枠を食う**——
-    // **`awaiting-human` は「人が外すまで待つ」で、作業が尽きた数にも入らない。**
-    expect(mergeSection(), "人待ちへ倒す手が無い").toMatch(/--add-label\s+awaiting-human/);
+    // **`in-progress` のまま置くと、実装していないのに枠を食う。**
+    expect(mergeSection(), "倒す先が無い").toMatch(/--add-label\s+blocked/);
+  });
+
+  it("倒した先の label が、Issue の一覧に出る", () => {
+    // **`bin/loop-unlisted-issues` が一覧と認めない label だけを付けると、
+    // 毎周回 `unlisted-issue:<N>` が積まれ、3 周で全ループが止まる**——
+    // **今日、`waiting-condition` を単独で付けて実際に鳴っている。**
+    //
+    // **一覧の正はスクリプトが持つ**（`AGENTS.md` §5）。**ここに写すと、
+    // あちらを直したときに片方だけ古くなる。**
+    const listed = listedIssueLabels();
+    expect(listed.length, "一覧と認める label を読み取れない").toBeGreaterThan(0);
+
+    const added = addedLabelsOfClosingBranch();
+    expect(added.length, "倒す先の label が読み取れない").toBeGreaterThan(0);
+    expect(
+      added.filter((label) => listed.includes(label)),
+      `倒した先が一覧に出ない（付ける: ${added.join(",")} / 一覧: ${listed.join(",")}）`,
+    ).not.toHaveLength(0);
   });
 });

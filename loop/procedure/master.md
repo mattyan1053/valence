@@ -178,6 +178,21 @@ worker が元気に push している間ずっと取得障害が数えられな�
 
 ### exit 0 — マージする
 
+**先に、この PR がマージした瞬間に閉じる Issue を見る** (#623)。
+
+```bash
+gh pr view <PR番号> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
+```
+
+- **空** → そのままマージへ。**ループが出す PR は閉じる語を書かない**ので、ふつうはこちら
+- **1 件以上** → **ループ外の著者の PR である**（**worker の手順は、その人には届かない**）。
+  **番号ごとに、下の「完了条件を読む」を先に通す**——**マージしてからでは遅い。**
+  **GitHub がその場で閉じ**、**閉じ忘れを挙げる口は closed を挙げない**ので、
+  **この節の下半分へは二度と来ない。** **人しか判定できない条件が残っているなら、
+  本文から閉じる語を外してからマージし**、**外したことを PR にコメントで残す**
+- **読めなかった** → **マージしない。** `bin/loop-stall pr-lookup-failed` を通して停止する。
+  **「閉じる参照は無い」と混ぜない**——**混ぜると、読めなかった周回が自動で閉じる側へ倒れる**
+
 ゲートが出力した SHA をそのまま使う。
 
 ```bash
@@ -234,13 +249,19 @@ gh issue close <N> --comment "<何が満たされたか / どの PR で>"
 **人しか判定できない条件が残っているなら、閉じずに人待ちへ倒す** (#623)。
 
 ```bash
-gh issue edit <N> --remove-label in-progress --add-label awaiting-human
+gh issue edit <N> --remove-label in-progress --add-label blocked
 gh issue comment <N> --body-file <file>   # **何が未判定か。何回持ち越したか**
 ```
 
-**`in-progress` のまま置かない。** **実装している周回は無い**ので、**枠を食うだけ**
-である。**`awaiting-human` は人が外すまで残り**、**「作業が尽きた」の数にも入らない**
-——**止まらないことが、次に読む側から見える。**
+**`in-progress` のまま置かない。** **実装している周回は無い**ので、**枠を食うだけ**である。
+
+**倒す先は `blocked`**（**「判断が要る。ループは触らない」**。`loop/README.md` の label 表）。
+**人待ちの label を単独で付けない**——**あれは PR に付けるもの**で、
+**`bin/loop-unlisted-issues` が一覧と認める Issue の label は `backlog` / `ready` /
+`in-progress` / `blocked` だけ**である。**単独で付けると毎周回 `unlisted-issue:<N>` が
+積まれ、3 周で全ループが止まる**（**今日、`waiting-condition` を単独で付けて実際に鳴った**）。
+**`./task loop:status` の人待ちの一覧も `gh pr list` しか引かない**ので、
+**人が見る場所にも出てこない。** **`blocked` なら Issue の一覧に出る。**
 
 **閉じたら理由を残す。** **番号だけでは、後から「なぜここで閉じたか」を読み返せない。**
 
