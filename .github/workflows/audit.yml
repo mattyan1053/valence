@@ -32,8 +32,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # low は誤検知と開発時のみ影響するものが多く、止めると形骸化する。
+      # 判定は bin/audit-dependencies が持つ (#612)——**「脆弱性が見つかった」と
+      # 「registry へ届かなかった」を言い分ける**。ここに条件を書き写さない。
       - name: Audit
-        run: pnpm audit --audit-level moderate
+        run: bin/audit-dependencies
 
   # PR で新しく入る依存だけを見る。既存の負債で毎回落ちると形骸化するため、
   # 「今の総量」を見る dependencies ジョブとは役割を分けている。

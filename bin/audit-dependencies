@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# **依存の脆弱性を見る** (#612)。**`pnpm audit` をそのまま打たない。**
+#
+# **落ちた理由が 2 通りある**——**脆弱性が見つかった**のと、**registry へ届かなかった**
+# のとで、**打つ手がまるで違う**（前者は直す、後者は待つ）。**素の `pnpm audit` は
+# どちらも exit 1 で返す**ので、**ログを読むまで見分けられない**
+# （**実測: 2 回とも master が読んで、手で `gh run rerun` を打った**）。
+#
+# **`--ignore-registry-errors` を素で使わない。** **あれは registry の失敗を exit 0 に
+# する口**で、**そのまま通すと、監査が走っていないのに緑になる**——**「落ちたら無視する」
+# で通すと、監査そのものが消える。** **ここでは見分けるためにだけ使い、
+# 届かなかったぶんは改めて止める。**
+#
+# **見分けは構造で行う**（**文言では見ない**。`AGENTS.md` §4）——**報告は
+# `metadata.totalDependencies` を持つ。** **届かなかったときの出力は報告ではない。**
+#
+# **倒す向きは「止まる」側のまま**である——**判定できなかったぶんを緑にしない。**
+#
+# **段の判定は `pnpm` が持つ。ここで数え直さない** (#616 のレビュー)。
+# **`--json` を付けても段は効く**——**実物で確かめた**（`pnpm@11.20.0`、
+# moderate が 1 件だけの木）:
+#
+#   --audit-level moderate  exit=1  advisories=1
+#   --audit-level high      exit=0  advisories=0  metadata={"moderate":1,"critical":1}
+#
+# **`metadata.vulnerabilities` は段で絞られない**——**そこを数えると、段より下の
+# 1 件で全 PR が止まる。** **数えるのは `pnpm` の終了コードだけである。**
+#
+#   exit 0 = 脆弱性なし / exit 1 = 脆弱性あり / exit 2 = registry へ届かず判定できない
+set -uo pipefail
+
+readonly LEVEL="${AUDIT_LEVEL:-moderate}"
+
+report="$(pnpm audit --audit-level "$LEVEL" --json --ignore-registry-errors 2>/dev/null)"
+audited=$?
+
+# **報告かどうかだけを見る。** **中身の解釈は `pnpm` に任せる**（終了コードが答えである）。
+if ! printf '%s' "$report" | node -e '
+  let raw = "";
+  process.stdin.on("data", (chunk) => { raw += chunk; });
+  process.stdin.on("end", () => {
+    try {
+      const parsed = JSON.parse(raw);
+      process.exit(typeof parsed?.metadata?.totalDependencies === "number" ? 0 : 1);
+    } catch {
+      process.exit(1);
+    }
+  });
+'; then
+  echo "[FAIL] npm registry へ届かず、脆弱性を判定できていません" >&2
+  echo "       依存に問題があるとは言っていません。時間をおいて打ち直してください" >&2
+  exit 2
+fi
+
+if ((audited != 0)); then
+  echo "[FAIL] 脆弱性が見つかりました（--audit-level $LEVEL）" >&2
+  printf '%s\n' "$report" >&2
+  exit 1
+fi
+
+printf '%s\n' "$report"
