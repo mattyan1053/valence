@@ -14,7 +14,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,15 +37,28 @@ afterEach(() => {
   }
 });
 
-/** 偽の `pnpm`。**その 3 通りだけを返す。** */
-function withPnpm(stdout: string, status: number): string {
+/**
+ * 偽の `pnpm`。**その 3 通りだけを返し、渡された引数を書き残す。**
+ *
+ * **引数を見ないと、渡していることを誰も確かめていない**（#616 のレビュー 2 周目）
+ * ——**`--audit-level` を落として既定（`low`）へ戻しても**、**`--json` を落として
+ * 正常な監査まで registry 障害扱いにしても**、**この試験は緑のままだった。**
+ */
+function withPnpm(stdout: string, status: number): { bin: string; args: () => string } {
   const dir = mkdtempSync(join(tmpdir(), "audit-deps-"));
   sandboxes.push(dir);
   mkdirSync(join(dir, "bin"), { recursive: true });
+  const argsLog = join(dir, "args");
   const stub = join(dir, "bin", "pnpm");
-  writeFileSync(stub, `#!/usr/bin/env bash\ncat <<'JSON'\n${stdout}\nJSON\nexit ${status}\n`);
+  writeFileSync(
+    stub,
+    `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >>${JSON.stringify(argsLog)}\ncat <<'JSON'\n${stdout}\nJSON\nexit ${status}\n`,
+  );
   chmodSync(stub, 0o755);
-  return join(dir, "bin");
+  return {
+    bin: join(dir, "bin"),
+    args: () => (existsSync(argsLog) ? readFileSync(argsLog, "utf8") : ""),
+  };
 }
 
 const REPORT = JSON.stringify({
@@ -45,10 +66,10 @@ const REPORT = JSON.stringify({
   metadata: { vulnerabilities: { moderate: 0 }, totalDependencies: 248 },
 });
 
-function run(stubBin: string) {
+function run(pnpm: { bin: string }) {
   return spawnSync(SCRIPT, [], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${stubBin}:${process.env.PATH}` },
+    env: { ...process.env, PATH: `${pnpm.bin}:${process.env.PATH}` },
   });
 }
 
@@ -57,6 +78,26 @@ describe("依存の脆弱性を見る", () => {
     const done = run(withPnpm(REPORT, 0));
 
     expect(done.status, `止まっている: ${done.stderr}`).toBe(0);
+  });
+
+  it("段を渡している", () => {
+    // **「段の判定は `pnpm` が持つ」は、渡していることが前提**である（#616 のレビュー）
+    // ——**落とすと既定（`low`）へ戻り**、**low の 1 件で必須チェックが落ちる。**
+    const pnpm = withPnpm(REPORT, 0);
+
+    run(pnpm);
+
+    expect(pnpm.args(), "段を渡していない").toContain("--audit-level moderate");
+  });
+
+  it("報告の形で受け取っている", () => {
+    // **「報告かどうかで見分ける」は、`--json` を渡していることが前提**である
+    // ——**落とすと表形式が返り**、**正常な監査まで registry 障害として止まる。**
+    const pnpm = withPnpm(REPORT, 0);
+
+    run(pnpm);
+
+    expect(pnpm.args(), "報告で受け取っていない").toContain("--json");
   });
 
   it("見つかったら、止める", () => {
