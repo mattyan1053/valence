@@ -58,9 +58,29 @@ function themeVariables(): { light: Set<string>; dark: Set<string> } {
   const css = readFileSync(join(REPO_ROOT, "src/app/globals.css"), "utf8");
   const darkFrom = css.indexOf("@media (prefers-color-scheme: dark)");
   expect(darkFrom, "暗いテーマの節が globals.css に無い").toBeGreaterThanOrEqual(0);
-  const names = (text: string) =>
-    new Set([...text.matchAll(/(--[a-zA-Z0-9-]+)\s*:/g)].map(([, n]) => n ?? ""));
-  return { light: names(css.slice(0, darkFrom)), dark: names(css.slice(darkFrom)) };
+  return { light: declaredIn(css.slice(0, darkFrom)), dark: declaredIn(css.slice(darkFrom)) };
+}
+
+/**
+ * **その節の `:root { … }` で宣言されている変数の名前。**
+ *
+ * **コメントを先に落とす**（#585 のレビュー 2 周目）——**`/* --tier-risk: … *\/` と
+ * コメントアウトしても、素で数えると「在る」ことになる。** **その状態では
+ * `var(--tier-risk)` が解決されず、帯と札が描かれない。**
+ *
+ * **`:root` の中だけを見る**——**`@theme inline` は別の名前を作る場所**で、
+ * **そこを混ぜると「宣言されている」の意味がぼやける。**
+ */
+function declaredIn(text: string): Set<string> {
+  const clean = text.replace(/\/\*[\s\S]*?\*\//g, "");
+  const at = clean.indexOf(":root");
+  expect(at, ":root が無い").toBeGreaterThanOrEqual(0);
+  const from = clean.indexOf("{", at);
+  const to = clean.indexOf("}", from);
+  expect(to, ":root が閉じていない").toBeGreaterThan(from);
+  return new Set(
+    [...clean.slice(from, to).matchAll(/(--[a-zA-Z0-9-]+)\s*:/g)].map(([, n]) => n ?? ""),
+  );
 }
 
 /** 塗る要素。**`g` / `title` は塗らない**ので、ここには入れない。 */
@@ -290,14 +310,30 @@ describe("盤面に見た目が当たっている（#583）", () => {
       return bands[0] ?? "";
     };
 
-    const tiers: RiskTier[] = ["fast-track", "needs-review", "high-risk"];
+    const tiers = EVERY_TIER;
     const colors = tiers.map(bandOf);
 
     expect(new Set(colors).size, "危なさの色が見分けられない").toBe(tiers.length);
+    // **段ごとに、その段の札だけを見る**（#585 のレビュー 2 周目）。
+    // **3 つに同じ正規表現を当てると、`needs-review` を `すぐ` にしても通る**
+    // ——**通常 Tier が fast-track と誤表示されても分からない。**
+    //
+    // **期待する札は、ここに書く**（**実装から取ると、実装を実装で確かめることになる**）。
+    const EXPECTED_LABEL: Record<RiskTier, string> = {
+      "fast-track": "すぐ",
+      "needs-review": "通常",
+      "high-risk": "要注意",
+    };
     for (const tier of tiers) {
-      expect(boxOf(markupFor([1], [], new Map([[1, mark(tier)]])), 1), "札が消えている").toMatch(
-        /すぐ|通常|要注意/,
-      );
+      const box = boxOf(markupFor([1], [], new Map([[1, mark(tier)]])), 1);
+      expect(box, `${tier} の札が出ていない`).toContain(EXPECTED_LABEL[tier]);
+      // **他の段の札が出ていない**——**取り違えは「出ている」だけでは見えない。**
+      for (const other of tiers) {
+        if (other === tier) {
+          continue;
+        }
+        expect(box, `${tier} に ${other} の札が出ている`).not.toContain(EXPECTED_LABEL[other]);
+      }
     }
   });
 
