@@ -27,12 +27,19 @@ import { procedureText } from "./procedure-doc";
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /**
- * GitHub が Issue を自動で閉じる語。
+ * GitHub が Issue を自動で閉じる参照。
  *
  * **`Closes` だけを見ない**——**`Fixes` / `Resolves` も同じように閉じる**ので、
  * **1 語だけ禁じると、別の語で同じことが起きる。**
+ *
+ * **`#N` だけを見ない**——**`Fixes owner/repo#73` も閉じる**（`bin/loop-claim` が
+ * 同じ形を扱っている）。**番号の直前だけを見ると、そちらの書き方が素通りする。**
+ *
+ * **写した規則は本家からずれる**（`bin/loop-claim` にそう書いてある）。**ここが
+ * 写しでよいのは、見る先が GitHub ではなく手順書の散文だから**である——
+ * **走っているときに信じるのは `closingIssuesReferences`** で、そちらは写しではない。
  */
-const CLOSING_KEYWORD = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#/i;
+const CLOSING_KEYWORD = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:[\w.-]+\/[\w.-]+)?#/i;
 
 /** worker が PR を作る節。**本文に何を書くかは、ここが決めている**。 */
 function prSection(): string {
@@ -81,6 +88,19 @@ describe("閉じる経路を 1 本にする", () => {
     expect(prSection(), "自動で閉じる語が残っている").not.toMatch(CLOSING_KEYWORD);
   });
 
+  it("閉じる参照の形を、1 つしか知らないままにしない", () => {
+    // **`Closes #N` の形しか見ていなかった**（レビュー 2 周目）——
+    // **`Fixes owner/repo#73` へ書き換えても緑**だった。
+    // **扱える形をここへ並べておく**と、**狭めた変更がここで赤くなる。**
+    for (const form of ["Closes #12", "Fixes owner/repo#12", "RESOLVES #12", "closed #12"]) {
+      expect(form, `${form} を閉じる参照として数えていない`).toMatch(CLOSING_KEYWORD);
+    }
+
+    // **広げすぎない側も置く。** **`Refs #N` まで数えると、番号を書けなくなる**
+    // ——**`bin/loop-close-candidates` が候補を挙げられず、今度は閉じ忘れる。**
+    expect("Refs #12", "参照まで閉じる語として数えている").not.toMatch(CLOSING_KEYWORD);
+  });
+
   it("PR の本文から、その Issue を引けるようにさせる", () => {
     // **閉じる語を消すだけだと、`bin/loop-close-candidates` が候補を挙げられない**
     // ——**本文の `#N` を拾う口**なので、**番号そのものは本文に要る。**
@@ -106,6 +126,21 @@ describe("閉じる経路を 1 本にする", () => {
     expect(looks[0]?.index ?? -1, "閉じる参照を見るのがマージより後になっている").toBeLessThan(
       merge,
     );
+  });
+
+  it("閉じる参照から、リポジトリを落とさない", () => {
+    // **`Fixes owner/other#73` は別のリポジトリの #73** である。**番号だけに潰すと、
+    // こちらの無関係な #73 の完了条件を読んで「判定した」ことになる**——
+    // **その Issue はまだ誰も直していない。**
+    //
+    // **`bin/loop-claim` が先に同じ口を使っている**（#122 で踏んだ形）。
+    // **写さず、そちらへ合わせる。**
+    const section = mergeSection();
+    const from = section.indexOf("--json closingIssuesReferences");
+    expect(from, "閉じる参照を見る口が無い").toBeGreaterThanOrEqual(0);
+    const block = section.slice(from).split("```")[0] ?? "";
+
+    expect(block, "リポジトリを落としている").toContain("nameWithOwner");
   });
 
   it("閉じる前に、Issue のコメントも読む", () => {

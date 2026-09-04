@@ -181,10 +181,17 @@ worker が元気に push している間ずっと取得障害が数えられな�
 **先に、この PR がマージした瞬間に閉じる Issue を見る** (#623)。
 
 ```bash
-gh pr view <PR番号> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
+# **リポジトリも一緒に取る**（`bin/loop-claim` と同じ形）——**`Fixes owner/other#73` は
+# **別のリポジトリの #73** で、**番号だけに潰すと、こちらの無関係な #73 の完了条件を
+# 読んで「判定した」ことになる**
+gh pr view <PR番号> --json closingIssuesReferences \
+  --jq '.closingIssuesReferences[] | "\(.repository.nameWithOwner)\t\(.number)"'
 ```
 
-- **空** → そのままマージへ。**ループが出す PR は閉じる語を書かない**ので、ふつうはこちら
+**見るのは、このリポジトリを指す行だけ**である。**他所の Issue は触れないし、触ってはいけない。**
+
+- **空**（**このリポジトリの行が無い**）→ そのままマージへ。**ループが出す PR は
+  閉じる語を書かない**ので、ふつうはこちら
 - **1 件以上** → **ループ外の著者の PR である**（**worker の手順は、その人には届かない**）。
   **番号ごとに、下の「完了条件を読む」を先に通す**——**マージしてからでは遅い。**
   **GitHub がその場で閉じ**、**閉じ忘れを挙げる口は closed を挙げない**ので、
