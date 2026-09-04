@@ -77,6 +77,14 @@ export type DependencyGraphViewProps = {
    * ——**取れているのに取れていないと言う**のは、`invalid` と同じ嘘である。
    */
   readonly titleOf: (pullRequestNumber: number) => string | undefined;
+  /**
+   * **その PR の GitHub 上の場所**（#621）。
+   *
+   * **任意にしない。** **押す場所から現物へ行けないと、番号を読んで
+   * 自分で URL を組み立てることになる**——**渡し忘れが「飛べない盤面」になる。**
+   * **組み立てるのは呼ぶ側**（**owner / name を知っているのは経路の側**）。
+   */
+  readonly urlOf: (pullRequestNumber: number) => string;
 };
 
 /**
@@ -102,17 +110,29 @@ function PullRequestRow({
   pullRequest,
   dependsOn,
   aside,
+  title,
+  url,
 }: {
   pullRequest: PullRequestRef;
   dependsOn: readonly number[];
   aside?: ReactNode;
+  title: string | undefined;
+  url: string;
 }) {
   return (
     // **行にも強弱を付ける**（#583）。**番号 > 枝 > 依存**——**素の `<li>` が並ぶと、
     // どこまでが 1 件か分からない。** **色はテーマが決める**（`var(--…)`）。
     <li className="flex flex-col gap-1 rounded border border-[var(--node-stroke)] bg-[var(--node-fill)] px-3 py-2">
       <div className="flex flex-wrap items-baseline gap-2">
-        <span className="font-mono font-bold">#{pullRequest.number}</span>
+        {/* **番号とタイトルを 1 つのリンクにする**（#621）——**タイトルが取れなくても
+            飛べる**（**取れなかったぶんは `undefined` で来る**。#542）。
+            **強弱は #583 のものを引き継ぐ**——**行の主役は変わっていない。**
+            **`underline` は「押せる」を見せるぶん**（#622 のレビュー）——
+            **Preflight が当たるので、書かなければ本文と同じ顔になる。** */}
+        <a className="font-mono font-bold underline" href={url}>
+          #{pullRequest.number}
+          {title === undefined ? "" : ` ${title}`}
+        </a>
         <code className="text-sm">{pullRequest.head.branch}</code>
         {dependsOn.length > 0 ? (
           <span className="text-sm text-[var(--muted)]">
@@ -159,6 +179,7 @@ export function DependencyGraphView({
   tierOf,
   headKnown,
   titleOf,
+  urlOf,
 }: DependencyGraphViewProps) {
   const byNumber = new Map(pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]));
   const dependsOn = dependsOnIndex(edges);
@@ -172,6 +193,8 @@ export function DependencyGraphView({
           pullRequest={pullRequest}
           dependsOn={dependsOn.get(pullRequest.number) ?? []}
           aside={renderAside?.(pullRequest.number)}
+          title={titleOf(pullRequest.number)}
+          url={urlOf(pullRequest.number)}
         />
       ));
 
