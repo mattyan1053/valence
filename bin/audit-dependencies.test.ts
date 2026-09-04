@@ -71,6 +71,25 @@ describe("依存の脆弱性を見る", () => {
     expect(done.stderr, "何が見つかったか言っていない").toContain("脆弱性");
   });
 
+  it("段より下の脆弱性しか無ければ、数え直さずに通す", () => {
+    // **段の判定は `pnpm` が持つ**（#616 のレビュー）——**`--json` でも効いている。**
+    // **実物で確かめた**（`pnpm@11.20.0`、moderate が 1 件だけの木）:
+    //
+    //   --audit-level moderate  exit=1  advisories=1
+    //   --audit-level high      exit=0  advisories=0  metadata={"moderate":1,"critical":1}
+    //
+    // **`metadata.vulnerabilities` は段で絞られない**——**そこを数えると、
+    // 段より下の 1 件で全 PR が止まる。** **数えるのは終了コードだけである。**
+    const belowLevel = JSON.stringify({
+      advisories: {},
+      metadata: { vulnerabilities: { low: 3, moderate: 0 }, totalDependencies: 248 },
+    });
+
+    const done = run(withPnpm(belowLevel, 0));
+
+    expect(done.status, "段より下を数えて止めている").toBe(0);
+  });
+
   it("JSON でも、報告の形でなければ止める", () => {
     // **`fetch failed` は JSON ですらない**ので、**`JSON.parse` が先に投げる**
     // ——**`metadata.totalDependencies` を見る判定は、それだけでは 1 度も通らない**

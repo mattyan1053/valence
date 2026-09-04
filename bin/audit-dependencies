@@ -16,6 +16,16 @@
 #
 # **倒す向きは「止まる」側のまま**である——**判定できなかったぶんを緑にしない。**
 #
+# **段の判定は `pnpm` が持つ。ここで数え直さない** (#616 のレビュー)。
+# **`--json` を付けても段は効く**——**実物で確かめた**（`pnpm@11.20.0`、
+# moderate が 1 件だけの木）:
+#
+#   --audit-level moderate  exit=1  advisories=1
+#   --audit-level high      exit=0  advisories=0  metadata={"moderate":1,"critical":1}
+#
+# **`metadata.vulnerabilities` は段で絞られない**——**そこを数えると、段より下の
+# 1 件で全 PR が止まる。** **数えるのは `pnpm` の終了コードだけである。**
+#
 #   exit 0 = 脆弱性なし / exit 1 = 脆弱性あり / exit 2 = registry へ届かず判定できない
 set -uo pipefail
 
