@@ -100,6 +100,21 @@ describe("依存の脆弱性を見る", () => {
     expect(pnpm.args(), "報告で受け取っていない").toContain("--json");
   });
 
+  it("試行の回数を絞っている", () => {
+    // **既定（2 回）だと、届かないときに最悪 4 分 10 秒かかる**（#617）——
+    // **60 秒 × 3 回 ＋ 待ち 10 秒 ＋ 60 秒。** **CI の実測もこの刻みだった**
+    // （**+60 秒で 1 回目の WARN、+130 秒で 2 回目、+198 秒で切られた**）。
+    //
+    // **切られると、この script の `exit 2` そのものが出ない**——**「なぜ止まったか」が
+    // 消える。** **1 回に絞ると最悪 2 分 10 秒**で、**あの周回に与えられていた
+    // 3 分 18 秒に収まる。**
+    const pnpm = withPnpm(REPORT, 0);
+
+    run(pnpm);
+
+    expect(pnpm.args(), "試行の回数を渡していない").toContain("--config.fetch-retries=1");
+  });
+
   it("見つかったら、止める", () => {
     const found = JSON.stringify({
       advisories: { "1": { severity: "moderate" } },

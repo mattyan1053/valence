@@ -31,7 +31,19 @@ set -uo pipefail
 
 readonly LEVEL="${AUDIT_LEVEL:-moderate}"
 
-report="$(pnpm audit --audit-level "$LEVEL" --json --ignore-registry-errors 2>/dev/null)"
+# **試行を 1 回に絞る** (#617)。**既定（2 回）は、届かないときに最悪 4 分 10 秒**
+# ——**1 回 60 秒（`fetch-timeout` の既定）× 3 回 ＋ 待ち 10 秒 ＋ 60 秒**である。
+# **CI の実測もこの刻みだった**（**+60 秒で 1 回目の WARN、+130 秒で 2 回目、
+# +198 秒で切られた**）。
+#
+# **切られると、この script の `exit 2` そのものが出ない**——**「なぜ止まったか」が
+# 消え、ログに残るのは `The operation was canceled.` だけ**になる。
+# **1 回に絞れば最悪 2 分 10 秒**で、**あの周回に与えられていた 3 分 18 秒に収まる。**
+#
+# **待つ回数を減らすぶん、瞬きのような障害では落ちやすくなる**——**そのときは
+# `exit 2` で「registry へ届かなかった」と言うので、押し直せば済むと分かる。**
+report="$(pnpm audit --audit-level "$LEVEL" --json --ignore-registry-errors \
+  --config.fetch-retries=1 2>/dev/null)"
 audited=$?
 
 # **報告かどうかだけを見る。** **中身の解釈は `pnpm` に任せる**（終了コードが答えである）。

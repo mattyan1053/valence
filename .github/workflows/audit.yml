@@ -19,7 +19,11 @@ jobs:
   dependencies:
     name: dependency vulnerabilities
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 監査の手前で予算が尽きると、bin/audit-dependencies の exit 2 そのものが
+    # 出ない (#617)。実測: 同じ registry 障害で pnpm/action-setup が 6 分 45 秒を
+    # 使い、Audit は 3 分 18 秒で切られた。監査の側は 1 回試行に絞って最悪
+    # 2 分 10 秒にしてあるので、手前がそれだけ使っても言い切れる幅を置く。
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
