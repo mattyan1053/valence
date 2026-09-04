@@ -47,7 +47,14 @@ type State = {
   reviewsExit?: number;
 };
 
-type Run = { status: number; stdout: string; stderr: string; calls: string[] };
+type Run = {
+  status: number;
+  stdout: string;
+  stderr: string;
+  calls: string[];
+  /** **隣の `bin/loop-review-head` が呼ばれたか**（#615 のレビュー）。 */
+  recorded: boolean;
+};
 
 /**
  * 偽の `bin/loop-review-commits`。
@@ -132,6 +139,16 @@ function run(state: State, env: Record<string, string> = {}): Run {
     mode: 0o755,
   });
 
+  // **副作用の先を、隣に置く**（#615 のレビュー）。**判定器が呼んだかどうかは、
+  // 呼ばれる側を置かないと観測できない**——**無いものを呼んでも、`set -e` が無いので
+  // 判定器はそのまま先へ進み、どこにも跡が残らない。**
+  const recordLog = join(dir, "recorded.log");
+  writeFileSync(
+    join(bin, "loop-review-head"),
+    `#!/usr/bin/env bash\necho "$*" >> ${JSON.stringify(recordLog)}\n`,
+    { mode: 0o755 },
+  );
+
   const result = spawnSync(script, ["12"], {
     encoding: "utf8",
     env: { ...process.env, PATH: path, ...env },
@@ -140,8 +157,15 @@ function run(state: State, env: Record<string, string> = {}): Run {
   const calls = existsSync(callLog)
     ? readFileSync(callLog, "utf8").split("\n").filter(Boolean)
     : [];
+  const recorded = existsSync(recordLog);
   rmSync(dir, { recursive: true, force: true });
-  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr, calls };
+  return {
+    status: result.status ?? -1,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    calls,
+    recorded,
+  };
 }
 
 /** いまから `minutes` 分前の時刻。**猶予の境目を跨がせるのに使う。** */
@@ -180,6 +204,148 @@ describe("bin/loop-review-budget", () => {
       );
 
       expect(budget.status).toBe(0);
+    });
+  });
+
+  /**
+   * **要求の前に head を記録する手順が、飛ばされた**（#614。**master が今日踏んだ**）。
+   *
+   * **ゲートの FAIL 行は「レビューを要求してください」としか言わない**——**手順の本体は
+   * `bin/loop-procedure-body` で読む側**にあるので、**ゲートの出力だけを読んで動くと
+   * 記録が抜ける。**
+   *
+   * **抜けたことは、その周回では分からない。** **困るのは 👍 だけで返ったとき**——
+   * **`--pair` は SHA の無い応答を「未消費の最も古い記録」へ寄せ、無ければ結び付けない**
+   * （安全側）。**記録が無ければその往復は数えられず、2 回しかない枠が 1 回消える。**
+   *
+   * **判定するのはここ**である——**`[OK]` を出す口が、投げる直前に読まれる最後の行**
+   * だからである。**ゲートには書かない**（**あちらは判定器で、手順を書くところではない**）。
+   *
+   * **記録そのものはさせない。** **判定器に副作用を入れると、判定だけしたい呼び出し
+   * （ゲートの内側など）でも記録が積まれる**——**次の応答が、投げてもいない要求へ寄る。**
+   */
+  describe("要求の前に、head を記録させる（#614）", () => {
+    it("要求してよいとき、記録する手順を出す", () => {
+      const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+      expect(budget.status).toBe(0);
+      // **貼れば走る形にする**（`bin/loop-lease check` の案内と同じ判断）
+      // ——**場所取りのまま出すと、読んだ側が組み立て直すことになる。**
+      // **PR 番号は、この試験群が使っているもの**（`run` が `12` で呼ぶ）
+      expect(budget.stdout, "記録する手順が出ていない").toContain(
+        `bin/loop-review-head 12 ${HEAD}`,
+      );
+    });
+
+    /**
+     * **貼った文字列を、そのまま走らせて見る**（#615 のレビュー）。
+     *
+     * **出ていることだけを見ると、手順の一部しか出していなくても緑**である
+     * ——**この案内が直しに来たのは「ゲートの FAIL 行が手順の一部しか言わない」**で、
+     * **一部だけを貼れる形は、飛ばせる形**である。
+     *
+     * **`head_sha` を読んでから貼るまでに push されると、古い SHA を記録したまま
+     * 新しい head へ投げる**——**SHA を持たない 👍 はその古い記録へ寄り、
+     * 現 head は未レビューのまま枠だけ減る。** **#614 の「結び付かない」（安全側）より
+     * 悪い**——**見てもいない head がレビュー済みになる。**
+     */
+    describe("案内を貼って走らせる", () => {
+      /** 案内の行から、貼る部分だけを取り出す。 */
+      function pasted(stdout: string): string {
+        const line = stdout.split("\n").find((each) => each.includes("bin/loop-review-head"));
+        expect(line, "案内が出ていない").toBeDefined();
+        return (line ?? "").trim();
+      }
+
+      /**
+       * 貼った文字列を走らせる。**隣の 2 つは偽物**——**見たいのは繋ぎ方**であって、
+       * **中身は各スクリプトの試験が固定している。**
+       */
+      function paste(command: string, headMoved: boolean): { recorded: boolean; status: number } {
+        const dir = mkdtempSync(join(tmpdir(), "review-budget-paste-"));
+        mkdirSync(join(dir, "bin"));
+        const record = join(dir, "recorded");
+        writeFileSync(
+          join(dir, "bin", "loop-head"),
+          `#!/usr/bin/env bash\nexit ${headMoved ? 1 : 0}\n`,
+          { mode: 0o755 },
+        );
+        writeFileSync(
+          join(dir, "bin", "loop-review-head"),
+          `#!/usr/bin/env bash\necho "$*" > ${JSON.stringify(record)}\n`,
+          { mode: 0o755 },
+        );
+        const ran = spawnSync("bash", ["-c", command], { cwd: dir, encoding: "utf8" });
+        const recorded = existsSync(record);
+        rmSync(dir, { recursive: true, force: true });
+        return { recorded, status: ran.status ?? -1 };
+      }
+
+      it("head が動いていなければ、記録まで行く", () => {
+        const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+        const ran = paste(pasted(budget.stdout), false);
+
+        expect(ran.recorded, "記録まで行っていない").toBe(true);
+      });
+
+      it("head が動いていたら、記録まで行かない", () => {
+        // **これが本題。** **`bin/loop-head same` が exit 1 なら、記録も投稿もしない**
+        // ——**貼った人が片方だけ実行してしまえる形にしない。**
+        const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+        const ran = paste(pasted(budget.stdout), true);
+
+        expect(ran.recorded, "動いた head の記録を残している").toBe(false);
+      });
+    });
+
+    it("現 head がレビュー済みなら、出さない", () => {
+      // **平常時に鳴る検査は読まれなくなる**（#248）。**投げない周回に出すと、
+      // 「打つべき手順」と「打ってはいけない周回」が同じ顔になる。**
+      const budget = run({ reviews: [`${minutesAgo(60)}\t${HEAD}\tlive`] });
+
+      expect(budget.status).toBe(1);
+      expect(budget.stdout, "投げない周回に手順を出している").not.toContain("bin/loop-review-head");
+    });
+
+    it("上限に達していても、出さない", () => {
+      // **exit 1 の道は 2 つある**（現 head がレビュー済み / 上限）——**片方だけ見ると、
+      // もう片方へ足しても緑のまま**である（**変異で見つけた**）。
+      const budget = run(
+        {
+          reviews: [
+            `${minutesAgo(90)}\t${"b".repeat(40)}\tlive`,
+            `${minutesAgo(60)}\t${"c".repeat(40)}\tlive`,
+          ],
+          createdAt: minutesAgo(120),
+        },
+        { LOOP_MAX_REVIEW_ROUNDS: "2" },
+      );
+
+      expect(budget.status).toBe(1);
+      expect(budget.stdout, "上限の周回に手順を出している").not.toContain("bin/loop-review-head");
+    });
+
+    it("待つだけの周回にも、出さない", () => {
+      const budget = run({ reviews: [], createdAt: minutesAgo(1) });
+
+      expect(budget.status).toBe(3);
+      expect(budget.stdout, "待つ周回に手順を出している").not.toContain("bin/loop-review-head");
+    });
+
+    it("判定器は、記録を積まない", () => {
+      // **副作用を判定器へ入れない**（完了条件）。**ゲートの内側から呼んでも、
+      // 投げてもいない要求の記録が残ってはいけない。**
+      //
+      // **呼ばれる側を隣に置いて見る**（#615 のレビュー）。**前は偽の
+      // `loop-review-commits` の引数を見ていた**——**そこに `loop-review-head` は
+      // 一度も現れない**ので、**判定器へ呼び出しを足しても緑のまま**だった
+      // （**無いものを呼んでも、`set -e` が無いので判定器は先へ進む**）。
+      const budget = run({ reviews: [], createdAt: minutesAgo(60) });
+
+      expect(budget.status).toBe(0);
+      expect(budget.recorded, "判定器が記録を積んでいる").toBe(false);
     });
   });
 
