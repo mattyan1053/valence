@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
 import type { RepositoryBoardResult } from "../../../../application/review-order/view-repository-board";
 import { mergeBlockFor } from "../../../../domain/graph/merge-block";
+import type { MergeStatusReport } from "../../../../domain/graph/merge-readiness";
 import { showsSignOut } from "../../../../ui/auth/sign-out-button";
 import {
   approvalDisplay,
@@ -636,11 +637,132 @@ describe("合流の状況が、行に出る", () => {
     );
   }
 
+  /**
+   * 盤面の側だけ。**推奨レビュー順の節を外す**（#632）。
+   *
+   * **あちらの理由にも `conflict` が出る**（「著者の手が要ります（conflict・…）」）
+   * ——**全体で数えると、盤面に出ていなくても当たる**（`AGENTS.md` §4）。
+   */
+  function board(html: string): string {
+    const from = html.indexOf("</section>");
+    expect(from, "推奨レビュー順の節が出ていない").toBeGreaterThanOrEqual(0);
+    return html.slice(from);
+  }
+
   it("conflict している PR だけに、その理由が出る", async () => {
     // **行を数えてから当てている**（`AGENTS.md` §4）——**2 行あるので、
     // 「出ている」だけでは、合流できる行にも出ていることを見落とす**
-    const html = await markup();
+    const rows = board(await markup());
 
-    expect(html.match(/conflict/g), "page から部品へ状況が渡っていない").toHaveLength(1);
+    expect(rows.match(/conflict/g), "page から部品へ状況が渡っていない").toHaveLength(1);
+  });
+});
+
+/**
+ * **どれから見るかを、盤面とは別に出す**（#632）。
+ *
+ * **一覧は依存の順のまま**である——**混ぜて 1 つの並びにすると、
+ * 土台より先に積み荷をマージしようとする**（`review-board.tsx` の判断）。
+ */
+describe("推奨レビュー順を、盤面とは別に出す", () => {
+  const pullRequest = (number: number, base: string, head: string) => ({
+    number,
+    base: { repository: "r", branch: base },
+    head: { repository: "r", branch: head },
+  });
+
+  const change = (paths: readonly string[]) => ({
+    changedFileCount: 1,
+    changedLineCount: 5,
+    changedPaths: { paths, truncated: false },
+    ciStatus: "passing" as const,
+  });
+
+  const CLEAN: MergeStatusReport = { mergeable: "mergeable", state: "clean" };
+
+  /** **#1 が土台で、すぐ通せる。#2 はその上に積まれていて、危ない。** */
+  async function markup(
+    mergeStatuses: ReadonlyMap<number, MergeStatusReport> = new Map([
+      [1, CLEAN],
+      [2, CLEAN],
+    ]),
+  ): Promise<string> {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        {
+          board: async () => ({
+            kind: "board",
+            plan: {
+              pullRequests: [pullRequest(1, "main", "feat/a"), pullRequest(2, "feat/a", "feat/b")],
+              edges: [{ dependent: 2, dependsOn: 1 }],
+              order: { ordered: [1, 2], cyclic: [] },
+              invalid: [],
+              changes: new Map([
+                [1, change(["src/ui/button.tsx"])],
+                [2, change(["src/infrastructure/github/app-jwt.ts"])],
+              ]),
+              changesUnavailable: [],
+              heads: new Map([
+                [1, "a".repeat(40)],
+                [2, "b".repeat(40)],
+              ]),
+              titles: new Map(),
+              mergeStatuses,
+            },
+            approvals: { approved: new Set<number>(), unavailable: [] },
+          }),
+          report: () => {},
+        },
+      ),
+    );
+  }
+
+  /** 推奨の節だけ。**盤面の一覧に当てない。** */
+  function suggestion(html: string): string {
+    const from = html.indexOf("推奨レビュー順");
+    expect(from, "推奨レビュー順が出ていない").toBeGreaterThanOrEqual(0);
+    const to = html.indexOf("</section>", from);
+    expect(to, "節が閉じていない").toBeGreaterThan(from);
+    return html.slice(from, to);
+  }
+
+  /** 盤面の一覧だけ。**推奨の節より後ろ**にある。 */
+  function boardList(html: string): string {
+    const after = html.indexOf("</section>", html.indexOf("推奨レビュー順"));
+    const from = html.indexOf("<ol", after);
+    expect(from, "盤面の一覧が出ていない").toBeGreaterThan(after);
+    const to = html.indexOf("</ol>", from);
+    expect(to, "一覧が閉じていない").toBeGreaterThan(from);
+    return html.slice(from, to);
+  }
+
+  it("危ないほうを先に見る、と出る", async () => {
+    const rows = suggestion(await markup());
+
+    expect(rows.indexOf("#2")).toBeLessThan(rows.indexOf("#1"));
+  });
+
+  it("conflict している PR を、先に見ろと言わない", async () => {
+    // **合流の状況が推奨まで渡っていること**（#632 は #629 の上に積む）
+    // ——**渡らないと、著者待ちの PR が「読む時間が要ります」で先頭に来る**
+    const rows = suggestion(
+      await markup(
+        new Map<number, MergeStatusReport>([
+          [1, CLEAN],
+          [2, { mergeable: "conflicting", state: "dirty" }],
+        ]),
+      ),
+    );
+
+    expect(rows.indexOf("#1"), "危ないほうが先のまま").toBeLessThan(rows.indexOf("#2"));
+  });
+
+  it("盤面の一覧は、依存の順のまま", async () => {
+    // **#1 は #2 の土台**である——**推奨が逆でも、ここは動かない**
+    const rows = boardList(await markup());
+
+    expect(rows.indexOf("#1")).toBeLessThan(rows.indexOf("#2"));
   });
 });
