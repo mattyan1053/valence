@@ -767,3 +767,28 @@ describe("base にどれだけ遅れているか（#639）", () => {
     expect(calls.filter((call) => call.url === GRAPHQL_URL)).toHaveLength(1);
   });
 });
+
+describe("依存を決めるぶんだけ取る（#650 のレビュー）", () => {
+  it("合流の状況も base の遅れも取りに行かない", async () => {
+    // **押す経路が待つのは、この往復である**——**`listPullRequests()` は
+    // GraphQL を PR の本数ぶん叩く。**
+    const { calls, fetchImpl } = fakeGitHub({
+      [INSTALLATION_URL]: INSTALLATION,
+      [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+      [PULLS_URL]: { body: JSON.stringify([pull(8, "main", "feat/a")]) },
+    });
+
+    const listing = await createGitHubPullRequestSource({
+      credentials,
+      repository,
+      fetchImpl,
+      now: clockFrom("2026-08-10T00:00:00Z"),
+    }).listPullRequestRefs();
+
+    expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8]);
+    expect(
+      calls.filter((call) => call.url === GRAPHQL_URL),
+      "GraphQL を叩いている",
+    ).toEqual([]);
+  });
+});

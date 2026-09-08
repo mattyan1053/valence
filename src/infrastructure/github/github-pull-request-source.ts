@@ -19,6 +19,7 @@
  */
 
 import type {
+  ListedPullRequests,
   PullRequestListing,
   PullRequestSource,
 } from "../../application/ports/pull-request-source";
@@ -131,6 +132,14 @@ export function createGitHubPullRequestSource({
   }
 
   return {
+    /**
+     * **依存を決めるぶんだけ**（#650 のレビュー）。**一覧の応答だけで作る**ので、
+     * **PR の本数で往復が増えない**——**押す経路はこちらを使う。**
+     */
+    async listPullRequestRefs(): Promise<ListedPullRequests> {
+      return toPullRequestRefs(await readPullRequests(await authorization()));
+    },
+
     async listPullRequests(): Promise<PullRequestListing> {
       const header = await authorization();
       // **同時に叩く**——**互いの結果は要らない**ので、**順に待つ理由が無い**
@@ -350,6 +359,19 @@ function abortion(deadline: AbortSignal): Promise<void> {
  *
  * **head は commit で指す。** **見せたものに固定する**（#331 と同じ向き）——
  * **枝の名前で聞くと、盤面を出してから push されたぶんまで数に入る。**
+ *
+ * **`qualifiedName` は短い名前でよい。** **`refs/heads/` を付けても答えは同じ**である
+ * ——**測った**（2026-09-08、この PR の head に対して `main` と `refs/heads/main` の
+ * どちらでも `behindBy 1 / status DIVERGED`）。**`Repository.ref` は完全修飾を先に探し、
+ * 無ければ短い名前へ落とす**ので、**`ref` が `null` になる経路はここでは無い。**
+ * **付け足す「修正」を入れなくてよい**（#650 のレビューで 1 度疑われた）。
+ *
+ * **base は枝の名前で聞く。** **PR が持っている `base.sha` は使えない**
+ * ——**あれは base の枝の先端を追わない。** **実測（2026-09-08、このリポジトリ）:
+ * PR #647 の `base.sha` は `a6b8f8f` のままで、その間に main は 2 回進んだ**
+ * （`261db55` → `c6ec166`）。**`base.sha` で比べると遅れは必ず 0 になり**、
+ * **黙って「遅れていません」と出る**（`AGENTS.md` §5。**このリポジトリが繰り返し
+ * 塞いでいる形**）。
  */
 const BASE_LAG_QUERY = `query($owner: String!, $name: String!, $base: String!, $head: String!) {
   repository(owner: $owner, name: $name) {

@@ -4,12 +4,15 @@ import type { ChangeSummarySource, UnavailableChangeSummary } from "../ports/cha
 import type { PullRequestListing, PullRequestSource } from "../ports/pull-request-source";
 import { planReviewOrder } from "./plan-review-order";
 
+/** **盤面が要る口だけ**（#650 のレビュー）——**押す経路のぶんは要らない。** */
+type BoardSource = Pick<PullRequestSource, "listPullRequests">;
+
 /** **モックを使わない。** port にはインメモリ実装を渡す（AGENTS.md §4）。 */
-function sourceReturning(listing: PullRequestListing): PullRequestSource {
+function sourceReturning(listing: PullRequestListing): BoardSource {
   return { listPullRequests: () => Promise.resolve(listing) };
 }
 
-function failingSource(error: Error): PullRequestSource {
+function failingSource(error: Error): BoardSource {
   return { listPullRequests: () => Promise.reject(error) };
 }
 
@@ -323,7 +326,7 @@ describe("レビュー順序を組み立てる", () => {
         // **決め方は composition に残したまま、開始だけ後ろへ動かす**——
         // **時計を `application` へ持ち込まない**（この節の上に書いてある理由）。
         const order: string[] = [];
-        const slowListing: PullRequestSource = {
+        const slowListing: BoardSource = {
           listPullRequests: async () => {
             order.push("一覧");
             return stacked;

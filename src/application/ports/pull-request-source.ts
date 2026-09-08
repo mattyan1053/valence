@@ -91,4 +91,17 @@ export type PullRequestSource = {
    * **「取得できなかった」が「PR が 0 件」に化ける**。
    */
   listPullRequests(): Promise<PullRequestListing>;
+  /**
+   * **依存を決めるぶんだけ**を取る（#650 のレビュー）。
+   *
+   * **一覧の応答だけで作れるもの**である——**合流の状況も base の遅れも足さない。**
+   * **あちらは PR の本数ぶん往復する**（**GraphQL を 1 本ずつ叩く**）ので、
+   * **押す経路がそれを待つと、押した人の待ち時間が open PR の本数で伸びる。**
+   *
+   * **盤面は `listPullRequests` を使う**——**押せない理由を、押す前に言うため**である。
+   * **分けているのは費用だけ**で、**依存の判定はどちらでも `mergeBlockFor` が持つ。**
+   *
+   * **取得に失敗したら投げる**（`listPullRequests` と同じ）。
+   */
+  listPullRequestRefs(): Promise<ListedPullRequests>;
 };
