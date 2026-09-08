@@ -51,6 +51,37 @@ describe("同じファイルを触る PR を並べる", () => {
     expect(reports.get(1)?.overlaps.map((overlap) => overlap.number)).toEqual([2, 3]);
   });
 
+  it("同じパスが 2 回あっても、1 個として数える", () => {
+    // **`ChangedPaths.paths` は一意ではない**（#651 のレビュー）——
+    // **`toChangeSummary` は `filename` と `previous_filename` を並べる**ので、
+    // **`a.ts → b.ts` に移して新しい `a.ts` を足した PR** は `["a.ts", "b.ts", "a.ts"]`
+    const reports = fileOverlapsFor([
+      candidate(1, ["a.ts", "b.ts", "a.ts"]),
+      candidate(2, ["a.ts"]),
+    ]);
+
+    expect(reports.get(1)?.overlaps).toEqual([{ number: 2, count: 1 }]);
+  });
+
+  it("相手のパスが 2 回あっても、1 個として数える", () => {
+    // **`A → B` と `B → C` を 1 本でやると `[B, A, C, B]`**——
+    // **ディレクトリを整理する PR でふつうに起きる**
+    const reports = fileOverlapsFor([candidate(1, ["a.ts"]), candidate(2, ["a.ts", "a.ts"])]);
+
+    expect(reports.get(1)?.overlaps).toEqual([{ number: 2, count: 1 }]);
+  });
+
+  it("重複が並びを変えない", () => {
+    // **水増しされると、多い順の並びまで変わる**
+    const reports = fileOverlapsFor([
+      candidate(1, ["a.ts", "b.ts", "c.ts"]),
+      candidate(2, ["a.ts", "a.ts", "a.ts"]),
+      candidate(3, ["b.ts", "c.ts"]),
+    ]);
+
+    expect(reports.get(1)?.overlaps.map((overlap) => overlap.number)).toEqual([3, 2]);
+  });
+
   it("自分自身とは重ねない", () => {
     const reports = fileOverlapsFor([candidate(1, ["a.ts"])]);
 
@@ -108,16 +139,22 @@ describe("同じファイルを触る PR を並べる", () => {
     expect(reports.get(9)?.overlaps).toEqual([{ number: 8, count: 1 }]);
   });
 
-  it("本数が増えても、2 乗にならない", () => {
-    // **盤面は全部の行について呼ぶ**（`mergeBlocksFor` と同じ理由）
+  it("全部が同じファイルを触っていても、組が消えない", () => {
+    // **組の数は「共有しているパスに何本が乗っているか」で決まる**（#651 のレビュー）
+    // ——**`pnpm-lock.yaml` を全 PR が触れば、本数の 2 乗**である。
+    // **前の版は候補ごとに違うパスを与えていて、この経路を通っていなかった。**
+    //
+    // **「遅い」を結論にしない**——**数を出すところまで**（この PR の主題と同じ形）。
+    // **上限は入れていない**ので、**ここで見るのは「組が消えていないこと」**である。
     const many = Array.from({ length: 400 }, (_, index) =>
-      candidate(index + 1, [`file-${index}.ts`]),
+      candidate(index + 1, ["pnpm-lock.yaml", `file-${index}.ts`]),
     );
 
     const started = process.hrtime.bigint();
-    fileOverlapsFor(many);
+    const reports = fileOverlapsFor(many);
     const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
-    expect(elapsed, `400 本で ${elapsed} ms`).toBeLessThan(500);
+    // **1 本が残り 399 本と重なる**
+    expect(reports.get(1)?.overlaps, `400 本で ${elapsed} ms`).toHaveLength(399);
   });
 });

@@ -62,7 +62,13 @@ export type OverlapReport = {
  * **一覧ぶんをまとめて出す**（`mergeBlocksFor` と同じ理由）。
  *
  * **1 件ずつ比べると本数の 2 乗**になる——**盤面は全部の行について呼ぶ。**
- * **パスから引く索引を 1 度だけ作る**ので、**触ったパスの総数で決まる。**
+ * **パスから引く索引を 1 度だけ作る。**
+ *
+ * **それでも「パスの総数で決まる」とは言えない** (#651 のレビュー)——
+ * **かかりは「共有しているパスに何本が乗っているか」で決まる。**
+ * **`pnpm-lock.yaml` を全 PR が触れば、組の数は本数の 2 乗**である。
+ * **上限は入れていない**——**黙って切ると、この Issue が消しに来た状態
+ * （順序に影響する相手が見えない）に戻る。** **行が読めなくなる話は #597 の仕事**である。
  *
  * **訊いた PR は、重なりが無くても全部返る**——**行が消えると、
  * 測ったのかどうかが分からない。**
@@ -70,9 +76,18 @@ export type OverlapReport = {
 export function fileOverlapsFor(
   candidates: readonly OverlapCandidate[],
 ): ReadonlyMap<number, OverlapReport> {
+  // **先に集合へ落とす**（#651 のレビュー）——**`ChangedPaths.paths` は一意ではない。**
+  // **`toChangeSummary` は `filename` と `previous_filename` を並べる**ので、
+  // **`A → B` と `B → C` を 1 本でやると `[B, A, C, B]` になる**（**ディレクトリを
+  // 整理する PR でふつうに起きる**）。**そのまま数えると、1 個しか共有していないのに
+  // 2 個と出て、多い順の並びまで変わる。**
+  const pathsOf = new Map<number, ReadonlySet<string>>(
+    candidates.map((candidate) => [candidate.number, new Set(candidate.changedPaths?.paths ?? [])]),
+  );
+
   const byPath = new Map<string, number[]>();
   for (const candidate of candidates) {
-    for (const path of candidate.changedPaths?.paths ?? []) {
+    for (const path of pathsOf.get(candidate.number) ?? []) {
       const found = byPath.get(path);
       if (found === undefined) {
         byPath.set(path, [candidate.number]);
@@ -90,20 +105,22 @@ export function fileOverlapsFor(
   return new Map(
     candidates.map((candidate) => [
       candidate.number,
-      { overlaps: overlapsOf(candidate, byPath), partial },
+      { overlaps: overlapsOf(candidate.number, pathsOf.get(candidate.number), byPath), partial },
     ]),
   );
 }
 
 function overlapsOf(
-  candidate: OverlapCandidate,
+  number: number,
+  // **集合を受ける**——**数えるのはファイルの重なりであって、行の数ではない**
+  paths: ReadonlySet<string> | undefined,
   byPath: ReadonlyMap<string, readonly number[]>,
 ): readonly FileOverlap[] {
   const counts = new Map<number, number>();
-  for (const path of candidate.changedPaths?.paths ?? []) {
+  for (const path of paths ?? []) {
     for (const other of byPath.get(path) ?? []) {
       // **自分自身とは重ねない**
-      if (other !== candidate.number) {
+      if (other !== number) {
         counts.set(other, (counts.get(other) ?? 0) + 1);
       }
     }
