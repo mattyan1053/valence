@@ -100,8 +100,32 @@ const TEST_DIRECTORIES: DirectoryRule = {
 /** ドキュメントだと、拡張子だけで分かるもの。 */
 const DOCUMENT_EXTENSIONS: readonly string[] = [".md", ".mdx", ".rst", ".adoc", ".textile"];
 
-/** 拡張子を持たない、決まった名前のドキュメント。 */
+/** 決まった名前のドキュメント。**拡張子は持たないか、下のものだけ。** */
 const DOCUMENT_FILE_NAMES: readonly string[] = ["license", "notice", "authors", "changelog"];
+
+/**
+ * 固定名に付いてよい拡張子 (#647 のレビュー 3 周目)。
+ *
+ * **任意の拡張子を落として比べない。** **`src/billing/license.ts` は実装**であり、
+ * **「文書だけです」と出すと、まさに読ませたい変更を読まずに通す。**
+ *
+ * **`.md` や `.rst` はここに要らない**——**`DOCUMENT_EXTENSIONS` が先に拾う。**
+ * **`LICENSE.txt` を拾うために置いてある**（**`.txt` は文書とは限らないので、
+ * 固定名と組んだときだけ**）。
+ */
+const DOCUMENT_PLAIN_EXTENSIONS: readonly string[] = [".txt"];
+
+/** 決まった名前のドキュメントか。**拡張子は「無い」か「許したもの」だけ。** */
+function isNamedDocument(fileName: string): boolean {
+  return (
+    DOCUMENT_FILE_NAMES.includes(fileName) ||
+    DOCUMENT_PLAIN_EXTENSIONS.some(
+      (extension) =>
+        fileName.endsWith(extension) &&
+        DOCUMENT_FILE_NAMES.includes(fileName.slice(0, -extension.length)),
+    )
+  );
+}
 
 /** ドキュメントの置き場所。**`docs/` を素の置き場にしているリポジトリがある。** */
 const DOCUMENT_DIRECTORIES: DirectoryRule = { anywhere: [], topLevel: ["docs", "doc"] };
@@ -158,7 +182,7 @@ function kindOf(path: string): ChangeKind {
   if (DOCUMENT_EXTENSIONS.some((extension) => fileName.endsWith(extension))) {
     return "docs";
   }
-  if (DOCUMENT_FILE_NAMES.includes(fileName.replace(/\.[^.]*$/, ""))) {
+  if (isNamedDocument(fileName)) {
     return "docs";
   }
   if (TEST_FILE_INFIXES.some((infix) => fileName.includes(infix))) {

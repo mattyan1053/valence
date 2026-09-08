@@ -123,6 +123,20 @@ describe("パスから、変更の種類を決める", () => {
     it("`distance.ts` を、生成物にしない", () => {
       expect(onlyKindOf(["src/distance.ts"])).toBe("other");
     });
+
+    it("固定名を basename に持つ実装を、ドキュメントにしない", () => {
+      // **拡張子を全部落として比べていた**（#647 のレビュー 3 周目）——
+      // **`src/billing/license.ts` が「文書だけです」になっていた。**
+      // **まさに読ませたい変更**である。
+      expect(onlyKindOf(["src/billing/license.ts"])).toBe("other");
+      expect(onlyKindOf(["src/AUTHORS.py"])).toBe("other");
+    });
+
+    it("拡張子の無い固定名と、文書の拡張子は、そのまま当てる", () => {
+      expect(onlyKindOf(["LICENSE"])).toBe("docs");
+      expect(onlyKindOf(["LICENSE.txt"])).toBe("docs");
+      expect(onlyKindOf(["CHANGELOG.md"])).toBe("docs");
+    });
   });
 });
 
