@@ -18,7 +18,7 @@
  * **純粋関数である**（§3）。
  */
 
-import { graphemeCount } from "../text/graphemes";
+import { graphemes } from "../text/graphemes";
 
 /** 比べる材料 1 件ぶん。**タイトルが取れていないなら `undefined`**（#542）。 */
 export type TitledPullRequest = {
@@ -62,6 +62,32 @@ export type TitleOverlapReport = {
 };
 
 /**
+ * **1 組あたり、先頭から何書記素まで比べるか。**
+ *
+ * **どんな分布でも有限の時間で描けること**が先である（#653 のレビュー 3 周目）
+ * ——**盤面が開かないのは、行が 1 つ黙るのとは違う。**
+ *
+ * **実物のタイトルはこれより短い**（**このリポジトリの 100 本は最長 48 書記素**。
+ * **GitHub の上限は 256**）。**超えたぶんは `partial` で言う**——**黙って切らない。**
+ */
+const COMPARED_PREFIX = 128;
+
+/**
+ * **1 枚の盤面で行う、正確な比較の回数。**
+ *
+ * **同じ題が並ぶのはふつうである**（**Dependabot**）——**そのとき絞り込みは効かず、
+ * 組の数は本数の 2 乗**になる。**実測では 100 本・4950 組のうち 16 組**だったが、
+ * **それはこのリポジトリの分布**であって、**別のインストール先では違う**（§1）。
+ *
+ * **数えて決めた。** **実物の 100 本で 16 組**、**題が似通う作りの 100 本で 460 組**
+ * ——**そこは通し**、**全部が同じ題の 100 本（4950 組）では区切る。**
+ * **かかりの上限は `1000 × 128 × 128`**（**1600 万マス**）である。
+ *
+ * **区切ったぶんは `partial` で言う**——**黙って切らない。**
+ */
+const COMPARISON_BUDGET = 1000;
+
+/**
  * **末尾の番号の飾りを外す。**
  *
  * **`（#123）` はほぼ全部の PR に付く**（`.claude/rules/git-workflow.md`）
@@ -83,6 +109,9 @@ export function titleOverlapsFor(
    * **境界そのものは呼ぶ側が持つ**（#630 の「判断が要るところ」）——**ここは
    * 「どこまで探すか」として受ける。** **絞り込みの上限に使う**ので、
    * **domain が知らないと、落としてよいものが決められない。**
+   *
+   * **ただし、区切ったぶんは取りこぼす**（`COMPARED_PREFIX` / `COMPARISON_BUDGET`）
+   * ——**そのときは `partial` が立つ。**
    */
   atLeast: number,
   /**
@@ -96,15 +125,37 @@ export function titleOverlapsFor(
   const titles = new Map(
     candidates.map((candidate) => [candidate.number, candidate.title?.replace(DECORATION, "")]),
   );
+  // **書記素の配列にしてから比べる**（#653 のレビュー 3 周目）——**符号単位で比べると、
+  // 絵文字 1 個が 2 と数えられて短い一致が選ばれ**、**切り出しが上位サロゲートで
+  // 切れて壊れた文字列が出る**（**gitmoji の多くが `D83D` を共有する**）
+  const full = new Map([...titles].map(([number, title]) => [number, graphemes(title ?? "")]));
+  const runes = new Map(
+    [...full].map(([number, rune]) => [number, rune.slice(0, COMPARED_PREFIX)]),
+  );
   const grams = new Map([...titles].map(([number, title]) => [number, bigrams(title)]));
+  // **切ったぶんがあるか**——**黙って切らない**（#637 の `partial` と同じ語彙）。
+  // **書記素どうしで比べる**——**符号単位の数と比べると、絵文字があるだけで
+  // 「切った」になる**
+  const cut = [...full].some(([, rune]) => rune.length > COMPARED_PREFIX);
+
+  const budget = { left: COMPARISON_BUDGET, spent: false };
+  const matches = new Map(
+    candidates.map((candidate) => [
+      candidate.number,
+      matchOf(candidate.number, atLeast, runes, grams, budget),
+    ]),
+  );
   // **読めていない PR が 1 本でもあれば、どの行の結果も下限である**
   const partial =
-    unreadableCount > 0 || candidates.some((candidate) => candidate.title === undefined);
+    unreadableCount > 0 ||
+    candidates.some((candidate) => candidate.title === undefined) ||
+    cut ||
+    budget.spent;
 
   return new Map(
     candidates.map((candidate) => [
       candidate.number,
-      { match: matchOf(candidate.number, atLeast, titles, grams), partial },
+      { match: matches.get(candidate.number), partial },
     ]),
   );
 }
@@ -126,7 +177,7 @@ function bigrams(title: string | undefined): ReadonlyMap<string, number> {
 }
 
 /**
- * **求めた長さに届きうる相手を全部、正確に比べる。**
+ * **求めた長さに届きうる相手を、予算の続く限り正確に比べる。**
  *
  * **絞り込みは上限で行う**——**共通する出現数が `atLeast - 1` に満たなければ、
  * その長さの一致は無い**（対偶）。**落とすのはそれだけ**である。
@@ -137,27 +188,35 @@ function bigrams(title: string | undefined): ReadonlyMap<string, number> {
 function matchOf(
   number: number,
   atLeast: number,
-  titles: ReadonlyMap<number, string | undefined>,
+  runes: ReadonlyMap<number, readonly string[]>,
   grams: ReadonlyMap<number, ReadonlyMap<string, number>>,
+  budget: { left: number; spent: boolean },
 ): TitleMatch | undefined {
-  const own = titles.get(number);
-  const ownGrams = grams.get(number);
-  if (own === undefined || own === "" || ownGrams === undefined) {
+  const own = runes.get(number);
+  if (own === undefined || own.length === 0) {
     return undefined;
   }
 
   let best: TitleMatch | undefined;
   let bestLength = 0;
-  for (const other of reachable(number, atLeast, titles, grams)) {
-    const shared = longestShared(own, titles.get(other) as string);
-    const length = graphemeCount(shared);
-    if (length < atLeast) {
+  for (const other of reachable(number, atLeast, runes, grams)) {
+    if (budget.left <= 0) {
+      // **区切ったことは `partial` で言う**——**黙って切らない**
+      budget.spent = true;
+      break;
+    }
+    budget.left -= 1;
+    const shared = longestShared(own, runes.get(other) as readonly string[]);
+    if (shared.length < atLeast) {
       continue;
     }
     // **同じ長さなら番号の小さいほう**——**呼ぶたびに揺れると、理由が読めない**
-    if (length > bestLength || (length === bestLength && other < (best?.number ?? other))) {
-      bestLength = length;
-      best = { number: other, shared };
+    if (
+      shared.length > bestLength ||
+      (shared.length === bestLength && other < (best?.number ?? other))
+    ) {
+      bestLength = shared.length;
+      best = { number: other, shared: shared.join("") };
     }
   }
   return best;
@@ -172,12 +231,12 @@ function matchOf(
 function* reachable(
   number: number,
   atLeast: number,
-  titles: ReadonlyMap<number, string | undefined>,
+  runes: ReadonlyMap<number, readonly string[]>,
   grams: ReadonlyMap<number, ReadonlyMap<string, number>>,
 ): Generator<number> {
   const ownGrams = grams.get(number) ?? new Map();
-  for (const [other, title] of titles) {
-    if (other === number || title === undefined) {
+  for (const [other, rune] of runes) {
+    if (other === number || rune.length === 0) {
       continue;
     }
     if (sharedCount(ownGrams, grams.get(other)) >= atLeast - 1) {
@@ -199,12 +258,15 @@ function sharedCount(
 }
 
 /**
- * **2 つの文字列に共通する、いちばん長い並び。**
+ * **2 つのタイトルに共通する、いちばん長い並び**（書記素の配列）。
  *
- * **呼ぶのは絞り込みを通った相手だけ**である。
+ * **符号単位ではない**（#653 のレビュー 3 周目）——**絵文字 1 個を 2 と数えると、
+ * 短い一致が選ばれて長いほうを取りこぼす**うえ、**切り出しが上位サロゲートで
+ * 切れて壊れた文字列が出る。**
+ *
  * **前の行だけを持って進む**——**長さの 2 乗の表を全部持たない。**
  */
-function longestShared(left: string, right: string): string {
+function longestShared(left: readonly string[], right: readonly string[]): readonly string[] {
   let previous = new Uint32Array(right.length + 1);
   let current = new Uint32Array(right.length + 1);
   let best = 0;

@@ -200,20 +200,38 @@ describe("タイトルが同じ PR を並べる", () => {
     expect([...reports.keys()].sort()).toEqual([1, 2]);
   });
 
+  /** **実物と同じくらい題がばらける 100 本**（**このリポジトリの分布**）。 */
+  function realistic(): TitledPullRequest[] {
+    const words = [
+      "盤面",
+      "依存",
+      "レビュー",
+      "記録",
+      "停止",
+      "経路",
+      "境界",
+      "判定",
+      "材料",
+      "一覧",
+    ];
+    const marks = ["✨", "🐛", "♻️", "📝"];
+    return Array.from({ length: 100 }, (_, index) =>
+      titled(
+        index + 1,
+        `${marks[index % 4]} ${words[index % 10]}を${words[(index * 3 + 1) % 10]}から${
+          words[(index * 7 + 2) % 10]
+        }へ${index}`,
+      ),
+    );
+  }
+
   it("実物と同じ形の 100 本で、組が消えない", () => {
     // **絞り込みは「求めた長さに届かない相手」だけを落とす**（#653 のレビュー 2 周目）
     // ——**実物で測った**（このリポジトリの PR 100 本・4950 組）:
     // **共通する bigram の出現数が 9 以上の組は 16 組**だけ。
-    // **正確に比べるのはそこだけ**である。
     //
-    // **「遅い」を結論にしない**（#637 と同じ）——**上限を入れていないので、
-    // 時間で赤くする根拠が無い。** **見るのは「組が消えていないこと」**である。
-    // **題が全部似ている入力は、比べるしかない**（**絞り込みが効かないのは、
-    // 本当に似ているとき**）。
-    const many = Array.from({ length: 100 }, (_, index) =>
-      titled(index + 1, `✨ feat: ${index} 番目の PR。ここから先は毎回ちがう題である`),
-    );
-    // **1 組だけ、題を同じにする**
+    // **「遅い」を結論にしない**（#637 と同じ）——**見るのは「組が消えていないこと」**
+    const many = realistic();
     const withDuplicate = [...many, titled(101, (many[0] as { title: string }).title)];
 
     const started = process.hrtime.bigint();
@@ -221,5 +239,59 @@ describe("タイトルが同じ PR を並べる", () => {
     const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
     expect(reports.get(101)?.match?.number, `101 本で ${elapsed} ms`).toBe(1);
+    expect(reports.get(101)?.partial, "測り切れているのに下限と言っている").toBe(false);
+  });
+
+  it("同じ題が並んでいても、返ってくる", () => {
+    // **絞り込みが効かない側**（#653 のレビュー 3 周目）——**Dependabot は同じ題を
+    // 並べる。** **盤面が開かないのは、行が 1 つ黙るのとは違う。**
+    // **見るのは時間ではなく「返ってくること」と「`partial` が立つこと」**である
+    const same = "⬆️ deps: bump the minor-and-patch group across 1 directory with 8 updates";
+    const many = Array.from({ length: 100 }, (_, index) => titled(index + 1, same));
+
+    const started = process.hrtime.bigint();
+    const reports = titleOverlapsFor(many, 10, NOTHING_UNREADABLE);
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(reports.size, `100 本で ${elapsed} ms`).toBe(100);
+    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+  });
+
+  it("長すぎるタイトルは、先頭までしか比べない", () => {
+    // **区切ったぶんは `partial` で言う**——**黙って切らない**
+    const long = "あ".repeat(200);
+    const reports = titleOverlapsFor([titled(1, long), titled(2, long)], 10, NOTHING_UNREADABLE);
+
+    expect(reports.get(1)?.partial, "切ったのに下限だと言っていない").toBe(true);
+  });
+
+  it("符号単位ではなく、書記素の長さで選ぶ", () => {
+    // **10 個の ASCII（10 単位・10 書記素）と 6 個の絵文字（12 単位・6 書記素）**
+    // ——**符号単位で選ぶと後者が勝ち**、**書記素では 6 文字なので境界を通らず**、
+    // **在るはずの 10 文字の一致が黙る**（#653 のレビュー 3 周目）
+    const emoji = "🐛".repeat(6);
+    const reports = titleOverlapsFor(
+      [titled(1, `ABCDEFGHIJ-${emoji}`), titled(2, `${emoji}+ABCDEFGHIJ`)],
+      10,
+      NOTHING_UNREADABLE,
+    );
+
+    expect(reports.get(1)?.match?.shared).toBe("ABCDEFGHIJ");
+  });
+
+  it("壊れた文字列を返さない", () => {
+    // **gitmoji の多くが上位サロゲート `D83D` を共有する**（`🐛` `🔥` `💄`）
+    // ——**符号単位で切ると、共通部分が半端な符号単位で終わる**
+    const reports = titleOverlapsFor(
+      [titled(1, "同じ前置きがある題です🐛"), titled(2, "同じ前置きがある題です🔥")],
+      10,
+      NOTHING_UNREADABLE,
+    );
+    const shared = reports.get(1)?.match?.shared ?? "";
+
+    expect(shared).toBe("同じ前置きがある題です");
+    expect(
+      [...shared].some((rune) => rune.charCodeAt(0) >= 0xd800 && rune.charCodeAt(0) <= 0xdbff),
+    ).toBe(false);
   });
 });
