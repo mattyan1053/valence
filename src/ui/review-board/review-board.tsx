@@ -14,6 +14,7 @@
 import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
+import type { MergeBlock } from "../../domain/graph/merge-block";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { Assignment } from "../../domain/triage/assignment";
@@ -170,6 +171,17 @@ export type ReviewBoardProps = {
    * ——**盤面を見て最初に知りたいのは、そこ**である。
    */
   readonly reviewOpinionOf: (pullRequestNumber: number) => ReviewOpinion | undefined;
+  /**
+   * **その PR に依存が残っているか**（#652 のレビュー）。**読めていないなら `undefined`。**
+   *
+   * **判定は `mergeBlockFor` が持つ**（#345 で 1 本にしたもの）——**ここで呼び直さない。**
+   * **行ごとに呼ぶと、辺と順序を本数ぶんなめ直す**（#541 のレビュー）ので、
+   * **呼ぶ側が 1 度だけ作ったものを配る。**
+   *
+   * **任意にしない。** **渡し忘れると、依存で押せない PR に「いま入れられます」と出る**
+   * ——**同じ画面が逆のことを言う。**
+   */
+  readonly mergeBlockOf: (pullRequestNumber: number) => MergeBlock | undefined;
 };
 
 export function ReviewBoard({
@@ -187,6 +199,7 @@ export function ReviewBoard({
   mergeStatusOf,
   assignmentOf,
   reviewOpinionOf,
+  mergeBlockOf,
 }: ReviewBoardProps) {
   // **行ごとに計算しない**（`mergeBlocksFor` と同じ理由）——**1 件ずつ比べると
   // 本数の 2 乗**になる。**材料が取れていない PR も渡す**——**「触っていない」
@@ -255,6 +268,7 @@ export function ReviewBoard({
           ballOf({
             opinion: reviewOpinionOf(number),
             readiness: mergeReadinessOf(status).kind,
+            block: mergeBlockOf(number),
             assignment: assignmentOf(number),
           }),
         );

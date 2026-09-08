@@ -80,6 +80,8 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
     assignmentOf: () => ASSIGNED,
     // **既定は「言うことが無い」**（#636）。**この試験群が見ているのは、そこではない**
     reviewOpinionOf: () => REVIEWED,
+    // **既定は依存が残っていない**（#652 のレビュー）。**この試験群が見ているのは、そこではない**
+    mergeBlockOf: () => ({ kind: "ready" }),
     ...overrides,
   };
 }
@@ -661,6 +663,7 @@ describe("理由が、行に出る（#577 のレビュー）", () => {
     mergeStatusOf: () => MERGEABLE,
     assignmentOf: () => ASSIGNED,
     reviewOpinionOf: () => REVIEWED,
+    mergeBlockOf: () => ({ kind: "ready" }),
     titleOf: () => undefined,
     urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
     changeUnavailableOf: kind === undefined ? undefined : () => kind,
@@ -870,5 +873,30 @@ describe("ボールが誰にあるか", () => {
     });
 
     expect(rows).not.toMatch(/誰の番でもありません/);
+  });
+});
+
+describe("行とボタンが、逆のことを言わない（#652 のレビュー）", () => {
+  it("依存で押せない行に、いま入れられますと出さない", () => {
+    // **積み重ねた PR はこのプロダクトの普通である**（§1）——**土台がまだ open な
+    // PR で、行が「いま入れられます」・ボタンが無効、になっていた。**
+    const rows = list(
+      render(
+        props({
+          reviewOpinionOf: () => ({ ...REVIEWED, approvesHead: true }),
+          mergeBlockOf: () => ({ kind: "depends-on", numbers: [1] }),
+        }),
+      ),
+    );
+
+    expect(rows).not.toMatch(/マージする人の番/);
+  });
+
+  it("依存が残っていなければ、これまでどおり出す", () => {
+    const rows = list(
+      render(props({ reviewOpinionOf: () => ({ ...REVIEWED, approvesHead: true }) })),
+    );
+
+    expect(rows.match(/マージする人の番/g), "マージする人の番の行が 2 行ではない").toHaveLength(2);
   });
 });

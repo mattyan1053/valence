@@ -19,6 +19,8 @@
  * **純粋関数である**（§3）。**材料をどこから取るかは、この層の関心ではない。**
  */
 
+import type { MergeBlock } from "../graph/merge-block";
+import type { MergeReadiness } from "../graph/merge-readiness";
 import type { Assignment } from "./assignment";
 
 /**
@@ -60,13 +62,21 @@ export type Ball = "author" | "merger" | "reviewer" | "nobody" | "unknown";
  * **順序が効く。** **上にあるものほど、GitHub が言い切った事実に近い。**
  *
  * 1. **変更が求められている**（head に付いた意見）→ **著者の番**
- * 2. **承認済みで、合流できる** → **マージする人の番**
+ * 2. **承認済みで、合流でき、依存も残っていない** → **マージする人の番**
  * 3. **レビュー依頼が残っている** → **レビューする人の番**
  * 4. **依頼も無く、レビューも 1 件も無い** → **誰の番でもない（放置）**
  * 5. それ以外 → **分からない**
  *
- * **2 は合流できるときだけ**である。**承認済みでも conflict していれば押しても
- * 入らない**——**その理由は別の行が言う**（#629）。
+ * **2 は「押せる」と同じ条件で言う**（#652 のレビュー）。**承認済みでも conflict
+ * していれば入らない**し、**土台がまだ open なら押せない**——**積み重ねた PR は
+ * このプロダクトの普通**である（§1）。**行が「いま入れられます」と言い、ボタンが
+ * 無効になっていると、同じ画面が逆のことを言う。**
+ *
+ * **依存の判定はここに持たない。** **`mergeBlockFor` が返したものを受ける**
+ * ——**あれはボタンと POST が通る 1 本**である（#345）。**写すと、片方が事実と違う日が来る。**
+ *
+ * **1 と 2 は、持ち主が読めなくても言える**（#652 のレビュー）——**どちらも
+ * GitHub が言い切った事実**である。**アサインは 3 と 4 にしか要らない。**
  *
  * **既定の分岐に倒し先を置かない**（`READINESS_OF_STATE` と同じ理由）。
  * **読めなかった材料は `undefined` で来る**ので、**そこを `nobody` へ落とさない。**
@@ -74,12 +84,20 @@ export type Ball = "author" | "merger" | "reviewer" | "nobody" | "unknown";
 export function ballOf({
   opinion,
   readiness,
+  block,
   assignment,
 }: {
   /** レビューの意見。**読めていなければ `undefined`。** */
   readonly opinion: ReviewOpinion | undefined;
-  /** 合流できるか（`mergeReadinessOf` の種別）。 */
-  readonly readiness: string;
+  /**
+   * 合流できるか（`mergeReadinessOf` の種別）。
+   *
+   * **型で受ける**（#652 のレビュー）——**`string` にすると、`mergeable` を改名した
+   * 日にここが型検査を素通りし**、**承認済みで合流できる PR が静かに落ちる**（#185）。
+   */
+  readonly readiness: MergeReadiness["kind"];
+  /** 依存が残っていないか（`mergeBlockFor` の答え）。**読めていなければ `undefined`。** */
+  readonly block: MergeBlock | undefined;
   /** 誰に振られているか。**読めていなければ `undefined`。** */
   readonly assignment: Assignment | undefined;
 }): Ball {
@@ -88,11 +106,13 @@ export function ballOf({
   if (opinion?.changesRequestedOnHead === true) {
     return "author";
   }
+  // **承認と合流の状況も同じ性質である**（#652 のレビュー）——**アサインが読めなくても
+  // 言える。** **「押せる」と同じ条件**なので、**依存が残っていれば言わない。**
+  if (opinion?.approvesHead === true && readiness === "mergeable" && block?.kind === "ready") {
+    return "merger";
+  }
   if (opinion === undefined || assignment === undefined) {
     return "unknown";
-  }
-  if (opinion.approvesHead && readiness === "mergeable") {
-    return "merger";
   }
   // **依頼が残っているのは「まだ返していない人がいる」**ということである
   if (assignment.reviewers.length > 0) {

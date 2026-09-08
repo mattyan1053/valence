@@ -309,6 +309,10 @@ export async function renderRepositoryBoard(
             // 「自分が動く番か」**である。**取れていない PR は `undefined` のまま
             // 渡す**（**「放置」に化けさせない**）
             reviewOpinionOf={(number) => result.plan.opinions.get(number)}
+            // **行とボタンが逆のことを言わないようにする**（#652 のレビュー）
+            // ——**`MergeButton` へ渡しているのと同じ `blocks`** である
+            // （**1 度だけ作ったものを配る**。#541 のレビュー）
+            mergeBlockOf={(number) => blocks?.get(number)}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

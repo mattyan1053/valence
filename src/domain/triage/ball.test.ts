@@ -12,6 +12,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { MergeBlock } from "../graph/merge-block";
 import type { Assignment } from "./assignment";
 import type { ReviewOpinion } from "./ball";
 import { ballOf } from "./ball";
@@ -28,12 +29,16 @@ const QUIET: ReviewOpinion = {
 /** **合流できる**（`mergeReadinessOf` が返す種別）。 */
 const MERGEABLE = "mergeable" as const;
 
+/** **依存は残っていない**（`mergeBlockFor` が返すもの）。 */
+const READY: MergeBlock = { kind: "ready" };
+
 describe("ボールが誰にあるか", () => {
   it("いまの head に変更が求められていれば、著者の番", () => {
     expect(
       ballOf({
         opinion: { ...QUIET, changesRequestedOnHead: true, reviewed: true },
         readiness: MERGEABLE,
+        block: READY,
         assignment: NOBODY,
       }),
     ).toBe("author");
@@ -44,6 +49,7 @@ describe("ボールが誰にあるか", () => {
       ballOf({
         opinion: { ...QUIET, approvesHead: true, reviewed: true },
         readiness: MERGEABLE,
+        block: READY,
         assignment: NOBODY,
       }),
     ).toBe("merger");
@@ -55,6 +61,7 @@ describe("ボールが誰にあるか", () => {
       ballOf({
         opinion: { ...QUIET, approvesHead: true, reviewed: true },
         readiness: "conflicting",
+        block: READY,
         assignment: NOBODY,
       }),
     ).not.toBe("merger");
@@ -67,45 +74,60 @@ describe("ボールが誰にあるか", () => {
       ballOf({
         opinion: { ...QUIET, approvesHead: false, reviewed: true },
         readiness: MERGEABLE,
+        block: READY,
         assignment: NOBODY,
       }),
     ).not.toBe("merger");
   });
 
   it("レビュー依頼が出ていれば、レビューする人の番", () => {
-    expect(ballOf({ opinion: QUIET, readiness: MERGEABLE, assignment: REQUESTED })).toBe(
-      "reviewer",
-    );
+    expect(
+      ballOf({ opinion: QUIET, readiness: MERGEABLE, block: READY, assignment: REQUESTED }),
+    ).toBe("reviewer");
   });
 
   it("依頼が無く、レビューも 1 件も無ければ、誰の番でもない", () => {
-    expect(ballOf({ opinion: QUIET, readiness: MERGEABLE, assignment: NOBODY })).toBe("nobody");
+    expect(ballOf({ opinion: QUIET, readiness: MERGEABLE, block: READY, assignment: NOBODY })).toBe(
+      "nobody",
+    );
   });
 
   it("レビュー済みの PR を、放置にしない", () => {
     // **これが #636 の罠である。** **提出したレビュアーは `requested_reviewers` から
     // 消える**ので、**依頼の有無だけで書くと、いちばん動いている PR が放置に見える。**
     expect(
-      ballOf({ opinion: { ...QUIET, reviewed: true }, readiness: MERGEABLE, assignment: NOBODY }),
+      ballOf({
+        opinion: { ...QUIET, reviewed: true },
+        readiness: MERGEABLE,
+        block: READY,
+        assignment: NOBODY,
+      }),
     ).not.toBe("nobody");
   });
 
   it("意見を読めなかった PR を、放置にしない", () => {
     // **「分からない」を「誰の番でもない」へ倒さない**（Issue の「気をつけること」）
-    expect(ballOf({ opinion: undefined, readiness: MERGEABLE, assignment: NOBODY })).toBe(
-      "unknown",
-    );
+    expect(
+      ballOf({ opinion: undefined, readiness: MERGEABLE, block: READY, assignment: NOBODY }),
+    ).toBe("unknown");
   });
 
   it("誰に振られているかを読めなかった PR を、放置にしない", () => {
-    expect(ballOf({ opinion: QUIET, readiness: MERGEABLE, assignment: undefined })).toBe("unknown");
+    expect(
+      ballOf({ opinion: QUIET, readiness: MERGEABLE, block: READY, assignment: undefined }),
+    ).toBe("unknown");
   });
 
   it("読めていても、規則のどれにも当たらなければ分からないと言う", () => {
     // **レビュー済みだが、承認も変更要求も head に無い**——**依頼も残っていない。**
     // **放置ではない**が、**誰の番かも決まらない。** **`unknown` は「言わない」側である。**
     expect(
-      ballOf({ opinion: { ...QUIET, reviewed: true }, readiness: MERGEABLE, assignment: NOBODY }),
+      ballOf({
+        opinion: { ...QUIET, reviewed: true },
+        readiness: MERGEABLE,
+        block: READY,
+        assignment: NOBODY,
+      }),
     ).toBe("unknown");
   });
 
@@ -116,8 +138,60 @@ describe("ボールが誰にあるか", () => {
       ballOf({
         opinion: { ...QUIET, changesRequestedOnHead: true },
         readiness: MERGEABLE,
+        block: READY,
         assignment: undefined,
       }),
     ).toBe("author");
+  });
+});
+
+describe("依存とアサインの扱い（#652 のレビュー）", () => {
+  it("依存が残っていれば、マージする人の番とは言わない", () => {
+    // **同じ画面が逆のことを言っていた**——**行は「いま入れられます」、
+    // ボタンは `depends-on` で無効。** **積み重ねた PR はこのプロダクトの普通**
+    // である（§1）ので、**踏める。**
+    expect(
+      ballOf({
+        opinion: { ...QUIET, approvesHead: true, reviewed: true },
+        readiness: MERGEABLE,
+        block: { kind: "depends-on", numbers: [7] },
+        assignment: NOBODY,
+      }),
+    ).not.toBe("merger");
+  });
+
+  it("順序を決められないときも、マージする人の番とは言わない", () => {
+    expect(
+      ballOf({
+        opinion: { ...QUIET, approvesHead: true, reviewed: true },
+        readiness: MERGEABLE,
+        block: { kind: "not-orderable" },
+        assignment: NOBODY,
+      }),
+    ).not.toBe("merger");
+  });
+
+  it("依存を読めていないときも、マージする人の番とは言わない", () => {
+    expect(
+      ballOf({
+        opinion: { ...QUIET, approvesHead: true, reviewed: true },
+        readiness: MERGEABLE,
+        block: undefined,
+        assignment: NOBODY,
+      }),
+    ).not.toBe("merger");
+  });
+
+  it("アサインを読めなくても、マージする人の番だとは言える", () => {
+    // **同じ規則が片方にだけ効いていた**——**承認と合流の状況も、GitHub が
+    // 言い切った事実**である。**アサインは `reviewer` / `nobody` にしか要らない。**
+    expect(
+      ballOf({
+        opinion: { ...QUIET, approvesHead: true, reviewed: true },
+        readiness: MERGEABLE,
+        block: READY,
+        assignment: undefined,
+      }),
+    ).toBe("merger");
   });
 });
