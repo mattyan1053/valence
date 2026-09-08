@@ -65,10 +65,33 @@ describe("IssueBoard", () => {
   });
 
   it("一覧そのものを取れなかったときは、そう言う", () => {
-    const markup = view({ issues: undefined });
+    const markup = view({ issues: { unavailable: "unreadable" } });
 
-    expect(markup).toContain("一覧を読めませんでした");
+    expect(markup).toContain("issue の一覧を読めませんでした");
     expect(markup, "0 件と同じ顔になっている").not.toContain("open な issue はありません");
+  });
+
+  it("待たなかったことを、読めなかったと同じ文にしない", () => {
+    // **#573 で踏んだ形**——**同じ文言だと、遅いだけのときに権限を疑いに行く**
+    const markup = view({ issues: { unavailable: "timedout" } });
+
+    expect(markup).toContain("時間内に返りませんでした");
+    expect(markup).not.toContain("読めませんでした");
+  });
+
+  it("知らない語でも、行を消さない", () => {
+    // **語彙が増えた日に行が消えると、また同じ顔になる**（`changeUnavailableNote` と同じ）
+    expect(view({ issues: { unavailable: "これから増える語" } })).toContain("これから増える語");
+  });
+
+  it("全件が読めなかったときに、0 件と言わない", () => {
+    // **`issues` は空だが `unreadable` がある**——**「読めなかった」が「無かった」に化ける**
+    const markup = view({ issues: [], assignments: new Map(), unreadable: 2 });
+
+    expect(markup, "全件読めていないのに 0 件と言っている").not.toContain(
+      "open な issue はありません",
+    );
+    expect(markup).toContain("読めなかった issue: 2 件");
   });
 
   it("読めなかった件数を、黙って落とさない", () => {

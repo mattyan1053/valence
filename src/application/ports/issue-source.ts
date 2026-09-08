@@ -42,7 +42,26 @@ export type IssueListing = {
   readonly assignments: ReadonlyMap<number, IssueAssignment>;
 };
 
+/** 取得のしかたに関する指示（`ChangeSummaryRequest` と同じ形）。 */
+export type IssueRequest = {
+  /**
+   * 打ち切りの合図。
+   *
+   * **先に返すだけでは、走っている要求は走り続ける。** 取り消しを**口まで通さない**と、
+   * **縮退したのは呼んだ側だけ**で、往復は最後まで続く。
+   *
+   * **期限の決め方はここに無い。** どれだけ待つかは**呼ぶ側の段取り**であって、
+   * ユースケースの判断ではない（`application` は時計を持たない）。
+   */
+  readonly signal?: AbortSignal;
+};
+
 export type IssueSource = {
-  /** open な issue を、最後のページまで読む。**読み切れなければ投げる。** */
-  listIssues(): Promise<IssueListing>;
+  /**
+   * open な issue を、最後のページまで読む。**読み切れなければ投げる。**
+   *
+   * **合図を受けたら速やかに返る**——ただし**呼ぶ側はこの約束に頼らない**
+   * （守らない実装でも、呼ぶ側は待ち続けない）。
+   */
+  listIssues(request?: IssueRequest): Promise<IssueListing>;
 };

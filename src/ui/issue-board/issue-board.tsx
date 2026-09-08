@@ -18,14 +18,38 @@
 import type { IssueAssignment, IssueRef } from "../../domain/triage/issue";
 import { issueAssignmentStateOf, summarizeIssueAssignments } from "../../domain/triage/issue";
 
+/**
+ * **取れなかった理由を、画面の語彙にする**（#573）。
+ *
+ * **文言で見分けさせない**——**読む側が文字列を解釈する形にすると、
+ * 言い換えた瞬間に区別が消える。**
+ *
+ * **知らない語でも黙らない**（`changeUnavailableNote` と同じ）——**語彙が増えた日に
+ * 行が消えると、また同じ顔になる。**
+ */
+export function issuesUnavailableNote(kind: string): string {
+  switch (kind) {
+    case "timedout":
+      // **待たなかったのであって、取れなかったのではない**
+      return "issue の一覧が、時間内に返りませんでした";
+    case "unreadable":
+      return "issue の一覧を読めませんでした";
+    default:
+      return `issue の一覧がありません（${kind}）`;
+  }
+}
+
 export type IssueBoardProps = {
   /**
-   * open な issue。
+   * open な issue。**取れなかったときは、その理由の種別**である。
    *
-   * **`undefined` は「一覧を取れなかった」**である——**空の配列と混ぜない。**
-   * **混ぜると、取れなかった日に「issue はありません」と出る**（`AGENTS.md` §5）。
+   * **1 つの項目で持つ**——**一覧と「取れなかった」を別々に渡すと、
+   * 食い違う組み合わせを作れてしまう**（`ChangeSummary.changedPaths` と同じ判断）。
+   *
+   * **空の配列と混ぜない**——**混ぜると、取れなかった日に
+   * 「issue はありません」と出る**（`AGENTS.md` §5）。
    */
-  readonly issues: readonly IssueRef[] | undefined;
+  readonly issues: readonly IssueRef[] | { readonly unavailable: string };
   /** issue 番号から引ける、誰に振られているか。**読めなかったものは入らない。** */
   readonly assignments: ReadonlyMap<number, IssueAssignment>;
   /**
@@ -52,10 +76,13 @@ const ASSIGNMENT_TEXT: Record<ReturnType<typeof issueAssignmentStateOf>, string 
 };
 
 export function IssueBoard({ issues, assignments, unreadable, urlOf }: IssueBoardProps) {
-  if (issues === undefined) {
-    return <p className="text-sm opacity-70">issue の一覧を読めませんでした</p>;
+  if ("unavailable" in issues) {
+    return <p className="text-sm opacity-70">{issuesUnavailableNote(issues.unavailable)}</p>;
   }
-  if (issues.length === 0) {
+  // **「0 件」と言えるのは、読めなかったものが 1 件も無いとき**である（#657 のレビュー）
+  // ——**全件が検証で落ちた盤面を「issue はありません」と出すと、
+  // 「読めなかった」が「無かった」に化ける。**
+  if (issues.length === 0 && unreadable === 0) {
     return <p className="text-sm opacity-70">open な issue はありません</p>;
   }
   const summary = summarizeIssueAssignments(issues, assignments);

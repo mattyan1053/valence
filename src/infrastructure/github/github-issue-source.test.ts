@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppCredentials } from "./app-credentials";
 import { createGitHubIssueSource } from "./github-issue-source";
 
@@ -79,5 +79,76 @@ describe("createGitHubIssueSource", () => {
     await expect(
       source([{ body: { message: "secret-token-leaked" }, status: 403 }]).listIssues(),
     ).rejects.toThrow(/^(?!.*secret-token-leaked).*$/s);
+  });
+});
+
+describe("打ち切りの合図", () => {
+  /** **本当に返らない `fetch`。** 即座に落ちる偽物では、遅い口を確かめられない。 */
+  function silentFetch(signals: (AbortSignal | undefined)[]): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/access_tokens")) {
+        return new Response(JSON.stringify({ token: "t", expires_at: "2999-01-01T00:00:00Z" }), {
+          status: 201,
+        });
+      }
+      if (url.includes("/installation")) {
+        return new Response(JSON.stringify({ id: 1 }), { status: 200 });
+      }
+      signals.push(init?.signal ?? undefined);
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("中断されました")), {
+          once: true,
+        });
+      });
+    }) as unknown as typeof fetch;
+  }
+
+  it("合図は fetch まで届く", async () => {
+    // **口の中で握り潰さない。** 届かないと、**中断したのに往復だけ続く**
+    const deadline = new AbortController();
+    const signals: (AbortSignal | undefined)[] = [];
+    const reading = createGitHubIssueSource({
+      credentials: CREDENTIALS,
+      repository: REPOSITORY,
+      now: () => new Date("2026-01-01T00:00:00Z"),
+      fetchImpl: silentFetch(signals),
+    })
+      .listIssues({ signal: deadline.signal })
+      .catch(() => undefined);
+
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    deadline.abort();
+    await reading;
+
+    expect(signals[0], "合図が fetch に渡っていない").toBe(deadline.signal);
+  });
+
+  it("合図は、認証の往復にも届く", async () => {
+    // **ここが素通しだと、呼んだ側が縮退したあとも認証だけが走り続ける**
+    const deadline = new AbortController();
+    const signals: (AbortSignal | undefined)[] = [];
+    const reading = createGitHubIssueSource({
+      credentials: CREDENTIALS,
+      repository: REPOSITORY,
+      now: () => new Date("2026-01-01T00:00:00Z"),
+      // **token の口も応答しない**——**認証を抜けた先しか試せなくなる**
+      fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+        signals.push(init?.signal ?? undefined);
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("中断されました")), {
+            once: true,
+          });
+        });
+      }) as unknown as typeof fetch,
+    })
+      .listIssues({ signal: deadline.signal })
+      .catch(() => undefined);
+
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    deadline.abort();
+    await reading;
+
+    expect(signals[0], "認証の fetch に合図が渡っていない").toBe(deadline.signal);
   });
 });

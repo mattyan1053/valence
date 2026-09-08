@@ -48,13 +48,18 @@ export function createGitHubIssueSource({
   });
 
   return {
-    async listIssues(): Promise<IssueListing> {
-      const header = await authorization();
+    async listIssues(request): Promise<IssueListing> {
+      // **合図は認証の往復まで届ける**——**素通しにすると、呼んだ側が縮退したあとも
+      // installation の解決と token の発行だけが走り続ける。**
+      const signal = request?.signal;
+      const header = await authorization(signal);
       const items: unknown[] = [];
 
       let url: string | undefined = `${repositoryUrl(repository)}/issues?state=open&per_page=100`;
       while (url !== undefined) {
         const response = await fetchImpl(url, {
+          // **合図は最後まで運ぶ。** 途中で落とすと、**中断したのに往復だけ続く**
+          signal,
           headers: {
             authorization: header,
             accept: "application/vnd.github+json",

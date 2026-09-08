@@ -281,6 +281,17 @@ export const CHANGES_DEADLINE_MS = 20_000;
 const APPROVALS_DEADLINE_MS = 5_000;
 
 /**
+ * issue の一覧の取得を打ち切るまで（#657 のレビュー）。
+ *
+ * **1 要求で 100 件**なので、**ふつうは 1 往復**である。**承認の状態と同じ桁**に置く
+ * ——**PR の盤面が出せているのに、issue を待って画面ごと止めない。**
+ *
+ * **正確な値ではない。** **足りなくなったら分かる形にしてある**——**画面に
+ * 「時間内に返りませんでした」と出る**（#573）。**黙って消えない。**
+ */
+const ISSUES_DEADLINE_MS = 5_000;
+
+/**
  * **いまログインしている人の目で、1 つのリポジトリの盤面を返す**（#314）。
  *
  * **見てよいかはユーザートークンで決め、PR のデータは installation トークンで取る**
@@ -320,14 +331,17 @@ export async function repositoryBoardForCurrentUser(repository: {
     // `viewRepositoryBoard` が先に確かめている。** **App の資格を読むのは、
     // その中の `plan` と同じく「見える」と分かってから**である
     issues: {
-      listIssues: () => {
+      listIssues: (request) => {
         const { app } = appSettings();
-        return createGitHubIssueSource({ credentials: app, repository }).listIssues();
+        return createGitHubIssueSource({ credentials: app, repository }).listIssues(request);
       },
     },
     // **合図は作る手続きで渡す**（#316 と同じ理由）——**盤面を組み立てるぶんを、
     // 承認の期限から引かない**
     approvalsDeadline: () => AbortSignal.timeout(APPROVALS_DEADLINE_MS),
+    // **合図は作る手続きで渡す**（#316 と同じ理由）——**盤面を組み立てるぶんを、
+    // issue の期限から引かない**
+    issuesDeadline: () => AbortSignal.timeout(ISSUES_DEADLINE_MS),
     // **App の資格を読むのはここだけ。** **見てよいと分かるまで、1 度も呼ばれない**
     plan: () => {
       const { app } = appSettings();

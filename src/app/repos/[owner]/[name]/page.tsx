@@ -11,7 +11,10 @@
 import { notFound } from "next/navigation";
 import type { IssueListing } from "../../../../application/ports/issue-source";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
-import type { RepositoryBoardResult } from "../../../../application/review-order/view-repository-board";
+import type {
+  IssuesUnavailable,
+  RepositoryBoardResult,
+} from "../../../../application/review-order/view-repository-board";
 import {
   issuePageUrl,
   pullRequestPageUrl,
@@ -177,15 +180,21 @@ export function boardUnavailableReason(result: {
 /**
  * issue の一覧を、画面へ渡せる形にする（#633）。
  *
- * **`undefined` は「取れなかった」**（`viewRepositoryBoard`）——**空の一覧と混ぜない。**
- * **混ぜると、取れなかった日に「issue はありません」と出る**（`AGENTS.md` §5）。
+ * **取れなかったことを、空の一覧と混ぜない**——**混ぜると、取れなかった日に
+ * 「issue はありません」と出る**（`AGENTS.md` §5）。**理由の種別はそのまま運ぶ**
+ * （#573。**「読めなかった」と「待たなかった」を同じ文にしない**）。
  */
-export function issueBoardProps(listing: IssueListing | undefined): Omit<IssueBoardProps, "urlOf"> {
+export function issueBoardProps(
+  listing: IssueListing | IssuesUnavailable,
+): Omit<IssueBoardProps, "urlOf"> {
+  if ("unavailable" in listing) {
+    return { issues: listing, assignments: new Map(), unreadable: 0 };
+  }
   return {
-    issues: listing?.issues,
-    assignments: listing?.assignments ?? new Map(),
+    issues: listing.issues,
+    assignments: listing.assignments,
     // **読めなかったぶんを黙って落とさない**
-    unreadable: listing?.invalid.length ?? 0,
+    unreadable: listing.invalid.length,
   };
 }
 

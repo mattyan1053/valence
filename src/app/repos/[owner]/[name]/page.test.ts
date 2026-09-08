@@ -13,7 +13,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { IssueListing } from "../../../../application/ports/issue-source";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
-import type { RepositoryBoardResult } from "../../../../application/review-order/view-repository-board";
+import type {
+  IssuesUnavailable,
+  RepositoryBoardResult,
+} from "../../../../application/review-order/view-repository-board";
 import { mergeBlockFor } from "../../../../domain/graph/merge-block";
 import type { MergeStatusReport } from "../../../../domain/graph/merge-readiness";
 import { showsSignOut } from "../../../../ui/auth/sign-out-button";
@@ -937,7 +940,7 @@ describe("issue の盤面（#633）", () => {
     opinions: new Map(),
   } as const;
 
-  async function board(issues: IssueListing | undefined) {
+  async function board(issues: IssueListing | IssuesUnavailable) {
     return renderToStaticMarkup(
       await renderRepositoryBoard(
         { owner: "acme", name: "web" },
@@ -969,17 +972,26 @@ describe("issue の盤面（#633）", () => {
 
   it("issue を読めなくても、PR の盤面は出る", async () => {
     // **1 本の失敗で画面が真っ白にならない**（#112 と同じ判断）
-    const markup = await board(undefined);
+    const markup = await board({ unavailable: "unreadable" });
 
     expect(markup).toContain("issue の一覧を読めませんでした");
     expect(markup, "盤面ごと消えている").toContain("acme/web");
+  });
+
+  it("待たなかったことを、読めなかったと同じ文にしない", async () => {
+    // **#573 で踏んだ形**——**同じ文言だと、遅いだけのときに権限を疑いに行く**
+    const markup = await board({ unavailable: "timedout" });
+
+    expect(markup).toContain("時間内に返りませんでした");
   });
 });
 
 describe("issueBoardProps", () => {
   it("取れなかったことを、0 件と混ぜない", () => {
     // **混ぜると、取れなかった日に「issue はありません」と出る**（`AGENTS.md` §5）
-    expect(issueBoardProps(undefined).issues).toBeUndefined();
+    expect(issueBoardProps({ unavailable: "unreadable" }).issues).toEqual({
+      unavailable: "unreadable",
+    });
     expect(issueBoardProps({ issues: [], invalid: [], assignments: new Map() }).issues).toEqual([]);
   });
 

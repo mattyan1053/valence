@@ -11,7 +11,7 @@
  * **モックを使わない**（§4）——**port にインメモリ実装を渡す。**
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IssueListing, IssueSource } from "../ports/issue-source";
 import type {
   PullRequestApprovalListing,
@@ -638,7 +638,95 @@ describe("issue も一緒に返す（#633）", () => {
 
     expect(result.kind).toBe("board");
     // **空の一覧にしない**——**「取得できなかった」が「issue が 0 件」に化ける**
-    expect(result.kind === "board" && result.issues, "0 件と同じ顔になっている").toBeUndefined();
+    expect(result.kind === "board" && result.issues).toEqual({ unavailable: "unreadable" });
+  });
+
+  it("issue が返ってこなくても、盤面は返す", async () => {
+    // **`catch` は reject しか拾わない**（#644 のレビューと同じ形）——**応答待ちのまま
+    // 返らないと、`Promise.all` も返らず、取れている盤面ごと出ない。**
+    //
+    // **合図を無視する口で測る**——**従う口だけだと、`Promise.race` が
+    // 有っても無くても緑**になる（**測れているのは口の行儀のほう**）。
+    //
+    // **要求が飛んでから切る**——**先に切ると、切れた合図の分岐に入るだけ**で、
+    // **待つのをやめる側は通らない。**
+    const deadline = new AbortController();
+    const asked = { started: false };
+    const deaf: IssueSource = {
+      listIssues: () => {
+        asked.started = true;
+        return new Promise(() => {
+          // **合図を受け取らない口**——**待つのをやめる側が無ければ、ここで止まる**
+        });
+      },
+    };
+
+    const pending = viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: plan().run,
+      approvals: approvals(),
+      issues: deaf,
+      issuesDeadline: () => deadline.signal,
+    });
+    await vi.waitFor(() => expect(asked.started).toBe(true));
+    deadline.abort();
+    const result = await pending;
+
+    // **「読めなかった」と同じにしない**（#573）——**遅いだけのときに権限を疑いに行く**
+    expect(result.kind === "board" && result.issues).toEqual({ unavailable: "timedout" });
+  });
+
+  it("合図を、issue の口まで渡す", async () => {
+    // **待つのをやめる側だけでは、往復が最後まで続く**——**取り消しも伝える**
+    const seen: (AbortSignal | undefined)[] = [];
+    const deadline = AbortSignal.timeout(60_000);
+
+    await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: plan().run,
+      approvals: approvals(),
+      issues: {
+        listIssues: async (request) => {
+          seen.push(request?.signal);
+          return NO_ISSUES;
+        },
+      },
+      issuesDeadline: () => deadline,
+    });
+
+    expect(seen[0], "口に合図が渡っていない").toBe(deadline);
+  });
+
+  it("切れている合図では、issue を取りに行かない", async () => {
+    // **呼べば往復が始まる**（`readApprovals` と同じ）
+    let called = 0;
+
+    await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: plan().run,
+      approvals: approvals(),
+      issues: {
+        listIssues: async () => {
+          called += 1;
+          return NO_ISSUES;
+        },
+      },
+      issuesDeadline: () => AbortSignal.abort(),
+    });
+
+    expect(called, "切れているのに取りに行っている").toBe(0);
   });
 
   it("見てよいと分かるまで、issue を取りに行かない", async () => {
