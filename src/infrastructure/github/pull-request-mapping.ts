@@ -9,7 +9,7 @@
 import { z } from "zod";
 import type {
   InvalidPullRequest,
-  PullRequestListing,
+  ListedPullRequests,
 } from "../../application/ports/pull-request-source";
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 
@@ -77,7 +77,7 @@ const pullRequestSchema = z.object({
  * **一覧そのものが読めなければ落とす。** 空の配列を返すと、取得の失敗が
  * 「PR が 0 件」に化ける。1 件ずつの失敗とは別の話なので、扱いも分ける。
  */
-export function toPullRequestRefs(response: unknown): PullRequestListing {
+export function toPullRequestRefs(response: unknown): ListedPullRequests {
   const listed = z.array(z.unknown()).safeParse(response);
   if (!listed.success) {
     throw new Error(`PR の一覧として読めません: ${z.prettifyError(listed.error)}`);

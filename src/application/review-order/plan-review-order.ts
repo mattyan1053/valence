@@ -9,6 +9,7 @@ import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependen
 import { buildDependencyEdges } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import { orderByDependency } from "../../domain/graph/dependency-order";
+import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { ChangeSummarySource, UnavailableChangeSummary } from "../ports/change-summary-source";
 import type { InvalidPullRequest, PullRequestSource } from "../ports/pull-request-source";
@@ -43,6 +44,16 @@ export type ReviewOrderPlan = {
    * **取れなかった PR は入らない**（`heads` と同じ）。
    */
   readonly titles: ReadonlyMap<number, string>;
+  /**
+   * PR 番号から引ける合流の状況（#629）。
+   *
+   * **押せない理由を、押す前に言うために運ぶ**——**いまは Merge を押すまで
+   * conflict が分からない**（#502）。
+   *
+   * **ここでは判定しない。** **`mergeReadinessOf` が読む**ので、
+   * **取ってきたものをそのまま通す**（`heads` / `titles` と同じ）。
+   */
+  readonly mergeStatuses: ReadonlyMap<number, MergeStatusReport>;
 };
 
 export type ReviewOrderSources = {
@@ -82,7 +93,8 @@ export async function planReviewOrder(
   sources: ReviewOrderSources,
   options: ReviewOrderOptions = {},
 ): Promise<ReviewOrderPlan> {
-  const { pullRequests, invalid, heads, titles } = await sources.pullRequests.listPullRequests();
+  const { pullRequests, invalid, heads, titles, mergeStatuses } =
+    await sources.pullRequests.listPullRequests();
   const edges = buildDependencyEdges(pullRequests);
   const numbers = pullRequests.map((pullRequest) => pullRequest.number);
   // **合図はここで作る。** **一覧を取り終えてから数え始める**（#316 のレビュー）
@@ -95,6 +107,7 @@ export async function planReviewOrder(
     invalid,
     heads,
     titles,
+    mergeStatuses,
     ...changes,
   };
 }

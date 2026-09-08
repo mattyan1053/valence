@@ -273,6 +273,11 @@ export async function renderRepositoryBoard(
             // **組み立ては `infrastructure` が持ち、合成ルートを通す**（#622 の
             // レビュー 2 周目）——**`.` / `..` を断る判定を写さない**
             urlOf={(number) => pullRequestPageUrl({ owner, name }, number)}
+            // **押せない理由を、押す前に出す**（#629）——**いまは Merge を押すまで
+            // conflict が分からない**（#502 で踏んだ）。**判定は domain が持つ**
+            // ——**取れていない PR は `undefined` のまま渡す**（**「マージできる」に
+            // 化けさせない**）
+            mergeStatusOf={(number) => result.plan.mergeStatuses.get(number)}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

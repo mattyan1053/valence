@@ -302,6 +302,8 @@ describe("commit が分からない PR", () => {
               changesUnavailable: [],
               heads: new Map([[1, "abc1234"]]),
               titles: new Map([[1, "依存グラフを図にする"]]),
+              // **合流の状況**（#629）。**この試験群が見ているのは、そこではない**
+              mergeStatuses: new Map([[1, { mergeable: "mergeable", state: "clean" } as const]]),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
           }),
@@ -425,6 +427,7 @@ describe("材料が出せなかったことを、サーバ側に残す（#573）
       changesUnavailable: unavailable,
       heads: new Map(),
       titles: new Map(),
+      mergeStatuses: new Map(),
     },
     approvals: { approved: new Set<number>(), unavailable: [] },
   });
@@ -542,6 +545,7 @@ describe("盤面が、理由を部品まで渡す（#577 のレビュー 2 周�
                 changesUnavailable: unavailable,
                 heads: new Map([[1, "a".repeat(40)]]),
                 titles: new Map(),
+                mergeStatuses: new Map([[1, { mergeable: "mergeable", state: "clean" }]]),
               },
               approvals: { approved: new Set<number>(), unavailable: [] },
             }) as never,
@@ -582,5 +586,61 @@ describe("盤面が、理由を部品まで渡す（#577 のレビュー 2 周�
 
     expect(html).toContain("まだ取得できていません");
     expect(html).not.toContain("時間内に返りませんでした");
+  });
+});
+
+/**
+ * **押せない理由を、押す前に出す**（#629）。
+ *
+ * **部品の側で出せることと、盤面がそれを渡していることは別**である（#577 のレビュー）
+ * ——**渡す 1 行を消しても、`ReviewBoard` の試験は全部緑**になる。
+ */
+describe("合流の状況が、行に出る", () => {
+  const pullRequest = (number: number, head: string) => ({
+    number,
+    base: { repository: "r", branch: "main" },
+    head: { repository: "r", branch: head },
+  });
+
+  /** **#1 は conflict している。#2 は合流できる。** どちらも依存は残っていない。 */
+  async function markup(): Promise<string> {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        {
+          board: async () => ({
+            kind: "board",
+            plan: {
+              pullRequests: [pullRequest(1, "feat/a"), pullRequest(2, "feat/b")],
+              edges: [],
+              order: { ordered: [1, 2], cyclic: [] },
+              invalid: [],
+              changes: new Map(),
+              changesUnavailable: [],
+              heads: new Map([
+                [1, "a".repeat(40)],
+                [2, "b".repeat(40)],
+              ]),
+              titles: new Map(),
+              mergeStatuses: new Map([
+                [1, { mergeable: "conflicting", state: "dirty" }],
+                [2, { mergeable: "mergeable", state: "clean" }],
+              ]),
+            },
+            approvals: { approved: new Set<number>(), unavailable: [] },
+          }),
+          report: () => {},
+        },
+      ),
+    );
+  }
+
+  it("conflict している PR だけに、その理由が出る", async () => {
+    // **行を数えてから当てている**（`AGENTS.md` §4）——**2 行あるので、
+    // 「出ている」だけでは、合流できる行にも出ていることを見落とす**
+    const html = await markup();
+
+    expect(html.match(/conflict/g), "page から部品へ状況が渡っていない").toHaveLength(1);
   });
 });
