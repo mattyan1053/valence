@@ -23,6 +23,7 @@ import { ballOf } from "../../domain/triage/ball";
 import { fileOverlapsFor } from "../../domain/triage/file-overlap";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import { classifyRiskTier } from "../../domain/triage/risk-tier";
+import { titleOverlapsFor } from "../../domain/triage/title-overlap";
 import { assignmentNote } from "../assignment/assignment-note";
 import { ballNote } from "../ball/ball-note";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
@@ -30,6 +31,7 @@ import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
 import { fileOverlapNote } from "../file-overlap/file-overlap-note";
 import { baseLagNote, mergeReadinessNote } from "../merge/merge-readiness-note";
 import { RiskTierView } from "../risk-tier/risk-tier-view";
+import { SHARED_TITLE_FLOOR, titleOverlapNote } from "../title-overlap/title-overlap-note";
 
 /**
  * **材料が無い理由を、画面の語彙にする**（#573）。
@@ -74,6 +76,16 @@ export function changeUnavailableNote(kind: string): string {
  * 文字幅で決まり、並べたときにズレる。** **並ぶときに揃えるのは、並べる側の仕事**
  * である（**部品は互いを知らない**）。
  */
+/**
+ * 行に足す 1 文。**言うことが無ければ出さない**（#248 / #597）。
+ *
+ * **行はもう長い**ので、**「出すか出さないか」を 1 箇所に集める**
+ * ——**足すたびに三項演算子が増えると、`renderAside` が読めなくなる。**
+ */
+function Note({ text }: { readonly text: string | undefined }) {
+  return text === undefined ? undefined : <span className="text-sm">{text}</span>;
+}
+
 function ActionRow({ children }: { readonly children: ReactNode }) {
   return <div className="flex flex-wrap items-center gap-2 [&_button]:min-w-24">{children}</div>;
 }
@@ -213,6 +225,19 @@ export function ReviewBoard({
       changedPaths: changes.get(pullRequest.number)?.changedPaths,
     })),
   );
+  // **同じ題の PR も、行ごとに計算しない**（#630。上と同じ理由）——
+  // **ファイルの重なりとは別の軸**である（**#637 は「順序に影響する」、
+  // こちらは「どちらか要らないかもしれない」**）
+  const titleOverlaps = titleOverlapsFor(
+    pullRequests.map((pullRequest) => ({
+      number: pullRequest.number,
+      title: titleOf(pullRequest.number),
+    })),
+    // **どこから言うかは画面が決める**（#630）——**domain へ渡して、
+    // 「この長さ以上は取りこぼさない」を守らせる**（#653 のレビュー 2 周目）
+    SHARED_TITLE_FLOOR,
+    invalid.length,
+  );
 
   return (
     <DependencyGraphView
@@ -260,6 +285,12 @@ export function ReviewBoard({
         // **ファイルの重なりは、その間に入る**（#637）——**押せるかの話ではなく、
         // 持ち主の話でもない。** **依存の順序とは別の目安**である
         const overlap = fileOverlapNote(overlaps.get(number));
+        // **重複しているかもしれない相手**（#630）——**「似ています」とは言わない。**
+        // **言うことが無ければ出ない**（#248 / #597）。
+        //
+        // **ファイルの重なり（上）と同じ「順序の目安」の族**である
+        // ——**#630 が「似ている」と「同じ」を分けた、その両側**（#653 の取り込み直し）
+        const duplicate = titleOverlapNote(titleOverlaps.get(number));
         // **誰の番か**（#636）——**「誰の持ち物か」（下）とは別の軸**である。
         // **判定は domain が持つ**（`ballOf`）ので、**ここは詰め替えるだけ**である。
         //
@@ -272,7 +303,6 @@ export function ReviewBoard({
             assignment: assignmentOf(number),
           }),
         );
-        const turn = ball === undefined ? undefined : <span className="text-sm">{ball}</span>;
         const assignment = (
           <span className="text-sm opacity-70">{assignmentNote(assignmentOf(number))}</span>
         );
@@ -292,8 +322,9 @@ export function ReviewBoard({
                   : changeUnavailableNote(kind)}
               </span>
               {readiness}
-              {overlap === undefined ? undefined : <span className="text-sm">{overlap}</span>}
-              {turn}
+              <Note text={overlap} />
+              <Note text={duplicate} />
+              <Note text={ball} />
               {assignment}
               <ActionRow>
                 {renderStatus?.(number)}
@@ -306,8 +337,9 @@ export function ReviewBoard({
           <>
             <RiskTierView tier={classifyRiskTier(change)} change={change} />
             {readiness}
-            {overlap === undefined ? undefined : <span className="text-sm">{overlap}</span>}
-            {turn}
+            <Note text={overlap} />
+            <Note text={duplicate} />
+            <Note text={ball} />
             {assignment}
             <ActionRow>
               {renderStatus?.(number)}

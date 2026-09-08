@@ -9,6 +9,8 @@
  * そのものが消える。** **少し早く切るのは読めるが、重なった 2 つは読めない。**
  */
 
+import { graphemes } from "../../domain/text/graphemes";
+
 /** **切ったことが分かる印。** **黙って切ると、別の PR が同じ文字列になる。** */
 export const ELLIPSIS = "…";
 
@@ -63,17 +65,6 @@ function characterWidth(character: string, fontSize: number): number {
     return fontSize * WIDTH.upper;
   }
   return fontSize * WIDTH.other;
-}
-
-/**
- * **書記素で割る**（#543 のレビュー）。**符号位置ではない**——**ZWJ で繋がった
- * 絵文字は、いくつもの符号位置で 1 文字**なので、**符号位置で切ると
- * 「👨‍👩‍👧」から「👨」だけが残り**、**元と違う意味の文字列が出る。**
- */
-const SEGMENTER = new Intl.Segmenter("ja", { granularity: "grapheme" });
-
-function graphemes(text: string): string[] {
-  return [...SEGMENTER.segment(text)].map(({ segment }) => segment);
 }
 
 /**
