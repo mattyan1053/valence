@@ -22,7 +22,7 @@ import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { AppCredentials } from "./app-credentials";
 import {
   toBaseCi,
-  toBaseRef,
+  toBaseRefPath,
   toChangeSummary,
   toCommitSha,
   toHeadSha,
@@ -292,7 +292,7 @@ export function createGitHubChangeSummarySource({
       throw new Error(result.reason);
     }
     // **落ちていない PR では引かない。** 言うことが無いところで往復を増やさない
-    const ref = result.summary.failingChecks.length === 0 ? undefined : toBaseRef(detail.body);
+    const ref = result.summary.failingChecks.length === 0 ? undefined : toBaseRefPath(detail.body);
     if (ref === undefined) {
       return result.summary;
     }

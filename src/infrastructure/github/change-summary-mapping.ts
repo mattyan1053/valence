@@ -109,6 +109,14 @@ const checksSchema = z.object({
        * （`ciStatus` だけ拾って先へ進むと、**名前の無い失敗を持ったまま突き合わせる**）。
        */
       name: z.string().min(1),
+      /**
+       * **出した App も読む**（#610）。**同名の check を複数の App が出す**ので、
+       * **名前だけでは「同じ check」と言えない。**
+       *
+       * **API の側で `null` になりうる**ので、**必須にしない**——**材料ごと捨てると、
+       * その PR は Tier まで出なくなる。** **突き合わせが立たなくなるだけ**にする。
+       */
+      app: z.object({ id: z.number().int() }).nullish(),
       status: z.string(),
       conclusion: z.string().nullable(),
     }),
@@ -120,31 +128,72 @@ const statusesSchema = z.object({
   statuses: z.array(z.object({ context: z.string().min(1), state: z.string() })),
 });
 
-/**
- * マージ先のブランチ名。
- *
- * **URL のパスへ入る値なので、段ごとに検証する**（`AGENTS.md` §6）。
- * **上の階層へ出る形（`..`）も、問い合わせを足す形（`?`）も、段の頭に置けない**
- * ——**段は英数字で始まる**とだけ決めれば、どちらも通らない。
- *
- * **`/` は残す。** この運用の枝は `<種別>/<番号>-<説明>` なので、
- * **符号化すると別の path になる。**
- */
-const baseRefSchema = z.object({
-  base: z.object({
-    ref: z
-      .string()
-      .max(255)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/),
-  }),
-});
+/** Git が枝の名前として禁じている記号（`git check-ref-format`）。**空白も入る。** */
+const FORBIDDEN_IN_REF = new Set([" ", "~", "^", ":", "?", "*", "[", "\\"]);
 
 /**
- * 検証済みのマージ先ブランチ名を取り出す。**読めなければ突き合わせない**（`toHeadSha` と同じ形）。
+ * 禁じられた文字を含むか。
+ *
+ * **符号位置で見る。** **正規表現の文字クラスに制御文字を書けない**（Biome が弾く）
+ * ——**書けたとしても、範囲は読めない。**
  */
-export function toBaseRef(detail: unknown): string | undefined {
+function hasForbiddenCharacter(ref: string): boolean {
+  for (const character of ref) {
+    const code = character.codePointAt(0) ?? 0;
+    // **制御文字も禁じられている**——**URL のパスとしても危ない**（`AGENTS.md` §6）
+    if (code <= 0x1f || code === 0x7f || FORBIDDEN_IN_REF.has(character)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Git の枝の名前として妥当か（`git check-ref-format`）。
+ *
+ * **このリポジトリの枝の付け方を当てはめない**（`AGENTS.md` §1。**インストール先は
+ * 1 つではない**）——**`release/2.0+hotfix` も `日本語の枝名` も Git では有効**である。
+ * **許す文字を並べると、そういうインストール先では機能が丸ごと死ぬ**
+ * ——**しかも「突き合わせられませんでした」と出るので、原因が分からない。**
+ *
+ * **弾くのは、Git が禁じているものだけ**である。**`..` と空の段は、
+ * URL のパスとしても危ない**（`AGENTS.md` §6）ので、**ここが両方を兼ねる。**
+ */
+function isValidRef(ref: string): boolean {
+  if (ref.length === 0 || ref.length > 255 || ref === "@") {
+    return false;
+  }
+  if (hasForbiddenCharacter(ref) || ref.includes("..") || ref.includes("@{")) {
+    return false;
+  }
+  // **段が空にならない**（`//`・頭と末尾の `/`）——**上の階層へ出る形も、ここで落ちる**
+  return ref
+    .split("/")
+    .every(
+      (part) =>
+        part.length > 0 && !part.startsWith(".") && !part.endsWith(".") && !part.endsWith(".lock"),
+    );
+}
+
+const baseRefSchema = z.object({ base: z.object({ ref: z.string() }) });
+
+/**
+ * マージ先のブランチ名を、**URL のパスの段として符号化して**返す。
+ * **読めなければ突き合わせない**（`toHeadSha` と同じ形）。
+ *
+ * **符号化まで含めて 1 つの口にする**（`AGENTS.md` §6）——**生の名前を返すと、
+ * 組み立てる側が包み忘れられる。**
+ *
+ * **`/` は段の区切りとして残し、段の中だけを包む。** **`%` は
+ * `encodeURIComponent` が `%25` にする**ので、**`a%2Fb` という枝名が `/` に
+ * 化けて別の段になることはない**（`bin/loop-ci-status` と同じ話）。
+ */
+export function toBaseRefPath(detail: unknown): string | undefined {
   const parsed = baseRefSchema.safeParse(detail);
-  return parsed.success ? parsed.data.base.ref : undefined;
+  if (!parsed.success || !isValidRef(parsed.data.base.ref)) {
+    return undefined;
+  }
+  return parsed.data.base.ref.split("/").map(encodeURIComponent).join("/");
 }
 
 /**
@@ -170,7 +219,12 @@ const PASSING_STATES = new Set(["success"]);
  * 混ぜない**——それは `pending` の側である。
  */
 function failingChecksOf(
-  runs: readonly { name: string; status: string; conclusion: string | null }[],
+  runs: readonly {
+    name: string;
+    app?: { id: number } | null;
+    status: string;
+    conclusion: string | null;
+  }[],
   states: readonly { context: string; state: string }[],
 ): readonly CheckSignal[] {
   return [
@@ -182,6 +236,7 @@ function failingChecksOf(
         kind: "check-run" as const,
         name: run.name,
         outcome: run.conclusion ?? "unknown",
+        appId: run.app?.id,
       })),
     ...states
       .filter((status) => status.state === "failure" || status.state === "error")
@@ -221,7 +276,12 @@ export function toBaseCi(checks: unknown, statuses: unknown): BaseCi | undefined
  * **1 件も無いものを `passing` にしない。** CI が動いていない PR が素通りする。
  */
 function toCiStatus(
-  runs: readonly { name: string; status: string; conclusion: string | null }[],
+  runs: readonly {
+    name: string;
+    app?: { id: number } | null;
+    status: string;
+    conclusion: string | null;
+  }[],
   states: readonly { context: string; state: string }[],
 ): CiStatus {
   // **「落ちている」を決めるのはここ 1 箇所**である（`failingChecksOf`）

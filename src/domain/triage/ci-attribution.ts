@@ -28,6 +28,14 @@ export type CheckSignal = {
    * **落ち方まで一致して初めて「マージ先でも出ている」と言える。**
    */
   readonly outcome: string;
+  /**
+   * 出した App（Checks API の `app.id`）。**Commit Status には無い。**
+   *
+   * **名前だけでは「同じ check」と言えない**（#610。**`bin/loop-ci-status` が
+   * 同じことを塞いでいる**）——**同名の check を複数の App が出す**ので、
+   * **別の App の失敗と一致させると「マージ先でも出ている」が嘘になる。**
+   */
+  readonly appId?: number;
 };
 
 /** 突き合わせる先（マージ先ブランチの先端）で見えた CI。 */
@@ -52,7 +60,15 @@ export type CiFailureScope =
   | "unmeasured";
 
 function sameSignal(left: CheckSignal, right: CheckSignal): boolean {
-  return left.kind === right.kind && left.name === right.name && left.outcome === right.outcome;
+  return (
+    left.kind === right.kind &&
+    left.name === right.name &&
+    left.outcome === right.outcome &&
+    // **発行元まで見て初めて「同じ check」**である（#610）。
+    // **Commit Status は両側とも `undefined`** なので、**そこは名前と落ち方で決まる**
+    // ——**名前空間は `kind` が分けている。**
+    left.appId === right.appId
+  );
 }
 
 /**

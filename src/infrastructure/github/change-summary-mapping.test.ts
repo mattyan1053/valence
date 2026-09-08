@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toBaseCi, toBaseRef, toChangeSummary, toCommitSha } from "./change-summary-mapping";
+import { toBaseCi, toBaseRefPath, toChangeSummary, toCommitSha } from "./change-summary-mapping";
 
 const DETAIL = { changed_files: 3, additions: 10, deletions: 4 };
 const FILES = [{ filename: "src/ui/button.tsx" }];
@@ -246,18 +246,30 @@ describe("落ちている check を名前で残す", () => {
     return result.ok ? result.summary.failingChecks : undefined;
   }
 
-  it("落ちた check run を、名前と落ち方で残す", () => {
+  it("落ちた check run を、名前と落ち方と発行元で残す", () => {
+    // **発行元まで残す**（#610）——**同名の check を複数の App が出す**
     expect(
       failingOf(
         {
           check_runs: [
-            { name: "test", status: "completed", conclusion: "failure" },
-            { name: "lint", status: "completed", conclusion: "success" },
+            { name: "test", status: "completed", conclusion: "failure", app: { id: 15368 } },
+            { name: "lint", status: "completed", conclusion: "success", app: { id: 15368 } },
           ],
         },
         NO_STATUSES,
       ),
-    ).toEqual([{ kind: "check-run", name: "test", outcome: "failure" }]);
+    ).toEqual([{ kind: "check-run", name: "test", outcome: "failure", appId: 15368 }]);
+  });
+
+  it("発行元を持たない応答でも、材料にはする", () => {
+    // **`app` は API の側で null になりうる。** **材料ごと捨てると、
+    // その PR は Tier まで出なくなる**——**突き合わせが立たないだけにする**
+    expect(
+      failingOf(
+        { check_runs: [{ name: "test", status: "completed", conclusion: "failure", app: null }] },
+        NO_STATUSES,
+      ),
+    ).toEqual([{ kind: "check-run", name: "test", outcome: "failure", appId: undefined }]);
   });
 
   it("落ちた Commit Status も、同じ形で残す", () => {
@@ -309,14 +321,28 @@ describe("落ちている check を名前で残す", () => {
   });
 });
 
-describe("toBaseRef", () => {
-  it("マージ先のブランチ名を取り出す", () => {
-    expect(toBaseRef({ base: { ref: "main" } })).toBe("main");
+describe("toBaseRefPath", () => {
+  it("マージ先のブランチ名を、URL の段として返す", () => {
+    expect(toBaseRefPath({ base: { ref: "main" } })).toBe("main");
   });
 
-  it("`/` を含むブランチ名も通す", () => {
-    // **この運用の枝はすべて `<種別>/<番号>-<説明>`** である（`git-workflow.md`）
-    expect(toBaseRef({ base: { ref: "feat/638-ci-blame" } })).toBe("feat/638-ci-blame");
+  it("`/` は段の区切りとして残す", () => {
+    expect(toBaseRefPath({ base: { ref: "feat/638-ci-blame" } })).toBe("feat/638-ci-blame");
+  });
+
+  it.each([
+    // **インストール先は 1 つではない**（`AGENTS.md` §1）——**このリポジトリの
+    // 枝の付け方を、他所の枝にも当てはめない。** **Git で有効なものは通す。**
+    ["release/2.0+hotfix", "release/2.0%2Bhotfix"],
+    ["_private", "_private"],
+    ["fix/#123", "fix/%23123"],
+    ["100%-done", "100%25-done"],
+    ["日本語の枝名", "%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%81%AE%E6%9E%9D%E5%90%8D"],
+    // **自分が置いた `%` を二重に包む**（`bin/loop-ci-status` と同じ話）
+    // ——**包まないと、`%2F` を含む枝名が `/` に化けて別の段になる**
+    ["a%2Fb", "a%252Fb"],
+  ])("Git で有効な %s は通す", (ref, expected) => {
+    expect(toBaseRefPath({ base: { ref } })).toBe(expected);
   });
 
   it.each([
@@ -324,11 +350,25 @@ describe("toBaseRef", () => {
     ["空", { base: { ref: "" } }],
     ["上の階層へ出る", { base: { ref: "../../../orgs/other/secrets" } }],
     ["段の途中に上がある", { base: { ref: "main/../../orgs" } }],
-    ["問い合わせを足す", { base: { ref: "main?per_page=1" } }],
+    // **段の中の `..` も Git が禁じている**（段の頭の `.` とは別の規則）
+    ["段の中に `..` がある", { base: { ref: "feat/a..b" } }],
+    ["段が空", { base: { ref: "feat//x" } }],
+    ["段の頭が `/`", { base: { ref: "/main" } }],
+    ["段の末尾が `/`", { base: { ref: "main/" } }],
+    ["段が `.` で始まる", { base: { ref: "feat/.hidden" } }],
+    ["段が `.` で終わる", { base: { ref: "main." } }],
+    ["段が `.lock` で終わる", { base: { ref: "main.lock" } }],
+    ["制御文字を含む", { base: { ref: "ma\u0000in" } }],
+    ["空白を含む", { base: { ref: "my branch" } }],
+    ["Git が禁じる記号を含む", { base: { ref: "feat/x?y" } }],
+    ["`@{` を含む", { base: { ref: "main@{1}" } }],
+    ["`@` だけ", { base: { ref: "@" } }],
+    // **長すぎるものは弾く。** **URL のパスへ入る値**なので、上限を持たせておく
+    ["長すぎる", { base: { ref: "a".repeat(256) } }],
   ])("%s ものは URL に入れない", (_name, detail) => {
     // **未検証の値を URL のパスへ入れない**（`AGENTS.md` §6）。
     // **installation トークンが付いている**ので、別の endpoint を叩けてしまう
-    expect(toBaseRef(detail)).toBeUndefined();
+    expect(toBaseRefPath(detail)).toBeUndefined();
   });
 });
 

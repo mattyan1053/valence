@@ -479,7 +479,7 @@ describe("createGitHubChangeSummarySource", () => {
 });
 
 describe("マージ先と突き合わせる", () => {
-  const FAILED = { name: "test", status: "completed", conclusion: "failure" };
+  const FAILED = { name: "test", status: "completed", conclusion: "failure", app: { id: 15368 } };
   /** **落ちている PR。** ここでだけマージ先を読みに行く。 */
   const FAILING: Routes = {
     ...OK_ROUTES,
@@ -497,7 +497,8 @@ describe("マージ先と突き合わせる", () => {
 
     expect(listing.summaries.get(1)?.baseCi).toEqual({
       settled: true,
-      failing: [{ kind: "check-run", name: "test", outcome: "failure" }],
+      // **発行元まで運ぶ**（#610）——**名前だけでは「同じ check」と言えない**
+      failing: [{ kind: "check-run", name: "test", outcome: "failure", appId: 15368 }],
     });
   });
 
@@ -554,6 +555,20 @@ describe("マージ先と突き合わせる", () => {
     }).listChangeSummaries([1]);
 
     expect(listing.summaries.get(1)?.baseCi).toBeUndefined();
+  });
+
+  it("マージ先の名前を、URL の段として包んでから叩く", async () => {
+    // **インストール先は 1 つではない**（`AGENTS.md` §1）——**`#` を含む枝名も
+    // Git では有効**である。**包み忘れると、`#` から先が切り落とされて別の commit を読む**
+    const { asked, source: watched } = watching({
+      ...FAILING,
+      ...BASE,
+      "/pulls/1": { body: { ...DETAIL, base: { ref: "fix/#123" } } },
+      "/commits/fix/%23123": { body: { sha: BASE_SHA } },
+    });
+    await watched.listChangeSummaries([1]);
+
+    expect(asked.some((url) => url.endsWith("/commits/fix/%23123"))).toBe(true);
   });
 
   it("マージ先の名前が形でなければ、その値で要求しない", async () => {

@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { BaseCi, CheckSignal } from "./ci-attribution";
 import { ciFailureScopeOf } from "./ci-attribution";
 
-const TEST_RUN: CheckSignal = { kind: "check-run", name: "test", outcome: "failure" };
-const TYPECHECK_RUN: CheckSignal = { kind: "check-run", name: "typecheck", outcome: "failure" };
+const TEST_RUN: CheckSignal = { kind: "check-run", name: "test", outcome: "failure", appId: 15368 };
+const TYPECHECK_RUN: CheckSignal = {
+  kind: "check-run",
+  name: "typecheck",
+  outcome: "failure",
+  appId: 15368,
+};
 
 /** マージ先の CI。**既定は「終わっている」**——突き合わせられる状態である。 */
 function base(failing: readonly CheckSignal[], settled = true): BaseCi {
@@ -40,6 +45,20 @@ describe("ciFailureScopeOf", () => {
     expect(ciFailureScopeOf([TEST_RUN], base([{ ...TEST_RUN, outcome: "timed_out" }]))).toBe(
       "only-here",
     );
+  });
+
+  it("名前が同じでも、発行元が違えば別の check として見る", () => {
+    // **同名の check を複数の App が出す**（#610。**`bin/loop-ci-status` が
+    // 同じ穴を塞いでいる**）——**別の App の失敗と一致させると、
+    // 「マージ先でも出ている」が嘘になる。**
+    expect(ciFailureScopeOf([TEST_RUN], base([{ ...TEST_RUN, appId: 57789 }]))).toBe("only-here");
+  });
+
+  it("Commit Status には発行元が無いので、そこは名前と落ち方で見る", () => {
+    // **`kind` で名前空間が分かれている**ので、**片方に無い項目で弾かない**
+    const status: CheckSignal = { kind: "commit-status", name: "ci/travis", outcome: "failure" };
+
+    expect(ciFailureScopeOf([status], base([{ ...status }]))).toBe("also-on-base");
   });
 
   it("名前が同じでも、種類が違えば別の check として見る", () => {
