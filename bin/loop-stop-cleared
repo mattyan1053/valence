@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# **止めた理由が消えたことを、止まっている周回から人へ出す** (#634)。
+#
+#   bin/loop-stop-cleared
+#
+#   exit 0 = 理由は消えている（人を呼ぶ 1 行を標準出力へ）
+#   exit 1 = 言うことは無い（STOP が無い / `no-work` 以外 / まだ渡せる仕事が無い）
+#   exit 2 = 判定できない（`loop/STOP` を読めない / 一覧を取れない）
+#
+# **`no-work` は「いま渡せるものが無い」で止める。** **止まっている間に仕事が入っても、
+# 入口は `loop/STOP` を読んで止まるだけ**なので、**止めた理由が消えたことがどこにも
+# 出ない。** **実測（#634）: PR #625 が来てから人が再開するまで 10 時間 45 分**で、
+# **その間 master の cron は 30 分ごとに鳴り、約 21 回「何もせず停止します」を返した。**
+#
+# **`loop/STOP` を弱めるものではない。** **止まるのは正しい**——**足りないのは、
+# 人が来る動機**である。**ここは 1 行出すだけで、STOP は消さないし、仕事も取らない。**
+# **再開するかどうかは、これまでどおり人が決める**（`./task loop:resume`）。
+#
+# ## なぜ入口で呼ぶのか
+#
+# **止まっている間、繰り返し人の目に入るのは、周回そのものの応答だけ**である。
+# **`./task loop:status` は人が引くもの**で、**人はそれを定期的には見ていない**
+# （**今回、人が来たのは 10 時間 45 分後**）。**出す先を、既に鳴っているものへ寄せる。**
+#
+# **`bin/loop-lease check` を通さない** (#386 と逆向き)。**あの受け口は「入口を飛ばした
+# 周回」を数えるためのもの**だが、**この口は lease を取らないと決めた経路から呼ばれる**
+# ——**通すと、正しく止まっている周回が毎回「入口を飛ばした」として記録される。**
+#
+# ## なぜ `no-work` だけなのか
+#
+# **止めた理由ごとに、消えたかどうかの測り方が違う。** **`no-work` は盤面で決まる**ので
+# **盤面を引けば分かる**が、**`main-sync-failed` や `procedure-stale` は盤面と無関係**
+# である——**同じ口で言い当てようとすると、消えていないものを「消えた」と言う。**
+#
+# ## 「渡せる仕事がある」の測り方は、十分条件だけである
+#
+# **`no-work` の条件は「open PR / ready / in-progress が 0 件で、昇格できる backlog も
+# 無い」**（`bin/loop-stall` の説明）。**ここが見るのは前の 3 つだけ**で、
+# **「昇格できる backlog が生えた」は見ていない**——**昇格の判定は master の手順書の
+# ブロックが持っており**（`loop/promotable-wiring.test.ts`）、**写すと片方だけ古くなる**
+# （`AGENTS.md` §5）。
+#
+# **倒れる向きは「黙る」側**である。**見落とすと、これまでどおり人が来ない**（**いまと
+# 同じ**）が、**誤って鳴らすと `loop/STOP` が「読み飛ばすもの」になる**——**そちらは
+# この仕組み自体を無効にする。** **実際に踏んだのは open PR が来た形**である。
+#
+# **人待ちを数に入れない。** **`parked` + `awaiting-human` の PR や、その PR しか持たない
+# `in-progress` は、ループの中では解けない**——**数に入れると、止めた理由は消えていない
+# のに毎周回鳴る。** **判定は `bin/loop-open-work` / `bin/loop-in-progress-work` が
+# 持っている**ので、**ここでは呼ぶだけ**である（`AGENTS.md` §5）。
+#
+# **出すのは件数だけ。** **タイトルも枝の名前も出さない**（`AGENTS.md` §6
+# 「出力に何が含まれうるかで判断する」）——**人が次に打つのは `./task loop:status`** で、
+# **中身はそちらが出す。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-stop-cleared" >&2
+  echo "        exit 0 理由は消えている / exit 1 言うことは無い / exit 2 判定できない" >&2
+  exit 2
+}
+
+[[ $# -eq 0 ]] || usage
+
+# **数える口は、このスクリプトの隣から辿る**（`bin/loop-procedure-stamp` と同じ）
+# ——**呼ばれる場所は作業ツリーの中とは限らない。**
+readonly HERE="${BASH_SOURCE[0]%/*}"
+
+# **入口が読むのと同じ場所**である（`.claude/commands/loop-*.md`）。
+readonly STOP="loop/STOP"
+
+# **STOP が無いなら、この口の出番ではない。** **止まっていない周回から呼ばれても、
+# 何も言わずに終わる**（**入口の分岐を、こちらでもう一度書かない**）。
+[[ -f $STOP ]] || exit 1
+
+if ! IFS= read -r first_line <"$STOP"; then
+  # **空の STOP もここへ来る。** **「`no-work` ではない」と読まない**——
+  # **読めていないだけ**である。
+  echo "[FAIL] loop/STOP を読めません: $STOP" >&2
+  exit 2
+fi
+
+# **識別子は 1 行目の、最初の `:` の前**である（`./task loop:stop` が書く形）。
+# **`:` が無い行**（手で止めたとき）**は、丸ごと識別子になる**ので `no-work` に当たらない。
+if [[ ${first_line%%:*} != "no-work" ]]; then
+  exit 1
+fi
+
+# **取ってから数える**（master の手順書と同じ形）。**パイプで繋ぐと `$?` は数える側の
+# ものになり**、**取れなかった周回が「0 件」と見分けが付かない。**
+if ! open_prs="$(gh pr list --state open --limit 200 --json number,headRefName,author,labels \
+  --jq '.[] | [(.number | tostring), .headRefName, .author.login] + [.labels[].name] | join("\u001f")')"; then
+  echo "[FAIL] open PR の一覧を取れません" >&2
+  exit 2
+fi
+
+if ! open_work="$(printf '%s\n' "$open_prs" | "$HERE/loop-open-work")"; then
+  echo "[FAIL] 着手できる open PR を数えられません" >&2
+  exit 2
+fi
+
+if ! ready_numbers="$(gh issue list --label ready --limit 200 --json number --jq '.[].number')"; then
+  echo "[FAIL] ready の Issue を取れません" >&2
+  exit 2
+fi
+
+if ! in_progress_numbers="$(gh issue list --label in-progress --limit 200 --json number \
+  --jq '.[].number')"; then
+  echo "[FAIL] in-progress の Issue を取れません" >&2
+  exit 2
+fi
+
+# **番号を 1 つずつ引数として渡す**（`bin/loop-in-progress-work` の約束）。
+# **引用しない**——**空なら引数が 0 個になる。**
+# shellcheck disable=SC2086
+if ! in_progress_work="$(printf '%s\n' "$open_prs" |
+  "$HERE/loop-in-progress-work" $in_progress_numbers)"; then
+  echo "[FAIL] 着手を進められる in-progress を数えられません" >&2
+  exit 2
+fi
+
+# **空行を数えない。** **一覧が 0 件のとき、`gh` からは空文字が来る。**
+ready_work=0
+while IFS= read -r number; do
+  [[ -n $number ]] || continue
+  ready_work=$((ready_work + 1))
+done <<<"$ready_numbers"
+
+for count in "$open_work" "$ready_work" "$in_progress_work"; do
+  if ! [[ $count =~ ^[0-9]+$ ]]; then
+    # **読めない値を 0 へ倒さない**（`bin/loop-open-work` と同じ向き）——
+    # **倒すと「まだ仕事が無い」に化け、この口は黙ったままになる。**
+    echo "[FAIL] 件数を読めません: $count" >&2
+    exit 2
+  fi
+done
+
+if ((open_work == 0 && ready_work == 0 && in_progress_work == 0)); then
+  # **まだ理由は消えていない。** **ここで何か出すと、毎周回鳴る**——
+  # **`loop/STOP` が「読み飛ばすもの」になる。**
+  exit 1
+fi
+
+echo "止めた理由は消えています: no-work（渡せる仕事: open PR ${open_work} 件 / ready ${ready_work} 件 / in-progress ${in_progress_work} 件）"
+echo "  読み=止めたのは「渡せるものが無い」ためで、それは成立していない。再開するかは人が決める（./task loop:status で見て、./task loop:resume）"
