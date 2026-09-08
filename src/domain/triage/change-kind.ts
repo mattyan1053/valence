@@ -67,15 +67,35 @@ const DEPENDENCY_MANIFEST_FILE_NAMES: readonly string[] = [
 /** テストだと、ファイル名だけで分かるもの（`foo.test.ts` / `foo_test.go` / `foo.spec.rb`）。 */
 const TEST_FILE_INFIXES: readonly string[] = [".test.", ".spec.", "_test.", "_spec."];
 
+/**
+ * 置き場所の名前は、**どの階層でも当ててよいものと、先頭でだけ当てるもの**に分ける。
+ *
+ * **このプロダクトは任意のリポジトリを見る**（`AGENTS.md` §1 マルチテナント）。
+ * **`build/` や `docs/` を素の置き場にしているリポジトリは珍しくない**ので、
+ * **どの階層でも当てると `src/build/compiler.ts` が「生成物だけです」になる**
+ * ——**実装を読まずに通す方向へ、事実でない理由で押す。**
+ *
+ * **分ける基準は「他の意味で使われるか」**である。**`node_modules` や `__x__` は
+ * その用途にしか使わない**ので深さを問わない。**それ以外は、先頭の階層でだけ当てる。**
+ *
+ * **単発の名前を潰さない**（#647 のレビュー）——**`build` だけ直すと、
+ * 次は `docs` で同じことが起きる。** **どこで当てるかを、名前ごとに 1 回決める。**
+ *
+ * **取りこぼす向きに倒れる。** **monorepo の `packages/web/dist/` は当たらない**が、
+ * **当たらなければ `other` になり、画面は何も言わない**——**誤って言い切るより軽い。**
+ */
+type DirectoryRule = {
+  /** どの階層に現れても、その種類だと言い切れる名前。 */
+  readonly anywhere: readonly string[];
+  /** 先頭の階層にあるときだけ当てる名前。**他の意味でも使われる。** */
+  readonly topLevel: readonly string[];
+};
+
 /** テストの置き場所。**語として一致したときだけ当てる**（`contest/` を拾わない）。 */
-const TEST_DIRECTORY_NAMES: readonly string[] = [
-  "test",
-  "tests",
-  "__tests__",
-  "spec",
-  "specs",
-  "e2e",
-];
+const TEST_DIRECTORIES: DirectoryRule = {
+  anywhere: ["__tests__"],
+  topLevel: ["test", "tests", "spec", "specs", "e2e"],
+};
 
 /** ドキュメントだと、拡張子だけで分かるもの。 */
 const DOCUMENT_EXTENSIONS: readonly string[] = [".md", ".mdx", ".rst", ".adoc", ".textile"];
@@ -83,8 +103,8 @@ const DOCUMENT_EXTENSIONS: readonly string[] = [".md", ".mdx", ".rst", ".adoc", 
 /** 拡張子を持たない、決まった名前のドキュメント。 */
 const DOCUMENT_FILE_NAMES: readonly string[] = ["license", "notice", "authors", "changelog"];
 
-/** ドキュメントの置き場所。**語として一致したときだけ当てる。** */
-const DOCUMENT_DIRECTORY_NAMES: readonly string[] = ["docs", "doc"];
+/** ドキュメントの置き場所。**`docs/` を素の置き場にしているリポジトリがある。** */
+const DOCUMENT_DIRECTORIES: DirectoryRule = { anywhere: [], topLevel: ["docs", "doc"] };
 
 /** 生成物だと、ファイル名だけで分かるもの。 */
 const GENERATED_FILE_INFIXES: readonly string[] = [".generated.", ".gen.", ".min.", ".pb."];
@@ -93,15 +113,21 @@ const GENERATED_FILE_INFIXES: readonly string[] = [".generated.", ".gen.", ".min
 const GENERATED_EXTENSIONS: readonly string[] = [".snap", ".map"];
 
 /** 生成物の置き場所。**語として一致したときだけ当てる**（`distance.ts` を拾わない）。 */
-const GENERATED_DIRECTORY_NAMES: readonly string[] = [
-  "dist",
-  "build",
-  "generated",
-  "__generated__",
-  "__snapshots__",
-  "vendor",
-  "node_modules",
-];
+const GENERATED_DIRECTORIES: DirectoryRule = {
+  // **その用途にしか使わない名前**——**深さを問わない**
+  anywhere: ["node_modules", "__generated__", "__snapshots__"],
+  // **素の置き場にもなる名前**——**`src/build/compiler.ts` を生成物にしない**
+  topLevel: ["dist", "build", "generated", "vendor"],
+};
+
+/** その置き場所に入っているか。**どこで当てるかは `DirectoryRule` が決める。** */
+function inDirectory(segments: readonly string[], rule: DirectoryRule): boolean {
+  const [top] = segments;
+  return (
+    rule.anywhere.some((name) => segments.includes(name)) ||
+    (top !== undefined && rule.topLevel.includes(top))
+  );
+}
 
 /**
  * 1 つのパスの種類。
@@ -117,10 +143,9 @@ function kindOf(path: string): ChangeKind {
   const normalized = path.replace(/^\.\//, "").toLowerCase();
   const segments = normalized.split("/");
   const fileName = segments.pop() ?? "";
-  const directories = new Set(segments);
 
   // **生成物の置き場所だけ、いちばん先に見る**（上記の例外）
-  if (GENERATED_DIRECTORY_NAMES.some((name) => directories.has(name))) {
+  if (inDirectory(segments, GENERATED_DIRECTORIES)) {
     return "generated";
   }
   if (
@@ -145,10 +170,10 @@ function kindOf(path: string): ChangeKind {
   ) {
     return "generated";
   }
-  if (TEST_DIRECTORY_NAMES.some((name) => directories.has(name))) {
+  if (inDirectory(segments, TEST_DIRECTORIES)) {
     return "test";
   }
-  if (DOCUMENT_DIRECTORY_NAMES.some((name) => directories.has(name))) {
+  if (inDirectory(segments, DOCUMENT_DIRECTORIES)) {
     return "docs";
   }
   return "other";

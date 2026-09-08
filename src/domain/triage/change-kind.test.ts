@@ -76,6 +76,40 @@ describe("パスから、変更の種類を決める", () => {
     });
   });
 
+  describe("置き場所の名前は、どの階層でも当ててよいわけではない", () => {
+    // **このプロダクトは任意のリポジトリを見る**（`AGENTS.md` §1 マルチテナント）
+    // ——**`build/` や `docs/` を素の置き場にしているリポジトリは珍しくない。**
+    // **「うちではそうだから」で断定すると、違う構成で嘘になる。**
+    it("`src/build/` の実装を、生成物にしない", () => {
+      expect(onlyKindOf(["src/build/compiler.ts"])).toBe("other");
+    });
+
+    it("`src/docs/` の実装を、ドキュメントにしない", () => {
+      expect(onlyKindOf(["src/docs/generator.ts"])).toBe("other");
+    });
+
+    it("`src/test/` の実装を、テストにしない", () => {
+      // **テストの補助かもしれないが、テスト道具の実装かもしれない**
+      // ——**言わない側へ倒す。**
+      expect(onlyKindOf(["src/test/helpers.ts"])).toBe("other");
+    });
+
+    it("先頭の階層なら、そのまま当てる", () => {
+      expect(onlyKindOf(["dist/main.js"])).toBe("generated");
+      expect(onlyKindOf(["docs/adr/0001-why.txt"])).toBe("docs");
+      expect(onlyKindOf(["test/held-lock.ts"])).toBe("test");
+    });
+
+    it("その用途にしか使わない名前は、どの階層でも当てる", () => {
+      // **`node_modules` / `__generated__` / `__snapshots__` / `__tests__` は、
+      // 他の意味で使われない**——**そこだけは深さを問わない。**
+      expect(onlyKindOf(["packages/web/node_modules/left-pad/index.js"])).toBe("generated");
+      expect(onlyKindOf(["src/api/__generated__/schema.ts"])).toBe("generated");
+      expect(onlyKindOf(["src/ui/__snapshots__/view.txt"])).toBe("generated");
+      expect(onlyKindOf(["src/ui/__tests__/view.ts"])).toBe("test");
+    });
+  });
+
   describe("取りこぼしを、名前で当てない", () => {
     it("`author.ts` を、依存にも生成物にもしない", () => {
       // **`sensitive-path.ts` が語で踏んだのと同じ形**——**部分一致で当てない**

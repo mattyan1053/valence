@@ -29,6 +29,54 @@ describe("toChangeSummary", () => {
     });
   });
 
+  it("移す前のパスも、材料に載せる", () => {
+    // **`previous_filename` を捨てると、実装を `docs/` へ移した PR が
+    // 「ドキュメントだけです」になる**（#647 のレビュー）——**元の場所から
+    // 消えた事実が隠れる。**
+    //
+    // **件数は `changed_files` が持っている**ので、**行が増えても数は狂わない。**
+    const result = toChangeSummary({
+      detail: DETAIL,
+      files: [{ filename: "docs/foo.ts", previous_filename: "src/domain/foo.ts" }],
+      filesTruncated: false,
+      checks: PASSING,
+      statuses: NO_STATUSES,
+    });
+
+    expect(result.ok && result.summary.changedPaths.paths).toEqual([
+      "docs/foo.ts",
+      "src/domain/foo.ts",
+    ]);
+    expect(result.ok && result.summary.changedFileCount, "件数まで増えている").toBe(3);
+  });
+
+  it("移していないファイルに、余分な行を作らない", () => {
+    const result = toChangeSummary({
+      detail: DETAIL,
+      files: FILES,
+      filesTruncated: false,
+      checks: PASSING,
+      statuses: NO_STATUSES,
+    });
+
+    expect(result.ok && result.summary.changedPaths.paths).toEqual(["src/ui/button.tsx"]);
+  });
+
+  it("移す前が影響の大きいパスなら、そちらでも当てる", () => {
+    // **`.env` を移した PR は「機密パスに触れた」側である**（#647 のレビュー）
+    // ——**移した先の名前だけを見ると、触れていないことになる。**
+    const result = toChangeSummary({
+      detail: DETAIL,
+      files: [{ filename: "config/example", previous_filename: ".env" }],
+      filesTruncated: true,
+      checks: PASSING,
+      statuses: NO_STATUSES,
+    });
+
+    // **見切れていても、当たれば材料にしてよい**（残りを見ても結論は変わらない）
+    expect(result.ok).toBe(true);
+  });
+
   it("変更ファイルのパスを、そのまま材料に載せる", () => {
     // **件数だけにしない。** 取得の段階ではパスが在るので、**捨てずに渡す**
     const result = toChangeSummary({
