@@ -16,8 +16,10 @@ import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependen
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
+import type { Assignment } from "../../domain/triage/assignment";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import { classifyRiskTier } from "../../domain/triage/risk-tier";
+import { assignmentNote } from "../assignment/assignment-note";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
 import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
 import { mergeReadinessNote } from "../merge/merge-readiness-note";
@@ -145,6 +147,15 @@ export type ReviewBoardProps = {
    * **`undefined` は「分からない」として出る**ので、**黙るのとは違う。**
    */
   readonly mergeStatusOf: (pullRequestNumber: number) => MergeStatusReport | undefined;
+  /**
+   * **その PR が誰に振られているか**（#631）。**読めていないなら `undefined`。**
+   *
+   * **盤面はこれを持っていない**ので、**渡す側から受ける**（`mergeStatusOf` と同じ形）。
+   *
+   * **任意にしない。** **渡し忘れると、どの行も持ち主を黙る**
+   * ——**#631 が消しに来た状態**である（**誰も見ていない PR が、他と同じ顔で並ぶ**）。
+   */
+  readonly assignmentOf: (pullRequestNumber: number) => Assignment | undefined;
 };
 
 export function ReviewBoard({
@@ -160,6 +171,7 @@ export function ReviewBoard({
   titleOf,
   urlOf,
   mergeStatusOf,
+  assignmentOf,
 }: ReviewBoardProps) {
   return (
     <DependencyGraphView
@@ -185,6 +197,12 @@ export function ReviewBoard({
         // （`renderStatus` と同じ判断）
         const note = mergeReadinessNote(mergeReadinessOf(mergeStatusOf(number)));
         const readiness = note === undefined ? undefined : <span className="text-sm">{note}</span>;
+        // **持ち主は常に出す**（#631）——**合流の状況（上）とは違う。**
+        // **あちらは「押せない理由」で平常時は言うことが無い**が、
+        // **こちらは「誰の持ち物か」**であり、**振られていないこと自体が主題**である
+        const assignment = (
+          <span className="text-sm opacity-70">{assignmentNote(assignmentOf(number))}</span>
+        );
         // **材料が無い PR を黙って落とさない。** 行は残し、
         // 「出せなかった」ことが分かる形にする（#107 の `invalid` と同じ形）。
         if (change === undefined) {
@@ -201,6 +219,7 @@ export function ReviewBoard({
                   : changeUnavailableNote(kind)}
               </span>
               {readiness}
+              {assignment}
               <ActionRow>
                 {renderStatus?.(number)}
                 {renderActions?.(number)}
@@ -212,6 +231,7 @@ export function ReviewBoard({
           <>
             <RiskTierView tier={classifyRiskTier(change)} change={change} />
             {readiness}
+            {assignment}
             <ActionRow>
               {renderStatus?.(number)}
               {renderActions?.(number)}

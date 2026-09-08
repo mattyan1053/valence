@@ -22,6 +22,7 @@ import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge"
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
 import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
+import { AssignmentSummaryView } from "../../../../ui/assignment/assignment-summary-view";
 import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button";
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
 import { MergeButton, mergeNotice } from "../../../../ui/merge/merge-button";
@@ -254,6 +255,12 @@ export async function renderRepositoryBoard(
       )}
       {result.kind === "board" ? (
         <>
+          {/* **何件が誰にも振られていないかを出す**（#631）——**数えるのは domain が
+              持つ**（`summarizeAssignments`）。**言うことが無ければ、この行は出ない** */}
+          <AssignmentSummaryView
+            pullRequestNumbers={result.plan.pullRequests.map((pullRequest) => pullRequest.number)}
+            assignments={result.plan.assignments}
+          />
           {/* **どれから見るかを、盤面とは別に出す**（#632）——**一覧は依存の順のまま**
               である。**混ぜて 1 つの並びにすると、土台より先に積み荷をマージしようとする**
               （`review-board.tsx` の判断）。**並べ替えは domain が持つ**——
@@ -295,6 +302,9 @@ export async function renderRepositoryBoard(
             // ——**取れていない PR は `undefined` のまま渡す**（**「マージできる」に
             // 化けさせない**）
             mergeStatusOf={(number) => result.plan.mergeStatuses.get(number)}
+            // **誰の持ち物かを、行に出す**（#631）——**取れていない PR は `undefined` の
+            // まま渡す**（**「誰も持っていない」に化けさせない**）
+            assignmentOf={(number) => result.plan.assignments.get(number)}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

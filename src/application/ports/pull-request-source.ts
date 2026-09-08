@@ -9,6 +9,7 @@
 
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
+import type { Assignment } from "../../domain/triage/assignment";
 
 /** 検証に落ちた 1 件。 */
 export type InvalidPullRequest = {
@@ -61,6 +62,16 @@ export type PullRequestListing = {
    * **あれは依存を決めるのに要る最小限**である。
    */
   readonly mergeStatuses: ReadonlyMap<number, MergeStatusReport>;
+  /**
+   * PR 番号から引ける、誰に振られているか（#631）。
+   *
+   * **誰も見ていない PR が、盤面では他と同じ顔で並んでいた。**
+   *
+   * **読めなかった PR は入らない。** **`assignmentStateOf` が地図に無い番号を
+   * `unknown` へ倒す**ので、**「読めなかった」が「誰も持っていない」に化けない**
+   * （`AGENTS.md` §5。**6 回塞いだ形**）。
+   */
+  readonly assignments: ReadonlyMap<number, Assignment>;
 };
 
 /**

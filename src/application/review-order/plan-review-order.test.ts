@@ -52,6 +52,8 @@ const stacked: PullRequestListing = {
   titles: new Map([[8, "コンテナ周りの改善"]]),
   // **合流の状況**（#629）。**この流れの関心ではない**が、**口が返すもの**なので置く
   mergeStatuses: new Map([[9, { mergeable: "conflicting", state: "dirty" } as const]]),
+  // **誰に振られているか**（#631）。**同じ理由で置く**
+  assignments: new Map([[8, { assignees: ["someone"], reviewers: [], authoredByBot: false }]]),
 };
 
 describe("レビュー順序を組み立てる", () => {
@@ -86,6 +88,7 @@ describe("レビュー順序を組み立てる", () => {
         heads: new Map(),
         titles: new Map(),
         mergeStatuses: new Map(),
+        assignments: new Map(),
       }),
     });
 
@@ -100,6 +103,7 @@ describe("レビュー順序を組み立てる", () => {
         heads: new Map(),
         titles: new Map(),
         mergeStatuses: new Map(),
+        assignments: new Map(),
       }),
       changes: NO_CHANGES,
     });
@@ -115,6 +119,8 @@ describe("レビュー順序を組み立てる", () => {
       titles: new Map(),
       // **合流の状況も同じ**（#629）
       mergeStatuses: new Map(),
+      // **誰に振られているかも同じ**（#631）
+      assignments: new Map(),
       changes: new Map(),
       changesUnavailable: [],
     });
@@ -128,6 +134,16 @@ describe("レビュー順序を組み立てる", () => {
     });
 
     expect(plan.mergeStatuses).toEqual(stacked.mergeStatuses);
+  });
+
+  it("誰に振られているかは、取ってきたまま計画に載る", async () => {
+    // **この流れは判定しない**（#631）——**`assignmentStateOf` が読む**
+    const plan = await planReviewOrder({
+      pullRequests: sourceReturning(stacked),
+      changes: NO_CHANGES,
+    });
+
+    expect(plan.assignments).toEqual(stacked.assignments);
   });
 
   it("取得に失敗したら、0 件ではなく失敗として伝わる", async () => {

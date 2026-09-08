@@ -305,6 +305,7 @@ describe("commit が分からない PR", () => {
               titles: new Map([[1, "依存グラフを図にする"]]),
               // **合流の状況**（#629）。**この試験群が見ているのは、そこではない**
               mergeStatuses: new Map([[1, { mergeable: "mergeable", state: "clean" } as const]]),
+              assignments: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
           }),
@@ -429,6 +430,7 @@ describe("材料が出せなかったことを、サーバ側に残す（#573）
       heads: new Map(),
       titles: new Map(),
       mergeStatuses: new Map(),
+      assignments: new Map(),
     },
     approvals: { approved: new Set<number>(), unavailable: [] },
   });
@@ -547,6 +549,7 @@ describe("盤面が、理由を部品まで渡す（#577 のレビュー 2 周�
                 heads: new Map([[1, "a".repeat(40)]]),
                 titles: new Map(),
                 mergeStatuses: new Map([[1, { mergeable: "mergeable", state: "clean" }]]),
+                assignments: new Map(),
               },
               approvals: { approved: new Set<number>(), unavailable: [] },
             }) as never,
@@ -628,6 +631,7 @@ describe("合流の状況が、行に出る", () => {
                 [1, { mergeable: "conflicting", state: "dirty" }],
                 [2, { mergeable: "mergeable", state: "clean" }],
               ]),
+              assignments: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
           }),
@@ -710,6 +714,7 @@ describe("推奨レビュー順を、盤面とは別に出す", () => {
               ]),
               titles: new Map(),
               mergeStatuses,
+              assignments: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
           }),
@@ -764,5 +769,68 @@ describe("推奨レビュー順を、盤面とは別に出す", () => {
     const rows = boardList(await markup());
 
     expect(rows.indexOf("#1")).toBeLessThan(rows.indexOf("#2"));
+  });
+});
+
+/**
+ * **誰に振られているかを、盤面に出す**（#631）。
+ *
+ * **部品の側で出せることと、盤面がそれを渡していることは別**である（#577 のレビュー）。
+ */
+describe("誰に振られているかを、盤面へ渡す", () => {
+  const pullRequest = (number: number, head: string) => ({
+    number,
+    base: { repository: "r", branch: "main" },
+    head: { repository: "r", branch: head },
+  });
+
+  /** **#1 は持ち主が居る。#2 は誰にも振られていない。** */
+  async function markup(): Promise<string> {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        {
+          board: async () => ({
+            kind: "board",
+            plan: {
+              pullRequests: [pullRequest(1, "feat/a"), pullRequest(2, "feat/b")],
+              edges: [],
+              order: { ordered: [1, 2], cyclic: [] },
+              invalid: [],
+              changes: new Map(),
+              changesUnavailable: [],
+              heads: new Map(),
+              titles: new Map(),
+              mergeStatuses: new Map(),
+              assignments: new Map([
+                [1, { assignees: ["someone"], reviewers: [], authoredByBot: false }],
+                [2, { assignees: [], reviewers: [], authoredByBot: true }],
+              ]),
+            },
+            approvals: { approved: new Set<number>(), unavailable: [] },
+          }),
+          report: () => {},
+        },
+      ),
+    );
+  }
+
+  it("持ち主が行に出る", async () => {
+    const html = await markup();
+
+    expect(html.match(/アサイン: someone/g), "page から部品へ渡っていない").toHaveLength(1);
+  });
+
+  it("誰にも振られていない件数が、盤面の上に出る", async () => {
+    // **サマリも #631 の完了条件**である
+    const html = await markup();
+
+    expect(html).toContain("誰にも振られていない PR: 1 件");
+  });
+
+  it("bot の内訳も出る", async () => {
+    // **除かずに内訳を出す**（#631 の判断どころ）
+    expect(await markup()).toContain("bot の PR: 1 件");
   });
 });
