@@ -63,7 +63,21 @@ export function toHeadSha(detail: unknown): string | undefined {
   return parsed.success ? parsed.data.head.sha : undefined;
 }
 
-const filesSchema = z.array(z.object({ filename: z.string().min(1) }));
+/**
+ * 変更ファイルの 1 件。
+ *
+ * **移す前のパスも読む** (#647 のレビュー)。**`previous_filename` を捨てると、
+ * 実装を `docs/` へ移した PR が「ドキュメントだけです」になり**、
+ * **元の場所から消えた事実が隠れる**（`change-kind.ts`）。
+ *
+ * **移していないファイルには付かない**ので、**任意**である。
+ */
+const filesSchema = z.array(
+  z.object({
+    filename: z.string().min(1),
+    previous_filename: z.string().min(1).optional(),
+  }),
+);
 
 /**
  * **`status` と `conclusion` の両方を見る。** `conclusion` は終わるまで `null` で、
@@ -140,7 +154,17 @@ export function toChangeSummary(input: ChangeSummaryInput): ChangeSummaryResult 
     return { ok: false, reason: `CI の状態を読めません: ${z.prettifyError(statuses.error)}` };
   }
 
-  const paths = files.data.map((file) => file.filename);
+  // **移した先と、移す前の両方を載せる** (#647 のレビュー)。**件数は
+  // `changed_files` が持っている**ので、**行が増えても数は狂わない。**
+  //
+  // **`touchesSensitivePath` にも効く**——**`.env` を移した PR は「機密パスに
+  // 触れた」側になる。** **意識して、そう変えている**（`AGENTS.md` §5）：
+  // **移した先の名前だけを見ると、触れていないことになる。**
+  const paths = files.data.flatMap((file) =>
+    file.previous_filename === undefined
+      ? [file.filename]
+      : [file.filename, file.previous_filename],
+  );
   // **ここで判定するのは、材料にしてよいかどうかだけ**である。**Tier の判定は domain が
   // 同じパスから導く**ので、**真偽値を材料に載せない**（載せると、パスと食い違う値を
   // 持てる——**同じことを 2 箇所で言って、片方が事実と違う**）。
