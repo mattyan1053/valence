@@ -884,6 +884,7 @@ describe("同じファイルを触る PR を、盤面へ出す", () => {
               titles: new Map(),
               mergeStatuses: new Map(),
               assignments: new Map(),
+              opinions: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
           }),
