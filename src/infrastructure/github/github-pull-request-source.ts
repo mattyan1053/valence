@@ -30,7 +30,7 @@ import type { AppCredentials } from "./app-credentials";
 import type { InstallationToken } from "./installation-token";
 import { needsRefresh, requestInstallationToken } from "./installation-token";
 import { nextPageUrl } from "./link-pagination";
-import type { MergeStatusPage } from "./merge-status-mapping";
+import type { JudgedOpinion, MergeStatusPage } from "./merge-status-mapping";
 import { toBehindBy, toMergeStatusPage } from "./merge-status-mapping";
 import { toPullRequestRefs } from "./pull-request-mapping";
 import type { GitHubRepository } from "./repository-installation";
@@ -149,8 +149,19 @@ export function createGitHubPullRequestSource({
         // **合図はここで作る**（#316 と同じ理由）——**token を取るぶんを期限から引かない**
         readMergeStatuses(fetchImpl, repository, header, mergeStatusDeadline()),
       ]);
-      const { statuses: mergeStatuses, opinions } = board;
+
       const refs = toPullRequestRefs(items);
+      const { statuses: mergeStatuses } = board;
+      // **見せる head と突き合わせる**（#652 のレビュー）——**REST の一覧と GraphQL は
+      // 同時に走る**ので、**その間に push されると 2 つが別の commit を見る。**
+      // **番号だけで結合すると、誰も読んでいない commit に「承認済み」が付く**
+      // （#331 / #635 / #643 と同じ形）。**落ちれば `ballOf` は `unknown`** である。
+      const opinions = new Map<number, ReviewOpinion>();
+      for (const [number, judged] of board.opinions) {
+        if (refs.heads.get(number) === judged.head) {
+          opinions.set(number, judged.opinion);
+        }
+      }
       // **一覧が要る**ので、ここから先は順に走る（#639）——**base の枝と head の
       // commit が分かって初めて、どれとどれを比べるかが決まる。**
       await addBaseLags({
@@ -312,7 +323,7 @@ async function readMergeStatuses(
   // ——**別の地図にすると、port から画面まで運ぶ道が 1 本増える。**
 ): Promise<BoardStatuses> {
   const statuses = new Map<number, MergeStatusReport>();
-  const opinions = new Map<number, ReviewOpinion>();
+  const opinions = new Map<number, JudgedOpinion>();
   // **読めたぶんはその場で入る**ので、**打ち切っても、途中までは残る**
   const reading = collectMergeStatuses(fetchImpl, repository, header, deadline, {
     statuses,
@@ -336,7 +347,8 @@ async function readMergeStatuses(
  */
 type BoardStatuses = {
   readonly statuses: Map<number, MergeStatusReport>;
-  readonly opinions: Map<number, ReviewOpinion>;
+  /** **判定した commit ごと持つ**（#652 のレビュー）——**突き合わせるのは呼ぶ側**である。 */
+  readonly opinions: Map<number, JudgedOpinion>;
 };
 
 /** 合流の状況を、最後のページまで `statuses` へ入れる。**落ちたら投げる。** */

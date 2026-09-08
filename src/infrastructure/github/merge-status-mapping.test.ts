@@ -149,11 +149,13 @@ describe("レビューの意見（#636）", () => {
     });
 
   it("いまの head への承認と、変更の求めを分けて読む", () => {
-    const approved = toMergeStatusPage(opinions([{ state: "APPROVED" }])).opinions.get(7);
+    const approved = toMergeStatusPage(opinions([{ state: "APPROVED" }])).opinions.get(7)?.opinion;
     expect(approved?.approvesHead).toBe(true);
     expect(approved?.changesRequestedOnHead).toBe(false);
 
-    const changes = toMergeStatusPage(opinions([{ state: "CHANGES_REQUESTED" }])).opinions.get(7);
+    const changes = toMergeStatusPage(opinions([{ state: "CHANGES_REQUESTED" }])).opinions.get(
+      7,
+    )?.opinion;
     expect(changes?.changesRequestedOnHead).toBe(true);
     expect(changes?.approvesHead).toBe(false);
   });
@@ -165,7 +167,7 @@ describe("レビューの意見（#636）", () => {
         { state: "APPROVED", oid: OLD },
         { state: "CHANGES_REQUESTED", oid: OLD },
       ]),
-    ).opinions.get(7);
+    ).opinions.get(7)?.opinion;
 
     expect(opinion?.approvesHead).toBe(false);
     expect(opinion?.changesRequestedOnHead).toBe(false);
@@ -182,7 +184,7 @@ describe("レビューの意見（#636）", () => {
         reviews: { totalCount: 6 },
         latestOpinionatedReviews: { pageInfo: { hasNextPage: false }, nodes: [] },
       }),
-    ).opinions.get(7);
+    ).opinions.get(7)?.opinion;
 
     expect(opinion?.reviewed).toBe(true);
     expect(opinion?.approvesHead).toBe(false);

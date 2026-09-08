@@ -71,16 +71,27 @@ const opinionSchema = z.object({
   }),
 });
 
+/** 意見と、**それを判定した commit**（#652 のレビュー）。 */
+export type JudgedOpinion = {
+  readonly head: string;
+  readonly opinion: ReviewOpinion;
+};
+
 /** 読み取った 1 ページ。 */
 export type MergeStatusPage = {
   readonly statuses: ReadonlyMap<number, MergeStatusReport>;
   /**
    * PR 番号から引けるレビューの意見（#636）。
    *
+   * **判定した commit を一緒に返す**（#652 のレビュー）——**この応答と、REST の
+   * 一覧は同時に走る**ので、**その間に push されると 2 つが別の commit を見る。**
+   * **番号だけで結合すると、誰も読んでいない commit に「承認済み」が付く**
+   * （#331 / #635 / #643 と同じ形）。**突き合わせるのは呼ぶ側**である。
+   *
    * **読めなかった PR は入らない**（`statuses` と同じ）——**`ballOf` が
    * 地図に無い番号を `unknown` へ倒す**ので、**「読めなかった」が「放置」に化けない。**
    */
-  readonly opinions: ReadonlyMap<number, ReviewOpinion>;
+  readonly opinions: ReadonlyMap<number, JudgedOpinion>;
   /** 次のページの位置。**続きが無ければ `undefined`。** */
   readonly nextCursor: string | undefined;
 };
@@ -103,7 +114,7 @@ export function toMergeStatusPage(response: unknown): MergeStatusPage {
   const { pageInfo, nodes } = parsed.data.data.repository.pullRequests;
 
   const statuses = new Map<number, MergeStatusReport>();
-  const opinions = new Map<number, ReviewOpinion>();
+  const opinions = new Map<number, JudgedOpinion>();
   for (const item of nodes) {
     const node = nodeSchema.safeParse(item);
     if (node.success) {
@@ -117,7 +128,7 @@ export function toMergeStatusPage(response: unknown): MergeStatusPage {
     if (opinion.success) {
       const seen = toReviewOpinion(opinion.data);
       if (seen !== undefined) {
-        opinions.set(opinion.data.number, seen);
+        opinions.set(opinion.data.number, { head: opinion.data.headRefOid, opinion: seen });
       }
     }
   }
