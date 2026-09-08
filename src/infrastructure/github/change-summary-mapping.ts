@@ -5,7 +5,8 @@
  * **通信はここに置かない**（`pull-request-mapping` と同じ形）。
  *
  * **影響が大きいパスの判定は `domain` のものを呼ぶ。** ここで書き直すと、
- * 規則が 2 箇所になって片方だけ古くなる。
+ * 規則が 2 箇所になって片方だけ古くなる。**ここで呼ぶのは「材料にしてよいか」を
+ * 決めるためだけ**で、**Tier の判定は domain が同じパスから導く。**
  */
 
 import { z } from "zod";
@@ -139,7 +140,11 @@ export function toChangeSummary(input: ChangeSummaryInput): ChangeSummaryResult 
     return { ok: false, reason: `CI の状態を読めません: ${z.prettifyError(statuses.error)}` };
   }
 
-  const touches = touchesSensitivePath(files.data.map((file) => file.filename));
+  const paths = files.data.map((file) => file.filename);
+  // **ここで判定するのは、材料にしてよいかどうかだけ**である。**Tier の判定は domain が
+  // 同じパスから導く**ので、**真偽値を材料に載せない**（載せると、パスと食い違う値を
+  // 持てる——**同じことを 2 箇所で言って、片方が事実と違う**）。
+  const touches = touchesSensitivePath(paths);
   // **「触れていない」と「見ていない」を混同しない。** 見切れたうえで当たらなかったのは
   // 「無い」ではないので、**材料にしない**（画面は行を残して「材料が無い」と出す）。
   // 当たったほうは、残りを見なくても結論が変わらないので材料にしてよい。
@@ -156,7 +161,9 @@ export function toChangeSummary(input: ChangeSummaryInput): ChangeSummaryResult 
       changedFileCount: detail.data.changed_files,
       // **追加と削除を足す。** 片方だけだと、消しただけの大きな変更が小さく見える
       changedLineCount: detail.data.additions + detail.data.deletions,
-      touchesSensitivePath: touches,
+      // **見切れたことを一緒に運ぶ。** ここで落とすと、**途中までの一覧が
+      // 「これが全部だ」に化ける**（`AGENTS.md` §5）
+      changedPaths: { paths, truncated: input.filesTruncated },
       ciStatus: toCiStatus(checks.data.check_runs, statuses.data.statuses),
     },
   };

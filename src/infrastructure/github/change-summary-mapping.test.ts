@@ -23,23 +23,26 @@ describe("toChangeSummary", () => {
         changedFileCount: 3,
         // **追加と削除を足す。** 片方だけだと、消しただけの大きな変更が小さく見える
         changedLineCount: 14,
-        touchesSensitivePath: false,
+        changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
         ciStatus: "passing",
       },
     });
   });
 
-  it("影響が大きいパスの判定は domain のものを使う", () => {
-    // **infrastructure で書き直さない。** 2 箇所に規則を持つと片方だけ古くなる
+  it("変更ファイルのパスを、そのまま材料に載せる", () => {
+    // **件数だけにしない。** 取得の段階ではパスが在るので、**捨てずに渡す**
     const result = toChangeSummary({
       detail: DETAIL,
-      files: [{ filename: "src/infrastructure/github/app-jwt.ts" }],
+      files: [{ filename: "src/ui/button.tsx" }, { filename: "src/domain/triage/risk-tier.ts" }],
       filesTruncated: false,
       checks: PASSING,
       statuses: NO_STATUSES,
     });
 
-    expect(result.ok && result.summary.touchesSensitivePath).toBe(true);
+    expect(result.ok && result.summary.changedPaths).toEqual({
+      paths: ["src/ui/button.tsx", "src/domain/triage/risk-tier.ts"],
+      truncated: false,
+    });
   });
 
   describe("CI の 3 状態", () => {
@@ -149,7 +152,11 @@ describe("toChangeSummary", () => {
         statuses: NO_STATUSES,
       });
 
-      expect(result.ok && result.summary.touchesSensitivePath).toBe(true);
+      // **見切れたことを、材料の側にも残す**（**部分の一覧を全部だと読ませない**）
+      expect(result.ok && result.summary.changedPaths).toEqual({
+        paths: [".env"],
+        truncated: true,
+      });
     });
   });
 

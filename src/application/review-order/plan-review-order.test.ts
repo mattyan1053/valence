@@ -16,7 +16,7 @@ function failingSource(error: Error): PullRequestSource {
 const SUMMARY: ChangeSummary = {
   changedFileCount: 1,
   changedLineCount: 5,
-  touchesSensitivePath: false,
+  changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
   ciStatus: "passing",
 };
 

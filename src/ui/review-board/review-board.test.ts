@@ -21,11 +21,17 @@ function pullRequest(number: number, base: string, head: string): PullRequestRef
   };
 }
 
+/** **domain の規則で当たるパス**（画面側で規則を書き直さない）。 */
+const SENSITIVE_PATHS = {
+  paths: ["src/infrastructure/github/app-jwt.ts"],
+  truncated: false,
+} as const;
+
 function change(overrides: Partial<ChangeSummary> = {}): ChangeSummary {
   return {
     changedFileCount: 1,
     changedLineCount: 5,
-    touchesSensitivePath: false,
+    changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
     ciStatus: "passing",
     ...overrides,
   };
@@ -213,7 +219,7 @@ describe("ReviewBoard", () => {
       props({
         changes: new Map([
           [1, change()], // fast-track（土台）
-          [2, change({ touchesSensitivePath: true })], // high-risk（その上）
+          [2, change({ changedPaths: SENSITIVE_PATHS })], // high-risk（その上）
         ]),
       }),
     );
@@ -315,7 +321,7 @@ describe("図の中だけで、次の 1 本を選べる", () => {
     [5, change()],
     [6, change({ changedFileCount: 9, changedLineCount: 400 })],
     [7, change({ changedFileCount: 9, changedLineCount: 400 })],
-    [8, change({ touchesSensitivePath: true })],
+    [8, change({ changedPaths: SENSITIVE_PATHS })],
     [9, change({ changedFileCount: 9, changedLineCount: 400 })],
   ]);
 
