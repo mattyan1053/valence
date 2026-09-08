@@ -63,9 +63,11 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
     titleOf: (number: number) => `#${number} のタイトル`,
     // **既定は飛べる**（#621）。**この試験群が見ているのは、そこではない**
     urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
+    // **既定は別々のファイルを触る**（#637）——**この試験群が見ているのは、
+    // そこではない**（**同じにすると、全部の行に重なりの 1 文が出る**）
     changes: new Map([
       [1, change()],
-      [2, change()],
+      [2, change({ changedPaths: { paths: ["src/ui/dialog.tsx"], truncated: false } })],
     ]),
     // **既定は「分かっている」**——**この試験群が見ているのは、そこではない**
     headKnown: () => true,
@@ -269,6 +271,61 @@ describe("ReviewBoard", () => {
     expect(markup).toMatch(/抜け/);
     expect(markup).toMatch(/その先に積まれ/);
     expect(markup).toContain("番号が数値ではありません");
+  });
+
+  /**
+   * **同じファイルを触る PR を、行に出す**（#637）。
+   *
+   * **依存グラフは base/head の積み重ねしか見ない**——**base が別々でも、
+   * 同じファイルに触っていれば実質的に順序がある。**
+   */
+  describe("同じファイルを触る PR", () => {
+    /** #1 と #2 が同じファイルを 1 つ触っている。 */
+    function overlapping(): ReviewBoardProps {
+      return props({
+        changes: new Map([
+          [1, change({ changedPaths: { paths: ["src/a.ts", "src/b.ts"], truncated: false } })],
+          [2, change({ changedPaths: { paths: ["src/b.ts"], truncated: false } })],
+        ]),
+      });
+    }
+
+    it("重なっている相手が、両方の行に出る", () => {
+      const rows = list(render(overlapping()));
+
+      expect(rows.match(/同じファイルを触っている PR/g), "2 行に出ていない").toHaveLength(2);
+    });
+
+    it("盤面の並びは変えない", () => {
+      // **依存は守らないと壊れる制約**で、**ファイルの重なりは目安**である
+      const rows = list(render(overlapping()));
+
+      expect(rows.indexOf("#1")).toBeLessThan(rows.indexOf("#2"));
+    });
+
+    it("重なっていなければ、行に出さない", () => {
+      // **平常時に鳴るものは読まれなくなる**（#248）——**行はもう長い**（#597）
+      const rows = list(render(props()));
+
+      expect(rows).not.toMatch(/同じファイルを触っている PR|測り切れていません/);
+    });
+
+    it("読めなかった PR が居れば、重なりがゼロでも測り切れていないと言う", () => {
+      // **盤面は既に「N 件の PR は読めませんでした」と出している**（#651 のレビュー 3 周目）
+      // ——**その画面で、重なりだけが「抜けは無い」と言うことになる**
+      const rows = list(
+        render(props({ invalid: [{ index: 4, reason: "番号が数値ではありません" }] })),
+      );
+
+      expect(rows).toMatch(/測り切れていません/);
+    });
+
+    it("材料が取れていない PR が居れば、測り切れていないと言う", () => {
+      // **「測れなかった」を「重なっていない」にしない**（#637）
+      const rows = list(render(props({ changes: new Map([[1, change()]]) })));
+
+      expect(rows).toMatch(/測り切れていません/);
+    });
   });
 
   /**

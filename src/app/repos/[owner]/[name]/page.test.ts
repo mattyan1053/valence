@@ -834,3 +834,70 @@ describe("誰に振られているかを、盤面へ渡す", () => {
     expect(await markup()).toContain("bot の PR: 1 件");
   });
 });
+
+/**
+ * **同じファイルを触る PR を、盤面に出す**（#637）。
+ *
+ * **部品の側で出せることと、盤面がそれを渡していることは別**である（#577 のレビュー）
+ * ——**盤面は `changes` をそのまま渡しているので、渡し忘れの経路は無い**が、
+ * **材料が行まで届いていることは 1 度通す。**
+ */
+describe("同じファイルを触る PR を、盤面へ出す", () => {
+  const pullRequest = (number: number, head: string) => ({
+    number,
+    base: { repository: "r", branch: "main" },
+    head: { repository: "r", branch: head },
+  });
+
+  const change = (paths: readonly string[]) => ({
+    changedFileCount: paths.length,
+    changedLineCount: 5,
+    changedPaths: { paths, truncated: false },
+    ciStatus: "passing" as const,
+  });
+
+  async function markup(): Promise<string> {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        {
+          board: async () => ({
+            kind: "board",
+            plan: {
+              pullRequests: [pullRequest(1, "feat/a"), pullRequest(2, "feat/b")],
+              edges: [],
+              order: { ordered: [1, 2], cyclic: [] },
+              invalid: [],
+              changes: new Map([
+                [1, change(["src/a.ts", "src/b.ts"])],
+                [2, change(["src/b.ts"])],
+              ]),
+              changesUnavailable: [],
+              heads: new Map(),
+              titles: new Map(),
+              mergeStatuses: new Map(),
+              assignments: new Map(),
+            },
+            approvals: { approved: new Set<number>(), unavailable: [] },
+          }),
+          report: () => {},
+        },
+      ),
+    );
+  }
+
+  it("重なっている相手が、両方の行に出る", async () => {
+    const html = await markup();
+
+    expect(
+      html.match(/同じファイルを触っている PR/g),
+      "page から部品へ材料が渡っていない",
+    ).toHaveLength(2);
+  });
+
+  it("「衝突する」とは言わない", async () => {
+    // **同じファイルでも、離れた行なら衝突しない**（#637）
+    expect(await markup()).not.toMatch(/衝突/);
+  });
+});
