@@ -53,11 +53,17 @@ export type ReviewReason =
   /**
    * **著者の手が要る。**
    *
-   * **conflict・下書き・CI が落ちている**が入る。**いま読んでも手戻りする**ので、
-   * **後ろへ回す**（#632 の完了条件）。
+   * **conflict・下書き・base の遅れ・CI が落ちている**が入る。**いま読んでも
+   * 手戻りする**ので、**後ろへ回す**（#632 の完了条件）。
+   *
+   * **`behind` が入るのは、勧めた結果が確実に捨てられるから**である
+   * （#648 のレビュー）——**`BEHIND` が返るのは最新化を必須にしているリポジトリ**
+   * （#644 で測った）**なので、著者は base を取り込むしかなく**、
+   * **取り込めば head が変わり、そこまでの承認は消える**（#643）。
    *
    * **保護ルールで止まっている（`blocked`）は入らない**——**未解決スレッドや
-   * 承認の不足**は、**レビュアーを待っている側**である。
+   * 承認の不足**は、**レビュアーを待っている側**である。**切る軸は
+   * 「次に動くのが誰か」**であって、「押せるかどうか」ではない。
    */
   | "needs-author";
 
@@ -121,9 +127,19 @@ export function suggestReviewOrder(
  * **合流の状況が分からない（`unknown`）ものは、後ろへ回さない**——**GitHub が
  * 計算中の間ずっと全部が後ろへ行くと、この並びは何も言わなくなる。**
  * **外れても手戻りは 1 件ぶん**である（**マージを止めるのは `MergeBlock` の側**）。
+ *
+ * **全部が `behind` になる設定でも害は無い**（#648 のレビュー）——**同じ束の中で
+ * 相対順は保たれる。**
  */
+const AUTHOR_FIRST: ReadonlySet<MergeReadiness["kind"]> = new Set([
+  "conflicting",
+  "draft",
+  // **取り込めば head が変わり、そこまでの承認は消える**（#643。#648 のレビュー）
+  "behind",
+]);
+
 function reasonFor({ change, readiness }: ReviewCandidate): ReviewReason {
-  if (readiness.kind === "conflicting" || readiness.kind === "draft") {
+  if (AUTHOR_FIRST.has(readiness.kind)) {
     return "needs-author";
   }
   if (change === undefined) {

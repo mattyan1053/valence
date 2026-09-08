@@ -80,6 +80,19 @@ describe("どれから見るかを、理由つきで出す", () => {
     expect(rows[1]?.reason).toBe("needs-author");
   });
 
+  it("base に遅れているものも、著者の手が要る側へ回す", () => {
+    // **`BEHIND` が返るのは最新化を必須にしているリポジトリ**（#644 で測った）
+    // ——**著者は base を取り込むしかなく**、**取り込めば head が変わり、
+    // そこまでの承認は消える**（#643）。**勧めた結果が、確実に捨てられる**
+    const rows = suggestReviewOrder(
+      [candidate(1, { readiness: { kind: "behind" }, change: RISKY }), candidate(2)],
+      NO_DEPENDENCY,
+    );
+
+    expect(rows.map((row) => row.number)).toEqual([2, 1]);
+    expect(rows[1]?.reason).toBe("needs-author");
+  });
+
   it("保護ルールで止まっているものは、後ろへ回さない", () => {
     // **未解決スレッドや承認の不足で止まっている**——**レビュアーを待っている側**である
     const rows = suggestReviewOrder(

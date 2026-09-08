@@ -33,7 +33,7 @@ const REASON_TEXT: Record<ReviewReason, string> = {
   "needs-review": "いつもどおり読むものです",
   "fast-track": "短時間で片付きます",
   unknown: "判定の材料がありません",
-  "needs-author": "著者の手が要ります（conflict・下書き・CI）",
+  "needs-author": "著者の手が要ります（conflict・下書き・base の遅れ・CI）",
 };
 
 /** その行に出す 1 文。 */
