@@ -26,6 +26,7 @@ import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
 import { MergeButton, mergeNotice } from "../../../../ui/merge/merge-button";
 import { ReviewBoard } from "../../../../ui/review-board/review-board";
+import { SuggestedReviewOrder } from "../../../../ui/review-order/suggested-review-order";
 
 /**
  * **要求ごとに描く。静的に生成させない**（入口の画面と同じ理由）。
@@ -253,6 +254,18 @@ export async function renderRepositoryBoard(
       )}
       {result.kind === "board" ? (
         <>
+          {/* **どれから見るかを、盤面とは別に出す**（#632）——**一覧は依存の順のまま**
+              である。**混ぜて 1 つの並びにすると、土台より先に積み荷をマージしようとする**
+              （`review-board.tsx` の判断）。**並べ替えは domain が持つ**——
+              **ここは材料を渡すだけ**である */}
+          <SuggestedReviewOrder
+            pullRequests={result.plan.pullRequests}
+            order={result.plan.order}
+            changes={result.plan.changes}
+            mergeStatusOf={(number) => result.plan.mergeStatuses.get(number)}
+            titleOf={(number) => result.plan.titles.get(number)}
+            urlOf={(number) => pullRequestPageUrl({ owner, name }, number)}
+          />
           <ReviewBoard
             pullRequests={result.plan.pullRequests}
             edges={result.plan.edges}
