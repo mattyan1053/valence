@@ -78,6 +78,7 @@ function listing(
         heads: new Map(),
         titles: new Map(),
         mergeStatuses: new Map(),
+        assignments: new Map(),
       };
     },
   };

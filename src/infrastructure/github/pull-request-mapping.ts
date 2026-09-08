@@ -12,6 +12,7 @@ import type {
   ListedPullRequests,
 } from "../../application/ports/pull-request-source";
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
+import type { Assignment } from "../../domain/triage/assignment";
 
 /**
  * ブランチの参照。
@@ -72,6 +73,26 @@ const pullRequestSchema = z.object({
 });
 
 /**
+ * 誰に振られているか（#631）。
+ *
+ * **一覧の応答がそのまま持っている**ので、**取りに行く往復は要らない。**
+ *
+ * **まとめて任意にする。** **`assignees` だけ在って `requested_reviewers` が
+ * 読めない、という半端な形を作らない**——**片方だけで「誰にも出ていない」と
+ * 言うことになる。** **読めなければ、その PR は地図に入らない**
+ * （**`assignmentStateOf` が `unknown` へ倒す**）。
+ *
+ * **`user.type` で bot を見る。** **login の `[bot]` で判定しない**
+ * ——**人が同じ名前を付けられる。**
+ */
+const assignmentSchema = z.object({
+  assignees: z.array(z.object({ login: z.string().min(1) })),
+  requested_reviewers: z.array(z.object({ login: z.string().min(1) })),
+  requested_teams: z.array(z.object({ slug: z.string().min(1) })),
+  user: z.object({ type: z.string() }),
+});
+
+/**
  * 応答をドメインの型へ変換する。
  *
  * **一覧そのものが読めなければ落とす。** 空の配列を返すと、取得の失敗が
@@ -90,6 +111,8 @@ export function toPullRequestRefs(response: unknown): ListedPullRequests {
   const heads = new Map<number, string>();
   // **タイトルも同じ形で持つ**（#542）——**`PullRequestRef` は依存を決める型のまま**
   const titles = new Map<number, string>();
+  // **誰に振られているかも同じ形**（#631）——**読めなかった PR は入らない**
+  const assignments = new Map<number, Assignment>();
   for (const [index, item] of listed.data.entries()) {
     const parsed = pullRequestSchema.safeParse(item);
     if (!parsed.success) {
@@ -103,8 +126,26 @@ export function toPullRequestRefs(response: unknown): ListedPullRequests {
     if (parsed.data.title !== undefined) {
       titles.set(parsed.data.number, parsed.data.title);
     }
+    // **本体とは別に検証する**（#631）——**ここが読めなくても、依存グラフは出す**
+    // （**`head.sha` と同じ判断**）
+    const people = assignmentSchema.safeParse(item);
+    if (people.success) {
+      assignments.set(parsed.data.number, toAssignment(people.data));
+    }
   }
-  return { pullRequests, invalid, heads, titles };
+  return { pullRequests, invalid, heads, titles, assignments };
+}
+
+function toAssignment(people: z.infer<typeof assignmentSchema>): Assignment {
+  return {
+    assignees: people.assignees.map((assignee) => assignee.login),
+    // **個人と team を 1 つに並べる**——**どちらも「誰かに出ている」**である
+    reviewers: [
+      ...people.requested_reviewers.map((reviewer) => reviewer.login),
+      ...people.requested_teams.map((team) => team.slug),
+    ],
+    authoredByBot: people.user.type === "Bot",
+  };
 }
 
 function toRef(pullRequest: z.infer<typeof pullRequestSchema>): PullRequestRef {

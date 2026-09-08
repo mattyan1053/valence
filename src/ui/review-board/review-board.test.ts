@@ -6,6 +6,7 @@ import { buildDependencyEdges } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import { orderByDependency } from "../../domain/graph/dependency-order";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
+import type { Assignment } from "../../domain/triage/assignment";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { ReviewBoardProps } from "./review-board";
 import { changeUnavailableNote, ReviewBoard } from "./review-board";
@@ -38,6 +39,9 @@ function change(overrides: Partial<ChangeSummary> = {}): ChangeSummary {
   };
 }
 
+/** **持ち主が居る**PR（#631）。 */
+const ASSIGNED: Assignment = { assignees: ["someone"], reviewers: [], authoredByBot: false };
+
 /** **GitHub が「合流できる」と言っている**状況（#629）。 */
 const MERGEABLE: MergeStatusReport = { mergeable: "mergeable", state: "clean" };
 
@@ -67,6 +71,8 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
     headKnown: () => true,
     // **既定は合流できる**（#629）。**この試験群が見ているのは、そこではない**
     mergeStatusOf: () => MERGEABLE,
+    // **既定はアサインされている**（#631）。**この試験群が見ているのは、そこではない**
+    assignmentOf: () => ASSIGNED,
     ...overrides,
   };
 }
@@ -263,6 +269,43 @@ describe("ReviewBoard", () => {
     expect(markup).toMatch(/抜け/);
     expect(markup).toMatch(/その先に積まれ/);
     expect(markup).toContain("番号が数値ではありません");
+  });
+
+  /**
+   * **誰に振られているかを、行に出す**（#631）。
+   *
+   * **誰も見ていない PR が、盤面では他と同じ顔で並んでいた。**
+   */
+  describe("誰に振られているか", () => {
+    it("振られていない行に、そう出る", () => {
+      const rows = list(
+        render(
+          props({
+            assignmentOf: (number) =>
+              number === 2 ? { assignees: [], reviewers: [], authoredByBot: false } : ASSIGNED,
+          }),
+        ),
+      );
+
+      expect(rows.match(/誰にも振られていません/g), "1 行ではない").toHaveLength(1);
+    });
+
+    it("読めなかった行を、振られていない側へ倒さない", () => {
+      // **6 回塞いだ形**（#631）
+      const rows = list(
+        render(props({ assignmentOf: (number) => (number === 2 ? undefined : ASSIGNED) })),
+      );
+
+      expect(rows.match(/読めませんでした/g), "1 行ではない").toHaveLength(1);
+      expect(rows).not.toMatch(/誰にも振られていません/);
+    });
+
+    it("リスク判定の材料が無い行にも出す", () => {
+      // **材料が揃っていないことと、誰の持ち物かは別**である
+      const rows = list(render(props({ changes: new Map() })));
+
+      expect(rows.match(/アサイン: someone/g), "2 行に出ていない").toHaveLength(2);
+    });
   });
 
   /**
@@ -530,6 +573,7 @@ describe("理由が、行に出る（#577 のレビュー）", () => {
     headKnown: () => true,
     // **合流できる側を既定にする**——**この試験群が見ているのは、そこではない**
     mergeStatusOf: () => MERGEABLE,
+    assignmentOf: () => ASSIGNED,
     titleOf: () => undefined,
     urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
     changeUnavailableOf: kind === undefined ? undefined : () => kind,

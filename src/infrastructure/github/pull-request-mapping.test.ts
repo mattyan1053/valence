@@ -89,6 +89,8 @@ describe("GitHub の PR 一覧をドメイン型へ変換する", () => {
         [8, "コンテナ周りの改善"],
         [9, "エージェント設定"],
       ]),
+      // **この見本には人の項目が無い**（#631）——**読めていないものは持たない**
+      assignments: new Map(),
     });
   });
 
@@ -165,6 +167,7 @@ describe("GitHub の PR 一覧をドメイン型へ変換する", () => {
       invalid: [],
       heads: new Map(),
       titles: new Map(),
+      assignments: new Map(),
     });
   });
 
@@ -247,5 +250,74 @@ describe("タイトルを、番号から引ける形で持つ", () => {
     const { titles } = toPullRequestRefs([{ ...first, title: "" }]);
 
     expect(titles.has(8), "空のタイトルを持っている").toBe(false);
+  });
+});
+
+/**
+ * **誰に振られているか**（#631）。
+ *
+ * **一覧の応答がそのまま持っている**（`assignees` / `requested_reviewers` /
+ * `requested_teams` / `user.type`）——**取りに行く往復は要らない。**
+ */
+describe("アサインとレビュー依頼", () => {
+  /**
+   * **実際の応答と同じ形にする。** **GitHub の一覧は 4 つとも必ず返す**ので、
+   * **どれか 1 つだけを置いた見本を作らない**（**実物とずれた形で緑になる**）。
+   */
+  const withPeople = (extra: Record<string, unknown>) => ({
+    ...(stackedPullRequests[0] as Record<string, unknown>),
+    assignees: [],
+    requested_reviewers: [],
+    requested_teams: [],
+    user: { login: "mattyan1053", type: "User" },
+    ...extra,
+  });
+
+  it("assignee の login を持ち帰る", () => {
+    const { assignments } = toPullRequestRefs([withPeople({ assignees: [{ login: "someone" }] })]);
+
+    expect(assignments.get(8)?.assignees).toEqual(["someone"]);
+  });
+
+  it("レビュー依頼を、個人も team も持ち帰る", () => {
+    // **team だけに出ている PR を「誰にも出ていない」と言わないため**
+    const { assignments } = toPullRequestRefs([
+      withPeople({
+        requested_reviewers: [{ login: "someone" }],
+        requested_teams: [{ slug: "reviewers" }],
+      }),
+    ]);
+
+    expect(assignments.get(8)?.reviewers).toEqual(["someone", "reviewers"]);
+  });
+
+  it("誰にも振られていない PR も、読めたものとして持ち帰る", () => {
+    // **「アサインが無い」と「取れなかった」を分ける**——**空の一覧は「無い」である**
+    const { assignments } = toPullRequestRefs([
+      withPeople({ assignees: [], requested_reviewers: [], requested_teams: [] }),
+    ]);
+
+    expect(assignments.get(8)).toEqual({
+      assignees: [],
+      reviewers: [],
+      authoredByBot: false,
+    });
+  });
+
+  it("著者が bot かどうかを持ち帰る", () => {
+    // **未アサインの内訳を出すため**（#631 の判断どころ）
+    const { assignments } = toPullRequestRefs([
+      withPeople({ user: { login: "dependabot[bot]", type: "Bot" } }),
+    ]);
+
+    expect(assignments.get(8)?.authoredByBot).toBe(true);
+  });
+
+  it("項目が無い PR は、読めなかったものとして残す", () => {
+    // **既定へ倒さない**——**「誰も持っていない」に化けさせない**
+    const { assignments, pullRequests } = toPullRequestRefs(stackedPullRequests);
+
+    expect(pullRequests, "PR そのものは落とさない").toHaveLength(2);
+    expect(assignments.has(8), "読めていないのに持っている").toBe(false);
   });
 });
