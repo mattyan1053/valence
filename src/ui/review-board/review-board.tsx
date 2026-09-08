@@ -179,6 +179,9 @@ export function ReviewBoard({
   // 本数の 2 乗**になる。**材料が取れていない PR も渡す**——**「触っていない」
   // ではない**ので、**渡さないと、その PR とは重ならないと言うことになる**（#637）
   const overlaps = fileOverlapsFor(
+    // **読めなかった PR も測り切れていない側である**（#651 のレビュー 3 周目）
+    // ——**候補には混ぜられない**（**番号が読めないので `index` で持っている**）
+    invalid.length,
     pullRequests.map((pullRequest) => ({
       number: pullRequest.number,
       changedPaths: changes.get(pullRequest.number)?.changedPaths,

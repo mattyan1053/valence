@@ -54,8 +54,10 @@ export type OverlapReport = {
    * **この数が下限か。**
    *
    * **どれか 1 本でも測り切れていなければ立つ**（自分の側でも、相手の側でも）
-   * ——**一覧が見切れている**か、**材料そのものが取れていない**か。
-   * **どちらも「見えていないパスが重なっているかもしれない」**である。
+   * ——**一覧が見切れている**か、**材料そのものが取れていない**か、
+   * **一覧から読めなかった**か。**どれも「見えていないパスが重なっているかもしれない」**
+   * である。**盤面は既に「N 件の PR は読めませんでした」と出している**ので、
+   * **重なりだけが「抜けは無い」と言うと、同じ画面の中で食い違う。**
    * **「測れなかった」を「重なっていない」にしない**（#637。**このリポジトリが
    * 繰り返し塞いでいる形**）。
    *
@@ -81,6 +83,16 @@ export type OverlapReport = {
  * 測ったのかどうかが分からない。**
  */
 export function fileOverlapsFor(
+  /**
+   * **一覧から読めなかった PR の件数**（#651 のレビュー 3 周目）。
+   *
+   * **候補には混ぜない。** **検証に落ちた PR は番号が読めない**（`InvalidPullRequest`
+   * は `index` で持つ）——**番号の無いものは候補にできない。**
+   *
+   * **既定値を置かない**（`mergeBlockFor` の `unreadableCount` と同じ理由）——
+   * **書き忘れが「抜けは無い」へ倒れると、この判定がまるごと素通りする。**
+   */
+  unreadableCount: number,
   candidates: readonly OverlapCandidate[],
 ): ReadonlyMap<number, OverlapReport> {
   // **先に集合へ落とす**（#651 のレビュー）——**`ChangedPaths.paths` は一意ではない。**
@@ -105,9 +117,12 @@ export function fileOverlapsFor(
   }
 
   // **1 本でも測り切れていなければ、どの行の数も下限である**（`OverlapReport.partial`）
-  const partial = candidates.some(
-    (candidate) => candidate.changedPaths === undefined || candidate.changedPaths.truncated,
-  );
+  const partial =
+    // **読めなかった PR は、そもそも一覧に出てこない**——**触ったパスも分からない**
+    unreadableCount > 0 ||
+    candidates.some(
+      (candidate) => candidate.changedPaths === undefined || candidate.changedPaths.truncated,
+    );
 
   return new Map(
     candidates.map((candidate) => [

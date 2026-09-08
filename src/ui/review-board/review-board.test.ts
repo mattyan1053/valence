@@ -310,6 +310,16 @@ describe("ReviewBoard", () => {
       expect(rows).not.toMatch(/同じファイルを触っている PR|測り切れていません/);
     });
 
+    it("読めなかった PR が居れば、重なりがゼロでも測り切れていないと言う", () => {
+      // **盤面は既に「N 件の PR は読めませんでした」と出している**（#651 のレビュー 3 周目）
+      // ——**その画面で、重なりだけが「抜けは無い」と言うことになる**
+      const rows = list(
+        render(props({ invalid: [{ index: 4, reason: "番号が数値ではありません" }] })),
+      );
+
+      expect(rows).toMatch(/測り切れていません/);
+    });
+
     it("材料が取れていない PR が居れば、測り切れていないと言う", () => {
       // **「測れなかった」を「重なっていない」にしない**（#637）
       const rows = list(render(props({ changes: new Map([[1, change()]]) })));
