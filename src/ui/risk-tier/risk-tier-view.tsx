@@ -9,6 +9,7 @@
  */
 
 import type { ChangeSummary, CiStatus, RiskTier } from "../../domain/triage/risk-tier";
+import { touchesSensitivePath } from "../../domain/triage/sensitive-path";
 
 export type RiskTierViewProps = {
   readonly tier: RiskTier;
@@ -96,7 +97,9 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
           変更: {change.changedFileCount} ファイル / {change.changedLineCount} 行
         </li>
         {!ciNeedsAttention && <li>{CI_TEXT[change.ciStatus]}</li>}
-        {change.touchesSensitivePath && <li>壊すと影響が大きいパスに触れています</li>}
+        {touchesSensitivePath(change.changedPaths.paths) && (
+          <li>壊すと影響が大きいパスに触れています</li>
+        )}
       </ul>
     </details>
   );

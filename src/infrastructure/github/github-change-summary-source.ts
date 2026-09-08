@@ -34,6 +34,10 @@ import { repositoryUrl } from "./repository-url";
  *
  * **どの一覧にも同じ上限を当てる。** ファイルだけを手当てして CI の結果を 1 ページで
  * 済ませていたため、**「30 件しか見ていないのに passing」**になっていた（#117 のレビュー）。
+ *
+ * **ファイルの一覧は、ここが上限のまま `domain` へ渡る**（`ChangedPaths`）。
+ * **超えたことは `truncated` として一緒に運ぶ**——**途中までの一覧を「これが全部だ」と
+ * 読ませない**（`AGENTS.md` §5）。
  */
 const MAX_PAGES = 3;
 

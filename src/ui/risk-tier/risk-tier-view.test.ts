@@ -10,11 +10,17 @@ function render(props: RiskTierViewProps): string {
   return renderToStaticMarkup(createElement(RiskTierView, props));
 }
 
+/** **domain の規則で当たるパス**（画面側で規則を書き直さない）。 */
+const SENSITIVE_PATHS = {
+  paths: ["src/infrastructure/github/app-jwt.ts"],
+  truncated: false,
+} as const;
+
 function change(overrides: Partial<ChangeSummary> = {}): ChangeSummary {
   return {
     changedFileCount: 2,
     changedLineCount: 20,
-    touchesSensitivePath: false,
+    changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
     ciStatus: "passing",
     ...overrides,
   };
@@ -35,7 +41,7 @@ const TIERS: readonly RiskTier[] = ["fast-track", "needs-review", "high-risk"];
 const REAL_CASES: Record<RiskTier, ChangeSummary> = {
   "fast-track": change({ changedFileCount: 1, changedLineCount: 5 }),
   "needs-review": change({ changedFileCount: 9, changedLineCount: 300 }),
-  "high-risk": change({ touchesSensitivePath: true }),
+  "high-risk": change({ changedPaths: SENSITIVE_PATHS }),
 };
 
 describe("RiskTierView", () => {
@@ -75,10 +81,13 @@ describe("RiskTierView", () => {
   it("壊すと影響が大きいパスに触っていれば、それが分かる", () => {
     // **同じ Tier どうしで比べる。** 別の文（Tier の説明）に同じ語があるので、
     // 語の有無だけを見ると**この行を消しても緑のまま**になる（実際にそうなった）
-    const touching = render({ tier: "high-risk", change: change({ touchesSensitivePath: true }) });
+    const touching = render({
+      tier: "high-risk",
+      change: change({ changedPaths: SENSITIVE_PATHS }),
+    });
     const notTouching = render({
       tier: "high-risk",
-      change: change({ touchesSensitivePath: false }),
+      change: change({ changedPaths: { paths: ["src/ui/button.tsx"], truncated: false } }),
     });
 
     expect(touching).toMatch(/パスに触れ/);

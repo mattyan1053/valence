@@ -76,7 +76,7 @@ describe("createGitHubChangeSummarySource", () => {
     expect(listing.summaries.get(1)).toEqual({
       changedFileCount: 1,
       changedLineCount: 2,
-      touchesSensitivePath: false,
+      changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
       ciStatus: "passing",
     });
     expect(listing.unavailable).toEqual([]);
