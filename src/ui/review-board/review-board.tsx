@@ -17,11 +17,13 @@ import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { Assignment } from "../../domain/triage/assignment";
+import { fileOverlapsFor } from "../../domain/triage/file-overlap";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import { classifyRiskTier } from "../../domain/triage/risk-tier";
 import { assignmentNote } from "../assignment/assignment-note";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
 import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
+import { fileOverlapNote } from "../file-overlap/file-overlap-note";
 import { baseLagNote, mergeReadinessNote } from "../merge/merge-readiness-note";
 import { RiskTierView } from "../risk-tier/risk-tier-view";
 
@@ -173,6 +175,16 @@ export function ReviewBoard({
   mergeStatusOf,
   assignmentOf,
 }: ReviewBoardProps) {
+  // **行ごとに計算しない**（`mergeBlocksFor` と同じ理由）——**1 件ずつ比べると
+  // 本数の 2 乗**になる。**材料が取れていない PR も渡す**——**「触っていない」
+  // ではない**ので、**渡さないと、その PR とは重ならないと言うことになる**（#637）
+  const overlaps = fileOverlapsFor(
+    pullRequests.map((pullRequest) => ({
+      number: pullRequest.number,
+      changedPaths: changes.get(pullRequest.number)?.changedPaths,
+    })),
+  );
+
   return (
     <DependencyGraphView
       pullRequests={pullRequests}
@@ -216,6 +228,9 @@ export function ReviewBoard({
         //
         // **押せるかの話が先、持ち主の話が後**である（#650 の取り込み直し）——
         // **base の遅れは合流の状況の側**なので、**`readiness` に並ぶ。**
+        // **ファイルの重なりは、その間に入る**（#637）——**押せるかの話ではなく、
+        // 持ち主の話でもない。** **依存の順序とは別の目安**である
+        const overlap = fileOverlapNote(overlaps.get(number));
         const assignment = (
           <span className="text-sm opacity-70">{assignmentNote(assignmentOf(number))}</span>
         );
@@ -235,6 +250,7 @@ export function ReviewBoard({
                   : changeUnavailableNote(kind)}
               </span>
               {readiness}
+              {overlap === undefined ? undefined : <span className="text-sm">{overlap}</span>}
               {assignment}
               <ActionRow>
                 {renderStatus?.(number)}
@@ -247,6 +263,7 @@ export function ReviewBoard({
           <>
             <RiskTierView tier={classifyRiskTier(change)} change={change} />
             {readiness}
+            {overlap === undefined ? undefined : <span className="text-sm">{overlap}</span>}
             {assignment}
             <ActionRow>
               {renderStatus?.(number)}
