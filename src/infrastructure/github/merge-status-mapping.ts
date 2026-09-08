@@ -15,6 +15,7 @@
 
 import { z } from "zod";
 import type { Mergeable, MergeState, MergeStatusReport } from "../../domain/graph/merge-readiness";
+import type { ReviewOpinion } from "../../domain/triage/ball";
 
 const pageInfoSchema = z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() });
 
@@ -45,9 +46,52 @@ const nodeSchema = z.object({
   mergeStateStatus: z.string(),
 });
 
+/**
+ * レビューの意見（#636）。**合流の状況とは別に検証する。**
+ *
+ * **1 件の形が違うだけで、その PR の合流の状況まで捨てない**（このファイルの判断）
+ * ——**別の関心**なので、**別に読む。**
+ *
+ * **`commit` は `null` になりうる**（**force push で消えた commit の意見**）。
+ * **`hasNextPage` なら意見を出さない**——**見えたぶんに変更の求めが無くても、
+ * 次のページにあるかは分からない**（`AGENTS.md` §5）。
+ */
+const opinionSchema = z.object({
+  number: z.number().int().positive(),
+  headRefOid: z.string().min(1),
+  reviews: z.object({ totalCount: z.number().int().nonnegative() }),
+  latestOpinionatedReviews: z.object({
+    pageInfo: z.object({ hasNextPage: z.boolean() }),
+    nodes: z.array(
+      z.object({
+        state: z.string(),
+        commit: z.object({ oid: z.string() }).nullable(),
+      }),
+    ),
+  }),
+});
+
+/** 意見と、**それを判定した commit**（#652 のレビュー）。 */
+export type JudgedOpinion = {
+  readonly head: string;
+  readonly opinion: ReviewOpinion;
+};
+
 /** 読み取った 1 ページ。 */
 export type MergeStatusPage = {
   readonly statuses: ReadonlyMap<number, MergeStatusReport>;
+  /**
+   * PR 番号から引けるレビューの意見（#636）。
+   *
+   * **判定した commit を一緒に返す**（#652 のレビュー）——**この応答と、REST の
+   * 一覧は同時に走る**ので、**その間に push されると 2 つが別の commit を見る。**
+   * **番号だけで結合すると、誰も読んでいない commit に「承認済み」が付く**
+   * （#331 / #635 / #643 と同じ形）。**突き合わせるのは呼ぶ側**である。
+   *
+   * **読めなかった PR は入らない**（`statuses` と同じ）——**`ballOf` が
+   * 地図に無い番号を `unknown` へ倒す**ので、**「読めなかった」が「放置」に化けない。**
+   */
+  readonly opinions: ReadonlyMap<number, JudgedOpinion>;
   /** 次のページの位置。**続きが無ければ `undefined`。** */
   readonly nextCursor: string | undefined;
 };
@@ -70,6 +114,7 @@ export function toMergeStatusPage(response: unknown): MergeStatusPage {
   const { pageInfo, nodes } = parsed.data.data.repository.pullRequests;
 
   const statuses = new Map<number, MergeStatusReport>();
+  const opinions = new Map<number, JudgedOpinion>();
   for (const item of nodes) {
     const node = nodeSchema.safeParse(item);
     if (node.success) {
@@ -78,8 +123,16 @@ export function toMergeStatusPage(response: unknown): MergeStatusPage {
         state: toMergeState(node.data.mergeStateStatus),
       });
     }
+    // **意見は別に読む**——**合流の状況が読めた PR でも、意見だけ読めないことがある**
+    const opinion = opinionSchema.safeParse(item);
+    if (opinion.success) {
+      const seen = toReviewOpinion(opinion.data);
+      if (seen !== undefined) {
+        opinions.set(opinion.data.number, { head: opinion.data.headRefOid, opinion: seen });
+      }
+    }
   }
-  return { statuses, nextCursor: nextCursor(pageInfo) };
+  return { statuses, opinions, nextCursor: nextCursor(pageInfo) };
 }
 
 /**
@@ -159,4 +212,30 @@ const behindBySchema = z.object({
 export function toBehindBy(response: unknown): number | undefined {
   const parsed = behindBySchema.safeParse(response);
   return parsed.success ? parsed.data.data.repository.ref?.compare?.behindBy : undefined;
+}
+
+/**
+ * 意見をドメインの型へ移す。**最後まで読めていなければ `undefined`。**
+ *
+ * **`reviewed` は `reviews.totalCount` から取る**（#636 の罠）——**意見を持たない
+ * レビュー（`COMMENTED`）も提出されたもの**である。**実測（2026-09-08、PR #650）:
+ * `totalCount` が 6 で `latestOpinionatedReviews` は 0 件**だった。
+ *
+ * **`state` は最新の意見だけが並ぶ**（`latestOpinionatedReviews`）ので、
+ * **取り下げられた承認も、あとから変更を求めた人の古い承認も入らない**
+ * ——**その規則は GitHub が持つ**（`AGENTS.md` §5）。
+ */
+function toReviewOpinion(node: z.infer<typeof opinionSchema>): ReviewOpinion | undefined {
+  if (node.latestOpinionatedReviews.pageInfo.hasNextPage) {
+    return undefined;
+  }
+  const onHead = (state: string) =>
+    node.latestOpinionatedReviews.nodes.some(
+      (review) => review.state === state && review.commit?.oid === node.headRefOid,
+    );
+  return {
+    approvesHead: onHead("APPROVED"),
+    changesRequestedOnHead: onHead("CHANGES_REQUESTED"),
+    reviewed: node.reviews.totalCount > 0,
+  };
 }

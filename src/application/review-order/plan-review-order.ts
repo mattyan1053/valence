@@ -11,6 +11,7 @@ import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import { orderByDependency } from "../../domain/graph/dependency-order";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import type { Assignment } from "../../domain/triage/assignment";
+import type { ReviewOpinion } from "../../domain/triage/ball";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { ChangeSummarySource, UnavailableChangeSummary } from "../ports/change-summary-source";
 import type { InvalidPullRequest, PullRequestSource } from "../ports/pull-request-source";
@@ -55,6 +56,13 @@ export type ReviewOrderPlan = {
    * **取ってきたものをそのまま通す**（`heads` / `titles` と同じ）。
    */
   readonly mergeStatuses: ReadonlyMap<number, MergeStatusReport>;
+  /**
+   * PR 番号から引けるレビューの意見（#636）。
+   *
+   * **「誰の番か」を決める材料**である。**ここでは判定しない**——**`ballOf` が読む**
+   * ので、**`mergeStatuses` と同じ形で運ぶだけ**である。
+   */
+  readonly opinions: ReadonlyMap<number, ReviewOpinion>;
   /**
    * PR 番号から引ける、誰に振られているか（#631）。
    *
@@ -107,7 +115,7 @@ export async function planReviewOrder(
   sources: ReviewOrderSources,
   options: ReviewOrderOptions = {},
 ): Promise<ReviewOrderPlan> {
-  const { pullRequests, invalid, heads, titles, mergeStatuses, assignments } =
+  const { pullRequests, invalid, heads, titles, mergeStatuses, assignments, opinions } =
     await sources.pullRequests.listPullRequests();
   const edges = buildDependencyEdges(pullRequests);
   const numbers = pullRequests.map((pullRequest) => pullRequest.number);
@@ -122,6 +130,7 @@ export async function planReviewOrder(
     heads,
     titles,
     mergeStatuses,
+    opinions,
     assignments,
     ...changes,
   };

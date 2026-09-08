@@ -792,3 +792,74 @@ describe("依存を決めるぶんだけ取る（#650 のレビュー）", () =>
     ).toEqual([]);
   });
 });
+
+describe("意見を、見せている head に固定する（#652 のレビュー）", () => {
+  // **REST の一覧と GraphQL は同時に走る**ので、**その間に push されると
+  // 2 つが別の commit を見る**——**番号だけで結合すると、誰も読んでいない
+  // commit に「承認済み」が付く**（#331 / #635 / #643 と同じ形）。
+  const SHOWN = "c".repeat(40);
+  const OLDER = "d".repeat(40);
+
+  function statuses(headRefOid: string): string {
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequests: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [
+              {
+                number: 8,
+                mergeable: "MERGEABLE",
+                mergeStateStatus: "CLEAN",
+                headRefOid,
+                reviews: { totalCount: 1 },
+                latestOpinionatedReviews: {
+                  pageInfo: { hasNextPage: false },
+                  nodes: [{ state: "APPROVED", commit: { oid: headRefOid } }],
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+  }
+
+  const listed = JSON.stringify([
+    {
+      number: 8,
+      base: { ref: "main", repo: { id: 1327515899 } },
+      head: { ref: "feat/a", repo: { id: 1327515899 }, sha: SHOWN },
+    },
+  ]);
+
+  async function opinionsFor(headRefOid: string) {
+    const { fetchImpl } = fakeGitHub({
+      [INSTALLATION_URL]: INSTALLATION,
+      [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+      [PULLS_URL]: { body: listed },
+      [GRAPHQL_URL]: [{ body: statuses(headRefOid) }, { body: "{}", status: 502 }],
+    });
+
+    const listing = await createGitHubPullRequestSource({
+      credentials,
+      repository,
+      fetchImpl,
+      now: clockFrom("2026-08-10T00:00:00Z"),
+    }).listPullRequests();
+    return listing;
+  }
+
+  it("同じ commit を見ていれば、意見をそのまま運ぶ", async () => {
+    expect((await opinionsFor(SHOWN)).opinions.get(8)?.approvesHead).toBe(true);
+  });
+
+  it("違う commit を見ていたら、意見を落とす", async () => {
+    // **落ちれば `ballOf` は `unknown`**——**何も言わない側**である
+    const listing = await opinionsFor(OLDER);
+
+    expect(listing.opinions.get(8), "誰も読んでいない commit に意見が付いている").toBeUndefined();
+    // **合流の状況は残る**——**別の関心である**
+    expect(listing.mergeStatuses.get(8)?.state).toBe("clean");
+  });
+});

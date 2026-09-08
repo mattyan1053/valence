@@ -25,11 +25,12 @@ import type {
 } from "../../application/ports/pull-request-source";
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
+import type { ReviewOpinion } from "../../domain/triage/ball";
 import type { AppCredentials } from "./app-credentials";
 import type { InstallationToken } from "./installation-token";
 import { needsRefresh, requestInstallationToken } from "./installation-token";
 import { nextPageUrl } from "./link-pagination";
-import type { MergeStatusPage } from "./merge-status-mapping";
+import type { JudgedOpinion, MergeStatusPage } from "./merge-status-mapping";
 import { toBehindBy, toMergeStatusPage } from "./merge-status-mapping";
 import { toPullRequestRefs } from "./pull-request-mapping";
 import type { GitHubRepository } from "./repository-installation";
@@ -143,12 +144,24 @@ export function createGitHubPullRequestSource({
     async listPullRequests(): Promise<PullRequestListing> {
       const header = await authorization();
       // **同時に叩く**——**互いの結果は要らない**ので、**順に待つ理由が無い**
-      const [items, mergeStatuses] = await Promise.all([
+      const [items, board] = await Promise.all([
         readPullRequests(header),
         // **合図はここで作る**（#316 と同じ理由）——**token を取るぶんを期限から引かない**
         readMergeStatuses(fetchImpl, repository, header, mergeStatusDeadline()),
       ]);
+
       const refs = toPullRequestRefs(items);
+      const { statuses: mergeStatuses } = board;
+      // **見せる head と突き合わせる**（#652 のレビュー）——**REST の一覧と GraphQL は
+      // 同時に走る**ので、**その間に push されると 2 つが別の commit を見る。**
+      // **番号だけで結合すると、誰も読んでいない commit に「承認済み」が付く**
+      // （#331 / #635 / #643 と同じ形）。**落ちれば `ballOf` は `unknown`** である。
+      const opinions = new Map<number, ReviewOpinion>();
+      for (const [number, judged] of board.opinions) {
+        if (refs.heads.get(number) === judged.head) {
+          opinions.set(number, judged.opinion);
+        }
+      }
       // **一覧が要る**ので、ここから先は順に走る（#639）——**base の枝と head の
       // commit が分かって初めて、どれとどれを比べるかが決まる。**
       await addBaseLags({
@@ -159,7 +172,7 @@ export function createGitHubPullRequestSource({
         mergeStatuses,
         deadline: baseLagDeadline(),
       });
-      return { ...refs, mergeStatuses };
+      return { ...refs, mergeStatuses, opinions };
     },
   };
 }
@@ -199,7 +212,18 @@ const MERGE_STATUS_QUERY = `query($owner: String!, $name: String!, $cursor: Stri
   repository(owner: $owner, name: $name) {
     pullRequests(states: OPEN, first: ${PAGE_SIZE}, after: $cursor) {
       pageInfo { hasNextPage endCursor }
-      nodes { number mergeable mergeStateStatus }
+      nodes {
+        number mergeable mergeStateStatus
+        # 誰の番かを決める材料（#636）。同じ node にあるので往復は増えない
+        headRefOid
+        # 意見を持たないレビューも数える（#636 の罠）。提出した人は
+        # requested_reviewers から消えるので、依頼の有無だけでは放置と区別できない
+        reviews { totalCount }
+        latestOpinionatedReviews(first: ${PAGE_SIZE}) {
+          pageInfo { hasNextPage }
+          nodes { state commit { oid } }
+        }
+      }
     }
   }
 }`;
@@ -297,10 +321,14 @@ async function readMergeStatuses(
   deadline: AbortSignal,
   // **書ける地図を返す** (#639)。**base の遅れを、そのまま同じ地図へ足す**
   // ——**別の地図にすると、port から画面まで運ぶ道が 1 本増える。**
-): Promise<Map<number, MergeStatusReport>> {
+): Promise<BoardStatuses> {
   const statuses = new Map<number, MergeStatusReport>();
+  const opinions = new Map<number, JudgedOpinion>();
   // **読めたぶんはその場で入る**ので、**打ち切っても、途中までは残る**
-  const reading = collectMergeStatuses(fetchImpl, repository, header, deadline, statuses)
+  const reading = collectMergeStatuses(fetchImpl, repository, header, deadline, {
+    statuses,
+    opinions,
+  })
     // **落ちたぶんは、ここで飲む**——**投げると盤面ごと落ちる**（上のコメント）。
     // **競争に負けたあとで落ちることもある**ので、**受け手はここに要る**
     .catch(() => undefined);
@@ -308,8 +336,20 @@ async function readMergeStatuses(
   // 受け取らない実装・無視する実装はありうる**（`fetchImpl` は差し替えられる引数である）。
   // **待つのをやめる側と、取り消しを伝える側の両方**が要る
   await Promise.race([reading, abortion(deadline)]);
-  return statuses;
+  return { statuses, opinions };
 }
+
+/**
+ * **盤面が要る、PR ごとの状況**（#636）。
+ *
+ * **1 つの問い合わせから来る**ので、**まとめて返す**——**別々に取ると、
+ * 間に main が進んだときに食い違う。**
+ */
+type BoardStatuses = {
+  readonly statuses: Map<number, MergeStatusReport>;
+  /** **判定した commit ごと持つ**（#652 のレビュー）——**突き合わせるのは呼ぶ側**である。 */
+  readonly opinions: Map<number, JudgedOpinion>;
+};
 
 /** 合流の状況を、最後のページまで `statuses` へ入れる。**落ちたら投げる。** */
 async function collectMergeStatuses(
@@ -317,7 +357,7 @@ async function collectMergeStatuses(
   repository: GitHubRepository,
   header: string,
   deadline: AbortSignal,
-  statuses: Map<number, MergeStatusReport>,
+  into: BoardStatuses,
 ): Promise<void> {
   let cursor: string | undefined;
   for (;;) {
@@ -326,7 +366,10 @@ async function collectMergeStatuses(
       return;
     }
     for (const [number, status] of page.statuses) {
-      statuses.set(number, status);
+      into.statuses.set(number, status);
+    }
+    for (const [number, opinion] of page.opinions) {
+      into.opinions.set(number, opinion);
     }
     if (page.nextCursor === undefined) {
       return;

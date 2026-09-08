@@ -53,6 +53,9 @@ const STACK: readonly PullRequestRef[] = [
 const EDGES: readonly DependencyEdge[] = [{ dependent: 2, dependsOn: 1 }];
 const ORDER: DependencyOrder = { ordered: [1, 2], cyclic: [] };
 
+/** **レビュー済みだが、head に意見は無い**（#636）——**既定では何も言わない。** */
+const REVIEWED = { approvesHead: false, changesRequestedOnHead: false, reviewed: true } as const;
+
 function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
   return {
     pullRequests: STACK,
@@ -75,6 +78,10 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
     mergeStatusOf: () => MERGEABLE,
     // **既定はアサインされている**（#631）。**この試験群が見ているのは、そこではない**
     assignmentOf: () => ASSIGNED,
+    // **既定は「言うことが無い」**（#636）。**この試験群が見ているのは、そこではない**
+    reviewOpinionOf: () => REVIEWED,
+    // **既定は依存が残っていない**（#652 のレビュー）。**この試験群が見ているのは、そこではない**
+    mergeBlockOf: () => ({ kind: "ready" }),
     ...overrides,
   };
 }
@@ -655,6 +662,8 @@ describe("理由が、行に出る（#577 のレビュー）", () => {
     // **合流できる側を既定にする**——**この試験群が見ているのは、そこではない**
     mergeStatusOf: () => MERGEABLE,
     assignmentOf: () => ASSIGNED,
+    reviewOpinionOf: () => REVIEWED,
+    mergeBlockOf: () => ({ kind: "ready" }),
     titleOf: () => undefined,
     urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
     changeUnavailableOf: kind === undefined ? undefined : () => kind,
@@ -803,5 +812,91 @@ describe("操作が横に並ぶ（#585 のレビュー）", () => {
     const between = markup.slice(at, form);
     expect(between, "状態と操作の間で器が閉じている").not.toContain("</div>");
     expect(between, "状態と操作の間で別の器が開いている").not.toContain("<div");
+  });
+});
+
+/**
+ * **ボールが誰にあるか**（#636）。
+ *
+ * **盤面を見て最初に知りたいのは「自分が動く番か」**である。
+ * **判定は `ballOf` が持つ**——**ここで見るのは、行がその口へ繋がっているか**である。
+ *
+ * **行を数えてから当てている**（`AGENTS.md` §4）——**盤面には 2 行ある。**
+ */
+describe("ボールが誰にあるか", () => {
+  function rowsWith(overrides: Partial<ReviewBoardProps>): string {
+    return list(render(props(overrides)));
+  }
+
+  it("変更が求められている行に、著者の番だと出る", () => {
+    const rows = rowsWith({
+      reviewOpinionOf: (number) =>
+        number === 2 ? { ...REVIEWED, changesRequestedOnHead: true } : REVIEWED,
+    });
+
+    expect(rows.match(/著者の番/g), "著者の番の行が 1 行ではない").toHaveLength(1);
+  });
+
+  it("承認済みで合流できる行に、マージする人の番だと出る", () => {
+    const rows = rowsWith({
+      reviewOpinionOf: (number) => (number === 2 ? { ...REVIEWED, approvesHead: true } : REVIEWED),
+    });
+
+    expect(rows.match(/マージする人の番/g), "マージする人の番の行が 1 行ではない").toHaveLength(1);
+  });
+
+  it("依頼もレビューも無い行に、誰の番でもないと出る", () => {
+    // **誰も見ていない PR が、他と同じ顔で並んでいた**（#631 / #636）
+    const rows = rowsWith({
+      assignmentOf: () => ({ assignees: [], reviewers: [], authoredByBot: false }),
+      reviewOpinionOf: (number) =>
+        number === 2 ? { ...REVIEWED, reviewed: false } : { ...REVIEWED, reviewed: true },
+    });
+
+    expect(rows.match(/誰の番でもありません/g), "放置の行が 1 行ではない").toHaveLength(1);
+  });
+
+  it("レビュー済みの PR を、放置にしない", () => {
+    // **`requested_reviewers` は提出すると消える**（#636 の罠）
+    const rows = rowsWith({
+      assignmentOf: () => ({ assignees: [], reviewers: [], authoredByBot: false }),
+      reviewOpinionOf: () => REVIEWED,
+    });
+
+    expect(rows).not.toMatch(/誰の番でもありません/);
+  });
+
+  it("意見を読めていない行を、放置にしない", () => {
+    const rows = rowsWith({
+      assignmentOf: () => ({ assignees: [], reviewers: [], authoredByBot: false }),
+      reviewOpinionOf: () => undefined,
+    });
+
+    expect(rows).not.toMatch(/誰の番でもありません/);
+  });
+});
+
+describe("行とボタンが、逆のことを言わない（#652 のレビュー）", () => {
+  it("依存で押せない行に、いま入れられますと出さない", () => {
+    // **積み重ねた PR はこのプロダクトの普通である**（§1）——**土台がまだ open な
+    // PR で、行が「いま入れられます」・ボタンが無効、になっていた。**
+    const rows = list(
+      render(
+        props({
+          reviewOpinionOf: () => ({ ...REVIEWED, approvesHead: true }),
+          mergeBlockOf: () => ({ kind: "depends-on", numbers: [1] }),
+        }),
+      ),
+    );
+
+    expect(rows).not.toMatch(/マージする人の番/);
+  });
+
+  it("依存が残っていなければ、これまでどおり出す", () => {
+    const rows = list(
+      render(props({ reviewOpinionOf: () => ({ ...REVIEWED, approvesHead: true }) })),
+    );
+
+    expect(rows.match(/マージする人の番/g), "マージする人の番の行が 2 行ではない").toHaveLength(2);
   });
 });

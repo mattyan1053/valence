@@ -57,6 +57,7 @@ const stacked: PullRequestListing = {
   mergeStatuses: new Map([[9, { mergeable: "conflicting", state: "dirty" } as const]]),
   // **誰に振られているか**（#631）。**同じ理由で置く**
   assignments: new Map([[8, { assignees: ["someone"], reviewers: [], authoredByBot: false }]]),
+  opinions: new Map(),
 };
 
 describe("レビュー順序を組み立てる", () => {
@@ -92,6 +93,7 @@ describe("レビュー順序を組み立てる", () => {
         titles: new Map(),
         mergeStatuses: new Map(),
         assignments: new Map(),
+        opinions: new Map(),
       }),
     });
 
@@ -107,6 +109,7 @@ describe("レビュー順序を組み立てる", () => {
         titles: new Map(),
         mergeStatuses: new Map(),
         assignments: new Map(),
+        opinions: new Map(),
       }),
       changes: NO_CHANGES,
     });
@@ -124,6 +127,7 @@ describe("レビュー順序を組み立てる", () => {
       mergeStatuses: new Map(),
       // **誰に振られているかも同じ**（#631）
       assignments: new Map(),
+      opinions: new Map(),
       changes: new Map(),
       changesUnavailable: [],
     });
