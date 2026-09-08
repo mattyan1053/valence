@@ -655,3 +655,140 @@ describe("GitHub から PR 一覧を取ってくる", () => {
     });
   });
 });
+
+describe("base にどれだけ遅れているか（#639）", () => {
+  /** **head の SHA を持つ PR**（`heads` に入る。`compare` の相手になる）。 */
+  function pullWithSha(number: number, baseRef: string, headRef: string, sha: string) {
+    return {
+      ...pull(number, baseRef, headRef),
+      head: { ref: headRef, repo: { id: 1327515899 }, sha },
+    };
+  }
+
+  const SHA = "a".repeat(40);
+  const listed = JSON.stringify([pullWithSha(8, "main", "feat/a", SHA)]);
+  const statuses = JSON.stringify({
+    data: {
+      repository: {
+        pullRequests: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [{ number: 8, mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" }],
+        },
+      },
+    },
+  });
+  const behind = (behindBy: number) =>
+    JSON.stringify({ data: { repository: { ref: { compare: { behindBy } } } } });
+
+  it("遅れている数を、合流の状況と一緒に運ぶ", async () => {
+    // **`BEHIND` が返らない設定でも数は出る**（#644 のレビューの裏取り）
+    // ——**`mergeStateStatus` は `BLOCKED` のまま、compare は 35 を返す。**
+    const { calls, fetchImpl } = fakeGitHub({
+      [INSTALLATION_URL]: INSTALLATION,
+      [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+      [PULLS_URL]: { body: listed },
+      [GRAPHQL_URL]: [{ body: statuses }, { body: behind(35) }],
+    });
+
+    const listing = await createGitHubPullRequestSource({
+      credentials,
+      repository,
+      fetchImpl,
+      now: clockFrom("2026-08-10T00:00:00Z"),
+    }).listPullRequests();
+
+    expect(listing.mergeStatuses.get(8)?.behindBy).toBe(35);
+    // **状況のほうは書き換えない**——**別の口の答えである**
+    expect(listing.mergeStatuses.get(8)?.state).toBe("blocked");
+    // **base は枝の名前、head は見せた commit**（#331 と同じ向き）
+    const asked = JSON.parse(String(await calls.at(-1)?.text())) as {
+      variables: Record<string, unknown>;
+    };
+    expect(asked.variables).toMatchObject({ base: "main", head: SHA });
+  });
+
+  it("読めなくても、合流の状況は残す", async () => {
+    // **1 つの失敗で全体を消さない**（`collectSummaries` と同じ判断）
+    const { fetchImpl } = fakeGitHub({
+      [INSTALLATION_URL]: INSTALLATION,
+      [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+      [PULLS_URL]: { body: listed },
+      [GRAPHQL_URL]: [{ body: statuses }, { body: "{}", status: 502 }],
+    });
+
+    const listing = await createGitHubPullRequestSource({
+      credentials,
+      repository,
+      fetchImpl,
+      now: clockFrom("2026-08-10T00:00:00Z"),
+    }).listPullRequests();
+
+    // **「読めなかった」を「遅れ 0」にしない**（`AGENTS.md` §5）
+    expect(listing.mergeStatuses.get(8)?.behindBy).toBeUndefined();
+    expect(listing.mergeStatuses.get(8)?.state).toBe("blocked");
+  });
+
+  it("切れている合図では、叩きに行かない", async () => {
+    // **呼べば往復が始まる**（`collectChanges` と同じ）
+    const { calls, fetchImpl } = fakeGitHub({
+      [INSTALLATION_URL]: INSTALLATION,
+      [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+      [PULLS_URL]: { body: listed },
+      [GRAPHQL_URL]: [{ body: statuses }],
+    });
+
+    await createGitHubPullRequestSource({
+      credentials,
+      repository,
+      fetchImpl,
+      now: clockFrom("2026-08-10T00:00:00Z"),
+      baseLagDeadline: () => AbortSignal.abort(),
+    }).listPullRequests();
+
+    expect(calls.filter((call) => call.url === GRAPHQL_URL)).toHaveLength(1);
+  });
+
+  it("head の commit が分からない PR は、聞きに行かない", async () => {
+    // **`heads` に入らない PR**（`head.sha` が読めなかった）——**相手が無い**
+    const { calls, fetchImpl } = fakeGitHub({
+      [INSTALLATION_URL]: INSTALLATION,
+      [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+      [PULLS_URL]: { body: JSON.stringify([pull(8, "main", "feat/a")]) },
+      [GRAPHQL_URL]: [{ body: statuses }],
+    });
+
+    await createGitHubPullRequestSource({
+      credentials,
+      repository,
+      fetchImpl,
+      now: clockFrom("2026-08-10T00:00:00Z"),
+    }).listPullRequests();
+
+    expect(calls.filter((call) => call.url === GRAPHQL_URL)).toHaveLength(1);
+  });
+});
+
+describe("依存を決めるぶんだけ取る（#650 のレビュー）", () => {
+  it("合流の状況も base の遅れも取りに行かない", async () => {
+    // **押す経路が待つのは、この往復である**——**`listPullRequests()` は
+    // GraphQL を PR の本数ぶん叩く。**
+    const { calls, fetchImpl } = fakeGitHub({
+      [INSTALLATION_URL]: INSTALLATION,
+      [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+      [PULLS_URL]: { body: JSON.stringify([pull(8, "main", "feat/a")]) },
+    });
+
+    const listing = await createGitHubPullRequestSource({
+      credentials,
+      repository,
+      fetchImpl,
+      now: clockFrom("2026-08-10T00:00:00Z"),
+    }).listPullRequestRefs();
+
+    expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8]);
+    expect(
+      calls.filter((call) => call.url === GRAPHQL_URL),
+      "GraphQL を叩いている",
+    ).toEqual([]);
+  });
+});

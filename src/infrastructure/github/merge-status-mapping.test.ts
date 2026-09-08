@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toMergeStatusPage } from "./merge-status-mapping";
+import { toBehindBy, toMergeStatusPage } from "./merge-status-mapping";
 
 function payload(
   nodes: readonly unknown[],
@@ -79,5 +79,37 @@ describe("GitHub の合流の状況を読む", () => {
   it("一覧として読めない応答は、空の一覧にしない", () => {
     // **「読めなかった」を「conflict していない」に化けさせない**
     expect(() => toMergeStatusPage({ data: { repository: null } })).toThrow();
+  });
+});
+
+describe("base にどれだけ遅れているか（#639）", () => {
+  const response = (behindBy: unknown) => ({
+    data: { repository: { ref: { compare: { behindBy } } } },
+  });
+
+  it("応答の数をそのまま返す", () => {
+    expect(toBehindBy(response(35))).toBe(35);
+  });
+
+  it("遅れていない PR は 0 である", () => {
+    expect(toBehindBy(response(0))).toBe(0);
+  });
+
+  it("読めない応答を「遅れ 0」にしない", () => {
+    // **既定の分岐に落とすと、黙って「遅れていません」になる**（`AGENTS.md` §5）
+    expect(toBehindBy(response("35"))).toBeUndefined();
+    expect(toBehindBy(response(-1))).toBeUndefined();
+    expect(toBehindBy({ data: { repository: { ref: null } } })).toBeUndefined();
+    expect(toBehindBy(undefined)).toBeUndefined();
+  });
+
+  it("`errors` が載っていたら読まない", () => {
+    // **GraphQL は 200 のまま失敗を返す**（#346 のレビュー 2 周目）
+    expect(
+      toBehindBy({
+        ...response(35),
+        errors: [{ message: "Could not resolve head ref" }],
+      }),
+    ).toBeUndefined();
   });
 });

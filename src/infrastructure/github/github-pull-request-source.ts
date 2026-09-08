@@ -19,16 +19,18 @@
  */
 
 import type {
+  ListedPullRequests,
   PullRequestListing,
   PullRequestSource,
 } from "../../application/ports/pull-request-source";
+import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import type { AppCredentials } from "./app-credentials";
 import type { InstallationToken } from "./installation-token";
 import { needsRefresh, requestInstallationToken } from "./installation-token";
 import { nextPageUrl } from "./link-pagination";
 import type { MergeStatusPage } from "./merge-status-mapping";
-import { toMergeStatusPage } from "./merge-status-mapping";
+import { toBehindBy, toMergeStatusPage } from "./merge-status-mapping";
 import { toPullRequestRefs } from "./pull-request-mapping";
 import type { GitHubRepository } from "./repository-installation";
 import { resolveRepositoryInstallation } from "./repository-installation";
@@ -57,6 +59,16 @@ export type GitHubPullRequestSourceOptions = {
    * **ページごとに掛けると、続きがあるぶんだけ待つ時間が伸びる。**
    */
   readonly mergeStatusDeadline?: () => AbortSignal;
+  /**
+   * **base にどれだけ遅れているか**の取得を打ち切る合図を**作る手続き**（#639）。
+   *
+   * **合流の状況とは別に持つ。** **あちらは 1 要求で 100 件**だが、**こちらは
+   * PR ごとに 1 要求**である（**GraphQL の引数は node ごとに変えられない**）
+   * ——**同じ期限に相乗りさせると、本数の多い盤面で合流の状況まで巻き添えになる。**
+   *
+   * **作る手続きで受けるのは、数え始める位置のため**である（`mergeStatusDeadline` と同じ）。
+   */
+  readonly baseLagDeadline?: () => AbortSignal;
 };
 
 /**
@@ -71,6 +83,7 @@ export function createGitHubPullRequestSource({
   fetchImpl = fetch,
   now = () => new Date(),
   mergeStatusDeadline = () => AbortSignal.timeout(MERGE_STATUS_DEADLINE_MS),
+  baseLagDeadline = () => AbortSignal.timeout(BASE_LAG_DEADLINE_MS),
 }: GitHubPullRequestSourceOptions): PullRequestSource {
   let cached: InstallationToken | undefined;
 
@@ -119,6 +132,14 @@ export function createGitHubPullRequestSource({
   }
 
   return {
+    /**
+     * **依存を決めるぶんだけ**（#650 のレビュー）。**一覧の応答だけで作る**ので、
+     * **PR の本数で往復が増えない**——**押す経路はこちらを使う。**
+     */
+    async listPullRequestRefs(): Promise<ListedPullRequests> {
+      return toPullRequestRefs(await readPullRequests(await authorization()));
+    },
+
     async listPullRequests(): Promise<PullRequestListing> {
       const header = await authorization();
       // **同時に叩く**——**互いの結果は要らない**ので、**順に待つ理由が無い**
@@ -127,7 +148,18 @@ export function createGitHubPullRequestSource({
         // **合図はここで作る**（#316 と同じ理由）——**token を取るぶんを期限から引かない**
         readMergeStatuses(fetchImpl, repository, header, mergeStatusDeadline()),
       ]);
-      return { ...toPullRequestRefs(items), mergeStatuses };
+      const refs = toPullRequestRefs(items);
+      // **一覧が要る**ので、ここから先は順に走る（#639）——**base の枝と head の
+      // commit が分かって初めて、どれとどれを比べるかが決まる。**
+      await addBaseLags({
+        fetchImpl,
+        repository,
+        header,
+        refs,
+        mergeStatuses,
+        deadline: baseLagDeadline(),
+      });
+      return { ...refs, mergeStatuses };
     },
   };
 }
@@ -145,6 +177,14 @@ const API_ORIGIN = "https://api.github.com";
  * ——**#644 のレビューが指したのは、その状態である。**
  */
 const MERGE_STATUS_DEADLINE_MS = 5_000;
+
+/**
+ * base の遅れの取得を打ち切るまで（#639）。
+ *
+ * **PR ごとに 1 要求**なので、**合流の状況より短く見積もらない**——**打ち切られた PR は
+ * 数を持たず、画面は何も言わない**（**「遅れ 0」には倒れない**）。
+ */
+const BASE_LAG_DEADLINE_MS = 5_000;
 
 /** 1 度に読む件数。**GraphQL の上限は 100**（REST の一覧と同じ）。 */
 const PAGE_SIZE = 100;
@@ -255,7 +295,9 @@ async function readMergeStatuses(
   repository: GitHubRepository,
   header: string,
   deadline: AbortSignal,
-): Promise<ReadonlyMap<number, MergeStatusReport>> {
+  // **書ける地図を返す** (#639)。**base の遅れを、そのまま同じ地図へ足す**
+  // ——**別の地図にすると、port から画面まで運ぶ道が 1 本増える。**
+): Promise<Map<number, MergeStatusReport>> {
   const statuses = new Map<number, MergeStatusReport>();
   // **読めたぶんはその場で入る**ので、**打ち切っても、途中までは残る**
   const reading = collectMergeStatuses(fetchImpl, repository, header, deadline, statuses)
@@ -302,4 +344,115 @@ function abortion(deadline: AbortSignal): Promise<void> {
     }
     deadline.addEventListener("abort", () => resolve(), { once: true });
   });
+}
+
+/**
+ * **base に何コミット遅れているか**を訊く（#639）。
+ *
+ * **`mergeStateStatus` では数が出ない。** **`BEHIND` は「入るかどうか」**で、
+ * **最新化を要求しない設定では、遅れていても返らない**（#644 のレビュー）
+ * ——**compare が `behindBy` をそのまま返す。**
+ *
+ * **枝の名前を URL へ入れない**（`AGENTS.md` §6）。**GraphQL の変数で渡す**ので、
+ * **`..` や `/` を含む枝名でも、別の endpoint を叩く形にはならない**
+ * （**REST の compare は `base...head` をパスへ入れる**）。
+ *
+ * **head は commit で指す。** **見せたものに固定する**（#331 と同じ向き）——
+ * **枝の名前で聞くと、盤面を出してから push されたぶんまで数に入る。**
+ *
+ * **`qualifiedName` は短い名前でよい。** **`refs/heads/` を付けても答えは同じ**である
+ * ——**測った**（2026-09-08、この PR の head に対して `main` と `refs/heads/main` の
+ * どちらでも `behindBy 1 / status DIVERGED`）。**`Repository.ref` は完全修飾を先に探し、
+ * 無ければ短い名前へ落とす**ので、**`ref` が `null` になる経路はここでは無い。**
+ * **付け足す「修正」を入れなくてよい**（#650 のレビューで 1 度疑われた）。
+ *
+ * **base は枝の名前で聞く。** **PR が持っている `base.sha` は使えない**
+ * ——**あれは base の枝の先端を追わない。** **実測（2026-09-08、このリポジトリ）:
+ * PR #647 の `base.sha` は `a6b8f8f` のままで、その間に main は 2 回進んだ**
+ * （`261db55` → `c6ec166`）。**`base.sha` で比べると遅れは必ず 0 になり**、
+ * **黙って「遅れていません」と出る**（`AGENTS.md` §5。**このリポジトリが繰り返し
+ * 塞いでいる形**）。
+ */
+const BASE_LAG_QUERY = `query($owner: String!, $name: String!, $base: String!, $head: String!) {
+  repository(owner: $owner, name: $name) {
+    ref(qualifiedName: $base) { compare(headRef: $head) { behindBy } }
+  }
+}`;
+
+/** 1 本ぶん訊く。**断られたなら `undefined`**（**「遅れ 0」ではない**）。 */
+async function readBaseLag(
+  fetchImpl: typeof fetch,
+  repository: GitHubRepository,
+  header: string,
+  base: string,
+  head: string,
+  deadline: AbortSignal,
+): Promise<number | undefined> {
+  const response = await fetchImpl(`${API_ORIGIN}/graphql`, {
+    method: "POST",
+    headers: { authorization: header, "content-type": "application/json" },
+    body: JSON.stringify({
+      query: BASE_LAG_QUERY,
+      // **どのリポジトリかは要求ごとに決まる**（設定に固定しない。§1）
+      variables: { owner: repository.owner, name: repository.name, base, head },
+    }),
+    signal: deadline,
+  });
+  return response.ok ? toBehindBy(safeJson(await response.text())) : undefined;
+}
+
+/**
+ * 読めたぶんだけ、**合流の状況へ数を足す**。
+ *
+ * **1 本ずつ訊く**（`collectSummaries` と同じ形）——**GraphQL の引数は node ごとに
+ * 変えられない**ので、**1 要求で全部は取れない。** **合図を見たら、取れたぶんを持って返る。**
+ *
+ * **落ちても投げない**（`readMergeStatuses` と同じ判断）——**数が出ないだけ**で、
+ * **盤面も合流の状況も残る。**
+ *
+ * **数が要るのは、状況を持っている PR だけではない。** **状況が読めなかった PR にも
+ * 数は出せる**が、**その行は「まだ分かりません」と出る**ので、**足し先が無い**
+ * ——**地図に在るものにだけ足す。**
+ */
+async function addBaseLags({
+  fetchImpl,
+  repository,
+  header,
+  refs,
+  mergeStatuses,
+  deadline,
+}: {
+  fetchImpl: typeof fetch;
+  repository: GitHubRepository;
+  header: string;
+  refs: { pullRequests: readonly PullRequestRef[]; heads: ReadonlyMap<number, string> };
+  mergeStatuses: Map<number, MergeStatusReport>;
+  deadline: AbortSignal;
+}): Promise<void> {
+  for (const pullRequest of refs.pullRequests) {
+    // **切れているなら呼ばない**——**呼べば往復が始まる**（`collectChanges` と同じ）
+    if (deadline.aborted) {
+      return;
+    }
+    const head = refs.heads.get(pullRequest.number);
+    const status = mergeStatuses.get(pullRequest.number);
+    // **相手が無いなら聞かない。** **head を読めなかった PR**（`heads` に入らない）と、
+    // **状況そのものを読めなかった PR**（地図に無い）である
+    if (head === undefined || status === undefined) {
+      continue;
+    }
+    const behindBy = await readBaseLag(
+      fetchImpl,
+      repository,
+      header,
+      pullRequest.base.branch,
+      head,
+      deadline,
+      // **1 本の失敗で全体を消さない**（`collectSummaries` と同じ）——**取り消しの跡も
+      // ここへ来る**が、**次の周で `deadline.aborted` を見て抜ける。**
+    ).catch(() => undefined);
+    if (behindBy !== undefined) {
+      mergeStatuses.set(pullRequest.number, { ...status, behindBy });
+    }
+  }
 }

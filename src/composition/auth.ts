@@ -412,9 +412,14 @@ export async function mergePullRequestForCurrentUser(
     // ——**PR の一覧は盤面と同じ口から取る**（installation トークン。§6）。
     // **App の資格を読むのはここだけ**で、**「押してよい」と分かるまで呼ばれない。**
     pullRequests: {
-      listPullRequests: () => {
+      // **依存を決めるぶんだけ取る**（#650 のレビュー）——**押す経路に、
+      // open PR の本数ぶんの往復を足さない。**
+      listPullRequestRefs: () => {
         const { app } = appSettings();
-        return createGitHubPullRequestSource({ credentials: app, repository }).listPullRequests();
+        return createGitHubPullRequestSource({
+          credentials: app,
+          repository,
+        }).listPullRequestRefs();
       },
     },
   });

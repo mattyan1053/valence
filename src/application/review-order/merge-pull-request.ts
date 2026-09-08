@@ -102,7 +102,13 @@ export type MergePullRequestInput = {
    *
    * **手続きごと受ける**（他の口と同じ）——**「押してよい」と分かるまで呼ばない。**
    */
-  readonly pullRequests: PullRequestSource;
+  /**
+   * **依存を見るための一覧**（#345）。
+   *
+   * **要るのは「依存を決めるぶん」だけ**である（#650 のレビュー）——**合流の状況も
+   * base の遅れも押すのに要らず、**あれは PR の本数ぶん往復する。**
+   */
+  readonly pullRequests: Pick<PullRequestSource, "listPullRequestRefs">;
 };
 
 export async function mergePullRequest({
@@ -137,7 +143,7 @@ export async function mergePullRequest({
   // **判定に使った base を控える**（#350）——**マージ直前に読み直して突き合わせる。**
   let judgedBaseBranch: string | undefined;
   try {
-    const listing = await pullRequests.listPullRequests();
+    const listing = await pullRequests.listPullRequestRefs();
     judgedBaseBranch = listing.pullRequests.find((pullRequest) => pullRequest.number === number)
       ?.base.branch;
     const edges = buildDependencyEdges(listing.pullRequests);

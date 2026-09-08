@@ -47,6 +47,21 @@ export type MergeState =
 export type MergeStatusReport = {
   readonly mergeable: Mergeable;
   readonly state: MergeState;
+  /**
+   * **base に何コミット遅れているか**（#639）。**読めなければ `undefined`。**
+   *
+   * **`0` と混ぜない。** **既定の分岐に落とすと、黙って「遅れていません」になる**
+   * （`AGENTS.md` §5）。
+   *
+   * **`state` の `behind` とは出どころが違う**——**あちらは `mergeStateStatus`**
+   * （**入るかどうか**）、**こちらは compare の `behindBy`**（**どれだけ**）である。
+   * **最新化を要求しない設定では、遅れていても `BEHIND` は返らない**（#644 のレビュー）
+   * ので、**片方だけが出る場面がある。**
+   *
+   * **判定には使わない。** **何コミットから「遅れすぎ」かは人が決める**ので、
+   * **`mergeReadinessOf` はここを読まない**——**数を出すだけ**である。
+   */
+  readonly behindBy?: number;
 };
 
 export type MergeReadiness =

@@ -18,6 +18,9 @@ import type { RepositoryAccessLevel, RepositoryPermissions } from "../ports/repo
 import type { VisibleRepositories, VisibleRepositoryListing } from "../ports/visible-repositories";
 import { mergePullRequest } from "./merge-pull-request";
 
+/** **押す経路が要る口だけ**（#650 のレビュー）——**盤面のぶんは要らない。** */
+type MergeSource = Pick<PullRequestSource, "listPullRequestRefs">;
+
 const TARGET = { owner: "acme", name: "web" } as const;
 const NUMBER = 42;
 const HEAD_SHA = "5e2a91c4d7f60b83ae15cd429f70b6d8e3a142cb";
@@ -69,15 +72,14 @@ function ref(number: number, base: string, head: string): PullRequestRef {
 function listing(
   pullRequests: readonly PullRequestRef[],
   invalid: readonly { index: number; reason: string }[] = [],
-): PullRequestSource {
+): MergeSource {
   return {
-    async listPullRequests() {
+    async listPullRequestRefs() {
       return {
         pullRequests,
         invalid,
         heads: new Map(),
         titles: new Map(),
-        mergeStatuses: new Map(),
         assignments: new Map(),
       };
     },
@@ -99,7 +101,7 @@ function input(overrides: {
   readonly listing?: VisibleRepositoryListing;
   readonly permissions: RepositoryPermissions;
   readonly merges: PullRequestMerges;
-  readonly pullRequests?: PullRequestSource;
+  readonly pullRequests?: MergeSource;
 }) {
   return {
     repository: TARGET,
@@ -261,8 +263,8 @@ describe("依存が残っている PR はマージしない", () => {
 
   it("一覧を読めなければマージしない", async () => {
     // **確かめられないまま通すと、この Issue が塞ごうとしたものがそのまま通る**
-    const failing: PullRequestSource = {
-      async listPullRequests() {
+    const failing: MergeSource = {
+      async listPullRequestRefs() {
         throw new Error("読めない");
       },
     };
@@ -278,8 +280,8 @@ describe("依存が残っている PR はマージしない", () => {
   it("押してよいと分かる前に、一覧を読みに行かない", async () => {
     // **認可が先**（#314 / #317 と同じ順序）——**権限の無い人の要求で
     // GitHub を叩かない**
-    const throwing: PullRequestSource = {
-      async listPullRequests() {
+    const throwing: MergeSource = {
+      async listPullRequestRefs() {
         throw new Error("認可より先に読んだ");
       },
     };
@@ -360,5 +362,33 @@ describe("判定に使った base を、マージの口へ渡す", () => {
     );
 
     expect(result).toEqual({ kind: "base-changed" });
+  });
+});
+
+describe("押す経路の費用", () => {
+  it("盤面のぶんを取りに行かない", async () => {
+    // **`listPullRequests()` は open PR の本数ぶん往復する**（#650 のレビュー）
+    // ——**合流の状況も base の遅れも、押すのに要らない。**
+    // **押した人が、その往復を待つことになる。**
+    const source: PullRequestSource = {
+      async listPullRequests() {
+        throw new Error("押す経路が盤面のぶんまで取りに行っている");
+      },
+      async listPullRequestRefs() {
+        return {
+          pullRequests: ALONE,
+          invalid: [],
+          heads: new Map(),
+          titles: new Map(),
+          assignments: new Map(),
+        };
+      },
+    };
+
+    const result = await mergePullRequest(
+      input({ permissions: permissions("write"), merges: merges(), pullRequests: source }),
+    );
+
+    expect(result.kind).toBe("merged");
   });
 });

@@ -44,3 +44,26 @@ const READINESS_TEXT: Record<MergeReadiness["kind"], string | undefined> = {
 export function mergeReadinessNote(readiness: MergeReadiness): string | undefined {
   return READINESS_TEXT[readiness.kind];
 }
+
+/**
+ * **base にどれだけ遅れているかを、数で出す**（#639）。
+ *
+ * **#502 は「35 commits 遅れ」だった**——**その数は画面のどこにも出ていなかった。**
+ *
+ * **「遅れすぎ」とは言わない。** **何コミットからそう呼ぶかは人が決める**ので、
+ * **数だけ出して、読む人に決めてもらう**（Issue の本文）——**境界を外すと、
+ * 直さなくてよいものを直させる。**
+ *
+ * **`mergeReadinessNote` と同じことを 2 度言っているのではない。**
+ * **あちらは「入るかどうか」**（GitHub の `mergeStateStatus`）、**こちらは「どれだけ」**
+ * （compare の `behindBy`）である——**出どころが違う**ので、**片方だけが出る場面がある**
+ * （**最新化を要求しない設定では、遅れていても `BEHIND` は返らない**。#644 のレビュー）。
+ *
+ * **読めなかったものを「遅れ 0」にしない。** **既定の分岐に落とすと、黙って
+ * 「遅れていません」になる**（`AGENTS.md` §5）——**言うことが無いのと同じ扱い**にする。
+ */
+export function baseLagNote(behindBy: number | undefined): string | undefined {
+  return behindBy === undefined || behindBy === 0
+    ? undefined
+    : `base に ${behindBy} commits 遅れています`;
+}

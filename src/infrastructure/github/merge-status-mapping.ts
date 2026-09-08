@@ -131,3 +131,32 @@ function toMergeState(value: string): MergeState {
       return "unknown";
   }
 }
+
+/**
+ * **base に何コミット遅れているか**を読む（#639）。
+ *
+ * **`mergeStateStatus` とは別の口である。** **compare が `behindBy` をそのまま返す**
+ * ので、**`BEHIND` が返らない設定でも数は出る**（#644 のレビュー）。
+ *
+ * **読めなければ `undefined`。** **`0` へ倒さない**——**既定の分岐に落とすと、
+ * 黙って「遅れていません」になる**（`AGENTS.md` §5。**このリポジトリが 7 回塞いだ形**）。
+ *
+ * **`ref` は `null` になりうる**（**base の枝が消えている**）。**`compare` も
+ * `null` になりうる**（**head を解決できない**——**fork の PR でありうる**）。
+ */
+const behindBySchema = z.object({
+  // **`errors` が載っていたら読まない**（`pageSchema` と同じ）
+  errors: z.never().optional(),
+  data: z.object({
+    repository: z.object({
+      ref: z
+        .object({ compare: z.object({ behindBy: z.number().int().nonnegative() }).nullable() })
+        .nullable(),
+    }),
+  }),
+});
+
+export function toBehindBy(response: unknown): number | undefined {
+  const parsed = behindBySchema.safeParse(response);
+  return parsed.success ? parsed.data.data.repository.ref?.compare?.behindBy : undefined;
+}

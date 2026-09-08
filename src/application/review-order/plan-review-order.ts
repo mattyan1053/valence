@@ -65,7 +65,13 @@ export type ReviewOrderPlan = {
 };
 
 export type ReviewOrderSources = {
-  readonly pullRequests: PullRequestSource;
+  /**
+   * **盤面のぶん**を取る口（#650 のレビュー）。
+   *
+   * **要る口だけを書く**——**押す経路は `listPullRequestRefs` しか使わない**ので、
+   * **どちらの流れが何を待つのかが、型で読める。**
+   */
+  readonly pullRequests: Pick<PullRequestSource, "listPullRequests">;
   readonly changes: ChangeSummarySource;
 };
 
