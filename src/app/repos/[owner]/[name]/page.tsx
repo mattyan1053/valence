@@ -9,9 +9,11 @@
  */
 
 import { notFound } from "next/navigation";
+import type { IssueListing } from "../../../../application/ports/issue-source";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
 import type { RepositoryBoardResult } from "../../../../application/review-order/view-repository-board";
 import {
+  issuePageUrl,
   pullRequestPageUrl,
   reportBoardActionUnavailable,
   repositoryBoardForCurrentUser,
@@ -24,6 +26,8 @@ import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
 import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
 import { AssignmentSummaryView } from "../../../../ui/assignment/assignment-summary-view";
 import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button";
+import type { IssueBoardProps } from "../../../../ui/issue-board/issue-board";
+import { IssueBoard } from "../../../../ui/issue-board/issue-board";
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
 import { MergeButton, mergeNotice } from "../../../../ui/merge/merge-button";
 import { ReviewBoard } from "../../../../ui/review-board/review-board";
@@ -170,6 +174,21 @@ export function boardUnavailableReason(result: {
  *
  * **判定は `boardUnavailableReason` のまま 1 箇所である**（§5）。
  */
+/**
+ * issue の一覧を、画面へ渡せる形にする（#633）。
+ *
+ * **`undefined` は「取れなかった」**（`viewRepositoryBoard`）——**空の一覧と混ぜない。**
+ * **混ぜると、取れなかった日に「issue はありません」と出る**（`AGENTS.md` §5）。
+ */
+export function issueBoardProps(listing: IssueListing | undefined): Omit<IssueBoardProps, "urlOf"> {
+  return {
+    issues: listing?.issues,
+    assignments: listing?.assignments ?? new Map(),
+    // **読めなかったぶんを黙って落とさない**
+    unreadable: listing?.invalid.length ?? 0,
+  };
+}
+
 export type BoardPageDeps = {
   /** 盤面を引く口（`repositoryBoardForCurrentUser`）。 */
   readonly board: (repository: {
@@ -346,6 +365,17 @@ export async function renderRepositoryBoard(
           {result.plan.invalid.length > 0 ? (
             <p className="text-sm opacity-70">{unreadableNote(result.plan.invalid.length)}</p>
           ) : undefined}
+          {/* **issue の盤面**（#633）。**PR の並びをそのまま持ち込まない**
+              ——**issue に「押せるか」は無い。** **一覧そのものは畳む**（#597）
+              ——**常時見せるのは、順番を決める材料だけ**である */}
+          <section className="flex flex-col gap-2">
+            <h2 className="font-semibold text-lg">issue</h2>
+            <IssueBoard
+              {...issueBoardProps(result.issues)}
+              // **組み立ては `infrastructure` が持ち、合成ルートを通す**（#622）
+              urlOf={(number) => issuePageUrl({ owner, name }, number)}
+            />
+          </section>
         </>
       ) : (
         <p className="text-sm">

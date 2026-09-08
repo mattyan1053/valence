@@ -18,6 +18,7 @@
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
 import { errorKind } from "../observability/error-kind";
+import type { IssueListing, IssueSource } from "../ports/issue-source";
 import type {
   PullRequestApprovalListing,
   PullRequestApprovals,
@@ -60,6 +61,16 @@ export type RepositoryBoardResult =
        * 載らない**（#342 のレビュー）ので、**ここが唯一の手掛かり**である。
        */
       readonly approvals: PullRequestApprovalListing;
+      /**
+       * open な issue（#633）。
+       *
+       * **`undefined` は「取れなかった」**である——**空の一覧と混ぜない。**
+       * **混ぜると、取れなかった日に「issue はありません」と出る**（`AGENTS.md` §5）。
+       *
+       * **落ちても盤面は返す**（`approvals` と同じ判断）——**依存グラフだけでも
+       * 交通整理の役に立つ**ので、**issue を読めないことを理由に画面ごと落とさない。**
+       */
+      readonly issues: IssueListing | undefined;
     };
 
 export type ViewRepositoryBoardInput = {
@@ -107,6 +118,13 @@ export type ViewRepositoryBoardInput = {
    * **合成ルートで作って渡すと、盤面を組み立てるぶんが承認の期限から引かれる。**
    */
   readonly approvalsDeadline?: () => AbortSignal;
+  /**
+   * issue の一覧を読む口（#633）。
+   *
+   * **任意にしない**（`approvals` と同じ理由）——**渡さなければ出ないだけ、にすると、
+   * 合成ルートで渡し忘れた日から静かに消える。**
+   */
+  readonly issues: IssueSource;
 };
 
 export async function viewRepositoryBoard({
@@ -118,6 +136,7 @@ export async function viewRepositoryBoard({
   plan,
   approvals,
   approvalsDeadline,
+  issues,
 }: ViewRepositoryBoardInput): Promise<RepositoryBoardResult> {
   // **認可は共有の判断が持つ** (#315)。**ここへ写すと、Approve / Merge 側と
   // 片方だけ直したときに食い違う**——**症状は「他人のものが見える / 触れる」**である。
@@ -149,10 +168,9 @@ export async function viewRepositoryBoard({
     return { kind: "unavailable", reason: `board/${errorKind(error)}` };
   }
 
-  return {
-    kind: "board",
-    plan: board,
-    approvals: await readApprovals(
+  // **同時に叩く**——**互いの結果は要らない**ので、**順に待つ理由が無い**
+  const [approvalListing, issueListing] = await Promise.all([
+    readApprovals(
       approvals,
       authorization.userAccessToken,
       repository,
@@ -164,7 +182,24 @@ export async function viewRepositoryBoard({
       // 承認の期限から引かない**
       approvalsDeadline?.(),
     ),
-  };
+    readIssues(issues),
+  ]);
+
+  return { kind: "board", plan: board, approvals: approvalListing, issues: issueListing };
+}
+
+/**
+ * issue を読む。**落ちても盤面は返す**（`readApprovals` と同じ判断）。
+ *
+ * **`undefined` を返す**——**空の一覧にすると「取得できなかった」が
+ * 「issue が 0 件」に化ける**（`AGENTS.md` §5）。
+ */
+async function readIssues(issues: IssueSource): Promise<IssueListing | undefined> {
+  try {
+    return await issues.listIssues();
+  } catch {
+    return undefined;
+  }
 }
 
 /**

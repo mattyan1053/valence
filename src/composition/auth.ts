@@ -28,6 +28,7 @@ import { viewRepositoryBoard } from "../application/review-order/view-repository
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
 import { readAppCredentials, readOAuthCredentials } from "../infrastructure/github/app-credentials";
 import { createGitHubChangeSummarySource } from "../infrastructure/github/github-change-summary-source";
+import { createGitHubIssueSource } from "../infrastructure/github/github-issue-source";
 import { createGitHubPullRequestApprovals } from "../infrastructure/github/github-pull-request-approvals";
 import { createGitHubPullRequestMerges } from "../infrastructure/github/github-pull-request-merge";
 import { createGitHubPullRequestReviews } from "../infrastructure/github/github-pull-request-review";
@@ -40,6 +41,7 @@ import { reportLoginFailure } from "../infrastructure/observability/login-failur
 // **盤面の行から PR へ飛ばす** (#621)。**`app` は `infrastructure` を import できない**
 // ので、**合成ルートを通す**（`AGENTS.md` §3）——**URL は外部サービスの詳細**なので、
 // **`domain` には置かない**（#622 のレビュー 2 周目）。
+export { issuePageUrl } from "../infrastructure/github/issue-page-url";
 export { pullRequestPageUrl } from "../infrastructure/github/pull-request-page-url";
 // **押せなかった理由を残す口** (#506 の 2)。**画面では 1 語にまとめてある**（§6）
 export { reportBoardActionUnavailable } from "../infrastructure/observability/board-action";
@@ -314,6 +316,15 @@ export async function repositoryBoardForCurrentUser(repository: {
     // **承認の状態も、その人のトークンで読む**（#343。§6）——**installation
     // トークンだと、誰がログインしていても同じ答えになる。**
     approvals: createGitHubPullRequestApprovals(),
+    // **issue も installation トークンで読む**（#633）——**見てよいかは
+    // `viewRepositoryBoard` が先に確かめている。** **App の資格を読むのは、
+    // その中の `plan` と同じく「見える」と分かってから**である
+    issues: {
+      listIssues: () => {
+        const { app } = appSettings();
+        return createGitHubIssueSource({ credentials: app, repository }).listIssues();
+      },
+    },
     // **合図は作る手続きで渡す**（#316 と同じ理由）——**盤面を組み立てるぶんを、
     // 承認の期限から引かない**
     approvalsDeadline: () => AbortSignal.timeout(APPROVALS_DEADLINE_MS),

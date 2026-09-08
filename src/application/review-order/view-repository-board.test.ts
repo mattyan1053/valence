@@ -12,6 +12,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { IssueListing, IssueSource } from "../ports/issue-source";
 import type {
   PullRequestApprovalListing,
   PullRequestApprovals,
@@ -127,6 +128,16 @@ const PERMISSIONS: RepositoryPermissions = {
   },
 };
 
+/** issue は別の口である（#633）。**既定は「0 件が読めた」。** */
+const NO_ISSUES: IssueListing = { issues: [], invalid: [], assignments: new Map() };
+const ISSUE_SOURCE: IssueSource = { listIssues: async () => NO_ISSUES };
+/** **読めない口。** **盤面ごと落ちないこと**を見る。 */
+const ISSUES_DOWN: IssueSource = {
+  listIssues: async () => {
+    throw new Error("issue を取れません");
+  },
+};
+
 const VISIBLE: VisibleRepositoryListing = { repositories: [TARGET], invalid: [] };
 const NOTHING_VISIBLE: VisibleRepositoryListing = { repositories: [], invalid: [] };
 
@@ -143,6 +154,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
     expect(result).toEqual({ kind: "signed-out" });
@@ -163,6 +175,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
     expect(result).toEqual({ kind: "not-found" });
@@ -181,9 +194,15 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
-    expect(result).toEqual({ kind: "board", plan: PLAN, approvals: NO_APPROVALS });
+    expect(result).toEqual({
+      kind: "board",
+      plan: PLAN,
+      approvals: NO_APPROVALS,
+      issues: NO_ISSUES,
+    });
     // **installation ではなく、その人のトークンで見えるかを判定している**
     expect(listing.seen).toEqual(["user-token"]);
     expect(board.calls).toBe(1);
@@ -203,9 +222,15 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
-    expect(result).toEqual({ kind: "board", plan: PLAN, approvals: NO_APPROVALS });
+    expect(result).toEqual({
+      kind: "board",
+      plan: PLAN,
+      approvals: NO_APPROVALS,
+      issues: NO_ISSUES,
+    });
   });
 
   it("一覧を取れなかったら、「見えない」に化けさせない", async () => {
@@ -225,6 +250,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
     expect(result).toEqual({ kind: "unavailable", reason: "list/Error" });
@@ -247,6 +273,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
     expect(result).toEqual({ kind: "unavailable", reason: "invalid-listing" });
@@ -268,9 +295,15 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
-    expect(result).toEqual({ kind: "board", plan: PLAN, approvals: NO_APPROVALS });
+    expect(result).toEqual({
+      kind: "board",
+      plan: PLAN,
+      approvals: NO_APPROVALS,
+      issues: NO_ISSUES,
+    });
   });
 
   it.each([
@@ -289,6 +322,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
     expect(result).toEqual(expected);
@@ -311,6 +345,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
         throw new Error("PR 一覧を取得できませんでした (HTTP 502)");
       },
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
     expect(result).toEqual({ kind: "unavailable", reason: "board/Error" });
@@ -329,6 +364,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: async () => ONE_PULL_REQUEST,
       approvals: reader,
+      issues: ISSUE_SOURCE,
     });
 
     expect(result.kind).toBe("board");
@@ -343,6 +379,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       kind: "board",
       plan: ONE_PULL_REQUEST,
       approvals: { approved: new Set([7]), unavailable: [] },
+      issues: NO_ISSUES,
     });
   });
 
@@ -358,6 +395,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: plan().run,
       approvals: reader,
+      issues: ISSUE_SOURCE,
     });
 
     expect(result).toEqual({ kind: "not-found" });
@@ -375,6 +413,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: async () => ONE_PULL_REQUEST,
       approvals: APPROVALS_DOWN,
+      issues: ISSUE_SOURCE,
     });
 
     expect(result.kind).toBe("board");
@@ -392,6 +431,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: async () => ONE_PULL_REQUEST,
       approvals: APPROVALS_DOWN,
+      issues: ISSUE_SOURCE,
     });
 
     expect(result.kind === "board" ? [...result.approvals.approved] : "板ではない").toEqual([]);
@@ -420,6 +460,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       // **head の無い盤面**——**PR は載っているのに、突き合わせる commit が無い**
       plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
       approvals: reader,
+      issues: ISSUE_SOURCE,
     });
 
     expect(reader.seen, "突き合わせる commit が無いのに叩きに行っている").toEqual([]);
@@ -449,6 +490,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
         heads: new Map([[PULL_REQUEST.number, HEAD]]),
       }),
       approvals: reader,
+      issues: ISSUE_SOURCE,
     });
 
     expect(reader.asked, "head の無い PR まで聞きに行っている").toEqual([[[7, HEAD]]]);
@@ -472,6 +514,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: plan().run,
       approvals: reader,
+      issues: ISSUE_SOURCE,
     });
 
     expect(reader.seen, "読むものが無いのに叩きに行っている").toEqual([]);
@@ -498,6 +541,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       plan: async () => ONE_PULL_REQUEST,
       approvals: never,
       approvalsDeadline: () => AbortSignal.abort(),
+      issues: ISSUE_SOURCE,
     });
 
     expect(result.kind).toBe("board");
@@ -529,6 +573,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: async () => ONE_PULL_REQUEST,
       approvals: reader,
+      issues: ISSUE_SOURCE,
       approvalsDeadline: () => deadline,
     });
 
@@ -548,9 +593,75 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       permissions: PERMISSIONS,
       plan: board.run,
       approvals: approvals(),
+      issues: ISSUE_SOURCE,
     });
 
     expect(result).toEqual({ kind: "unavailable", reason: "store/Error" });
     expect(board.calls).toBe(0);
+  });
+});
+
+describe("issue も一緒に返す（#633）", () => {
+  it("open な issue を、盤面と一緒に返す", async () => {
+    const listing: IssueListing = {
+      issues: [{ number: 9, title: "落ちる" }],
+      invalid: [],
+      assignments: new Map(),
+    };
+
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: plan().run,
+      approvals: approvals(),
+      issues: { listIssues: async () => listing },
+    });
+
+    expect(result.kind === "board" && result.issues).toEqual(listing);
+  });
+
+  it("issue を読めなくても、盤面は返す", async () => {
+    // **依存グラフだけでも交通整理の役に立つ**（`approvals` と同じ判断）
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: plan().run,
+      approvals: approvals(),
+      issues: ISSUES_DOWN,
+    });
+
+    expect(result.kind).toBe("board");
+    // **空の一覧にしない**——**「取得できなかった」が「issue が 0 件」に化ける**
+    expect(result.kind === "board" && result.issues, "0 件と同じ顔になっている").toBeUndefined();
+  });
+
+  it("見てよいと分かるまで、issue を取りに行かない", async () => {
+    // **認可が先である**（`AGENTS.md` §6）——**installation トークンで読む口**なので、
+    // **確かめる前に呼ぶと、見えない人にまでデータを取りに行く**
+    let called = 0;
+
+    await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => undefined,
+      ensure: async () => ({ kind: "usable", accessToken: "user" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: plan().run,
+      approvals: approvals(),
+      issues: {
+        listIssues: async () => {
+          called += 1;
+          return NO_ISSUES;
+        },
+      },
+    });
+
+    expect(called, "ログインしていないのに issue を取りに行っている").toBe(0);
   });
 });
