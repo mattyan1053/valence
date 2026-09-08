@@ -10,6 +10,7 @@
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import type { Assignment } from "../../domain/triage/assignment";
+import type { ReviewOpinion } from "../../domain/triage/ball";
 
 /** 検証に落ちた 1 件。 */
 export type InvalidPullRequest = {
@@ -72,6 +73,16 @@ export type PullRequestListing = {
    * （`AGENTS.md` §5。**6 回塞いだ形**）。
    */
   readonly assignments: ReadonlyMap<number, Assignment>;
+  /**
+   * PR 番号から引けるレビューの意見（#636）。
+   *
+   * **「誰の番か」を決める材料**である——**盤面を見て最初に知りたいのは
+   * 「自分が動く番か」**なのに、**いまはどこにも出ていない。**
+   *
+   * **読めなかった PR は入らない。** **`ballOf` が地図に無い番号を `unknown` へ
+   * 倒す**ので、**「読めなかった」が「放置」に化けない**（`AGENTS.md` §5）。
+   */
+  readonly opinions: ReadonlyMap<number, ReviewOpinion>;
 };
 
 /**
@@ -81,7 +92,7 @@ export type PullRequestListing = {
  * ので、**境界がもう 1 つの口から足す。** **型でそれを言っておく**と、
  * **一覧を読む側（`toPullRequestRefs`）が、持っていないものを埋めずに済む。**
  */
-export type ListedPullRequests = Omit<PullRequestListing, "mergeStatuses">;
+export type ListedPullRequests = Omit<PullRequestListing, "mergeStatuses" | "opinions">;
 
 export type PullRequestSource = {
   /**

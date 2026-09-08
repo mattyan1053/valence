@@ -113,3 +113,105 @@ describe("base にどれだけ遅れているか（#639）", () => {
     ).toBeUndefined();
   });
 });
+
+describe("レビューの意見（#636）", () => {
+  const HEAD = "a".repeat(40);
+  const OLD = "b".repeat(40);
+
+  function page(node: Record<string, unknown>): unknown {
+    return {
+      data: {
+        repository: {
+          pullRequests: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [{ number: 7, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", ...node }],
+          },
+        },
+      },
+    };
+  }
+
+  const opinions = (
+    states: readonly { state: string; oid?: string | null }[],
+    extra: Record<string, unknown> = {},
+  ) =>
+    page({
+      headRefOid: HEAD,
+      reviews: { totalCount: states.length },
+      latestOpinionatedReviews: {
+        pageInfo: { hasNextPage: false },
+        nodes: states.map(({ state, oid }) => ({
+          state,
+          commit: oid === null ? null : { oid: oid ?? HEAD },
+        })),
+      },
+      ...extra,
+    });
+
+  it("いまの head への承認と、変更の求めを分けて読む", () => {
+    const approved = toMergeStatusPage(opinions([{ state: "APPROVED" }])).opinions.get(7);
+    expect(approved?.approvesHead).toBe(true);
+    expect(approved?.changesRequestedOnHead).toBe(false);
+
+    const changes = toMergeStatusPage(opinions([{ state: "CHANGES_REQUESTED" }])).opinions.get(7);
+    expect(changes?.changesRequestedOnHead).toBe(true);
+    expect(changes?.approvesHead).toBe(false);
+  });
+
+  it("古い commit に付いた意見は、いまの head のものにしない", () => {
+    // **#635 と同じ向き**——**そのあとに push されたものは、誰も読んでいない差分である**
+    const opinion = toMergeStatusPage(
+      opinions([
+        { state: "APPROVED", oid: OLD },
+        { state: "CHANGES_REQUESTED", oid: OLD },
+      ]),
+    ).opinions.get(7);
+
+    expect(opinion?.approvesHead).toBe(false);
+    expect(opinion?.changesRequestedOnHead).toBe(false);
+    // **提出はされている**——**放置ではない**
+    expect(opinion?.reviewed).toBe(true);
+  });
+
+  it("意見を持たないレビューも、提出されたものとして数える", () => {
+    // **実測（2026-09-08、PR #650）: `reviews.totalCount` が 6 で
+    // `latestOpinionatedReviews` は 0 件**だった（**自動レビューは `COMMENTED`**）
+    const opinion = toMergeStatusPage(
+      page({
+        headRefOid: HEAD,
+        reviews: { totalCount: 6 },
+        latestOpinionatedReviews: { pageInfo: { hasNextPage: false }, nodes: [] },
+      }),
+    ).opinions.get(7);
+
+    expect(opinion?.reviewed).toBe(true);
+    expect(opinion?.approvesHead).toBe(false);
+  });
+
+  it("意見を最後まで読めていないなら、意見を出さない", () => {
+    // **見えたぶんに変更の求めが無くても、次のページにあるかは分からない**
+    // ——**「読めなかった」を「無かった」にしない**（`AGENTS.md` §5）
+    const listing = toMergeStatusPage(
+      page({
+        headRefOid: HEAD,
+        reviews: { totalCount: 200 },
+        latestOpinionatedReviews: {
+          pageInfo: { hasNextPage: true },
+          nodes: [{ state: "APPROVED", commit: { oid: HEAD } }],
+        },
+      }),
+    );
+
+    expect(listing.opinions.get(7)).toBeUndefined();
+    // **合流の状況は残る**——**別の関心である**
+    expect(listing.statuses.get(7)?.state).toBe("clean");
+  });
+
+  it("意見の項目が無い応答でも、合流の状況は残す", () => {
+    // **1 件の形が違うだけで、盤面全部を捨てない**（このファイルの判断）
+    const listing = toMergeStatusPage(page({}));
+
+    expect(listing.opinions.get(7)).toBeUndefined();
+    expect(listing.statuses.get(7)?.mergeable).toBe("mergeable");
+  });
+});

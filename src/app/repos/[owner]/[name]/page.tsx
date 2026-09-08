@@ -305,6 +305,10 @@ export async function renderRepositoryBoard(
             // **誰の持ち物かを、行に出す**（#631）——**取れていない PR は `undefined` の
             // まま渡す**（**「誰も持っていない」に化けさせない**）
             assignmentOf={(number) => result.plan.assignments.get(number)}
+            // **誰の番かを、行に出す**（#636）——**盤面を見て最初に知りたいのは
+            // 「自分が動く番か」**である。**取れていない PR は `undefined` のまま
+            // 渡す**（**「放置」に化けさせない**）
+            reviewOpinionOf={(number) => result.plan.opinions.get(number)}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

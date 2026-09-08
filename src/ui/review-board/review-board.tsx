@@ -17,10 +17,13 @@ import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { Assignment } from "../../domain/triage/assignment";
+import type { ReviewOpinion } from "../../domain/triage/ball";
+import { ballOf } from "../../domain/triage/ball";
 import { fileOverlapsFor } from "../../domain/triage/file-overlap";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import { classifyRiskTier } from "../../domain/triage/risk-tier";
 import { assignmentNote } from "../assignment/assignment-note";
+import { ballNote } from "../ball/ball-note";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
 import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
 import { fileOverlapNote } from "../file-overlap/file-overlap-note";
@@ -158,6 +161,15 @@ export type ReviewBoardProps = {
    * ——**#631 が消しに来た状態**である（**誰も見ていない PR が、他と同じ顔で並ぶ**）。
    */
   readonly assignmentOf: (pullRequestNumber: number) => Assignment | undefined;
+  /**
+   * **その PR に出ているレビューの意見**（#636）。**読めていないなら `undefined`。**
+   *
+   * **盤面はこれを持っていない**ので、**渡す側から受ける**（`mergeStatusOf` と同じ形）。
+   *
+   * **任意にしない。** **渡し忘れると、どの行も「誰の番か」を黙る**
+   * ——**盤面を見て最初に知りたいのは、そこ**である。
+   */
+  readonly reviewOpinionOf: (pullRequestNumber: number) => ReviewOpinion | undefined;
 };
 
 export function ReviewBoard({
@@ -174,6 +186,7 @@ export function ReviewBoard({
   urlOf,
   mergeStatusOf,
   assignmentOf,
+  reviewOpinionOf,
 }: ReviewBoardProps) {
   // **行ごとに計算しない**（`mergeBlocksFor` と同じ理由）——**1 件ずつ比べると
   // 本数の 2 乗**になる。**材料が取れていない PR も渡す**——**「触っていない」
@@ -234,6 +247,18 @@ export function ReviewBoard({
         // **ファイルの重なりは、その間に入る**（#637）——**押せるかの話ではなく、
         // 持ち主の話でもない。** **依存の順序とは別の目安**である
         const overlap = fileOverlapNote(overlaps.get(number));
+        // **誰の番か**（#636）——**「誰の持ち物か」（下）とは別の軸**である。
+        // **判定は domain が持つ**（`ballOf`）ので、**ここは詰め替えるだけ**である。
+        //
+        // **「誰の持ち物か」の直前に置く**——**役割の話が先、人の話が後**である。
+        const ball = ballNote(
+          ballOf({
+            opinion: reviewOpinionOf(number),
+            readiness: mergeReadinessOf(status).kind,
+            assignment: assignmentOf(number),
+          }),
+        );
+        const turn = ball === undefined ? undefined : <span className="text-sm">{ball}</span>;
         const assignment = (
           <span className="text-sm opacity-70">{assignmentNote(assignmentOf(number))}</span>
         );
@@ -254,6 +279,7 @@ export function ReviewBoard({
               </span>
               {readiness}
               {overlap === undefined ? undefined : <span className="text-sm">{overlap}</span>}
+              {turn}
               {assignment}
               <ActionRow>
                 {renderStatus?.(number)}
@@ -267,6 +293,7 @@ export function ReviewBoard({
             <RiskTierView tier={classifyRiskTier(change)} change={change} />
             {readiness}
             {overlap === undefined ? undefined : <span className="text-sm">{overlap}</span>}
+            {turn}
             {assignment}
             <ActionRow>
               {renderStatus?.(number)}
