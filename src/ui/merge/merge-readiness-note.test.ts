@@ -31,12 +31,24 @@ describe("合流の状況を、行の言葉にする", () => {
     expect(note("draft")).toContain("下書き");
   });
 
+  it("保護ルールで止まっていることが分かる", () => {
+    // **どの規則かまでは言わない**（#644 のレビュー 2 周目）——**`BLOCKED` は寄せ集め**
+    // なので、**言い切ると `BEHIND` と同じ断定が生まれる**
+    expect(note("blocked")).toContain("保護ルール");
+  });
+
   it("言い分けられている", () => {
     // **上のそれぞれが空でないことを、ここが支えている**——**同じ文なら、
     // 分けた意味が無い**（`changeUnavailableNote` と同じ判断）
-    const texts = [note("conflicting"), note("behind"), note("draft"), note("unknown")];
+    const texts = [
+      note("conflicting"),
+      note("behind"),
+      note("draft"),
+      note("blocked"),
+      note("unknown"),
+    ];
 
-    expect(new Set(texts).size, "言い分けられていない").toBe(4);
+    expect(new Set(texts).size, "言い分けられていない").toBe(5);
   });
 
   it("次に何をすればよいかまで言う", () => {

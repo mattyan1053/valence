@@ -57,10 +57,25 @@ describe("押す前に、合流できるかを言う", () => {
     expect(mergeReadinessOf(report({ state: "draft" }))).toEqual({ kind: "draft" });
   });
 
-  it("承認待ちや CI の失敗を、conflict として言わない", () => {
-    // **押せない理由は 1 つではない**——**`blocked` / `unstable` は別の行が言う**
-    // （**承認は `ApprovalBadge`、CI はリスク Tier**）
-    expect(mergeReadinessOf(report({ state: "blocked" }))).toEqual({ kind: "mergeable" });
+  it("2 つが食い違っていても、緩い側へ倒さない", () => {
+    // **`mergeable` は「合流できる」と言い、`state` は `dirty`（合流できない）と言う**
+    // ——**ありえない組み合わせだが、来たときに「押せる」へ倒さない**
+    // （`mergeBlockFor` と同じ判断）
+    expect(mergeReadinessOf(report({ mergeable: "mergeable", state: "dirty" }))).toEqual({
+      kind: "conflicting",
+    });
+  });
+
+  it("保護ルールで止まっている PR を、マージできる側へ倒さない", () => {
+    // **`ApprovalBadge` は「1 件でもあれば承認済み」**（#644 のレビュー 2 周目）
+    // ——**必要な数に届いているかは見ていない**ので、**「2 件必要で 1 件」の行は
+    // 事実と逆を言う。** **未解決スレッドを言う行は、どこにも無い**
+    expect(mergeReadinessOf(report({ state: "blocked" }))).toEqual({ kind: "blocked" });
+  });
+
+  it("CI が通っていないことは、合流の話として言わない", () => {
+    // **押せない理由は 1 つではない**——**CI はリスク Tier が言う**（`CI_TEXT`）。
+    // **同じことを 2 箇所で言うと、片方が事実と違う日が来る**
     expect(mergeReadinessOf(report({ state: "unstable" }))).toEqual({ kind: "mergeable" });
   });
 });

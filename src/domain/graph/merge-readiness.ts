@@ -68,9 +68,21 @@ export type MergeReadiness =
    * **下書きのまま。** **GitHub が押させる前に止める。**
    *
    * **既定の「合流できる」へ落とさない**（#644 のレビュー）——**draft を言う行は
-   * ほかに無い**ので、**落とすと押せるまま何も出ない**（**`blocked` / `unstable` とは違う**）。
+   * ほかに無い**ので、**落とすと押せるまま何も出ない**（**`unstable` とは違う**）。
    */
   | { readonly kind: "draft" }
+  /**
+   * **保護ルールで止まっている。**
+   *
+   * **どの規則かは言わない**（#644 のレビュー 2 周目）——**`BLOCKED` は寄せ集め**
+   * （**承認の数・未解決スレッド・その他の条件**）なので、**名指しすると、
+   * 成立していない理由を表示する**（`TIER_TEXT` と同じ判断）。
+   *
+   * **`ApprovalBadge` があるから要らない、とは言えない**——**あれは
+   * 「1 件でもあれば承認済み」**で、**必要な数に届いているかは見ていない。**
+   * **未解決スレッドを言う行は、どこにも無い。**
+   */
+  | { readonly kind: "blocked" }
   /**
    * **まだ分からない。**
    *
@@ -93,6 +105,9 @@ export type MergeReadiness =
  * **どちらかが分からなければ、分からないと言う。** **`mergeable` だけ読めても、
  * `state` が分からなければ「base に遅れている」を見落とす**——
  * **食い違っていても緩い側へ倒さない**（`mergeBlockFor` と同じ判断）。
+ *
+ * **状況ごとの行き先は `READINESS_OF_STATE` が持つ。** **既定の分岐を書かない**
+ * ——**そこへ落ちた値が、黙って「合流できる」になる**（#644 のレビューで 2 度）。
  */
 export function mergeReadinessOf(report: MergeStatusReport | undefined): MergeReadiness {
   if (report === undefined) {
@@ -101,13 +116,37 @@ export function mergeReadinessOf(report: MergeStatusReport | undefined): MergeRe
   if (report.mergeable === "conflicting") {
     return { kind: "conflicting" };
   }
-  if (report.mergeable === "unknown" || report.state === "unknown") {
+  if (report.mergeable === "unknown") {
     return { kind: "unknown" };
   }
-  // **draft は GitHub が押させない**（#644 のレビュー）。**承認待ち（`blocked`）や
-  // CI（`unstable`）と違い、これを言う行はほかに無い**ので、ここで言う
-  if (report.state === "draft") {
-    return { kind: "draft" };
-  }
-  return report.state === "behind" ? { kind: "behind" } : { kind: "mergeable" };
+  return { kind: READINESS_OF_STATE[report.state] };
 }
+
+/**
+ * **状況ごとに、何と言うか。**
+ *
+ * **既定の分岐を持たない**（#644 のレビュー。**2 周とも同じ形で当てられた**）
+ * ——**`?:` で「それ以外は合流できる」と書くと、`draft` も `BLOCKED` も
+ * そこへ落ちる**（**どちらも実際に落ちていた**）。**`Record` なら、値が増えた日に
+ * 型検査が落ちる**ので、**倒し先を決めずには通らない**（`TIER_TEXT` と同じ形）。
+ *
+ * **`mergeable` へ倒してよいのは、その理由を言う行がほかにあるとき**である。
+ * **`unstable`（CI）はリスク Tier が言う**——**同じことを 2 箇所で言うと、
+ * 片方が事実と違う日が来る。**
+ *
+ * **`dirty` は `mergeable` の側と食い違っている状態**である（**`CONFLICTING` なら
+ * 上で返っている**）。**緩い側へ倒さない**（`mergeBlockFor` と同じ判断）。
+ */
+const READINESS_OF_STATE: Record<MergeState, MergeReadiness["kind"]> = {
+  behind: "behind",
+  blocked: "blocked",
+  clean: "mergeable",
+  dirty: "conflicting",
+  draft: "draft",
+  // **pre-receive hook を通った、というだけ**である（GitHub の語彙）
+  "has-hooks": "mergeable",
+  // **`state` だけ分からない場合も、緩い側へ倒さない**——**`behind` を見落とす**
+  unknown: "unknown",
+  // **CI はリスク Tier が言う**（`CI_TEXT`）
+  unstable: "mergeable",
+};
