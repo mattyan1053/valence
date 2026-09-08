@@ -22,7 +22,7 @@ import { classifyRiskTier } from "../../domain/triage/risk-tier";
 import { assignmentNote } from "../assignment/assignment-note";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
 import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
-import { mergeReadinessNote } from "../merge/merge-readiness-note";
+import { baseLagNote, mergeReadinessNote } from "../merge/merge-readiness-note";
 import { RiskTierView } from "../risk-tier/risk-tier-view";
 
 /**
@@ -195,11 +195,27 @@ export function ReviewBoard({
         // **材料の有無に関わらず出す**（#629）——**リスク Tier が揃っていないことと、
         // 合流できるかは別**である。**片方の行にだけ出すと、押せない理由が消える**
         // （`renderStatus` と同じ判断）
-        const note = mergeReadinessNote(mergeReadinessOf(mergeStatusOf(number)));
-        const readiness = note === undefined ? undefined : <span className="text-sm">{note}</span>;
+        const status = mergeStatusOf(number);
+        // **2 行になりうる**（#639）。**同じことを 2 度言っているのではない**——
+        // **`mergeReadinessNote` は「入るかどうか」**（`mergeStateStatus`）、
+        // **`baseLagNote` は「どれだけ」**（compare の `behindBy`）で、**出どころが違う。**
+        // **最新化を要求しない設定では、遅れていても `BEHIND` は返らない**（#644 のレビュー）
+        // ので、**片方だけが出る場面がある。**
+        const notes = [
+          mergeReadinessNote(mergeReadinessOf(status)),
+          baseLagNote(status?.behindBy),
+        ].filter((line) => line !== undefined);
+        const readiness = notes.map((line) => (
+          <span className="text-sm" key={line}>
+            {line}
+          </span>
+        ));
         // **持ち主は常に出す**（#631）——**合流の状況（上）とは違う。**
         // **あちらは「押せない理由」で平常時は言うことが無い**が、
         // **こちらは「誰の持ち物か」**であり、**振られていないこと自体が主題**である
+        //
+        // **押せるかの話が先、持ち主の話が後**である（#650 の取り込み直し）——
+        // **base の遅れは合流の状況の側**なので、**`readiness` に並ぶ。**
         const assignment = (
           <span className="text-sm opacity-70">{assignmentNote(assignmentOf(number))}</span>
         );

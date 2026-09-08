@@ -337,6 +337,30 @@ describe("ReviewBoard", () => {
       expect(rows.match(/取り込み直/g), "遅れの行が 1 行ではない").toHaveLength(1);
     });
 
+    it("base にどれだけ遅れているかを、数で出す", () => {
+      // **#502 は「35 commits 遅れ」だった**（#639）——**その数が出ていなかった。**
+      // **`BEHIND` が返らない設定でも数は出る**（#644 のレビューの裏取り）ので、
+      // **`state` は `blocked` のまま**で見る。
+      const rows = rowsWith({ mergeable: "mergeable", state: "blocked", behindBy: 35 });
+
+      expect(rows.match(/35 commits 遅れ/g), "遅れの数が 1 行ではない").toHaveLength(1);
+    });
+
+    it("遅れていない行では、遅れの話をしない", () => {
+      // **平常時に鳴るものは読まれなくなる**（#248）
+      const rows = rowsWith({ mergeable: "mergeable", state: "clean", behindBy: 0 });
+
+      expect(rows).not.toMatch(/commits 遅れ/);
+    });
+
+    it("数を読めなかった行を、「遅れ 0」にしない", () => {
+      // **`behindBy` が無いのは「読めなかった」**である（`AGENTS.md` §5）
+      // ——**「遅れていません」とは書かない**（**何も言わない**）。
+      const rows = rowsWith({ mergeable: "mergeable", state: "clean" });
+
+      expect(rows).not.toMatch(/遅れ/);
+    });
+
     it("状況が読めていない行を、押せる顔にしない", () => {
       // **地図に無い番号**（**読めなかった / GitHub が計算中**）
       const rows = rowsWith(undefined);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MergeReadiness } from "../../domain/graph/merge-readiness";
-import { mergeReadinessNote } from "./merge-readiness-note";
+import { baseLagNote, mergeReadinessNote } from "./merge-readiness-note";
 
 function note(kind: MergeReadiness["kind"]): string | undefined {
   return mergeReadinessNote({ kind });
@@ -55,5 +55,30 @@ describe("合流の状況を、行の言葉にする", () => {
     // **「押せない」だけでは、何をすればよいか分からない**（#345 と同じ理由）
     expect(note("conflicting")).toContain("解消");
     expect(note("behind")).toContain("取り込み直");
+  });
+});
+
+describe("base にどれだけ遅れているかを、数で出す", () => {
+  // **#502 は「35 commits 遅れ」だった**（#639）——**その数が画面のどこにも
+  // 出ていなかった。** **言い切る前に、まず数を出す**（Issue の本文）。
+  it("遅れている数を、そのまま出す", () => {
+    expect(baseLagNote(35)).toContain("35");
+  });
+
+  it("遅れていないなら、何も言わない", () => {
+    // **平常時に鳴るものは読まれなくなる**（#248）
+    expect(baseLagNote(0)).toBeUndefined();
+  });
+
+  it("読めなかったものを、「遅れ 0」にしない", () => {
+    // **既定の分岐に落とすと、黙って「遅れていません」になる**
+    // （`AGENTS.md` §5。#639 の昇格コメント）——**言うことが無いのと同じ扱い**にする。
+    expect(baseLagNote(undefined)).toBeUndefined();
+  });
+
+  it("「遅れすぎ」とは言わない", () => {
+    // **何コミットから遅れすぎかは人が決める**（Issue の「気をつけること」）
+    // ——**境界を外すと、直さなくてよいものを直させる。**
+    expect(baseLagNote(35)).not.toMatch(/すぎ|遅すぎ|取り込み直さないと/);
   });
 });
