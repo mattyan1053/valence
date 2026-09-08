@@ -26,12 +26,17 @@ describe("合流の状況を、行の言葉にする", () => {
     expect(note("unknown")).toContain("分かりません");
   });
 
-  it("conflict と、遅れと、分からないを、同じ文にしない", () => {
-    // **上の 3 つが空でないことを、ここが支えている**——**同じ文なら、
-    // 分けた意味が無い**（`changeUnavailableNote` と同じ判断）
-    const texts = [note("conflicting"), note("behind"), note("unknown")];
+  it("下書きのままであることが分かる", () => {
+    // **draft は GitHub が押させる前に止める**（#644 のレビュー）
+    expect(note("draft")).toContain("下書き");
+  });
 
-    expect(new Set(texts).size, "言い分けられていない").toBe(3);
+  it("言い分けられている", () => {
+    // **上のそれぞれが空でないことを、ここが支えている**——**同じ文なら、
+    // 分けた意味が無い**（`changeUnavailableNote` と同じ判断）
+    const texts = [note("conflicting"), note("behind"), note("draft"), note("unknown")];
+
+    expect(new Set(texts).size, "言い分けられていない").toBe(4);
   });
 
   it("次に何をすればよいかまで言う", () => {

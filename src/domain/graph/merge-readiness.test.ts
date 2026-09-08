@@ -51,6 +51,12 @@ describe("押す前に、合流できるかを言う", () => {
     expect(mergeReadinessOf(report())).toEqual({ kind: "mergeable" });
   });
 
+  it("下書きの PR は、そう言う", () => {
+    // **draft は GitHub が押させない**（#644 のレビュー）——**ほかに言う行が無い**ので、
+    // **既定の「合流できる」へ落ちると、押せるまま何も出ない**
+    expect(mergeReadinessOf(report({ state: "draft" }))).toEqual({ kind: "draft" });
+  });
+
   it("承認待ちや CI の失敗を、conflict として言わない", () => {
     // **押せない理由は 1 つではない**——**`blocked` / `unstable` は別の行が言う**
     // （**承認は `ApprovalBadge`、CI はリスク Tier**）

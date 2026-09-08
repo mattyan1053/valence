@@ -309,6 +309,30 @@ describe("GitHub から PR 一覧を取ってくる", () => {
       return { number, mergeable, mergeStateStatus };
     }
 
+    /**
+     * 合流の状況だけが返ってこない `fetch`。
+     *
+     * **`honorsSignal` で行儀を変える**——**本物は合図で reject する**が、
+     * **差し替えられる引数なので、無視する実装もありうる。**
+     */
+    function neverReturning(
+      fetchImpl: typeof fetch,
+      { honorsSignal }: { honorsSignal: boolean },
+    ): typeof fetch {
+      return (input, init) => {
+        if (new Request(input, init).url !== GRAPHQL_URL) {
+          return fetchImpl(input, init);
+        }
+        return new Promise((_resolve, reject) => {
+          if (honorsSignal) {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+              once: true,
+            });
+          }
+        });
+      };
+    }
+
     async function listWithStatuses(...pages: Route[]) {
       const { calls, fetchImpl } = fakeGitHub({
         [INSTALLATION_URL]: INSTALLATION,
@@ -400,6 +424,79 @@ describe("GitHub から PR 一覧を取ってくる", () => {
 
       expect(listing.mergeStatuses.get(8)).toEqual({ mergeable: "conflicting", state: "dirty" });
       expect(listing.mergeStatuses.has(9)).toBe(false);
+    });
+
+    it("返ってこない状況を待ち続けない", async () => {
+      // **落ちるのと遅いのは別の経路である**（#119 / #120 と同じ形。#644 のレビュー）
+      // ——**`catch` は reject しか拾わない**ので、**応答待ちのまま返らないと
+      // `Promise.all` が返らず、盤面ごと出なくなる。**
+      const { fetchImpl } = fakeGitHub({
+        [INSTALLATION_URL]: INSTALLATION,
+        [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+        [PULLS_URL]: { body: stacked },
+      });
+      const hangingFetch = neverReturning(fetchImpl, { honorsSignal: true });
+
+      const listing = await createGitHubPullRequestSource({
+        credentials,
+        repository,
+        fetchImpl: hangingFetch,
+        now: clockFrom("2026-08-10T00:00:00Z"),
+        // **期限そのものは短くして試す**——**待つ長さは、この試験の関心ではない**
+        mergeStatusDeadline: () => AbortSignal.timeout(5),
+      }).listPullRequests();
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8, 9]);
+      expect(listing.mergeStatuses.size).toBe(0);
+    });
+
+    it("合図を無視する fetch でも、待ち続けない", async () => {
+      // **口の行儀に頼らない**（#346 のレビュー。#644 のレビュー）——**合図を渡しても、
+      // 受け取らない実装・無視する実装はありうる**（`fetchImpl` は差し替えられる）。
+      // **待つのをやめる側と、取り消しを伝える側の両方**が要る
+      const { fetchImpl } = fakeGitHub({
+        [INSTALLATION_URL]: INSTALLATION,
+        [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+        [PULLS_URL]: { body: stacked },
+      });
+
+      const listing = await createGitHubPullRequestSource({
+        credentials,
+        repository,
+        fetchImpl: neverReturning(fetchImpl, { honorsSignal: false }),
+        now: clockFrom("2026-08-10T00:00:00Z"),
+        mergeStatusDeadline: () => AbortSignal.timeout(5),
+      }).listPullRequests();
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8, 9]);
+      expect(listing.mergeStatuses.size).toBe(0);
+    });
+
+    it("打ち切ったことを、要求の側にも伝える", async () => {
+      // **待つのをやめるだけでは、走っている要求は走り続ける**（#346 のレビュー）
+      // ——**合図を口まで通す。** **上の試験は「待たない」側しか見ていない**
+      const { fetchImpl } = fakeGitHub({
+        [INSTALLATION_URL]: INSTALLATION,
+        [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+        [PULLS_URL]: { body: stacked },
+      });
+      let seen: AbortSignal | null | undefined;
+      const capturing: typeof fetch = (input, init) => {
+        if (new Request(input, init).url === GRAPHQL_URL) {
+          seen = init?.signal;
+        }
+        return neverReturning(fetchImpl, { honorsSignal: false })(input, init);
+      };
+
+      await createGitHubPullRequestSource({
+        credentials,
+        repository,
+        fetchImpl: capturing,
+        now: clockFrom("2026-08-10T00:00:00Z"),
+        mergeStatusDeadline: () => AbortSignal.timeout(5),
+      }).listPullRequests();
+
+      expect(seen?.aborted, "合図が要求まで届いていない").toBe(true);
     });
 
     it("状況を読めなかった PR を、conflict していない側へ倒さない", async () => {

@@ -11,6 +11,11 @@
  *
  * **2 つの口を同時に叩く。** **順に待つと、盤面の期限（#573）をそのぶん食う**
  * ——**一覧の取得と合流の状況に、互いの結果は要らない。**
+ *
+ * **合流の状況にだけ期限を掛ける** (#644 のレビュー)。**落ちるのと遅いのは別の経路**
+ * である（#119 / #120）——**`catch` は reject しか拾わない**ので、**応答待ちのまま
+ * 返らないと、一覧が取れていても盤面ごと出ない。** **一覧の側には掛けない**
+ * ——**あれが返らなければ、そもそも出せるものが無い。**
  */
 
 import type {
@@ -41,6 +46,17 @@ export type GitHubPullRequestSourceOptions = {
   /** **差し替えるための引数であって、抽象ではない**（#64 と同じ形）。 */
   readonly fetchImpl?: typeof fetch;
   readonly now?: () => Date;
+  /**
+   * 合流の状況の取得を打ち切る合図を**作る手続き**（#644 のレビュー）。
+   *
+   * **作る手続きで受けるのは、数え始める位置のため**である（#316 と同じ理由）
+   * ——**`AbortSignal.timeout` は作った瞬間から数え始める**ので、
+   * **口を作った時点で作ると、使われるまでの時間が期限から引かれる。**
+   *
+   * **1 回の呼び出し全体に 1 つ**である（**ページごとではない**）——
+   * **ページごとに掛けると、続きがあるぶんだけ待つ時間が伸びる。**
+   */
+  readonly mergeStatusDeadline?: () => AbortSignal;
 };
 
 /**
@@ -54,6 +70,7 @@ export function createGitHubPullRequestSource({
   repository,
   fetchImpl = fetch,
   now = () => new Date(),
+  mergeStatusDeadline = () => AbortSignal.timeout(MERGE_STATUS_DEADLINE_MS),
 }: GitHubPullRequestSourceOptions): PullRequestSource {
   let cached: InstallationToken | undefined;
 
@@ -107,7 +124,8 @@ export function createGitHubPullRequestSource({
       // **同時に叩く**——**互いの結果は要らない**ので、**順に待つ理由が無い**
       const [items, mergeStatuses] = await Promise.all([
         readPullRequests(header),
-        readMergeStatuses(fetchImpl, repository, header),
+        // **合図はここで作る**（#316 と同じ理由）——**token を取るぶんを期限から引かない**
+        readMergeStatuses(fetchImpl, repository, header, mergeStatusDeadline()),
       ]);
       return { ...toPullRequestRefs(items), mergeStatuses };
     },
@@ -115,6 +133,18 @@ export function createGitHubPullRequestSource({
 }
 
 const API_ORIGIN = "https://api.github.com";
+
+/**
+ * 合流の状況の取得を打ち切るまで（#644 のレビュー）。
+ *
+ * **1 要求で 100 件**（`PAGE_SIZE`）なので、**承認の状態（`APPROVALS_DEADLINE_MS`）と
+ * 同じ桁**にしてある。**打ち切られた PR は地図に入らず、行は「まだ分かりません」**と出る
+ * ——**「マージできる」には倒れない**ので、**足りなければ画面で分かる。**
+ *
+ * **既定を持つ。** **渡し忘れが「期限なし」に倒れると、遅い日に盤面ごと出なくなる**
+ * ——**#644 のレビューが指したのは、その状態である。**
+ */
+const MERGE_STATUS_DEADLINE_MS = 5_000;
 
 /** 1 度に読む件数。**GraphQL の上限は 100**（REST の一覧と同じ）。 */
 const PAGE_SIZE = 100;
@@ -179,6 +209,7 @@ async function readMergeStatusPage(
   repository: GitHubRepository,
   header: string,
   cursor: string | undefined,
+  deadline: AbortSignal,
 ): Promise<MergeStatusPage | undefined> {
   const response = await fetchImpl(`${API_ORIGIN}/graphql`, {
     method: "POST",
@@ -195,6 +226,10 @@ async function readMergeStatusPage(
       // **どのリポジトリかは要求ごとに決まる**（設定に固定しない。§1）
       variables: { owner: repository.owner, name: repository.name, cursor: cursor ?? null },
     }),
+    // **合図を口まで通す**（#346 のレビューと同じ）——**先に返すだけでは、
+    // 走っている要求は走り続ける。** **ここは `fetch` を直に呼ぶ側**なので、
+    // **渡せば止まる**（**行儀を疑う相手が居ない**）
+    signal: deadline,
   });
   return response.ok ? toMergeStatusPage(safeJson(await response.text())) : undefined;
 }
@@ -211,29 +246,60 @@ async function readMergeStatusPage(
  *
  * **途中まで読めたぶんは返す。** **残りは地図に無いまま**なので、
  * **その行は「まだ分かりません」と出る**（**「マージできる」ではない**）。
+ *
+ * **打ち切りも同じ扱いである** (#644 のレビュー)。**合図が鳴れば `fetch` は reject する**
+ * ので、**遅い日も、落ちた日と同じ経路で縮退する。**
  */
 async function readMergeStatuses(
   fetchImpl: typeof fetch,
   repository: GitHubRepository,
   header: string,
+  deadline: AbortSignal,
 ): Promise<ReadonlyMap<number, MergeStatusReport>> {
   const statuses = new Map<number, MergeStatusReport>();
-  try {
-    let cursor: string | undefined;
-    for (;;) {
-      const page = await readMergeStatusPage(fetchImpl, repository, header, cursor);
-      if (page === undefined) {
-        return statuses;
-      }
-      for (const [number, status] of page.statuses) {
-        statuses.set(number, status);
-      }
-      if (page.nextCursor === undefined) {
-        return statuses;
-      }
-      cursor = page.nextCursor;
+  // **読めたぶんはその場で入る**ので、**打ち切っても、途中までは残る**
+  const reading = collectMergeStatuses(fetchImpl, repository, header, deadline, statuses)
+    // **落ちたぶんは、ここで飲む**——**投げると盤面ごと落ちる**（上のコメント）。
+    // **競争に負けたあとで落ちることもある**ので、**受け手はここに要る**
+    .catch(() => undefined);
+  // **口の行儀に頼らない**（#346 のレビュー。#644 のレビュー）——**合図を渡しても、
+  // 受け取らない実装・無視する実装はありうる**（`fetchImpl` は差し替えられる引数である）。
+  // **待つのをやめる側と、取り消しを伝える側の両方**が要る
+  await Promise.race([reading, abortion(deadline)]);
+  return statuses;
+}
+
+/** 合流の状況を、最後のページまで `statuses` へ入れる。**落ちたら投げる。** */
+async function collectMergeStatuses(
+  fetchImpl: typeof fetch,
+  repository: GitHubRepository,
+  header: string,
+  deadline: AbortSignal,
+  statuses: Map<number, MergeStatusReport>,
+): Promise<void> {
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await readMergeStatusPage(fetchImpl, repository, header, cursor, deadline);
+    if (page === undefined) {
+      return;
     }
-  } catch {
-    return statuses;
+    for (const [number, status] of page.statuses) {
+      statuses.set(number, status);
+    }
+    if (page.nextCursor === undefined) {
+      return;
+    }
+    cursor = page.nextCursor;
   }
+}
+
+/** 合図が鳴るまで返らない約束（`view-repository-board.ts` と同じ形）。 */
+function abortion(deadline: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (deadline.aborted) {
+      resolve();
+      return;
+    }
+    deadline.addEventListener("abort", () => resolve(), { once: true });
+  });
 }

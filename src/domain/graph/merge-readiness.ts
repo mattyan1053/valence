@@ -54,8 +54,23 @@ export type MergeReadiness =
   | { readonly kind: "mergeable" }
   /** **conflict している。** 先に解消しないと入らない。 */
   | { readonly kind: "conflicting" }
-  /** **base に遅れている。** 先に取り込み直さないと入らない。 */
+  /**
+   * **base に遅れている。** 先に取り込み直さないと入らない。
+   *
+   * **「設定次第では入る」ではないか**を疑われた（#644 のレビュー。`AGENTS.md` §1 の
+   * マルチテナント）。**確かめた**（2026-09-08、このリポジトリ）——**最新化を要求しない
+   * 設定**（ruleset の `strict_required_status_checks_policy: false`）**で、
+   * base に 1 commit 遅れている PR** は `BLOCKED` を返し、**`BEHIND` にはならなかった。**
+   * **`BEHIND` が出るのは最新化を要求している側**なので、**そこでは断定してよい。**
+   */
   | { readonly kind: "behind" }
+  /**
+   * **下書きのまま。** **GitHub が押させる前に止める。**
+   *
+   * **既定の「合流できる」へ落とさない**（#644 のレビュー）——**draft を言う行は
+   * ほかに無い**ので、**落とすと押せるまま何も出ない**（**`blocked` / `unstable` とは違う**）。
+   */
+  | { readonly kind: "draft" }
   /**
    * **まだ分からない。**
    *
@@ -88,6 +103,11 @@ export function mergeReadinessOf(report: MergeStatusReport | undefined): MergeRe
   }
   if (report.mergeable === "unknown" || report.state === "unknown") {
     return { kind: "unknown" };
+  }
+  // **draft は GitHub が押させない**（#644 のレビュー）。**承認待ち（`blocked`）や
+  // CI（`unstable`）と違い、これを言う行はほかに無い**ので、ここで言う
+  if (report.state === "draft") {
+    return { kind: "draft" };
   }
   return report.state === "behind" ? { kind: "behind" } : { kind: "mergeable" };
 }

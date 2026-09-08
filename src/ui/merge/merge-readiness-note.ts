@@ -30,6 +30,8 @@ const READINESS_TEXT: Record<MergeReadiness["kind"], string | undefined> = {
   mergeable: undefined,
   conflicting: "conflict しています（先に解消しないとマージできません）",
   behind: "base に遅れています（先に取り込み直さないとマージできません）",
+  // **draft を言う行はほかに無い**（#644 のレビュー）——**承認待ちや CI とは違う**
+  draft: "下書きのままです（ready for review にするまでマージできません）",
   // **「まだ分からない」を「マージできる」へ倒さない**（#540 / #541 と同じ向き）。
   // **GitHub が計算中の場合と、状況を読めなかった場合が入る**——**次の一手は同じ**
   unknown: "合流できるかは、まだ分かりません（読み込み直すと分かることがあります）",
