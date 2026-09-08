@@ -258,7 +258,7 @@ describe("落ちている check を名前で残す", () => {
         },
         NO_STATUSES,
       ),
-    ).toEqual([{ kind: "check-run", name: "test", outcome: "failure", appId: 15368 }]);
+    ).toEqual([{ kind: "check-run", name: "test", outcome: "failure", issuer: 15368 }]);
   });
 
   it("発行元を持たない応答でも、材料にはする", () => {
@@ -269,17 +269,21 @@ describe("落ちている check を名前で残す", () => {
         { check_runs: [{ name: "test", status: "completed", conclusion: "failure", app: null }] },
         NO_STATUSES,
       ),
-    ).toEqual([{ kind: "check-run", name: "test", outcome: "failure", appId: undefined }]);
+    ).toEqual([{ kind: "check-run", name: "test", outcome: "failure", issuer: undefined }]);
   });
 
-  it("落ちた Commit Status も、同じ形で残す", () => {
-    // **道具立てを前提にしない**（`AGENTS.md` §1）。Commit Status だけの CI がある
+  it("落ちた Commit Status も、発行元まで同じ形で残す", () => {
+    // **道具立てを前提にしない**（`AGENTS.md` §1）。Commit Status だけの CI がある。
+    // **同じ context を別の App / 人が出す**ので、**check run と同じ衝突が残る**
     expect(
       failingOf(
         { check_runs: [] },
-        { state: "failure", statuses: [{ context: "ci/travis", state: "error" }] },
+        {
+          state: "failure",
+          statuses: [{ context: "ci/travis", state: "error", creator: { id: 99 } }],
+        },
       ),
-    ).toEqual([{ kind: "commit-status", name: "ci/travis", outcome: "error" }]);
+    ).toEqual([{ kind: "commit-status", name: "ci/travis", outcome: "error", issuer: 99 }]);
   });
 
   it("通っている PR には、落ちている check が 1 件も無い", () => {
@@ -341,6 +345,8 @@ describe("toBaseRefPath", () => {
     // **自分が置いた `%` を二重に包む**（`bin/loop-ci-status` と同じ話）
     // ——**包まないと、`%2F` を含む枝名が `/` に化けて別の段になる**
     ["a%2Fb", "a%252Fb"],
+    // **長さの上限を自前で置かない**——**`git check-ref-format` は通す長さ**である
+    [`${"a".repeat(200)}/${"b".repeat(100)}`, `${"a".repeat(200)}/${"b".repeat(100)}`],
   ])("Git で有効な %s は通す", (ref, expected) => {
     expect(toBaseRefPath({ base: { ref } })).toBe(expected);
   });
@@ -363,8 +369,6 @@ describe("toBaseRefPath", () => {
     ["Git が禁じる記号を含む", { base: { ref: "feat/x?y" } }],
     ["`@{` を含む", { base: { ref: "main@{1}" } }],
     ["`@` だけ", { base: { ref: "@" } }],
-    // **長すぎるものは弾く。** **URL のパスへ入る値**なので、上限を持たせておく
-    ["長すぎる", { base: { ref: "a".repeat(256) } }],
   ])("%s ものは URL に入れない", (_name, detail) => {
     // **未検証の値を URL のパスへ入れない**（`AGENTS.md` §6）。
     // **installation トークンが付いている**ので、別の endpoint を叩けてしまう
@@ -393,6 +397,36 @@ describe("toBaseCi", () => {
       settled: false,
       failing: [],
     });
+  });
+
+  it("落ちたものが 1 つあっても、走っている最中なら終わっていない", () => {
+    // **`ciStatus` は先に `failing` を返す**ので、**そこから導くと `settled` になる**
+    // ——**PR 側の失敗がマージ先ではまだ実行中のとき、「突き合わせられませんでした」が消える**
+    const baseCi = toBaseCi(
+      {
+        check_runs: [
+          { name: "test", status: "completed", conclusion: "failure", app: { id: 15368 } },
+          { name: "build", status: "in_progress", conclusion: null, app: { id: 15368 } },
+        ],
+      },
+      NO_STATUSES,
+    );
+
+    expect(baseCi?.settled, "走っている最中なのに終わったことにしている").toBe(false);
+  });
+
+  it("Commit Status が走っている最中でも、終わっていない", () => {
+    const baseCi = toBaseCi(PASSING, {
+      state: "pending",
+      statuses: [{ context: "ci", state: "pending", creator: { id: 99 } }],
+    });
+
+    expect(baseCi?.settled).toBe(false);
+  });
+
+  it("信号が 1 つも無ければ、終わっていない", () => {
+    // **CI が動いていないマージ先を「緑だった」と読まない**
+    expect(toBaseCi({ check_runs: [] }, NO_STATUSES)?.settled).toBe(false);
   });
 
   it("読めなければ、突き合わせ先にしない", () => {

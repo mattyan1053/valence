@@ -498,7 +498,7 @@ describe("マージ先と突き合わせる", () => {
     expect(listing.summaries.get(1)?.baseCi).toEqual({
       settled: true,
       // **発行元まで運ぶ**（#610）——**名前だけでは「同じ check」と言えない**
-      failing: [{ kind: "check-run", name: "test", outcome: "failure", appId: 15368 }],
+      failing: [{ kind: "check-run", name: "test", outcome: "failure", issuer: 15368 }],
     });
   });
 

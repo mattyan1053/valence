@@ -124,8 +124,20 @@ const checksSchema = z.object({
 });
 
 const statusesSchema = z.object({
-  /** **`context` が Commit Status 側の名前**である。**こちらも必須。** */
-  statuses: z.array(z.object({ context: z.string().min(1), state: z.string() })),
+  statuses: z.array(
+    z.object({
+      /** **`context` が Commit Status 側の名前**である。**こちらも必須。** */
+      context: z.string().min(1),
+      /**
+       * **出したもの**（#610 と同じ話）。**同じ context を別の App / 人が出す**ので、
+       * **名前だけでは「同じ check」と言えない。**
+       *
+       * **`app` と同じく、必須にしない**——**材料ごと捨てると Tier まで出なくなる。**
+       */
+      creator: z.object({ id: z.number().int() }).nullish(),
+      state: z.string(),
+    }),
+  ),
 });
 
 /** Git が枝の名前として禁じている記号（`git check-ref-format`）。**空白も入る。** */
@@ -160,7 +172,10 @@ function hasForbiddenCharacter(ref: string): boolean {
  * URL のパスとしても危ない**（`AGENTS.md` §6）ので、**ここが両方を兼ねる。**
  */
 function isValidRef(ref: string): boolean {
-  if (ref.length === 0 || ref.length > 255 || ref === "@") {
+  // **長さの上限を自前で置かない**（#654 のレビュー）——**`git check-ref-format` は
+  // 全体の長さを見ない**ので、**200 文字 + 100 文字の段を繋いだ枝も作れる。**
+  // **置くと、そういうインストール先では機能が丸ごと死ぬ。**
+  if (ref.length === 0 || ref === "@") {
     return false;
   }
   if (hasForbiddenCharacter(ref) || ref.includes("..") || ref.includes("@{")) {
@@ -209,6 +224,10 @@ const PASSING_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
 /** Commit Status 側で「通った」と見なす値。**同じ理由で通ったほうを挙げる。** */
 const PASSING_STATES = new Set(["success"]);
 
+/** 検証済みの応答の形。**同じ組を 3 箇所で書き写さない。** */
+type CheckRunResponse = z.infer<typeof checksSchema>["check_runs"][number];
+type CommitStatusResponse = z.infer<typeof statusesSchema>["statuses"][number];
+
 /**
  * 落ちている check を、名前と落ち方で挙げる（#638）。
  *
@@ -219,13 +238,8 @@ const PASSING_STATES = new Set(["success"]);
  * 混ぜない**——それは `pending` の側である。
  */
 function failingChecksOf(
-  runs: readonly {
-    name: string;
-    app?: { id: number } | null;
-    status: string;
-    conclusion: string | null;
-  }[],
-  states: readonly { context: string; state: string }[],
+  runs: readonly CheckRunResponse[],
+  states: readonly CommitStatusResponse[],
 ): readonly CheckSignal[] {
   return [
     ...runs
@@ -236,7 +250,7 @@ function failingChecksOf(
         kind: "check-run" as const,
         name: run.name,
         outcome: run.conclusion ?? "unknown",
-        appId: run.app?.id,
+        issuer: run.app?.id,
       })),
     ...states
       .filter((status) => status.state === "failure" || status.state === "error")
@@ -244,6 +258,7 @@ function failingChecksOf(
         kind: "commit-status" as const,
         name: status.context,
         outcome: status.state,
+        issuer: status.creator?.id,
       })),
   ];
 }
@@ -254,6 +269,29 @@ function failingChecksOf(
  * **読めなければ `undefined`。** **「緑だった」へ倒さない**（#638）
  * ——**倒すと、マージ先から来た失敗まで全部この PR のせいに見える。**
  */
+/**
+ * CI が終わっているか。
+ *
+ * **`ciStatus` から導かない**——**あちらは落ちているものを先に返す**ので、
+ * **走っている最中の run が混ざっていても「終わった」になる**（#654 のレビュー）。
+ * **そうなると、マージ先でまだ走っている失敗が「この PR だけのもの」に化ける。**
+ *
+ * **信号が 1 つも無いのも「終わっていない」**である——**CI が動いていないマージ先を
+ * 「緑だった」と読まない。**
+ */
+function isSettled(
+  runs: readonly CheckRunResponse[],
+  states: readonly CommitStatusResponse[],
+): boolean {
+  if (runs.length === 0 && states.length === 0) {
+    return false;
+  }
+  return (
+    runs.every((run) => run.status === "completed") &&
+    states.every((status) => status.state !== "pending")
+  );
+}
+
 export function toBaseCi(checks: unknown, statuses: unknown): BaseCi | undefined {
   const parsedChecks = checksSchema.safeParse(checks);
   const parsedStatuses = statusesSchema.safeParse(statuses);
@@ -264,7 +302,7 @@ export function toBaseCi(checks: unknown, statuses: unknown): BaseCi | undefined
   const states = parsedStatuses.data.statuses;
   return {
     // **走っている最中は「落ちていない」ではなく「まだ分からない」**である
-    settled: toCiStatus(runs, states) !== "pending",
+    settled: isSettled(runs, states),
     failing: failingChecksOf(runs, states),
   };
 }
@@ -276,13 +314,8 @@ export function toBaseCi(checks: unknown, statuses: unknown): BaseCi | undefined
  * **1 件も無いものを `passing` にしない。** CI が動いていない PR が素通りする。
  */
 function toCiStatus(
-  runs: readonly {
-    name: string;
-    app?: { id: number } | null;
-    status: string;
-    conclusion: string | null;
-  }[],
-  states: readonly { context: string; state: string }[],
+  runs: readonly CheckRunResponse[],
+  states: readonly CommitStatusResponse[],
 ): CiStatus {
   // **「落ちている」を決めるのはここ 1 箇所**である（`failingChecksOf`）
   if (failingChecksOf(runs, states).length > 0) {

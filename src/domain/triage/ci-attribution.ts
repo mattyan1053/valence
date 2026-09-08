@@ -29,13 +29,18 @@ export type CheckSignal = {
    */
   readonly outcome: string;
   /**
-   * 出した App（Checks API の `app.id`）。**Commit Status には無い。**
+   * 出したもの（Checks API の `app.id`、Commit Status の `creator.id`）。
    *
    * **名前だけでは「同じ check」と言えない**（#610。**`bin/loop-ci-status` が
    * 同じことを塞いでいる**）——**同名の check を複数の App が出す**ので、
    * **別の App の失敗と一致させると「マージ先でも出ている」が嘘になる。**
+   *
+   * **番号の名前空間は 2 つある**（App と人）が、**`kind` が分けている**ので混ざらない。
+   *
+   * **読めないことがある**（`app` も `creator` も応答の側で欠けうる）。
+   * **そのときは突き合わせられない**——**`undefined` どうしを一致させない。**
    */
-  readonly appId?: number;
+  readonly issuer?: number;
 };
 
 /** 突き合わせる先（マージ先ブランチの先端）で見えた CI。 */
@@ -59,15 +64,22 @@ export type CiFailureScope =
   /** **突き合わせられなかった。** */
   | "unmeasured";
 
+/**
+ * 突き合わせられる信号か。**発行元が読めないものは比べられない。**
+ *
+ * **`undefined` どうしを一致させない**——**確かめていないものを「同じ」と言うことになる。**
+ */
+function comparable(signal: CheckSignal): boolean {
+  return signal.issuer !== undefined;
+}
+
 function sameSignal(left: CheckSignal, right: CheckSignal): boolean {
   return (
     left.kind === right.kind &&
     left.name === right.name &&
     left.outcome === right.outcome &&
-    // **発行元まで見て初めて「同じ check」**である（#610）。
-    // **Commit Status は両側とも `undefined`** なので、**そこは名前と落ち方で決まる**
-    // ——**名前空間は `kind` が分けている。**
-    left.appId === right.appId
+    // **発行元まで見て初めて「同じ check」**である（#610）
+    left.issuer === right.issuer
   );
 }
 
@@ -87,6 +99,13 @@ export function ciFailureScopeOf(
   if (base === undefined || !base.settled) {
     return "unmeasured";
   }
+  // **1 件でも発行元が読めなければ、そこで止める**——**残りが揃っていても、
+  // その 1 件が本物でありうる。** **黙るのも違う**（**黙ると全部が自分のせいに見える**）
+  if (!failing.every(comparable)) {
+    return "unmeasured";
+  }
+  // **マージ先の側で発行元が読めない信号は、どれとも一致しない**（`sameSignal`）
+  // ——**倒れる先は `only-here`** で、**言い切らない側**である
   return failing.every((signal) => base.failing.some((other) => sameSignal(other, signal)))
     ? "also-on-base"
     : "only-here";

@@ -2,12 +2,17 @@ import { describe, expect, it } from "vitest";
 import type { BaseCi, CheckSignal } from "./ci-attribution";
 import { ciFailureScopeOf } from "./ci-attribution";
 
-const TEST_RUN: CheckSignal = { kind: "check-run", name: "test", outcome: "failure", appId: 15368 };
+const TEST_RUN: CheckSignal = {
+  kind: "check-run",
+  name: "test",
+  outcome: "failure",
+  issuer: 15368,
+};
 const TYPECHECK_RUN: CheckSignal = {
   kind: "check-run",
   name: "typecheck",
   outcome: "failure",
-  appId: 15368,
+  issuer: 15368,
 };
 
 /** マージ先の CI。**既定は「終わっている」**——突き合わせられる状態である。 */
@@ -51,14 +56,37 @@ describe("ciFailureScopeOf", () => {
     // **同名の check を複数の App が出す**（#610。**`bin/loop-ci-status` が
     // 同じ穴を塞いでいる**）——**別の App の失敗と一致させると、
     // 「マージ先でも出ている」が嘘になる。**
-    expect(ciFailureScopeOf([TEST_RUN], base([{ ...TEST_RUN, appId: 57789 }]))).toBe("only-here");
+    expect(ciFailureScopeOf([TEST_RUN], base([{ ...TEST_RUN, issuer: 57789 }]))).toBe("only-here");
   });
 
-  it("Commit Status には発行元が無いので、そこは名前と落ち方で見る", () => {
-    // **`kind` で名前空間が分かれている**ので、**片方に無い項目で弾かない**
-    const status: CheckSignal = { kind: "commit-status", name: "ci/travis", outcome: "failure" };
+  it("Commit Status も、発行元まで見る", () => {
+    // **同じ context を別の App / 人が出す**ので、**check run と同じ衝突が残る**。
+    // **名前空間は `kind` が分けている**ので、**番号が被っても混ざらない**
+    const status: CheckSignal = {
+      kind: "commit-status",
+      name: "ci/travis",
+      outcome: "failure",
+      issuer: 99,
+    };
 
     expect(ciFailureScopeOf([status], base([{ ...status }]))).toBe("also-on-base");
+    expect(ciFailureScopeOf([status], base([{ ...status, issuer: 100 }]))).toBe("only-here");
+  });
+
+  it("発行元が読めなければ、突き合わせられないと言う", () => {
+    // **`undefined` どうしを一致させない**——**発行元を確かめていないのに
+    // 「マージ先でも出ている」と言うことになる。** **黙るのも違う**
+    // ——**黙ると、全部が自分のせいに見える**（この Issue が消しに来たもの）
+    const unknown: CheckSignal = { kind: "check-run", name: "test", outcome: "failure" };
+
+    expect(ciFailureScopeOf([unknown], base([unknown]))).toBe("unmeasured");
+  });
+
+  it("読めた失敗が 1 つでも混ざっていれば、そこで止める", () => {
+    // **一部だけ突き合わせても、残りが本物でありうる**
+    const unknown: CheckSignal = { kind: "check-run", name: "lint", outcome: "failure" };
+
+    expect(ciFailureScopeOf([TEST_RUN, unknown], base([TEST_RUN]))).toBe("unmeasured");
   });
 
   it("名前が同じでも、種類が違えば別の check として見る", () => {

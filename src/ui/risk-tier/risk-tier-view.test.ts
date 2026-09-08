@@ -18,7 +18,12 @@ const SENSITIVE_PATHS = {
 } as const;
 
 /** 落ちている check の 1 件。**突き合わせるには名前が要る**（#638）。 */
-const FAILED_CHECK: CheckSignal = { kind: "check-run", name: "test", outcome: "failure" };
+const FAILED_CHECK: CheckSignal = {
+  kind: "check-run",
+  name: "test",
+  outcome: "failure",
+  issuer: 15368,
+};
 
 function change(overrides: Partial<ChangeSummary> = {}): ChangeSummary {
   const ciStatus = overrides.ciStatus ?? "passing";
@@ -370,6 +375,17 @@ describe("落ちている CI の出どころ（#638）", () => {
     const markup = viewFor(failingAgainst({ settled: true, failing: [] }));
 
     expect(markup).not.toContain("マージ先");
+  });
+
+  it("発行元を読めなければ、突き合わせられないと言う", () => {
+    // **`undefined` どうしを一致させない**（#654 のレビュー）——**黙るのも違う**
+    const unknown = change({
+      ciStatus: "failing",
+      failingChecks: [{ kind: "check-run", name: "test", outcome: "failure" }],
+      baseCi: { settled: true, failing: [{ kind: "check-run", name: "test", outcome: "failure" }] },
+    });
+
+    expect(viewFor(unknown)).toContain("突き合わせられませんでした");
   });
 
   it("CI が落ちていない行には、突き合わせの話を出さない", () => {
