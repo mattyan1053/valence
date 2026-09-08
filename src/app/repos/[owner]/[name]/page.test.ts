@@ -684,6 +684,8 @@ describe("推奨レビュー順を、盤面とは別に出す", () => {
     changedLineCount: 5,
     changedPaths: { paths, truncated: false },
     ciStatus: "passing" as const,
+    failingChecks: [],
+    baseCi: undefined,
   });
 
   const CLEAN: MergeStatusReport = { mergeable: "mergeable", state: "clean" };
@@ -860,6 +862,8 @@ describe("同じファイルを触る PR を、盤面へ出す", () => {
     changedLineCount: 5,
     changedPaths: { paths, truncated: false },
     ciStatus: "passing" as const,
+    failingChecks: [],
+    baseCi: undefined,
   });
 
   async function markup(): Promise<string> {

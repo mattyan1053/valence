@@ -17,9 +17,16 @@ import type {
   ChangeSummarySource,
   UnavailableChangeSummary,
 } from "../../application/ports/change-summary-source";
+import type { BaseCi } from "../../domain/triage/ci-attribution";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { AppCredentials } from "./app-credentials";
-import { toChangeSummary, toHeadSha } from "./change-summary-mapping";
+import {
+  toBaseCi,
+  toBaseRefPath,
+  toChangeSummary,
+  toCommitSha,
+  toHeadSha,
+} from "./change-summary-mapping";
 import type { InstallationToken } from "./installation-token";
 import { needsRefresh, requestInstallationToken } from "./installation-token";
 import type { GitHubRepository } from "./repository-installation";
@@ -151,9 +158,83 @@ export function createGitHubChangeSummarySource({
     return items;
   }
 
+  /**
+   * 突き合わせ先（マージ先ブランチの先端）の CI を読む（#638）。
+   *
+   * **枝の名前で 2 回読まない。** **先に 1 度だけ commit へ解決し、そこへ固定する**
+   * ——**間に push が入ると、check と Commit Status が別々の commit を見る**
+   * （#652 と同じ形）。**枝の名前が URL に出るのは、その 1 回だけ**である。
+   *
+   * **読めなければ `undefined` を返す。** **投げない**——**マージ先を読めなかっただけで、
+   * この PR の材料まで落とさない**（この口が守ってきたもの）。**倒れる先は
+   * 「突き合わせられなかった」**であって、「マージ先は緑」ではない。
+   * **打ち切られたときも同じ**——**この PR の材料は残り、突き合わせだけが立たない。**
+   */
+  async function readBaseCi(
+    ref: string,
+    header: string,
+    signal?: AbortSignal,
+  ): Promise<BaseCi | undefined> {
+    try {
+      // **検証してから URL へ入れる**（`AGENTS.md` §6）。素通しにすると、
+      // **installation トークンを付けたまま別の endpoint を叩ける**。
+      const commit = (await readJson(
+        `${repositoryUrl(repository)}/commits/${ref}`,
+        header,
+        signal,
+      )) as {
+        body: unknown;
+      };
+      const sha = toCommitSha(commit.body);
+      if (sha === undefined) {
+        return undefined;
+      }
+      // **見切れたら突き合わせ先にしない**（`readAll` が投げる）——
+      // **「見ていない」を「落ちていない」と読まない。**
+      const checkRuns = await readAll(
+        `/commits/${sha}/check-runs`,
+        (body) => (body as { check_runs?: unknown })?.check_runs as unknown[] | undefined,
+        header,
+        "マージ先の CI の結果",
+        signal,
+      );
+      const statuses = await readAll(
+        `/commits/${sha}/status`,
+        (body) => (body as { statuses?: unknown })?.statuses as unknown[] | undefined,
+        header,
+        "マージ先の CI の状態",
+        signal,
+      );
+      return toBaseCi({ check_runs: checkRuns }, { statuses });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * **同じ枝を PR ごとに読み直さない。** 積み上げた PR は同じマージ先を共有するので、
+   * **本数ぶん往復が増える**。**記憶は 1 回の呼び出しの中だけ**——
+   * **持ち越すと、次に開いた画面が古いマージ先を見る。**
+   */
+  async function baseCiOf(
+    ref: string,
+    header: string,
+    knownBases: Map<string, BaseCi | undefined>,
+    signal?: AbortSignal,
+  ): Promise<BaseCi | undefined> {
+    if (knownBases.has(ref)) {
+      return knownBases.get(ref);
+    }
+    const result = await readBaseCi(ref, header, signal);
+    // **読めなかったことも覚える。** 覚えないと、落ちている PR の本数ぶん叩き直す
+    knownBases.set(ref, result);
+    return result;
+  }
+
   async function summaryOf(
     number: number,
     header: string,
+    knownBases: Map<string, BaseCi | undefined>,
     signal?: AbortSignal,
   ): Promise<ChangeSummary> {
     const base = `${repositoryUrl(repository)}`;
@@ -210,7 +291,12 @@ export function createGitHubChangeSummarySource({
     if (!result.ok) {
       throw new Error(result.reason);
     }
-    return result.summary;
+    // **落ちていない PR では引かない。** 言うことが無いところで往復を増やさない
+    const ref = result.summary.failingChecks.length === 0 ? undefined : toBaseRefPath(detail.body);
+    if (ref === undefined) {
+      return result.summary;
+    }
+    return { ...result.summary, baseCi: await baseCiOf(ref, header, knownBases, signal) };
   }
 
   /** 打ち切られたぶん。**「読めなかった」と同じ場所に出るが、同じものではない。** */
@@ -233,10 +319,11 @@ export function createGitHubChangeSummarySource({
   async function attempt(
     number: number,
     header: string,
+    knownBases: Map<string, BaseCi | undefined>,
     signal: AbortSignal | undefined,
   ): Promise<Attempt> {
     try {
-      return { ok: true, summary: await summaryOf(number, header, signal) };
+      return { ok: true, summary: await summaryOf(number, header, knownBases, signal) };
     } catch (error) {
       return {
         ok: false,
@@ -258,6 +345,8 @@ export function createGitHubChangeSummarySource({
   ): Promise<ChangeSummaryListing> {
     const summaries = new Map<number, ChangeSummary>();
     const unavailable: UnavailableChangeSummary[] = [];
+    // **1 回の呼び出しの中だけ覚える**（`baseCiOf`）
+    const knownBases = new Map<string, BaseCi | undefined>();
     const stopAt = (index: number): ChangeSummaryListing => ({
       summaries,
       unavailable: [...unavailable, ...giveUp(numbers.slice(index))],
@@ -267,7 +356,7 @@ export function createGitHubChangeSummarySource({
       if (abandoned(signal)) {
         return stopAt(index);
       }
-      const result = await attempt(number, header, signal);
+      const result = await attempt(number, header, knownBases, signal);
       if (result.ok) {
         summaries.set(number, result.summary);
         continue;
