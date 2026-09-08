@@ -336,6 +336,48 @@ describe("ReviewBoard", () => {
   });
 
   /**
+   * **同じ題の PR を、行に出す**（#630）。
+   *
+   * **「似ています」とは言わない**——**同じだった並びと、その長さを出す。**
+   */
+  describe("重複しているかもしれない PR", () => {
+    const SAME = "リポジトリ一覧に、1 要求ずつの上限を置く";
+
+    it("同じ題の相手が、両方の行に出る", () => {
+      const rows = list(render(props({ titleOf: () => SAME })));
+
+      expect(rows.match(/タイトルが/g), "2 行に出ていない").toHaveLength(2);
+    });
+
+    it("リスク判定の材料が無い行にも出す", () => {
+      // **材料が揃っていないことと、同じ題かどうかは別**である
+      const rows = list(render(props({ changes: new Map(), titleOf: () => SAME })));
+
+      expect(rows.match(/タイトルが/g), "2 行に出ていない").toHaveLength(2);
+    });
+
+    it("題が違えば、行に出さない", () => {
+      // **平常時に鳴るものは読まれなくなる**（#248）——**行はもう長い**（#597）
+      const rows = list(
+        render(
+          props({ titleOf: (number: number) => (number === 1 ? "あいうえお" : "かきくけこ") }),
+        ),
+      );
+
+      expect(rows).not.toMatch(/タイトルが|測り切れていません/);
+    });
+
+    it("タイトルが取れていない PR が居れば、測り切れていないと言う", () => {
+      // **「読めなかった」を「似ていない」にしない**（#637 と同じ）
+      const rows = list(
+        render(props({ titleOf: (number: number) => (number === 1 ? "あいうえお" : undefined) })),
+      );
+
+      expect(rows).toMatch(/測り切れていません/);
+    });
+  });
+
+  /**
    * **誰に振られているかを、行に出す**（#631）。
    *
    * **誰も見ていない PR が、盤面では他と同じ顔で並んでいた。**
