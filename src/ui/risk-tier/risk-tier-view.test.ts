@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { BaseCi, CheckSignal } from "../../domain/triage/ci-attribution";
 import type { ChangeSummary, CiStatus, RiskTier } from "../../domain/triage/risk-tier";
 import { classifyRiskTier } from "../../domain/triage/risk-tier";
 import type { RiskTierViewProps } from "./risk-tier-view";
@@ -16,14 +17,28 @@ const SENSITIVE_PATHS = {
   truncated: false,
 } as const;
 
+/** 落ちている check の 1 件。**突き合わせるには名前が要る**（#638）。 */
+const FAILED_CHECK: CheckSignal = { kind: "check-run", name: "test", outcome: "failure" };
+
 function change(overrides: Partial<ChangeSummary> = {}): ChangeSummary {
+  const ciStatus = overrides.ciStatus ?? "passing";
   return {
     changedFileCount: 2,
     changedLineCount: 20,
     changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
-    ciStatus: "passing",
+    ciStatus,
+    // **`ciStatus` と食い違わせない。** 材料を作る側は**同じ判定から両方を出す**ので、
+    // **「落ちているのに 1 件も挙がらない」入力は起こりえない**——
+    // **起こりえない組み合わせで緑にしない**（この試験群がずっと守っている形）
+    failingChecks: ciStatus === "failing" ? [FAILED_CHECK] : [],
+    baseCi: undefined,
     ...overrides,
   };
+}
+
+/** マージ先の CI を添えた、落ちている PR。 */
+function failingAgainst(baseCi: BaseCi | undefined): ChangeSummary {
+  return change({ ciStatus: "failing", baseCi });
 }
 
 /**
@@ -283,6 +298,16 @@ describe("RiskTierView", () => {
       expect(summary, "区切りだけが残っている").not.toContain("／");
     });
 
+    it("落ちている CI の出どころは、畳まない", () => {
+      // **順番を決める材料である**（#638）——**マージ先から来た赤なら、
+      // 開くまでもなく「ここは追わなくてよい」**と分かる
+      const markup = viewFor(
+        change({ ciStatus: "failing", baseCi: { settled: true, failing: [FAILED_CHECK] } }),
+      );
+
+      expect(summaryOf(markup), "出どころが畳まれている").toContain("マージ先でも");
+    });
+
     it("CI の行は、常時出す側と畳む側の片方にしか無い", () => {
       // **同じことを 2 箇所で言うと、片方が事実と違う日が来る**（`TIER_TEXT` の但し書き）。
       for (const ciStatus of ["passing", "failing", "pending"] as const) {
@@ -318,5 +343,38 @@ describe("RiskTierView", () => {
       expect(new Set(shown).size).toBe(3);
       expect(ciPartOf(ciStatus, "needs-review")).not.toBe("");
     });
+  });
+});
+
+/**
+ * **マージ先が赤いと、その上の PR は全部赤くなる**（#638）。
+ * **「CI: 落ちています」としか言わないと、自分のせいでない失敗を全員が追いかける。**
+ */
+describe("落ちている CI の出どころ（#638）", () => {
+  it("マージ先でも同じように落ちていれば、そう出す", () => {
+    const markup = viewFor(failingAgainst({ settled: true, failing: [FAILED_CHECK] }));
+
+    expect(markup).toContain("マージ先でも同じ check が落ちています");
+  });
+
+  it("突き合わせられなければ、そう言う", () => {
+    // **「マージ先は緑」へ倒さない**——**倒すと、全部が自分のせいに見える**
+    const markup = viewFor(failingAgainst(undefined));
+
+    expect(markup).toContain("突き合わせられませんでした");
+  });
+
+  it("この PR にしか出ていないときは、マージ先の話をしない", () => {
+    // **言い切るのは、同じ check が同じように落ちているときだけ**である。
+    // **`CI: 落ちています（直さないと進みません）` が、そのまま答えになっている**
+    const markup = viewFor(failingAgainst({ settled: true, failing: [] }));
+
+    expect(markup).not.toContain("マージ先");
+  });
+
+  it("CI が落ちていない行には、突き合わせの話を出さない", () => {
+    for (const ciStatus of ["passing", "pending"] as const) {
+      expect(viewFor(change({ ciStatus })), `${ciStatus} に出ている`).not.toContain("マージ先");
+    }
   });
 });

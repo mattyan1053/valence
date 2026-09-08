@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import type { BaseCi, CheckSignal } from "../../domain/triage/ci-attribution";
 import type { ChangeSummary, CiStatus } from "../../domain/triage/risk-tier";
 import { touchesSensitivePath } from "../../domain/triage/sensitive-path";
 
@@ -45,6 +46,20 @@ export type ChangeSummaryInput = {
 const headShaSchema = z.string().regex(/^[0-9a-f]{40}$/);
 
 const headSchema = z.object({ head: z.object({ sha: headShaSchema }) });
+
+const commitSchema = z.object({ sha: headShaSchema });
+
+/**
+ * commit の SHA を取り出す。**マージ先のブランチ名を解決した結果**がここに来る。
+ *
+ * **枝の名前のまま 2 回読まない**（#638）——**間に push が入ると、
+ * check と Commit Status が別々の commit を見る**（#652 と同じ形）。
+ * **1 度だけ解決して、そこへ固定する。**
+ */
+export function toCommitSha(body: unknown): string | undefined {
+  const parsed = commitSchema.safeParse(body);
+  return parsed.success ? parsed.data.sha : undefined;
+}
 
 const detailSchema = z.object({
   changed_files: z.number().int().nonnegative(),
@@ -86,6 +101,14 @@ const filesSchema = z.array(
 const checksSchema = z.object({
   check_runs: z.array(
     z.object({
+      /**
+       * **名前も読む**（#638）。**突き合わせるには名前が要る**ので、
+       * **無いものを空文字で埋めない**——**無関係な失敗どうしが一致する。**
+       *
+       * **Checks API では必須**なので、**欠けている応答は「読めない」側**へ倒す
+       * （`ciStatus` だけ拾って先へ進むと、**名前の無い失敗を持ったまま突き合わせる**）。
+       */
+      name: z.string().min(1),
       status: z.string(),
       conclusion: z.string().nullable(),
     }),
@@ -93,8 +116,36 @@ const checksSchema = z.object({
 });
 
 const statusesSchema = z.object({
-  statuses: z.array(z.object({ state: z.string() })),
+  /** **`context` が Commit Status 側の名前**である。**こちらも必須。** */
+  statuses: z.array(z.object({ context: z.string().min(1), state: z.string() })),
 });
+
+/**
+ * マージ先のブランチ名。
+ *
+ * **URL のパスへ入る値なので、段ごとに検証する**（`AGENTS.md` §6）。
+ * **上の階層へ出る形（`..`）も、問い合わせを足す形（`?`）も、段の頭に置けない**
+ * ——**段は英数字で始まる**とだけ決めれば、どちらも通らない。
+ *
+ * **`/` は残す。** この運用の枝は `<種別>/<番号>-<説明>` なので、
+ * **符号化すると別の path になる。**
+ */
+const baseRefSchema = z.object({
+  base: z.object({
+    ref: z
+      .string()
+      .max(255)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/),
+  }),
+});
+
+/**
+ * 検証済みのマージ先ブランチ名を取り出す。**読めなければ突き合わせない**（`toHeadSha` と同じ形）。
+ */
+export function toBaseRef(detail: unknown): string | undefined {
+  const parsed = baseRefSchema.safeParse(detail);
+  return parsed.success ? parsed.data.base.ref : undefined;
+}
 
 /**
  * **通ったと見なす結末を挙げる。** 落ちたほうを挙げると、**知らない値が `passing` になる**。
@@ -110,20 +161,71 @@ const PASSING_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
 const PASSING_STATES = new Set(["success"]);
 
 /**
+ * 落ちている check を、名前と落ち方で挙げる（#638）。
+ *
+ * **`ciStatus` と同じ判定から作る。** **2 箇所で「落ちている」を決めると、
+ * 片方が事実と違う日が来る**（このリポジトリが繰り返し塞いでいる形）。
+ *
+ * **終わっていない run は入れない。** **待てば済むものを「直さないと進まない」に
+ * 混ぜない**——それは `pending` の側である。
+ */
+function failingChecksOf(
+  runs: readonly { name: string; status: string; conclusion: string | null }[],
+  states: readonly { context: string; state: string }[],
+): readonly CheckSignal[] {
+  return [
+    ...runs
+      .filter((run) => run.status === "completed" && !PASSING_CONCLUSIONS.has(run.conclusion ?? ""))
+      // **`conclusion` が無いまま終わることは無い**が、**空文字で埋めない**
+      // ——**空どうしが一致して「同じように落ちている」になる。**
+      .map((run) => ({
+        kind: "check-run" as const,
+        name: run.name,
+        outcome: run.conclusion ?? "unknown",
+      })),
+    ...states
+      .filter((status) => status.state === "failure" || status.state === "error")
+      .map((status) => ({
+        kind: "commit-status" as const,
+        name: status.context,
+        outcome: status.state,
+      })),
+  ];
+}
+
+/**
+ * 突き合わせ先（マージ先ブランチの先端）の CI を組み立てる。
+ *
+ * **読めなければ `undefined`。** **「緑だった」へ倒さない**（#638）
+ * ——**倒すと、マージ先から来た失敗まで全部この PR のせいに見える。**
+ */
+export function toBaseCi(checks: unknown, statuses: unknown): BaseCi | undefined {
+  const parsedChecks = checksSchema.safeParse(checks);
+  const parsedStatuses = statusesSchema.safeParse(statuses);
+  if (!parsedChecks.success || !parsedStatuses.success) {
+    return undefined;
+  }
+  const runs = parsedChecks.data.check_runs;
+  const states = parsedStatuses.data.statuses;
+  return {
+    // **走っている最中は「落ちていない」ではなく「まだ分からない」**である
+    settled: toCiStatus(runs, states) !== "pending",
+    failing: failingChecksOf(runs, states),
+  };
+}
+
+/**
  * **3 つを潰さない。** `pending` は待てば済み、`failing` は直さないと進まない——
  * 表示側（#110）が分けている区別なので、ここで丸めると意味が無くなる。
  *
  * **1 件も無いものを `passing` にしない。** CI が動いていない PR が素通りする。
  */
 function toCiStatus(
-  runs: readonly { status: string; conclusion: string | null }[],
-  states: readonly { state: string }[],
+  runs: readonly { name: string; status: string; conclusion: string | null }[],
+  states: readonly { context: string; state: string }[],
 ): CiStatus {
-  const failed =
-    runs.some(
-      (run) => run.status === "completed" && !PASSING_CONCLUSIONS.has(run.conclusion ?? ""),
-    ) || states.some((status) => status.state === "failure" || status.state === "error");
-  if (failed) {
+  // **「落ちている」を決めるのはここ 1 箇所**である（`failingChecksOf`）
+  if (failingChecksOf(runs, states).length > 0) {
     return "failing";
   }
   // **信号が 1 つも無いものを `passing` にしない。** CI が動いていない PR が素通りする
@@ -189,6 +291,11 @@ export function toChangeSummary(input: ChangeSummaryInput): ChangeSummaryResult 
       // 「これが全部だ」に化ける**（`AGENTS.md` §5）
       changedPaths: { paths, truncated: input.filesTruncated },
       ciStatus: toCiStatus(checks.data.check_runs, statuses.data.statuses),
+      failingChecks: failingChecksOf(checks.data.check_runs, statuses.data.statuses),
+      // **突き合わせ先はここでは付けない。** **どの commit と比べるかを決めるのは、
+      // 取りに行く側**である（`github-change-summary-source`）。
+      // **付け忘れたときに倒れる先は「突き合わせられなかった」**——安全な側である。
+      baseCi: undefined,
     },
   };
 }

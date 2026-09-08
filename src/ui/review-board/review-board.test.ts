@@ -30,11 +30,17 @@ const SENSITIVE_PATHS = {
 } as const;
 
 function change(overrides: Partial<ChangeSummary> = {}): ChangeSummary {
+  const ciStatus = overrides.ciStatus ?? "passing";
   return {
     changedFileCount: 1,
     changedLineCount: 5,
     changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
-    ciStatus: "passing",
+    ciStatus,
+    // **`ciStatus` と食い違わせない**（#638）——**材料を作る側は同じ判定から
+    // 両方を出す**ので、**「落ちているのに 1 件も挙がらない」入力は起こりえない**
+    failingChecks:
+      ciStatus === "failing" ? [{ kind: "check-run", name: "test", outcome: "failure" }] : [],
+    baseCi: undefined,
     ...overrides,
   };
 }

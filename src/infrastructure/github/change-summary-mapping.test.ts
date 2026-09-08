@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { toChangeSummary } from "./change-summary-mapping";
+import { toBaseCi, toBaseRef, toChangeSummary, toCommitSha } from "./change-summary-mapping";
 
 const DETAIL = { changed_files: 3, additions: 10, deletions: 4 };
 const FILES = [{ filename: "src/ui/button.tsx" }];
-const PASSING = { check_runs: [{ status: "completed", conclusion: "success" }] };
+const PASSING = { check_runs: [{ name: "test", status: "completed", conclusion: "success" }] };
 /** Commit Status しか登録しないリポジトリもある。**既定は「信号なし」。** */
 const NO_STATUSES = { state: "pending", statuses: [] };
 
@@ -25,6 +25,8 @@ describe("toChangeSummary", () => {
         changedLineCount: 14,
         changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
         ciStatus: "passing",
+        failingChecks: [],
+        baseCi: undefined,
       },
     });
   });
@@ -95,15 +97,15 @@ describe("toChangeSummary", () => {
 
   describe("CI の 3 状態", () => {
     it.each([
-      [{ check_runs: [{ status: "completed", conclusion: "success" }] }, "passing"],
-      [{ check_runs: [{ status: "completed", conclusion: "failure" }] }, "failing"],
-      [{ check_runs: [{ status: "in_progress", conclusion: null }] }, "pending"],
+      [{ check_runs: [{ name: "test", status: "completed", conclusion: "success" }] }, "passing"],
+      [{ check_runs: [{ name: "test", status: "completed", conclusion: "failure" }] }, "failing"],
+      [{ check_runs: [{ name: "test", status: "in_progress", conclusion: null }] }, "pending"],
       // **終わっているものと落ちているものが混ざれば落ちている**
       [
         {
           check_runs: [
-            { status: "completed", conclusion: "success" },
-            { status: "completed", conclusion: "failure" },
+            { name: "test", status: "completed", conclusion: "success" },
+            { name: "test", status: "completed", conclusion: "failure" },
           ],
         },
         "failing",
@@ -112,8 +114,8 @@ describe("toChangeSummary", () => {
       [
         {
           check_runs: [
-            { status: "in_progress", conclusion: null },
-            { status: "completed", conclusion: "failure" },
+            { name: "test", status: "in_progress", conclusion: null },
+            { name: "test", status: "completed", conclusion: "failure" },
           ],
         },
         "failing",
@@ -122,11 +124,14 @@ describe("toChangeSummary", () => {
       [{ check_runs: [] }, "pending"],
       // **知らない結末を passing にしない。** `conclusion` は GitHub が増やす値で、
       // 増えたことを知る手立てがない（#114 の「列挙は必ず古くなる」と同じ）
-      [{ check_runs: [{ status: "completed", conclusion: "stale" }] }, "failing"],
-      [{ check_runs: [{ status: "completed", conclusion: "これから増える値" }] }, "failing"],
+      [{ check_runs: [{ name: "test", status: "completed", conclusion: "stale" }] }, "failing"],
+      [
+        { check_runs: [{ name: "test", status: "completed", conclusion: "これから増える値" }] },
+        "failing",
+      ],
       // **通ったと見なすものは明示する**
-      [{ check_runs: [{ status: "completed", conclusion: "skipped" }] }, "passing"],
-      [{ check_runs: [{ status: "completed", conclusion: "neutral" }] }, "passing"],
+      [{ check_runs: [{ name: "test", status: "completed", conclusion: "skipped" }] }, "passing"],
+      [{ check_runs: [{ name: "test", status: "completed", conclusion: "neutral" }] }, "passing"],
     ])("%o は %s", (checks, expected) => {
       const result = toChangeSummary({
         detail: DETAIL,
@@ -155,17 +160,24 @@ describe("toChangeSummary", () => {
     }
 
     it("check run が無くても、Commit Status が通っていれば passing", () => {
-      expect(ciOf({ check_runs: [] }, { state: "success", statuses: [{ state: "success" }] })).toBe(
-        "passing",
-      );
+      expect(
+        ciOf(
+          { check_runs: [] },
+          { state: "success", statuses: [{ context: "ci", state: "success" }] },
+        ),
+      ).toBe("passing");
     });
 
     it("Commit Status が落ちていれば failing", () => {
-      expect(ciOf(PASSING, { state: "failure", statuses: [{ state: "failure" }] })).toBe("failing");
+      expect(
+        ciOf(PASSING, { state: "failure", statuses: [{ context: "ci", state: "failure" }] }),
+      ).toBe("failing");
     });
 
     it("Commit Status が走っていれば pending", () => {
-      expect(ciOf(PASSING, { state: "pending", statuses: [{ state: "pending" }] })).toBe("pending");
+      expect(
+        ciOf(PASSING, { state: "pending", statuses: [{ context: "ci", state: "pending" }] }),
+      ).toBe("pending");
     });
 
     it("どちらにも信号が無ければ pending", () => {
@@ -217,5 +229,150 @@ describe("toChangeSummary", () => {
     const result = toChangeSummary({ statuses: NO_STATUSES, ...input, filesTruncated: false });
 
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("落ちている check を名前で残す", () => {
+  // **突き合わせるには名前が要る**（#638）。**3 値に潰れた `ciStatus` は
+  // 「どれが落ちたか」を持っていない**ので、マージ先と比べられない。
+  function failingOf(checks: unknown, statuses: unknown) {
+    const result = toChangeSummary({
+      detail: DETAIL,
+      files: FILES,
+      filesTruncated: false,
+      checks,
+      statuses,
+    });
+    return result.ok ? result.summary.failingChecks : undefined;
+  }
+
+  it("落ちた check run を、名前と落ち方で残す", () => {
+    expect(
+      failingOf(
+        {
+          check_runs: [
+            { name: "test", status: "completed", conclusion: "failure" },
+            { name: "lint", status: "completed", conclusion: "success" },
+          ],
+        },
+        NO_STATUSES,
+      ),
+    ).toEqual([{ kind: "check-run", name: "test", outcome: "failure" }]);
+  });
+
+  it("落ちた Commit Status も、同じ形で残す", () => {
+    // **道具立てを前提にしない**（`AGENTS.md` §1）。Commit Status だけの CI がある
+    expect(
+      failingOf(
+        { check_runs: [] },
+        { state: "failure", statuses: [{ context: "ci/travis", state: "error" }] },
+      ),
+    ).toEqual([{ kind: "commit-status", name: "ci/travis", outcome: "error" }]);
+  });
+
+  it("通っている PR には、落ちている check が 1 件も無い", () => {
+    // **`ciStatus` と食い違わせない。** 同じ材料から作るので、
+    // **「落ちているのに 1 件も挙がらない」は起きない**
+    expect(failingOf(PASSING, NO_STATUSES)).toEqual([]);
+  });
+
+  it("走っている途中のものは、落ちている側に入れない", () => {
+    // **待てば済むものを「直さないと進まない」に混ぜない**
+    expect(
+      failingOf(
+        { check_runs: [{ name: "test", status: "in_progress", conclusion: null }] },
+        NO_STATUSES,
+      ),
+    ).toEqual([]);
+  });
+
+  it("名前を読めない応答は、材料にしない", () => {
+    // **名前は Checks API / Commit Status のどちらでも必須**である。
+    // **無いものを空文字で埋めると、無関係な失敗どうしが一致する**
+    expect(
+      failingOf({ check_runs: [{ status: "completed", conclusion: "failure" }] }, NO_STATUSES),
+    ).toBeUndefined();
+  });
+
+  it("突き合わせ先は、ここでは付けない", () => {
+    // **付けるのは、どの commit と比べるかを決める側**（infrastructure）である。
+    // **付け忘れたときに倒れる先は「突き合わせられなかった」**——安全な側である
+    const result = toChangeSummary({
+      detail: DETAIL,
+      files: FILES,
+      filesTruncated: false,
+      checks: PASSING,
+      statuses: NO_STATUSES,
+    });
+
+    expect(result.ok && result.summary.baseCi).toBeUndefined();
+  });
+});
+
+describe("toBaseRef", () => {
+  it("マージ先のブランチ名を取り出す", () => {
+    expect(toBaseRef({ base: { ref: "main" } })).toBe("main");
+  });
+
+  it("`/` を含むブランチ名も通す", () => {
+    // **この運用の枝はすべて `<種別>/<番号>-<説明>`** である（`git-workflow.md`）
+    expect(toBaseRef({ base: { ref: "feat/638-ci-blame" } })).toBe("feat/638-ci-blame");
+  });
+
+  it.each([
+    ["読めない", {}],
+    ["空", { base: { ref: "" } }],
+    ["上の階層へ出る", { base: { ref: "../../../orgs/other/secrets" } }],
+    ["段の途中に上がある", { base: { ref: "main/../../orgs" } }],
+    ["問い合わせを足す", { base: { ref: "main?per_page=1" } }],
+  ])("%s ものは URL に入れない", (_name, detail) => {
+    // **未検証の値を URL のパスへ入れない**（`AGENTS.md` §6）。
+    // **installation トークンが付いている**ので、別の endpoint を叩けてしまう
+    expect(toBaseRef(detail)).toBeUndefined();
+  });
+});
+
+describe("toBaseCi", () => {
+  it("マージ先で落ちている check を、同じ形で残す", () => {
+    expect(
+      toBaseCi(
+        { check_runs: [{ name: "test", status: "completed", conclusion: "failure" }] },
+        NO_STATUSES,
+      ),
+    ).toEqual({
+      settled: true,
+      failing: [{ kind: "check-run", name: "test", outcome: "failure" }],
+    });
+  });
+
+  it("CI が終わっていなければ、そう言う", () => {
+    // **走っている最中は「落ちていない」ではなく「まだ分からない」**
+    expect(
+      toBaseCi({ check_runs: [{ name: "test", status: "queued", conclusion: null }] }, NO_STATUSES),
+    ).toEqual({
+      settled: false,
+      failing: [],
+    });
+  });
+
+  it("読めなければ、突き合わせ先にしない", () => {
+    // **「マージ先は緑」へ倒さない**——**読めなかったことを残す**
+    expect(toBaseCi({ check_runs: "?" }, NO_STATUSES)).toBeUndefined();
+  });
+});
+
+describe("toCommitSha", () => {
+  it("commit の SHA を取り出す", () => {
+    expect(toCommitSha({ sha: "a".repeat(40) })).toBe("a".repeat(40));
+  });
+
+  it.each([
+    ["読めない", {}],
+    ["40 桁でない", { sha: "abc" }],
+    ["16 進でない", { sha: "z".repeat(40) }],
+    ["上の階層へ出る", { sha: "../../../orgs/other/secrets" }],
+  ])("%s ものは URL に入れない", (_name, body) => {
+    // **未検証の値を URL のパスへ入れない**（`AGENTS.md` §6）
+    expect(toCommitSha(body)).toBeUndefined();
   });
 });

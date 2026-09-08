@@ -10,6 +10,8 @@
 
 import type { ReportableChangeKind } from "../../domain/triage/change-kind";
 import { reportableKindOf } from "../../domain/triage/change-kind";
+import type { CiFailureScope } from "../../domain/triage/ci-attribution";
+import { ciFailureScopeOf } from "../../domain/triage/ci-attribution";
 import type { ChangeSummary, CiStatus, RiskTier } from "../../domain/triage/risk-tier";
 import { touchesSensitivePath } from "../../domain/triage/sensitive-path";
 
@@ -68,6 +70,24 @@ const CI_TEXT: Record<CiStatus, string> = {
 };
 
 /**
+ * 落ちている CI の出どころ（#638）。**マージ先が赤いと、その上の PR は全部赤くなる。**
+ *
+ * **`Record` で持つ**（`TIER_TEXT` と同じ）——**状態を足して書き忘れると型検査が落ちる。**
+ *
+ * **`only-here` は `undefined`。** **既定の文言（`CI: 落ちています（直さないと
+ * 進みません）`）が、そのまま答えになっている**ので、**同じことを 2 度言わない。**
+ * **「この PR のせいだ」とも言い切らない**——**この PR の check が走ったのは、
+ * マージ先を読んだ瞬間とは別の瞬間**である。**マージ先が直ったあとの赤**は
+ * ここへ来るが、**そこで言えるのは「いまのマージ先には出ていない」までで、
+ * 誰のせいかではない。**
+ */
+const SCOPE_TEXT: Record<CiFailureScope, string | undefined> = {
+  "also-on-base": "マージ先でも同じ check が落ちています",
+  "only-here": undefined,
+  unmeasured: "マージ先と突き合わせられませんでした",
+};
+
+/**
  * **10 本並ぶと、全部読まないと順番が決まらない**（#597。**人が見て言った**）。
  *
  * > あとこれ数が増えたらめっちゃ見づらそう
@@ -91,6 +111,10 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
   // **言ってよいかは domain が決める**（#640）——**混ざっているとき・最後まで
   // 読めていないとき・実装だけのときは `undefined` が返る。**
   const kind = reportableKindOf(change.changedPaths);
+  // **落ちていなければ `undefined`**（`ciFailureScopeOf`）——**通っている行に
+  // 突き合わせの話は出ない。** **判定はここに書き写さない。**
+  const scope = ciFailureScopeOf(change.failingChecks, change.baseCi);
+  const scopeText = scope === undefined ? undefined : SCOPE_TEXT[scope];
 
   return (
     // **判断材料は脇に置く**（#583）。**本文と同じ強さで並ぶと、行が読めない。**
@@ -114,6 +138,15 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
                 **試験では気づけない**（#585 で、配信中の CSS を見るまで分からなかった形）。 */}
             <span aria-hidden="true">／</span>
             <span>{CI_TEXT[change.ciStatus]}</span>
+          </>
+        )}
+        {/* **出どころも、開かずに見せる**（#638）——**マージ先から来た赤なら、
+            開くまでもなく「ここは追わなくてよい」と分かる。**
+            **区切りは上と同じく文字で置く**（class に頼らない。#605 のレビュー）。 */}
+        {scopeText !== undefined && (
+          <>
+            <span aria-hidden="true">／</span>
+            <span>{scopeText}</span>
           </>
         )}
       </summary>

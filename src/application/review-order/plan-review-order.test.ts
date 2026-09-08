@@ -21,6 +21,8 @@ const SUMMARY: ChangeSummary = {
   changedLineCount: 5,
   changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
   ciStatus: "passing",
+  failingChecks: [],
+  baseCi: undefined,
 };
 
 /** 材料の口。**渡さなければ「1 件も取れなかった」ものとして扱う。** */

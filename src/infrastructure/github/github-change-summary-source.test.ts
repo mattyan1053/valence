@@ -57,11 +57,39 @@ function source(routes: Routes) {
   });
 }
 
+/** 叩いた URL を控えながら答える口。**どこを引いたか**を見る試験で使う。 */
+function watching(routes: Routes, rewrite: (url: string) => string = (url) => url) {
+  const asked: string[] = [];
+  const answer = fakeFetch(routes);
+  return {
+    asked,
+    source: createGitHubChangeSummarySource({
+      credentials: CREDENTIALS,
+      repository: REPOSITORY,
+      now: () => new Date("2026-01-01T00:00:00Z"),
+      fetchImpl: (async (input: string | URL | Request) => {
+        asked.push(String(input));
+        return answer(rewrite(String(input)));
+      }) as unknown as typeof fetch,
+    }),
+  };
+}
+
+/** マージ先の先端。**枝の名前を解決した結果**で、突き合わせはここへ固定する。 */
+const BASE_SHA = "c".repeat(40);
+const DETAIL = {
+  changed_files: 1,
+  additions: 2,
+  deletions: 0,
+  head: { sha: HEAD },
+  base: { ref: "main" },
+};
+
 const OK_ROUTES: Routes = {
   "/pulls/1/files": { body: [{ filename: "src/ui/button.tsx" }] },
-  "/pulls/1": { body: { changed_files: 1, additions: 2, deletions: 0, head: { sha: HEAD } } },
+  "/pulls/1": { body: DETAIL },
   [`/commits/${HEAD}/check-runs`]: {
-    body: { check_runs: [{ status: "completed", conclusion: "success" }] },
+    body: { check_runs: [{ name: "test", status: "completed", conclusion: "success" }] },
   },
   // **Commit Status しか登録しない CI がある。** 両方見て初めてどちらでも動く
   [`/commits/${HEAD}/status`]: { body: { state: "success", statuses: [] } },
@@ -78,6 +106,8 @@ describe("createGitHubChangeSummarySource", () => {
       changedLineCount: 2,
       changedPaths: { paths: ["src/ui/button.tsx"], truncated: false },
       ciStatus: "passing",
+      failingChecks: [],
+      baseCi: undefined,
     });
     expect(listing.unavailable).toEqual([]);
   });
@@ -132,7 +162,7 @@ describe("createGitHubChangeSummarySource", () => {
     const listing = await source({
       ...OK_ROUTES,
       [`/commits/${HEAD}/check-runs`]: {
-        body: { check_runs: [{ status: "completed", conclusion: "success" }] },
+        body: { check_runs: [{ name: "test", status: "completed", conclusion: "success" }] },
         link: NEXT_PAGE,
       },
     }).listChangeSummaries([1]);
@@ -156,7 +186,9 @@ describe("createGitHubChangeSummarySource", () => {
     const listing = await source({
       ...OK_ROUTES,
       [`/commits/${HEAD}/check-runs`]: { body: { check_runs: [] } },
-      [`/commits/${HEAD}/status`]: { body: { state: "success", statuses: [{ state: "success" }] } },
+      [`/commits/${HEAD}/status`]: {
+        body: { state: "success", statuses: [{ context: "ci", state: "success" }] },
+      },
     }).listChangeSummaries([1]);
 
     expect(listing.summaries.get(1)?.ciStatus).toBe("passing");
@@ -177,6 +209,7 @@ describe("createGitHubChangeSummarySource", () => {
             changed_files: 1,
             additions: 2,
             deletions: 0,
+            base: { ref: "main" },
             head: { sha: call === 1 ? HEAD : "b".repeat(40) },
           };
         },
@@ -442,5 +475,98 @@ describe("createGitHubChangeSummarySource", () => {
 
     expect(listing.summaries.size).toBe(0);
     expect(listing.unavailable).toEqual([]);
+  });
+});
+
+describe("マージ先と突き合わせる", () => {
+  const FAILED = { name: "test", status: "completed", conclusion: "failure" };
+  /** **落ちている PR。** ここでだけマージ先を読みに行く。 */
+  const FAILING: Routes = {
+    ...OK_ROUTES,
+    [`/commits/${HEAD}/check-runs`]: { body: { check_runs: [FAILED] } },
+  };
+  /** マージ先の枝を解決してから、その commit の CI を読む。 */
+  const BASE: Routes = {
+    [`/commits/${BASE_SHA}/check-runs`]: { body: { check_runs: [FAILED] } },
+    [`/commits/${BASE_SHA}/status`]: { body: { state: "failure", statuses: [] } },
+    "/commits/main": { body: { sha: BASE_SHA } },
+  };
+
+  it("落ちている PR は、マージ先の CI も材料にする", async () => {
+    const listing = await source({ ...FAILING, ...BASE }).listChangeSummaries([1]);
+
+    expect(listing.summaries.get(1)?.baseCi).toEqual({
+      settled: true,
+      failing: [{ kind: "check-run", name: "test", outcome: "failure" }],
+    });
+  });
+
+  it("突き合わせる commit へ固定する", async () => {
+    // **枝の名前のまま 2 回読むと、間に push が入った瞬間に
+    // check と Commit Status が別々の commit を見る**（#652 と同じ形）
+    const { asked, source: watched } = watching({ ...FAILING, ...BASE });
+    await watched.listChangeSummaries([1]);
+
+    expect(asked.filter((url) => url.includes("/commits/main"))).toHaveLength(1);
+    expect(
+      asked.some((url) => url.includes(`/commits/${BASE_SHA}/check-runs`)),
+      "マージ先の check を、解決した commit で読んでいない",
+    ).toBe(true);
+  });
+
+  it("CI が落ちていない PR では、マージ先を読みに行かない", async () => {
+    // **往復は PR の本数ぶん増える。** 言うことが無いところでは引かない
+    const { asked, source: watched } = watching({ ...OK_ROUTES, ...BASE });
+    await watched.listChangeSummaries([1]);
+
+    expect(asked.some((url) => url.includes("/commits/main"))).toBe(false);
+  });
+
+  it("同じマージ先を、PR ごとに読み直さない", async () => {
+    // **2 本目も同じ枝の上にある**（1 本目と同じ応答でよい）
+    const { asked, source: watched } = watching({ ...FAILING, ...BASE }, (url) =>
+      url.replace("/pulls/2", "/pulls/1"),
+    );
+    await watched.listChangeSummaries([1, 2]);
+
+    expect(asked.filter((url) => url.includes("/commits/main"))).toHaveLength(1);
+  });
+
+  it("マージ先を読めなくても、材料は返す", async () => {
+    // **1 本の失敗で全体を落とさない**（この口が守ってきたもの）。
+    // **突き合わせられなかったことは `undefined` が持つ**
+    const listing = await source({
+      ...FAILING,
+      "/commits/main": { status: 500, body: {} },
+    }).listChangeSummaries([1]);
+
+    expect(listing.summaries.get(1)?.ciStatus).toBe("failing");
+    expect(listing.summaries.get(1)?.baseCi).toBeUndefined();
+  });
+
+  it("マージ先の CI が見切れたら、突き合わせ先にしない", async () => {
+    // **「見ていない」を「落ちていない」と読まない。**
+    // **緑に見えると、マージ先から来た失敗まで全部この PR のせいになる**
+    const listing = await source({
+      ...FAILING,
+      ...BASE,
+      [`/commits/${BASE_SHA}/check-runs`]: { body: { check_runs: [FAILED] }, link: NEXT_PAGE },
+    }).listChangeSummaries([1]);
+
+    expect(listing.summaries.get(1)?.baseCi).toBeUndefined();
+  });
+
+  it("マージ先の名前が形でなければ、その値で要求しない", async () => {
+    // **未検証の値を URL のパスへ入れない**（`AGENTS.md` §6）
+    const { asked, source: watched } = watching({
+      ...FAILING,
+      ...BASE,
+      "/pulls/1": { body: { ...DETAIL, base: { ref: "../../../orgs/other/secrets" } } },
+    });
+    const listing = await watched.listChangeSummaries([1]);
+
+    expect(asked.some((url) => url.includes("orgs/other/secrets"))).toBe(false);
+    // **材料そのものは落とさない**——**突き合わせだけが立たない**
+    expect(listing.summaries.get(1)?.ciStatus).toBe("failing");
   });
 });

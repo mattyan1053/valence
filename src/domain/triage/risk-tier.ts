@@ -6,6 +6,7 @@
  * 変換は infrastructure の責務。
  */
 
+import type { BaseCi, CheckSignal } from "./ci-attribution";
 import { touchesSensitivePath } from "./sensitive-path";
 
 export type RiskTier =
@@ -47,6 +48,23 @@ export type ChangeSummary = {
    */
   readonly changedPaths: ChangedPaths;
   readonly ciStatus: CiStatus;
+  /**
+   * 落ちている check（#638）。**`ciStatus` と同じ材料から作る**ので、
+   * **ここが空であることと、`ciStatus` が `failing` でないことは同じ**である
+   * ——**2 箇所で「落ちている」を決めると、片方が事実と違う日が来る。**
+   *
+   * **Tier は見ない。** **マージ先のせいでも赤は赤**なので、
+   * **`classifyRiskTier` の分岐はここを読まない**——**判定に使わない材料**である
+   * （`MergeStatusReport` に `behindBy` を足したときと同じ扱い。#639）。
+   */
+  readonly failingChecks: readonly CheckSignal[];
+  /**
+   * 突き合わせ先（マージ先ブランチの先端）で見えた CI。**読めなければ `undefined`。**
+   *
+   * **どの commit と比べるかは infrastructure が決める。** ここが `undefined` なら
+   * 「突き合わせられなかった」——**「マージ先は緑」へ倒さない**（#638）。
+   */
+  readonly baseCi: BaseCi | undefined;
 };
 
 /** これ以下なら「読まなくても分かる大きさ」とみなす。 */
