@@ -38,6 +38,7 @@ const PLAN: ReviewOrderPlan = {
   invalid: [],
   heads: new Map(),
   titles: new Map(),
+  mergeStatuses: new Map(),
   changes: new Map(),
   changesUnavailable: [],
 };

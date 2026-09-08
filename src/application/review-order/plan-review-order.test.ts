@@ -50,6 +50,8 @@ const stacked: PullRequestListing = {
   heads: new Map(),
   // **タイトル**（#542）。**同じ理由で置く**
   titles: new Map([[8, "コンテナ周りの改善"]]),
+  // **合流の状況**（#629）。**この流れの関心ではない**が、**口が返すもの**なので置く
+  mergeStatuses: new Map([[9, { mergeable: "conflicting", state: "dirty" } as const]]),
 };
 
 describe("レビュー順序を組み立てる", () => {
@@ -83,6 +85,7 @@ describe("レビュー順序を組み立てる", () => {
         invalid: [],
         heads: new Map(),
         titles: new Map(),
+        mergeStatuses: new Map(),
       }),
     });
 
@@ -96,6 +99,7 @@ describe("レビュー順序を組み立てる", () => {
         invalid: [],
         heads: new Map(),
         titles: new Map(),
+        mergeStatuses: new Map(),
       }),
       changes: NO_CHANGES,
     });
@@ -109,9 +113,21 @@ describe("レビュー順序を組み立てる", () => {
       heads: new Map(),
       // **タイトルも同じ**（#542）
       titles: new Map(),
+      // **合流の状況も同じ**（#629）
+      mergeStatuses: new Map(),
       changes: new Map(),
       changesUnavailable: [],
     });
+  });
+
+  it("合流の状況は、取ってきたまま計画に載る", async () => {
+    // **押す前に理由を言うための材料**である（#629）——**この流れは判定しない**
+    const plan = await planReviewOrder({
+      pullRequests: sourceReturning(stacked),
+      changes: NO_CHANGES,
+    });
+
+    expect(plan.mergeStatuses).toEqual(stacked.mergeStatuses);
   });
 
   it("取得に失敗したら、0 件ではなく失敗として伝わる", async () => {

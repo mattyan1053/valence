@@ -1,0 +1,59 @@
+import { describe, expect, it } from "vitest";
+import type { MergeReadiness } from "../../domain/graph/merge-readiness";
+import { mergeReadinessNote } from "./merge-readiness-note";
+
+function note(kind: MergeReadiness["kind"]): string | undefined {
+  return mergeReadinessNote({ kind });
+}
+
+describe("合流の状況を、行の言葉にする", () => {
+  it("合流できるときは、何も言わない", () => {
+    // **平常時に鳴るものは読まれなくなる**（#248）——**10 本並ぶと、
+    // 読むのは普通でない行だけ**である
+    expect(note("mergeable")).toBeUndefined();
+  });
+
+  it("conflict していることが分かる", () => {
+    expect(note("conflicting")).toContain("conflict");
+  });
+
+  it("base に遅れていることが分かる", () => {
+    expect(note("behind")).toContain("遅れ");
+  });
+
+  it("まだ分からないことが分かる", () => {
+    // **「マージできる」とは言わない**（#540 / #541 と同じ向き）
+    expect(note("unknown")).toContain("分かりません");
+  });
+
+  it("下書きのままであることが分かる", () => {
+    // **draft は GitHub が押させる前に止める**（#644 のレビュー）
+    expect(note("draft")).toContain("下書き");
+  });
+
+  it("保護ルールで止まっていることが分かる", () => {
+    // **どの規則かまでは言わない**（#644 のレビュー 2 周目）——**`BLOCKED` は寄せ集め**
+    // なので、**言い切ると `BEHIND` と同じ断定が生まれる**
+    expect(note("blocked")).toContain("保護ルール");
+  });
+
+  it("言い分けられている", () => {
+    // **上のそれぞれが空でないことを、ここが支えている**——**同じ文なら、
+    // 分けた意味が無い**（`changeUnavailableNote` と同じ判断）
+    const texts = [
+      note("conflicting"),
+      note("behind"),
+      note("draft"),
+      note("blocked"),
+      note("unknown"),
+    ];
+
+    expect(new Set(texts).size, "言い分けられていない").toBe(5);
+  });
+
+  it("次に何をすればよいかまで言う", () => {
+    // **「押せない」だけでは、何をすればよいか分からない**（#345 と同じ理由）
+    expect(note("conflicting")).toContain("解消");
+    expect(note("behind")).toContain("取り込み直");
+  });
+});

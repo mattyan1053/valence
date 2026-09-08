@@ -8,6 +8,7 @@
  */
 
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
+import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 
 /** 検証に落ちた 1 件。 */
 export type InvalidPullRequest = {
@@ -46,7 +47,30 @@ export type PullRequestListing = {
    * 表示の側で「短いタイトル」と「取れなかった」が見分けられない。**
    */
   readonly titles: ReadonlyMap<number, string>;
+  /**
+   * PR 番号から引ける合流の状況（#629）。
+   *
+   * **押せない理由を、押す前に言うための材料**である——**いまは Merge を押すまで
+   * conflict が分からない**（#502 で実際に踏んだ）。
+   *
+   * **読めなかった PR は入らない。** **入れないほうが安全である**——
+   * **`mergeReadinessOf` が、地図に無い番号を `unknown` へ倒す**ので、
+   * **「読めなかった」が「マージできる」に化けない。**
+   *
+   * **`PullRequestRef` へ足さない**（`heads` / `titles` と同じ）——
+   * **あれは依存を決めるのに要る最小限**である。
+   */
+  readonly mergeStatuses: ReadonlyMap<number, MergeStatusReport>;
 };
+
+/**
+ * **一覧そのものから作れるぶん**（#629）。
+ *
+ * **合流の状況は別の応答から来る**——**REST の PR 一覧は `mergeable` を返さない**
+ * ので、**境界がもう 1 つの口から足す。** **型でそれを言っておく**と、
+ * **一覧を読む側（`toPullRequestRefs`）が、持っていないものを埋めずに済む。**
+ */
+export type ListedPullRequests = Omit<PullRequestListing, "mergeStatuses">;
 
 export type PullRequestSource = {
   /**

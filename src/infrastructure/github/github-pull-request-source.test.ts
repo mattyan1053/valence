@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { planReviewOrder } from "../../application/review-order/plan-review-order";
+import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { AppCredentials } from "./app-credentials";
 import { createGitHubPullRequestSource } from "./github-pull-request-source";
 
@@ -23,6 +24,9 @@ const OTHER_PULLS_URL =
 
 const PULLS_URL = "https://api.github.com/repos/mattyan1053/valence/pulls?state=open&per_page=100";
 const SECOND_PAGE_URL = "https://api.github.com/repositories/1327515899/pulls?page=2";
+
+/** **REST の一覧に `mergeable` が無い**ので、合流の状況だけ GraphQL で訊く（#629）。 */
+const GRAPHQL_URL = "https://api.github.com/graphql";
 
 /** GitHub の応答から、使う項目だけを抜いた形（#60 のテストと同じ作り）。 */
 function pull(number: number, baseRef: string, headRef: string) {
@@ -285,6 +289,223 @@ describe("GitHub から PR 一覧を取ってくる", () => {
       .catch((error: unknown) => String(error));
 
     expect(message).not.toContain("ghs_leaked");
+  });
+
+  describe("合流の状況", () => {
+    /** GraphQL の 1 ページ。**REST の一覧に `mergeable` が無い**ので、こちらで取る。 */
+    function statusPage(
+      nodes: readonly unknown[],
+      pageInfo: { hasNextPage: boolean; endCursor: string | null } = {
+        hasNextPage: false,
+        endCursor: null,
+      },
+    ): Route {
+      return {
+        body: JSON.stringify({ data: { repository: { pullRequests: { pageInfo, nodes } } } }),
+      };
+    }
+
+    function statusNode(number: number, mergeable: string, mergeStateStatus: string) {
+      return { number, mergeable, mergeStateStatus };
+    }
+
+    /**
+     * 合流の状況だけが返ってこない `fetch`。
+     *
+     * **`honorsSignal` で行儀を変える**——**本物は合図で reject する**が、
+     * **差し替えられる引数なので、無視する実装もありうる。**
+     */
+    function neverReturning(
+      fetchImpl: typeof fetch,
+      { honorsSignal }: { honorsSignal: boolean },
+    ): typeof fetch {
+      return (input, init) => {
+        if (new Request(input, init).url !== GRAPHQL_URL) {
+          return fetchImpl(input, init);
+        }
+        return new Promise((_resolve, reject) => {
+          if (honorsSignal) {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+              once: true,
+            });
+          }
+        });
+      };
+    }
+
+    async function listWithStatuses(...pages: Route[]) {
+      const { calls, fetchImpl } = fakeGitHub({
+        [INSTALLATION_URL]: INSTALLATION,
+        [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+        [PULLS_URL]: { body: stacked },
+        [GRAPHQL_URL]: pages,
+      });
+      const listing = await createGitHubPullRequestSource({
+        credentials,
+        repository,
+        fetchImpl,
+        now: clockFrom("2026-08-10T00:00:00Z"),
+      }).listPullRequests();
+      return { calls, listing };
+    }
+
+    it("PR 一覧と一緒に、合流の状況も取ってくる", async () => {
+      // **押す前に理由を言うための材料**である（#629）
+      const { listing } = await listWithStatuses(
+        statusPage([statusNode(9, "CONFLICTING", "DIRTY"), statusNode(8, "MERGEABLE", "BEHIND")]),
+      );
+
+      expect(listing.mergeStatuses.get(9)).toEqual({ mergeable: "conflicting", state: "dirty" });
+      expect(listing.mergeStatuses.get(8)).toEqual({ mergeable: "mergeable", state: "behind" });
+    });
+
+    it("最後のページまで読む", async () => {
+      // **打ち切ると、残りの PR が黙って「分からない」へ落ちる**
+      const { listing } = await listWithStatuses(
+        statusPage([statusNode(8, "MERGEABLE", "CLEAN")], {
+          hasNextPage: true,
+          endCursor: "Y3Vyc29y",
+        }),
+        statusPage([statusNode(9, "CONFLICTING", "DIRTY")]),
+      );
+
+      expect(listing.mergeStatuses.get(9)).toEqual({ mergeable: "conflicting", state: "dirty" });
+    });
+
+    it("そのリポジトリの状況だけを訊く", async () => {
+      // **どのリポジトリかは要求ごとに決まる**（`AGENTS.md` §1）
+      const { calls } = await listWithStatuses(statusPage([]));
+      const asked = calls.filter((call) => call.url === GRAPHQL_URL);
+
+      expect(asked).toHaveLength(1);
+      await expect((asked[0] as Request).json()).resolves.toMatchObject({
+        variables: { owner: "mattyan1053", name: "valence" },
+      });
+    });
+
+    it("状況を読めなくても、PR 一覧は返す", async () => {
+      // **依存グラフだけでも交通整理の役に立つ**（`collectChanges` と同じ判断）
+      // ——**合流の状況のために、盤面ごと落とさない**
+      const { listing } = await listWithStatuses({ body: "{}", status: 500 });
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8, 9]);
+      expect(listing.mergeStatuses.size).toBe(0);
+    });
+
+    it("断られた応答は、読めても材料にしない", async () => {
+      // **状態コードを見ずに本文だけを読むと、エラーの本文がそれらしいときに
+      // 材料として通る**——**「断られた」と「読めなかった」を分ける**（#64 と同じ形）
+      const { listing } = await listWithStatuses({
+        ...statusPage([statusNode(8, "MERGEABLE", "CLEAN")]),
+        status: 500,
+      });
+
+      expect(listing.mergeStatuses.size).toBe(0);
+    });
+
+    it("応答を読めなくても、PR 一覧は返す", async () => {
+      // **200 のまま読めない応答が返る**（GraphQL は失敗も 200 で返す）
+      // ——**投げると、盤面ごと落ちる**
+      const { listing } = await listWithStatuses({ body: '{"errors":[{"message":"問題"}]}' });
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8, 9]);
+      expect(listing.mergeStatuses.size).toBe(0);
+    });
+
+    it("途中まで読めたぶんは捨てない", async () => {
+      // **2 ページ目で落ちても、1 ページ目の PR は理由を言える**
+      const { listing } = await listWithStatuses(
+        statusPage([statusNode(8, "CONFLICTING", "DIRTY")], {
+          hasNextPage: true,
+          endCursor: "Y3Vyc29y",
+        }),
+        { body: "{}", status: 500 },
+      );
+
+      expect(listing.mergeStatuses.get(8)).toEqual({ mergeable: "conflicting", state: "dirty" });
+      expect(listing.mergeStatuses.has(9)).toBe(false);
+    });
+
+    it("返ってこない状況を待ち続けない", async () => {
+      // **落ちるのと遅いのは別の経路である**（#119 / #120 と同じ形。#644 のレビュー）
+      // ——**`catch` は reject しか拾わない**ので、**応答待ちのまま返らないと
+      // `Promise.all` が返らず、盤面ごと出なくなる。**
+      const { fetchImpl } = fakeGitHub({
+        [INSTALLATION_URL]: INSTALLATION,
+        [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+        [PULLS_URL]: { body: stacked },
+      });
+      const hangingFetch = neverReturning(fetchImpl, { honorsSignal: true });
+
+      const listing = await createGitHubPullRequestSource({
+        credentials,
+        repository,
+        fetchImpl: hangingFetch,
+        now: clockFrom("2026-08-10T00:00:00Z"),
+        // **期限そのものは短くして試す**——**待つ長さは、この試験の関心ではない**
+        mergeStatusDeadline: () => AbortSignal.timeout(5),
+      }).listPullRequests();
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8, 9]);
+      expect(listing.mergeStatuses.size).toBe(0);
+    });
+
+    it("合図を無視する fetch でも、待ち続けない", async () => {
+      // **口の行儀に頼らない**（#346 のレビュー。#644 のレビュー）——**合図を渡しても、
+      // 受け取らない実装・無視する実装はありうる**（`fetchImpl` は差し替えられる）。
+      // **待つのをやめる側と、取り消しを伝える側の両方**が要る
+      const { fetchImpl } = fakeGitHub({
+        [INSTALLATION_URL]: INSTALLATION,
+        [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+        [PULLS_URL]: { body: stacked },
+      });
+
+      const listing = await createGitHubPullRequestSource({
+        credentials,
+        repository,
+        fetchImpl: neverReturning(fetchImpl, { honorsSignal: false }),
+        now: clockFrom("2026-08-10T00:00:00Z"),
+        mergeStatusDeadline: () => AbortSignal.timeout(5),
+      }).listPullRequests();
+
+      expect(listing.pullRequests.map((pullRequest) => pullRequest.number)).toEqual([8, 9]);
+      expect(listing.mergeStatuses.size).toBe(0);
+    });
+
+    it("打ち切ったことを、要求の側にも伝える", async () => {
+      // **待つのをやめるだけでは、走っている要求は走り続ける**（#346 のレビュー）
+      // ——**合図を口まで通す。** **上の試験は「待たない」側しか見ていない**
+      const { fetchImpl } = fakeGitHub({
+        [INSTALLATION_URL]: INSTALLATION,
+        [TOKEN_URL]: token("2026-08-10T01:00:00Z"),
+        [PULLS_URL]: { body: stacked },
+      });
+      let seen: AbortSignal | null | undefined;
+      const capturing: typeof fetch = (input, init) => {
+        if (new Request(input, init).url === GRAPHQL_URL) {
+          seen = init?.signal;
+        }
+        return neverReturning(fetchImpl, { honorsSignal: false })(input, init);
+      };
+
+      await createGitHubPullRequestSource({
+        credentials,
+        repository,
+        fetchImpl: capturing,
+        now: clockFrom("2026-08-10T00:00:00Z"),
+        mergeStatusDeadline: () => AbortSignal.timeout(5),
+      }).listPullRequests();
+
+      expect(seen?.aborted, "合図が要求まで届いていない").toBe(true);
+    });
+
+    it("状況を読めなかった PR を、conflict していない側へ倒さない", async () => {
+      // **地図に無い番号は `mergeReadinessOf` が `unknown` にする**
+      // ——**「読めなかった」が「マージできる」に化けない**
+      const { listing } = await listWithStatuses({ body: "{}", status: 500 });
+
+      expect(mergeReadinessOf(listing.mergeStatuses.get(9))).toEqual({ kind: "unknown" });
+    });
   });
 
   it("planReviewOrder にそのまま渡せる", async () => {

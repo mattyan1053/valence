@@ -5,6 +5,7 @@ import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependen
 import { buildDependencyEdges } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import { orderByDependency } from "../../domain/graph/dependency-order";
+import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { ReviewBoardProps } from "./review-board";
 import { changeUnavailableNote, ReviewBoard } from "./review-board";
@@ -37,6 +38,9 @@ function change(overrides: Partial<ChangeSummary> = {}): ChangeSummary {
   };
 }
 
+/** **GitHub が「合流できる」と言っている**状況（#629）。 */
+const MERGEABLE: MergeStatusReport = { mergeable: "mergeable", state: "clean" };
+
 /** #2 が #1 の上に積まれている、いちばん小さなスタック。 */
 const STACK: readonly PullRequestRef[] = [
   pullRequest(1, "main", "feat/a"),
@@ -61,6 +65,8 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
     ]),
     // **既定は「分かっている」**——**この試験群が見ているのは、そこではない**
     headKnown: () => true,
+    // **既定は合流できる**（#629）。**この試験群が見ているのは、そこではない**
+    mergeStatusOf: () => MERGEABLE,
     ...overrides,
   };
 }
@@ -257,6 +263,66 @@ describe("ReviewBoard", () => {
     expect(markup).toMatch(/抜け/);
     expect(markup).toMatch(/その先に積まれ/);
     expect(markup).toContain("番号が数値ではありません");
+  });
+
+  /**
+   * **押す前に、押せない理由を言う**（#629）。
+   *
+   * **#502 で利用者が Merge を押し、「いまマージできませんでした」だけが返った**
+   * ——**原因は画面のどこにも出ていなかった。**
+   *
+   * **行を数えてから当てている**（`AGENTS.md` §4）——**盤面には 2 行あるので、
+   * 「出ている」だけでは、片方に出ていないことを見落とす。**
+   */
+  describe("合流の状況", () => {
+    function rowsWith(status: MergeStatusReport | undefined): string {
+      return list(
+        render(props({ mergeStatusOf: (number) => (number === 2 ? status : MERGEABLE) })),
+      );
+    }
+
+    it("conflict している行に、その理由が出る", () => {
+      const rows = rowsWith({ mergeable: "conflicting", state: "dirty" });
+
+      expect(rows.match(/conflict/g), "conflict の行が 1 行ではない").toHaveLength(1);
+    });
+
+    it("base に遅れている行に、その理由が出る", () => {
+      // **conflict していなくても押せない**——**#502 の「35 commits 遅れ」**である
+      const rows = rowsWith({ mergeable: "mergeable", state: "behind" });
+
+      expect(rows.match(/取り込み直/g), "遅れの行が 1 行ではない").toHaveLength(1);
+    });
+
+    it("状況が読めていない行を、押せる顔にしない", () => {
+      // **地図に無い番号**（**読めなかった / GitHub が計算中**）
+      const rows = rowsWith(undefined);
+
+      expect(rows.match(/合流できるかは/g), "分からない行が 1 行ではない").toHaveLength(1);
+    });
+
+    it("リスク判定の材料が無い行にも出す", () => {
+      // **材料が揃っていないことと、合流できるかは別**である
+      // ——**片方の行にだけ出すと、押せない理由が消える**
+      const rows = list(
+        render(
+          props({
+            changes: new Map(),
+            mergeStatusOf: (number) =>
+              number === 2 ? { mergeable: "conflicting", state: "dirty" } : MERGEABLE,
+          }),
+        ),
+      );
+
+      expect(rows.match(/conflict/g), "材料が無い行で conflict を黙っている").toHaveLength(1);
+    });
+
+    it("合流できる行では、conflict の話をしない", () => {
+      // **平常時に鳴るものは読まれなくなる**（#248）
+      const rows = list(render(props()));
+
+      expect(rows).not.toMatch(/conflict|取り込み直|合流できるかは/);
+    });
   });
 });
 
@@ -462,6 +528,8 @@ describe("理由が、行に出る（#577 のレビュー）", () => {
     // **材料は 1 件も無い**——**理由の側だけを変える**
     changes: new Map(),
     headKnown: () => true,
+    // **合流できる側を既定にする**——**この試験群が見ているのは、そこではない**
+    mergeStatusOf: () => MERGEABLE,
     titleOf: () => undefined,
     urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
     changeUnavailableOf: kind === undefined ? undefined : () => kind,

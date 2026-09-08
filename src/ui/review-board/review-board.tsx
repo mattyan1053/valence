@@ -14,10 +14,13 @@
 import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
+import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
+import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import { classifyRiskTier } from "../../domain/triage/risk-tier";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
 import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
+import { mergeReadinessNote } from "../merge/merge-readiness-note";
 import { RiskTierView } from "../risk-tier/risk-tier-view";
 
 /**
@@ -131,6 +134,17 @@ export type ReviewBoardProps = {
   readonly titleOf: (pullRequestNumber: number) => string | undefined;
   /** **その PR の GitHub 上の場所**（#621）。**渡す先は行である。** */
   readonly urlOf: (pullRequestNumber: number) => string;
+  /**
+   * **その PR の合流の状況**（#629）。**取れていないなら `undefined`。**
+   *
+   * **盤面はこれを持っていない**（`changes` はリスク判定の材料である）ので、
+   * **渡す側から受ける**——**`heads` / `titles` と同じ形**である。
+   *
+   * **任意にしない。** **渡し忘れると、どの行も conflict を黙る**
+   * ——**#629 が消しに来た状態**である（**押すまで分からない**）。
+   * **`undefined` は「分からない」として出る**ので、**黙るのとは違う。**
+   */
+  readonly mergeStatusOf: (pullRequestNumber: number) => MergeStatusReport | undefined;
 };
 
 export function ReviewBoard({
@@ -145,6 +159,7 @@ export function ReviewBoard({
   headKnown,
   titleOf,
   urlOf,
+  mergeStatusOf,
 }: ReviewBoardProps) {
   return (
     <DependencyGraphView
@@ -165,6 +180,11 @@ export function ReviewBoard({
       urlOf={urlOf}
       renderAside={(number) => {
         const change = changes.get(number);
+        // **材料の有無に関わらず出す**（#629）——**リスク Tier が揃っていないことと、
+        // 合流できるかは別**である。**片方の行にだけ出すと、押せない理由が消える**
+        // （`renderStatus` と同じ判断）
+        const note = mergeReadinessNote(mergeReadinessOf(mergeStatusOf(number)));
+        const readiness = note === undefined ? undefined : <span className="text-sm">{note}</span>;
         // **材料が無い PR を黙って落とさない。** 行は残し、
         // 「出せなかった」ことが分かる形にする（#107 の `invalid` と同じ形）。
         if (change === undefined) {
@@ -180,6 +200,7 @@ export function ReviewBoard({
                     "リスク判定の材料がありません（まだ取得できていません）"
                   : changeUnavailableNote(kind)}
               </span>
+              {readiness}
               <ActionRow>
                 {renderStatus?.(number)}
                 {renderActions?.(number)}
@@ -190,6 +211,7 @@ export function ReviewBoard({
         return (
           <>
             <RiskTierView tier={classifyRiskTier(change)} change={change} />
+            {readiness}
             <ActionRow>
               {renderStatus?.(number)}
               {renderActions?.(number)}
