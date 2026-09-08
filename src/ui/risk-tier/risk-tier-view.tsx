@@ -8,6 +8,8 @@
  * **依存グラフの各行に載せられるよう、見出しを持たない。** 置き場所は呼ぶ側が決める。
  */
 
+import type { ReportableChangeKind } from "../../domain/triage/change-kind";
+import { reportableKindOf } from "../../domain/triage/change-kind";
 import type { ChangeSummary, CiStatus, RiskTier } from "../../domain/triage/risk-tier";
 import { touchesSensitivePath } from "../../domain/triage/sensitive-path";
 
@@ -31,6 +33,27 @@ const TIER_TEXT: Record<RiskTier, { label: string; meaning: string }> = {
   "fast-track": { label: "すぐ通せる", meaning: "内容を読まずにマージしてよい大きさです" },
   "needs-review": { label: "通常のレビュー", meaning: "いつもどおり中身を読んでください" },
   "high-risk": { label: "先に人が見る", meaning: "マージの前に人が中身を確認してください" },
+};
+
+/**
+ * 変更の種類（#640）。**「読まなくていい」とは書かない。**
+ *
+ * **仕分けは「どう読むか」を変えるもの**である——**`#625`（Dependabot）は
+ * `package.json` と `pnpm-lock.yaml` だけの機械的な変更**だったが、**版が
+ * `biome.json` にもあり、そちらがずれて CI が落ちた。** **「deps だから読まなくていい」
+ * ではない**ので、**どこを見るかだけを言う。**
+ *
+ * **Tier には効かない**（`classifyRiskTier` はここを見ない）——**種類は「何をする PR か」**、
+ * **危なさは「壊れたときの影響」**である。
+ *
+ * **`Record` で持つ**（`TIER_TEXT` と同じ）——**種類を足したときに書き忘れると、
+ * 型検査が落ちる。**
+ */
+const KIND_TEXT: Record<ReportableChangeKind, string> = {
+  deps: "依存の更新だけです（版を持つ別のファイルとずれていないか）",
+  docs: "ドキュメントだけです",
+  test: "テストだけです",
+  generated: "生成物だけです（生成元も一緒に変わっているか）",
 };
 
 /**
@@ -65,6 +88,9 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
   const text = TIER_TEXT[tier];
   // **普通でない CI だけを、開かずに見せる**（**待つのか直すのかで、次の行動が違う**）
   const ciNeedsAttention = change.ciStatus !== "passing";
+  // **言ってよいかは domain が決める**（#640）——**混ざっているとき・最後まで
+  // 読めていないとき・実装だけのときは `undefined` が返る。**
+  const kind = reportableKindOf(change.changedPaths);
 
   return (
     // **判断材料は脇に置く**（#583）。**本文と同じ強さで並ぶと、行が読めない。**
@@ -97,6 +123,7 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
           変更: {change.changedFileCount} ファイル / {change.changedLineCount} 行
         </li>
         {!ciNeedsAttention && <li>{CI_TEXT[change.ciStatus]}</li>}
+        {kind !== undefined && <li>{KIND_TEXT[kind]}</li>}
         {touchesSensitivePath(change.changedPaths.paths) && (
           <li>壊すと影響が大きいパスに触れています</li>
         )}

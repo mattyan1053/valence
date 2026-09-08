@@ -36,6 +36,32 @@
  */
 
 /**
+ * 依存の固定。**何が動くかが変わる**（差分に現れない）。
+ *
+ * **ここが 1 箇所である**（`AGENTS.md` §5）——**`change-kind.ts` の「依存の更新だけか」も
+ * 同じ一覧を読む。** **危なさと種類は別の判断**だが、**「どれが依存の固定か」は
+ * 1 つの事実**なので、**写さずに読ませる。**
+ *
+ * **`.lock` で終わるものは一般則（`DEPENDENCY_PIN_SUFFIXES`）が拾う**ので、
+ * **ここに並べるのは、その形をしていないものだけ**である。
+ */
+export const DEPENDENCY_PIN_FILE_NAMES: readonly string[] = [
+  "pnpm-lock.yaml",
+  "package-lock.json",
+  "go.sum",
+  "requirements.txt",
+];
+
+/** 依存の固定のうち、名前の末尾で決まるもの。**列挙より一般則を優先する。** */
+export const DEPENDENCY_PIN_SUFFIXES: readonly string[] = [
+  // bun / deno / uv / Pipfile / cargo / yarn / poetry / composer …
+  // **列挙しなくても入る。** 新しいパッケージマネージャが出ても取りこぼさない
+  ".lock",
+  // terraform の依存固定（`.lock.hcl`）。拡張子だけでは `.hcl` を拾えない
+  ".lock.hcl",
+];
+
+/**
  * ファイル名そのものが意味を持つもの。
  *
  * **CI・デプロイ・依存の固定**は、どのリポジトリでも「壊すと影響が大きい」。
@@ -62,22 +88,14 @@ const SENSITIVE_FILE_NAMES: readonly string[] = [
   "appveyor.yml",
   "buildspec.yml",
   "cloudbuild.yaml",
-  // 依存の固定（何が動くかが変わる）。**`.lock` で終わるものは一般則が拾う**ので、
-  // ここに並べるのは**その形をしていないもの**だけである。
-  "pnpm-lock.yaml",
-  "package-lock.json",
-  "go.sum",
-  "requirements.txt",
+  // 依存の固定（何が動くかが変わる）。**一覧は `DEPENDENCY_PIN_FILE_NAMES` が持つ**
+  // ——**種類の仕分け（`change-kind.ts`）も同じものを読む**ので、**2 箇所に置かない**
+  // （`AGENTS.md` §5）。
+  ...DEPENDENCY_PIN_FILE_NAMES,
 ];
 
 /** 名前の末尾でだけ決まるもの。**列挙より一般則を優先する。** */
-const SENSITIVE_FILE_SUFFIXES: readonly string[] = [
-  // bun / deno / uv / Pipfile / cargo / yarn / poetry / composer …
-  // **列挙しなくても入る。** 新しいパッケージマネージャが出ても取りこぼさない
-  ".lock",
-  // terraform の依存固定（`.lock.hcl`）。拡張子だけでは `.hcl` を拾えない
-  ".lock.hcl",
-];
+const SENSITIVE_FILE_SUFFIXES: readonly string[] = [...DEPENDENCY_PIN_SUFFIXES];
 
 /** 名前の頭でだけ決まるもの（`compose.yaml` / `docker-compose.yml` / `.env.production` など）。 */
 const SENSITIVE_FILE_PREFIXES: readonly string[] = ["compose.", "docker-compose.", ".env"];

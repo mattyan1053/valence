@@ -95,6 +95,68 @@ describe("RiskTierView", () => {
     expect(notTouching).not.toMatch(/パスに触れ/);
   });
 
+  describe("変更の種類（#640）", () => {
+    // **判定は `reportableKindOf` が持つ**（`AGENTS.md` §5）——**ここで見るのは、
+    // 画面がその口へ繋がっているか**である。
+    const depsOnly = change({
+      changedPaths: { paths: ["package.json", "pnpm-lock.yaml"], truncated: false },
+    });
+
+    it("依存の更新だけなら、そう分かる", () => {
+      // **#625 がこの形**である（**機械的だが、CI が落ちて人の手が要った**）
+      expect(viewFor(depsOnly)).toMatch(/依存の更新だけ/);
+    });
+
+    it("「読まなくていい」とは書かない", () => {
+      // **仕分けは「どう読むか」を変えるもの**である（#640）——**種類と危なさを
+      // 混ぜると、deps を無条件で fast-track する。**
+      const markup = viewFor(depsOnly);
+
+      expect(markup).not.toMatch(/読まなくて|そのまま通して|安全/);
+    });
+
+    it("種類は Tier を変えない", () => {
+      // **種類は「何をする PR か」、危なさは「壊れたときの影響」**である
+      // ——**混ぜたら、ここで赤くする。**
+      //
+      // **影響が大きいパスを含まない組で比べる。** **`pnpm-lock.yaml` は
+      // それ自体が `high-risk`** なので、**入れると「種類で変わった」と
+      // 見分けが付かない。**
+      // **`fast-track` になる大きさで比べない。** **どちらも `fast-track` なら、
+      // 「docs なら通す」を足しても差が出ない**——**変異が素通りする**
+      // （**実際に一度素通りした**）。**判定が割れる大きさで比べる。**
+      const big = { changedFileCount: 9, changedLineCount: 300 };
+      const docsOnly = change({
+        ...big,
+        changedPaths: { paths: ["README.md", "docs/adr/0001-why.md"], truncated: false },
+      });
+      const codeOnly = change({
+        ...big,
+        changedPaths: { paths: ["src/ui/button.tsx", "src/ui/other.tsx"], truncated: false },
+      });
+
+      expect(classifyRiskTier(docsOnly)).toBe("needs-review");
+      expect(classifyRiskTier(docsOnly)).toBe(classifyRiskTier(codeOnly));
+    });
+
+    it("混ざっていたら、種類を出さない", () => {
+      const mixed = change({
+        changedPaths: { paths: ["package.json", "src/ui/button.tsx"], truncated: false },
+      });
+
+      expect(viewFor(mixed)).not.toMatch(/だけです/);
+    });
+
+    it("最後まで読めていないなら、種類を出さない", () => {
+      // **「読めなかった」を「deps だけ」に化けさせない**（`AGENTS.md` §5）
+      const truncated = change({
+        changedPaths: { paths: ["package.json", "pnpm-lock.yaml"], truncated: true },
+      });
+
+      expect(viewFor(truncated)).not.toMatch(/だけです/);
+    });
+  });
+
   it("CI だけが落ちている小さな変更に、影響が大きいとは書かない", () => {
     // **`high-risk` は 2 通りの理由で成立する**（CI が落ちている / 機密パスに触れている）。
     // 成立していないほうを名指しすると、**画面の中で理由が食い違う**。
