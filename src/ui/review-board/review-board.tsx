@@ -31,7 +31,7 @@ import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
 import { fileOverlapNote } from "../file-overlap/file-overlap-note";
 import { baseLagNote, mergeReadinessNote } from "../merge/merge-readiness-note";
 import { RiskTierView } from "../risk-tier/risk-tier-view";
-import { titleOverlapNote } from "../title-overlap/title-overlap-note";
+import { SHARED_TITLE_FLOOR, titleOverlapNote } from "../title-overlap/title-overlap-note";
 
 /**
  * **材料が無い理由を、画面の語彙にする**（#573）。
@@ -233,6 +233,9 @@ export function ReviewBoard({
       number: pullRequest.number,
       title: titleOf(pullRequest.number),
     })),
+    // **どこから言うかは画面が決める**（#630）——**domain へ渡して、
+    // 「この長さ以上は取りこぼさない」を守らせる**（#653 のレビュー 2 周目）
+    SHARED_TITLE_FLOOR,
     invalid.length,
   );
 

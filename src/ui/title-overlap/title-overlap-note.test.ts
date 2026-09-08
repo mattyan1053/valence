@@ -26,13 +26,16 @@ describe("重複しているかもしれない PR を、行の言葉にする", 
     expect(titleOverlapNote(report("あ".repeat(30)))).not.toMatch(/似て|重複/);
   });
 
-  it("境界のちょうど上は出る", () => {
-    // **閾値を外したときに何が起きるかが見える**（#630 の完了条件。**両側を置く**）
-    expect(titleOverlapNote(report("あ".repeat(SHARED_TITLE_FLOOR)))).toBeDefined();
+  it("ここでは数え直さない", () => {
+    // **境界は `titleOverlapsFor` へ渡してある**（#653 のレビュー 2 周目）
+    // ——**同じ判定を 2 箇所に持たない**（§5）。**境界の両側は domain の試験にある**
+    expect(titleOverlapNote(report("あ".repeat(SHARED_TITLE_FLOOR - 1)))).toBeDefined();
   });
 
-  it("境界の 1 つ下は出ない", () => {
-    expect(titleOverlapNote(report("あ".repeat(SHARED_TITLE_FLOOR - 1)))).toBeUndefined();
+  it("絵文字は 1 文字として数える", () => {
+    // **`String.length` は UTF-16 の数**（#653 のレビュー 2 周目）
+    // ——**gitmoji 1 個が 2 になり、「10 文字ぶん同じ」が事実と違う**
+    expect(titleOverlapNote(report("✨🐛♻️"))).toContain("3 文字");
   });
 
   it("組が無ければ、何も言わない", () => {

@@ -18,6 +18,8 @@
  * **純粋関数である**（§3）。
  */
 
+import { graphemeCount } from "../text/graphemes";
+
 /** 比べる材料 1 件ぶん。**タイトルが取れていないなら `undefined`**（#542）。 */
 export type TitledPullRequest = {
   readonly number: number;
@@ -38,15 +40,15 @@ export type TitleMatch = {
 
 export type TitleOverlapReport = {
   /**
-   * **いちばん近い 1 本だけ。** **同じ並びが無ければ `undefined`。**
+   * **いちばん長く同じだった 1 本。** **求めた長さに満たなければ `undefined`。**
    *
-   * **全部の組を出さない。** **かかりが本数の 2 乗 × タイトルの長さの 2 乗**になり、
-   * **実測で 100 本 × 256 文字が 46 秒**だった（**盤面はこれを描くたびに呼ぶ**）。
-   * **2 文字の並び（bigram）の重なりで先に絞り**、**いちばん近い 1 本にだけ、
-   * 正確な「いちばん長い並び」を求める。**
+   * **絞り込みで落としてよいのは、その長さに届かない相手だけ**である
+   * （#653 のレビュー 2 周目）。**「いちばん近い 1 本」を先に選ばない**
+   * ——**近さの指標と、測りたいもの（連続した一致の長さ）は別物**なので、
+   * **1 本に絞った時点で取りこぼす。**
    *
-   * **落としたぶんは黙って消えない**——**残りは同じ画面の別の行に出る**
-   * （**相手の側からは、こちらが「いちばん近い 1 本」になりうる**）。
+   * **同じ長さなら番号の小さいほう。** **出すのは 1 本だけ**だが、
+   * **落としたぶんは黙って消えない**——**相手の側からは、こちらが選ばれうる。**
    */
   readonly match: TitleMatch | undefined;
   /**
@@ -76,7 +78,15 @@ const DECORATION = /(（#\d+[^）]*）|\(#\d+[^)]*\))\s*$/;
 export function titleOverlapsFor(
   candidates: readonly TitledPullRequest[],
   /**
-   * **一覧から読めなかった PR の件数**（`fileOverlapsFor` と同じ。**並びも合わせる**）。
+   * **この長さ（書記素）以上の一致は取りこぼさない**、が契約である。
+   *
+   * **境界そのものは呼ぶ側が持つ**（#630 の「判断が要るところ」）——**ここは
+   * 「どこまで探すか」として受ける。** **絞り込みの上限に使う**ので、
+   * **domain が知らないと、落としてよいものが決められない。**
+   */
+  atLeast: number,
+  /**
+   * **一覧から読めなかった PR の件数**（`fileOverlapsFor` と同じ）。
    *
    * **既定値を置かない**——**書き忘れが「抜けは無い」へ倒れると、この判定が
    * まるごと素通りする。**
@@ -94,30 +104,41 @@ export function titleOverlapsFor(
   return new Map(
     candidates.map((candidate) => [
       candidate.number,
-      { match: matchOf(candidate.number, titles, grams), partial },
+      { match: matchOf(candidate.number, atLeast, titles, grams), partial },
     ]),
   );
 }
 
-/** タイトルを 2 文字の並びへ落とす。**絞り込みに使う**（正確な比較はこの後）。 */
-function bigrams(title: string | undefined): ReadonlySet<string> {
-  const found = new Set<string>();
+/**
+ * タイトルを 2 文字の並びへ落とす。**出現回数まで数える。**
+ *
+ * **種類では上限にならない**（#653 のレビュー 2 周目）——**`aaaaaaaaaa` は
+ * 10 文字だが bigram は 1 種類**である。**出現回数なら上限になる**
+ * ——**長さ L の共通部分列は、両方に L−1 個の出現を持つ。**
+ */
+function bigrams(title: string | undefined): ReadonlyMap<string, number> {
+  const found = new Map<string, number>();
   for (let i = 0; i + 1 < (title?.length ?? 0); i += 1) {
-    found.add((title as string).slice(i, i + 2));
+    const gram = (title as string).slice(i, i + 2);
+    found.set(gram, (found.get(gram) ?? 0) + 1);
   }
   return found;
 }
 
 /**
- * いちばん近い 1 本を選び、**その相手とだけ正確に比べる。**
+ * **求めた長さに届きうる相手を全部、正確に比べる。**
  *
- * **絞り込みは 2 文字の並びの重なりで行う**——**本数の 2 乗で回るのはこちら**で、
- * **タイトルの長さには比例する**（**2 乗にはならない**）。
+ * **絞り込みは上限で行う**——**共通する出現数が `atLeast - 1` に満たなければ、
+ * その長さの一致は無い**（対偶）。**落とすのはそれだけ**である。
+ *
+ * **絞り込みは UTF-16 の数で行い、判定は書記素で行う。** **書記素は UTF-16 より
+ * 少ない**ので、**上限としてはそのまま成り立つ**——**多めに残るだけで、落とさない。**
  */
 function matchOf(
   number: number,
+  atLeast: number,
   titles: ReadonlyMap<number, string | undefined>,
-  grams: ReadonlyMap<number, ReadonlySet<string>>,
+  grams: ReadonlyMap<number, ReadonlyMap<string, number>>,
 ): TitleMatch | undefined {
   const own = titles.get(number);
   const ownGrams = grams.get(number);
@@ -125,52 +146,54 @@ function matchOf(
     return undefined;
   }
 
-  const partner = bestPartner(number, ownGrams, titles, grams);
-  if (partner === undefined) {
-    return undefined;
-  }
-  // **ここまで来た相手とは、必ず 2 文字以上が同じ**である
-  // ——**選んだのは「2 文字の並びが重なった」相手**なので、
-  // **空になる道が無い**（**空を返す分岐を置くと、通らない枝になる**）
-  return { number: partner, shared: longestShared(own, titles.get(partner) as string) };
-}
-
-/**
- * **2 文字の並びがいちばん重なる相手。**
- *
- * **ここが本数の 2 乗で回る**——**タイトルの長さには比例するが、2 乗にはならない。**
- * **正確な比較は、選んだ 1 本にだけ行う。**
- */
-function bestPartner(
-  number: number,
-  ownGrams: ReadonlySet<string>,
-  titles: ReadonlyMap<number, string | undefined>,
-  grams: ReadonlyMap<number, ReadonlySet<string>>,
-): number | undefined {
-  let best: number | undefined;
-  let bestScore = 0;
-
-  for (const [other, otherGrams] of grams) {
-    // **自分自身とは比べない**
-    if (other === number || titles.get(other) === undefined) {
+  let best: TitleMatch | undefined;
+  let bestLength = 0;
+  for (const other of reachable(number, atLeast, titles, grams)) {
+    const shared = longestShared(own, titles.get(other) as string);
+    const length = graphemeCount(shared);
+    if (length < atLeast) {
       continue;
     }
-    const score = sharedCount(ownGrams, otherGrams);
-    // **同じ点なら番号の小さい順**——**呼ぶたびに揺れると、理由が読めない**
-    if (score > bestScore || (score === bestScore && score > 0 && other < (best ?? other))) {
-      bestScore = score;
-      best = other;
+    // **同じ長さなら番号の小さいほう**——**呼ぶたびに揺れると、理由が読めない**
+    if (length > bestLength || (length === bestLength && other < (best?.number ?? other))) {
+      bestLength = length;
+      best = { number: other, shared };
     }
   }
   return best;
 }
 
-function sharedCount(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
-  let count = 0;
-  for (const gram of right) {
-    if (left.has(gram)) {
-      count += 1;
+/**
+ * **求めた長さに届きうる相手だけ**を返す。
+ *
+ * **落としてよいのは、そこに届かないものだけ**である（#653 のレビュー 2 周目）
+ * ——**「いちばん近い 1 本」を先に選ばない。**
+ */
+function* reachable(
+  number: number,
+  atLeast: number,
+  titles: ReadonlyMap<number, string | undefined>,
+  grams: ReadonlyMap<number, ReadonlyMap<string, number>>,
+): Generator<number> {
+  const ownGrams = grams.get(number) ?? new Map();
+  for (const [other, title] of titles) {
+    if (other === number || title === undefined) {
+      continue;
     }
+    if (sharedCount(ownGrams, grams.get(other)) >= atLeast - 1) {
+      yield other;
+    }
+  }
+}
+
+/** 共通する 2 文字の並びの**出現数**（少ないほうを取った合計）。 */
+function sharedCount(
+  left: ReadonlyMap<string, number>,
+  right: ReadonlyMap<string, number> | undefined,
+): number {
+  let count = 0;
+  for (const [gram, times] of right ?? []) {
+    count += Math.min(times, left.get(gram) ?? 0);
   }
   return count;
 }
@@ -178,7 +201,7 @@ function sharedCount(left: ReadonlySet<string>, right: ReadonlySet<string>): num
 /**
  * **2 つの文字列に共通する、いちばん長い並び。**
  *
- * **呼ぶのは 1 本あたり 1 回だけ**（`matchOf` が絞り込んだ相手とだけ）。
+ * **呼ぶのは絞り込みを通った相手だけ**である。
  * **前の行だけを持って進む**——**長さの 2 乗の表を全部持たない。**
  */
 function longestShared(left: string, right: string): string {

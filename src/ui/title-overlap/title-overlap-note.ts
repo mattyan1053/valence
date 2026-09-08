@@ -8,11 +8,15 @@
  * **判定はしない**（`fileOverlapNote` と同じ）——**`titleOverlapsFor` が返したものに、
  * 画面の語彙を当てるだけ**である。
  *
- * **境界はここが持つ。** **計算は domain、「出すかどうか」は呼ぶ側**
- * （#630 の「判断が要るところ」）——**domain は数を出すだけで、
- * どこから言うかは画面の都合**である。
+ * **境界はここが持つ。** **計算は domain、「どこから言うか」は呼ぶ側**
+ * （#630 の「判断が要るところ」）。
+ *
+ * **値は domain へ渡す**（#653 のレビュー 2 周目）——**`titleOverlapsFor` は
+ * 「この長さ以上の一致は取りこぼさない」を契約にしている**ので、
+ * **ここで数え直さない**（**同じ判定を 2 箇所に持たない**。§5）。
  */
 
+import { graphemeCount } from "../../domain/text/graphemes";
 import type { TitleOverlapReport } from "../../domain/triage/title-overlap";
 
 /**
@@ -26,6 +30,9 @@ import type { TitleOverlapReport } from "../../domain/triage/title-overlap";
  *                 32〜45 文字    4 組   ← 実際に同じ題の PR だけ
  * ```
  *
+ * **この値は絞り込みの上限にもなる**（#653 のレビュー 2 周目）
+ * ——**同じ 100 本で、正確に比べる相手は 4950 組のうち 16 組**だった。
+ *
  * **背景と、実際の重複の間が広い**ので、**その谷に置く。**
  * **外すと何が起きるかは試験にある**（**境界のちょうど上と、1 つ下**）。
  *
@@ -38,18 +45,17 @@ export const SHARED_TITLE_FLOOR = 10;
 
 /** その行に出す 1 文。**言うことが無ければ `undefined`。** */
 export function titleOverlapNote(report: TitleOverlapReport | undefined): string | undefined {
-  if (report === undefined) {
-    return undefined;
-  }
-  const shared = report.match?.shared ?? "";
-  if (shared.length < SHARED_TITLE_FLOOR) {
-    // **測り切れていないなら、短くても黙らない**——**「読めなかった」を
+  const match = report?.match;
+  if (match === undefined) {
+    // **測り切れていないなら、組が無くても黙らない**——**「読めなかった」を
     // 「似ていない」にしない**（#637 と同じ）
-    return report.partial
+    return report?.partial === true
       ? "タイトルを読み切れていないので、同じ題の PR を測り切れていません"
       : undefined;
   }
 
-  const found = `タイトルが ${shared.length} 文字ぶん同じ PR: #${report.match?.number}（「${shared}」）`;
-  return report.partial ? `${found}（読み切れていないので、下限です）` : found;
+  // **書記素で数える**（#653 のレビュー 2 周目）——**`String.length` は UTF-16 の数**で、
+  // **gitmoji 1 個が 2 になる。** **境界に使ったのと同じ数え方**である
+  const found = `タイトルが ${graphemeCount(match.shared)} 文字ぶん同じ PR: #${match.number}（「${match.shared}」）`;
+  return report?.partial === true ? `${found}（読み切れていないので、下限です）` : found;
 }
