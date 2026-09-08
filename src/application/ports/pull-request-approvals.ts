@@ -26,7 +26,11 @@ export type UnavailableApproval = {
 
 export type PullRequestApprovalListing = {
   /**
-   * **承認済みと確かめられた PR の番号。**
+   * **渡した commit を承認済みと確かめられた PR の番号**（#635）。
+   *
+   * **「承認済み」ではなく「その commit を承認済み」である。** **承認は commit に
+   * 付く**ので、**そのあとに push されたものは、誰も読んでいない差分**である
+   * ——**前者へ倒すと、読まれていない変更がマージできてしまう。**
    *
    * **確かめられたものだけを入れる。** **迷ったら入れない**——
    * **「承認済み」は取り消せない事実の主張**で、**見た人はマージへ進む**
@@ -55,6 +59,14 @@ export type PullRequestApprovals = {
   /**
    * **その人の身元で**、承認の状態を読む。
    *
+   * **突き合わせる commit は、呼ぶ側が渡す**（#635）。**「どの commit の話か」を
+   * 決めるのは、盤面が何を見せたか**であって、**この口の判断ではない**
+   * ——**`PullRequestMergeTarget.headSha` が「押した対象を、見せた対象に固定する」
+   * ために運ばれているのと同じもの**である（#331）。
+   *
+   * **head が分からない PR は渡さない。** **突き合わせる相手が無いなら、
+   * 承認済みかどうかは決められない**——**呼ぶ側が「読めなかった」側へ残す。**
+   *
    * **判定を写さない**（§5）。**「最新の意見だけを数える」「取り下げられた承認は
    * 数えない」といった規則は GitHub が持っている**——**こちらで数え直すと、
    * 向こうが変わったときに片方だけ古くなる**（**症状は「承認されているのに
@@ -66,7 +78,8 @@ export type PullRequestApprovals = {
   listApprovals(
     userAccessToken: string,
     repository: VisibleRepository,
-    pullRequestNumbers: readonly number[],
+    /** PR 番号 → **突き合わせる commit**（盤面が見せた head）。 */
+    heads: ReadonlyMap<number, string>,
     request?: PullRequestApprovalRequest,
   ): Promise<PullRequestApprovalListing>;
 };

@@ -42,6 +42,21 @@ const PLAN: ReviewOrderPlan = {
   changesUnavailable: [],
 };
 
+/** 盤面が見せた head。**承認と突き合わせる相手**である（#635）。 */
+const HEAD = "a".repeat(40);
+
+/**
+ * PR が 1 件だけ載った盤面。**head も一緒に載る。**
+ *
+ * **承認は commit に付く**ので、**突き合わせる相手が無いと「承認済み」と言えない**
+ * （#635）——**`heads` を空のままにした盤面は、承認の話をしていない。**
+ */
+const ONE_PULL_REQUEST: ReviewOrderPlan = {
+  ...PLAN,
+  pullRequests: [PULL_REQUEST],
+  heads: new Map([[PULL_REQUEST.number, HEAD]]),
+};
+
 /** 承認の状態を 1 件も持たない盤面。**この流れの関心は「誰の目で読むか」**である。 */
 const NO_APPROVALS: PullRequestApprovalListing = { approved: new Set(), unavailable: [] };
 
@@ -53,15 +68,17 @@ const NO_APPROVALS: PullRequestApprovalListing = { approved: new Set(), unavaila
  */
 function approvals(
   listing: PullRequestApprovalListing = NO_APPROVALS,
-): PullRequestApprovals & { seen: string[]; asked: number[][] } {
+): PullRequestApprovals & { seen: string[]; asked: [number, string][][] } {
   const seen: string[] = [];
-  const asked: number[][] = [];
+  // **番号だけでなく commit も控える**（#635）——**「どの commit の話か」を
+  // 渡していなければ、口は承認済みかどうかを決められない**
+  const asked: [number, string][][] = [];
   return {
     seen,
     asked,
-    async listApprovals(userAccessToken, _repository, numbers) {
+    async listApprovals(userAccessToken, _repository, heads) {
       seen.push(userAccessToken);
-      asked.push([...numbers]);
+      asked.push([...heads]);
       return listing;
     },
   };
@@ -307,7 +324,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: repositories(VISIBLE),
       permissions: PERMISSIONS,
-      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      plan: async () => ONE_PULL_REQUEST,
       approvals: reader,
     });
 
@@ -315,10 +332,13 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
     expect(reader.seen, "承認の状態を、その人以外のトークンで読んでいる").toEqual(["user-token"]);
     // **盤面に載っている PR の状態を読む**——**番号を渡していなければ、
     // 口は「どれの話か」を知らないまま答えることになる**
-    expect(reader.asked).toEqual([[7]]);
+    //
+    // **commit も渡す**（#635）——**盤面が見せた head を渡していなければ、
+    // 口は「承認済み」としか答えられず、その承認がどの差分に付いたか分からない。**
+    expect(reader.asked).toEqual([[[7, HEAD]]]);
     expect(result).toEqual({
       kind: "board",
-      plan: { ...PLAN, pullRequests: [PULL_REQUEST] },
+      plan: ONE_PULL_REQUEST,
       approvals: { approved: new Set([7]), unavailable: [] },
     });
   });
@@ -350,7 +370,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: repositories(VISIBLE),
       permissions: PERMISSIONS,
-      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      plan: async () => ONE_PULL_REQUEST,
       approvals: APPROVALS_DOWN,
     });
 
@@ -367,7 +387,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: repositories(VISIBLE),
       permissions: PERMISSIONS,
-      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      plan: async () => ONE_PULL_REQUEST,
       approvals: APPROVALS_DOWN,
     });
 
@@ -378,6 +398,63 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
         : [],
       "読めなかった PR が、どこにも残っていない",
     ).toEqual([7]);
+  });
+
+  it("head が分からない PR は、承認済みにも未承認にもしない", async () => {
+    // **突き合わせる相手が無いなら、承認済みかどうかは決められない**（#635）
+    // ——**`heads` に入らないのは「取れなかった PR」**である（`planReviewOrder`）。
+    //
+    // **「古い」と「読めなかった」を分ける**（§5）。**黙って落とすと、
+    // 画面では「承認されていない」と見分けが付かない**——**押した人はもう一度押す。**
+    const reader = approvals({ approved: new Set([7]), unavailable: [] });
+
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      // **head の無い盤面**——**PR は載っているのに、突き合わせる commit が無い**
+      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      approvals: reader,
+    });
+
+    expect(reader.seen, "突き合わせる commit が無いのに叩きに行っている").toEqual([]);
+    expect(result.kind === "board" ? [...result.approvals.approved] : "板ではない").toEqual([]);
+    expect(
+      result.kind === "board"
+        ? result.approvals.unavailable.map((row) => row.pullRequestNumber)
+        : [],
+      "head が無い PR が、どこにも残っていない",
+    ).toEqual([7]);
+  });
+
+  it("head の分かる PR だけを聞き、分からないぶんは読めなかったこととして残す", async () => {
+    // **片方が欠けたからといって、もう片方まで捨てない**——**盤面は交通整理**である
+    const reader = approvals({ approved: new Set([7]), unavailable: [] });
+    const OTHER = { ...PULL_REQUEST, number: 8 } as const;
+
+    const result = await viewRepositoryBoard({
+      repository: TARGET,
+      openStore: async () => ({}) as never,
+      ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
+      repositories: repositories(VISIBLE),
+      permissions: PERMISSIONS,
+      plan: async () => ({
+        ...PLAN,
+        pullRequests: [PULL_REQUEST, OTHER],
+        heads: new Map([[PULL_REQUEST.number, HEAD]]),
+      }),
+      approvals: reader,
+    });
+
+    expect(reader.asked, "head の無い PR まで聞きに行っている").toEqual([[[7, HEAD]]]);
+    expect(result.kind === "board" ? [...result.approvals.approved] : "板ではない").toEqual([7]);
+    expect(
+      result.kind === "board"
+        ? result.approvals.unavailable.map((row) => row.pullRequestNumber)
+        : [],
+    ).toEqual([8]);
   });
 
   it("PR が 1 件も無ければ、承認の状態を読みに行かない", async () => {
@@ -415,7 +492,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: repositories(VISIBLE),
       permissions: PERMISSIONS,
-      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      plan: async () => ONE_PULL_REQUEST,
       approvals: never,
       approvalsDeadline: () => AbortSignal.abort(),
     });
@@ -447,7 +524,7 @@ describe("リポジトリの盤面を出す前に、見てよいかを確かめ�
       ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
       repositories: repositories(VISIBLE),
       permissions: PERMISSIONS,
-      plan: async () => ({ ...PLAN, pullRequests: [PULL_REQUEST] }),
+      plan: async () => ONE_PULL_REQUEST,
       approvals: reader,
       approvalsDeadline: () => deadline,
     });
