@@ -21,6 +21,7 @@ import { errorKind } from "../observability/error-kind";
 import type {
   PullRequestApprovalListing,
   PullRequestApprovals,
+  UnavailableApproval,
 } from "../ports/pull-request-approvals";
 import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
@@ -50,7 +51,10 @@ export type RepositoryBoardResult =
       readonly kind: "board";
       readonly plan: ReviewOrderPlan;
       /**
-       * **各 PR が承認済みかどうか**（#343）。
+       * **各 PR の head が承認済みかどうか**（#343 / #635）。
+       *
+       * **「承認済み」ではない。** **承認は commit に付く**ので、**そのあとに
+       * push されたものは、誰も読んでいない差分**である（#635）。
        *
        * **押した結果は、盤面そのもので確かめる**——**成功はクエリ文字列に
        * 載らない**（#342 のレビュー）ので、**ここが唯一の手掛かり**である。
@@ -153,6 +157,9 @@ export async function viewRepositoryBoard({
       authorization.userAccessToken,
       repository,
       board.pullRequests.map((pullRequest) => pullRequest.number),
+      // **盤面が見せた head を、そのまま突き合わせる相手として渡す**（#635）
+      // ——**`MergeButton` へ渡しているものと同じ**である（#331）
+      board.heads,
       // **合図はここで作る**（#316 と同じ理由）——**盤面を組み立てるぶんを、
       // 承認の期限から引かない**
       approvalsDeadline?.(),
@@ -175,33 +182,69 @@ async function readApprovals(
   userAccessToken: string,
   repository: VisibleRepository,
   numbers: readonly number[],
+  heads: ReadonlyMap<number, string>,
   deadline: AbortSignal | undefined,
 ): Promise<PullRequestApprovalListing> {
-  // **読むものが無ければ、往復も作らない**
-  if (numbers.length === 0) {
-    return { approved: new Set(), unavailable: [] };
+  // **突き合わせる commit が無い PR は、聞いても決められない**（#635）
+  // ——**`heads` に入らないのは「取れなかった PR」**である（`planReviewOrder`）。
+  // **黙って落とすと、画面では「承認されていない」と見分けが付かない。**
+  const asked = new Map<number, string>();
+  const headless: number[] = [];
+  for (const number of numbers) {
+    const head = heads.get(number);
+    if (head === undefined) {
+      headless.push(number);
+    } else {
+      asked.set(number, head);
+    }
   }
+  const headlessRows = unreadable(
+    headless,
+    "head の commit が分からないので、承認と突き合わせられませんでした",
+  ).unavailable;
+
+  // **読むものが無ければ、往復も作らない**
+  if (asked.size === 0) {
+    return { approved: new Set(), unavailable: headlessRows };
+  }
+  const numbersAsked = [...asked.keys()];
   // **切れているなら呼ばない**（`collectChanges` と同じ）——**呼べば往復が始まる**
   if (deadline?.aborted === true) {
-    return unreadable(numbers, "期限までに承認の状態が返りませんでした");
+    return merge(unreadable(numbersAsked, "期限までに承認の状態が返りませんでした"), headlessRows);
   }
   try {
     // **口の行儀に頼らない**（`collectChanges` と同じ理由）——**合図を渡しても、
     // 受け取らない実装・無視する実装はありうる。** **待つのをやめる側と、
     // 取り消しを伝える側の両方**が要る。
     const listing = await Promise.race([
-      approvals.listApprovals(userAccessToken, repository, numbers, { signal: deadline }),
+      approvals.listApprovals(userAccessToken, repository, asked, { signal: deadline }),
       abortion(deadline),
     ]);
-    return listing === TIMED_OUT
-      ? unreadable(numbers, "期限までに承認の状態が返りませんでした")
-      : listing;
+    return merge(
+      listing === TIMED_OUT
+        ? unreadable(numbersAsked, "期限までに承認の状態が返りませんでした")
+        : listing,
+      headlessRows,
+    );
   } catch (error) {
-    return unreadable(
-      numbers,
-      error instanceof Error ? error.message : "承認の状態を取得できませんでした",
+    return merge(
+      unreadable(
+        numbersAsked,
+        error instanceof Error ? error.message : "承認の状態を取得できませんでした",
+      ),
+      headlessRows,
     );
   }
+}
+
+/** 聞けたぶんと、聞けなかったぶんを 1 つにする。**どちらも落とさない。** */
+function merge(
+  listing: PullRequestApprovalListing,
+  headless: readonly UnavailableApproval[],
+): PullRequestApprovalListing {
+  return headless.length === 0
+    ? listing
+    : { approved: listing.approved, unavailable: [...listing.unavailable, ...headless] };
 }
 
 /** 打ち切りの印。**「1 件も承認されていなかった」と区別できる値**にする。 */

@@ -95,6 +95,10 @@ export function mergeNoticeKind(value: unknown): MergeNoticeKind | undefined {
 /**
  * その PR について、盤面に出す状態（#343）。
  *
+ * **「承認済み」は、いま見せている head を承認済みという意味である**（#635）
+ * ——**突き合わせは `viewRepositoryBoard` と `PullRequestApprovals` が済ませている**
+ * ので、**ここは引くだけ**である（**判定を 2 箇所に持たない**）。
+ *
  * **読むのは GitHub から引いた状態だけ**である——**引数に検索文字列が無い**ので、
  * **`?approve=approved` のような値からは作れない**（#342 が塞いだ穴）。
  *

@@ -20,7 +20,30 @@ import { createGitHubPullRequestApprovals } from "./github-pull-request-approval
 const REPOSITORY = { owner: "acme", name: "web" } as const;
 const USER_TOKEN = "user-token";
 
-type Node = { number: number; states: string[]; moreReviews?: string };
+/** 盤面が見せた head。**承認と突き合わせる相手**である（#635）。 */
+const HEAD = "a".repeat(40);
+/** 承認が付いたあとに push される前の commit。**head ではない。** */
+const OLDER = "b".repeat(40);
+
+/**
+ * 意見 1 件。**commit を書かなければ、いまの head に付いたもの**とする。
+ *
+ * **既定を head にするのは、この口が答えるのが「その commit を承認済みか」だから**
+ * である——**commit を書いた試験だけが、ずれた承認の話をしている。**
+ */
+type Review = string | { state: string; commit: string | null };
+type Node = { number: number; states: readonly Review[]; moreReviews?: string };
+
+function review(entry: Review): unknown {
+  const { state, commit } = typeof entry === "string" ? { state: entry, commit: HEAD } : entry;
+  // **`commit` は null になりうる**——**force push で消えた commit の承認**である
+  return { state, commit: commit === null ? null : { oid: commit } };
+}
+
+/** 盤面が見せた head。**この番号を、この commit で聞く。** */
+function heads(...numbers: readonly number[]): ReadonlyMap<number, string> {
+  return new Map(numbers.map((number) => [number, HEAD]));
+}
 
 /** 1 ページぶんの応答。**続きがあるかは `endCursor` で表す。** */
 function page(nodes: readonly Node[], endCursor?: string): unknown {
@@ -37,7 +60,7 @@ function page(nodes: readonly Node[], endCursor?: string): unknown {
                 hasNextPage: moreReviews !== undefined,
                 endCursor: moreReviews ?? null,
               },
-              nodes: states.map((state) => ({ state })),
+              nodes: states.map(review),
             },
           })),
         },
@@ -47,14 +70,14 @@ function page(nodes: readonly Node[], endCursor?: string): unknown {
 }
 
 /** 1 つの PR の、意見だけの応答（**内側の続きを読む要求への答え**）。 */
-function reviewPage(states: readonly string[], endCursor?: string): unknown {
+function reviewPage(states: readonly Review[], endCursor?: string): unknown {
   return {
     data: {
       repository: {
         pullRequest: {
           latestOpinionatedReviews: {
             pageInfo: { hasNextPage: endCursor !== undefined, endCursor: endCursor ?? null },
-            nodes: states.map((state) => ({ state })),
+            nodes: states.map(review),
           },
         },
       },
@@ -87,7 +110,7 @@ describe("GitHub から承認の状態を読む", () => {
     await createGitHubPullRequestApprovals({ fetchImpl }).listApprovals(
       USER_TOKEN,
       REPOSITORY,
-      [7],
+      heads(7),
     );
 
     const [call] = fetchImpl.calls;
@@ -105,10 +128,50 @@ describe("GitHub から承認の状態を読む", () => {
       fetchImpl: fetcher([{ status: 200, body: page([{ number: 7, states: ["APPROVED"] }]) }]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7]);
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
 
     expect([...listing.approved]).toEqual([7]);
     expect(listing.unavailable).toEqual([]);
+  });
+
+  it("承認のあとに push された PR を、承認済みにしない", async () => {
+    // **これが #635 の 1 点である。** **承認は commit に付く**ので、**そのあとに
+    // push されたら、誰も読んでいない差分が「承認済み」の顔をする**——
+    // **Merge は見せた commit に固定されている**（#331）のに、**その固定の根拠が
+    // 固定されていなかった。**
+    //
+    // **上の試験との差は commit だけ**である——**同じにしたら緑、ずらしたら赤。**
+    const approvals = createGitHubPullRequestApprovals({
+      fetchImpl: fetcher([
+        {
+          status: 200,
+          body: page([{ number: 7, states: [{ state: "APPROVED", commit: OLDER }] }]),
+        },
+      ]),
+    });
+
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
+
+    expect([...listing.approved], "古い commit の承認を、head の承認として返した").toEqual([]);
+    // **「古い」と「読めなかった」を分ける**——**読めてはいる**ので、こちらへは入れない
+    expect(listing.unavailable).toEqual([]);
+  });
+
+  it("commit の分からない承認を、承認済みにしない", async () => {
+    // **`commit` は null になりうる**——**承認が付いた commit が force push で
+    // 消えている**。**消えているなら head ではない**ので、承認済みとは言わない。
+    const approvals = createGitHubPullRequestApprovals({
+      fetchImpl: fetcher([
+        {
+          status: 200,
+          body: page([{ number: 7, states: [{ state: "APPROVED", commit: null }] }]),
+        },
+      ]),
+    });
+
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
+
+    expect([...listing.approved]).toEqual([]);
   });
 
   it("承認が付いていない PR を、承認済みにしない", async () => {
@@ -127,7 +190,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7, 8, 9]);
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7, 8, 9));
 
     expect([...listing.approved]).toEqual([7]);
     expect(listing.unavailable).toEqual([]);
@@ -146,7 +209,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7]);
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
 
     // **1 人でも「最新の意見が承認」なら承認済み**である
     expect([...listing.approved]).toEqual([7]);
@@ -167,7 +230,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7]);
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
 
     expect([...listing.approved]).toEqual([7]);
   });
@@ -182,7 +245,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7, 8]);
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7, 8));
 
     expect([...listing.approved]).toEqual([8]);
     expect(listing.unavailable).toEqual([]);
@@ -195,7 +258,7 @@ describe("GitHub から承認の状態を読む", () => {
       fetchImpl: fetcher([{ status: 200, body: page([{ number: 7, states: ["APPROVED"] }]) }]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7, 8]);
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7, 8));
 
     expect([...listing.approved]).toEqual([7]);
     expect(listing.unavailable.map((row) => row.pullRequestNumber)).toEqual([8]);
@@ -214,7 +277,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7]);
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
 
     expect([...listing.approved], "内側の続きを読んでいない").toEqual([7]);
     expect(listing.unavailable).toEqual([]);
@@ -232,14 +295,35 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, [7]);
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
 
     expect([...listing.approved]).toEqual([]);
     expect(listing.unavailable).toEqual([]);
   });
 
-  it("承認が 1 ページ目にあれば、続きは読まない", async () => {
-    // **要らない往復を作らない**——**1 人でも承認していれば、そこで決まる**
+  it("1 ページ目の承認が古い commit なら、続きを読む", async () => {
+    // **打ち切る条件は「承認があった」ではなく「head に付いた承認があった」**である
+    // （#635）——**古い承認で止めると、head を承認した人が次のページにいる PR で
+    // 「承認されていない」に化ける。** **早く止める側へ倒さない。**
+    const approvals = createGitHubPullRequestApprovals({
+      fetchImpl: fetcher([
+        {
+          status: 200,
+          body: page([
+            { number: 7, states: [{ state: "APPROVED", commit: OLDER }], moreReviews: "REVIEWS" },
+          ]),
+        },
+        { status: 200, body: reviewPage(["APPROVED"]) },
+      ]),
+    });
+
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
+
+    expect([...listing.approved], "古い承認で打ち切っている").toEqual([7]);
+  });
+
+  it("head に付いた承認が 1 ページ目にあれば、続きは読まない", async () => {
+    // **要らない往復を作らない**——**1 人でも head を承認していれば、そこで決まる**
     const fetchImpl = fetcher([
       {
         status: 200,
@@ -250,7 +334,7 @@ describe("GitHub から承認の状態を読む", () => {
     await createGitHubPullRequestApprovals({ fetchImpl }).listApprovals(
       USER_TOKEN,
       REPOSITORY,
-      [7],
+      heads(7),
     );
 
     expect(fetchImpl.calls).toHaveLength(1);
@@ -264,7 +348,7 @@ describe("GitHub から承認の状態を読む", () => {
     await createGitHubPullRequestApprovals({ fetchImpl }).listApprovals(
       USER_TOKEN,
       REPOSITORY,
-      [7],
+      heads(7),
       { signal: controller.signal },
     );
 
@@ -287,7 +371,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow();
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7))).rejects.toThrow();
   });
 
   it("続きがあるのに辿れないなら、承認されていないことにしない", async () => {
@@ -309,7 +393,7 @@ describe("GitHub から承認の状態を読む", () => {
                       latestOpinionatedReviews: {
                         // **続きがあると言いながら、行き先が無い**
                         pageInfo: { hasNextPage: true, endCursor: null },
-                        nodes: [{ state: "CHANGES_REQUESTED" }],
+                        nodes: [{ state: "CHANGES_REQUESTED", commit: { oid: HEAD } }],
                       },
                     },
                   ],
@@ -321,7 +405,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow();
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7))).rejects.toThrow();
   });
 
   it("PR の一覧も、続きを辿れないなら投げる", async () => {
@@ -344,7 +428,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow();
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7))).rejects.toThrow();
   });
 
   it("読めなければ投げる", async () => {
@@ -354,7 +438,7 @@ describe("GitHub から承認の状態を読む", () => {
       fetchImpl: fetcher([{ status: 502, body: { message: "bad gateway" } }]),
     });
 
-    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow();
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7))).rejects.toThrow();
   });
 
   it("GraphQL がエラーを返したときも投げる", async () => {
@@ -366,7 +450,7 @@ describe("GitHub から承認の状態を読む", () => {
       ]),
     });
 
-    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow();
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7))).rejects.toThrow();
   });
 
   it("応答の中身を、例外の文言へ載せない", async () => {
@@ -375,7 +459,7 @@ describe("GitHub から承認の状態を読む", () => {
       fetchImpl: fetcher([{ status: 403, body: { message: "secret-repository-name" } }]),
     });
 
-    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, [7])).rejects.toThrow(
+    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7))).rejects.toThrow(
       /^(?!.*secret-repository-name).*$/,
     );
   });
@@ -387,7 +471,7 @@ describe("GitHub から承認の状態を読む", () => {
     const listing = await createGitHubPullRequestApprovals({ fetchImpl }).listApprovals(
       USER_TOKEN,
       REPOSITORY,
-      [],
+      heads(),
     );
 
     expect(fetchImpl.calls).toEqual([]);

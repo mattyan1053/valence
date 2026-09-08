@@ -51,7 +51,7 @@ const BOARD_QUERY = `query($owner: String!, $name: String!, $cursor: String) {
         number
         latestOpinionatedReviews(first: ${PAGE_SIZE}) {
           pageInfo { hasNextPage endCursor }
-          nodes { state }
+          nodes { state commit { oid } }
         }
       }
     }
@@ -69,7 +69,7 @@ const REVIEWS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $cu
     pullRequest(number: $number) {
       latestOpinionatedReviews(first: ${PAGE_SIZE}, after: $cursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { state }
+        nodes { state commit { oid } }
       }
     }
   }
@@ -78,7 +78,14 @@ const REVIEWS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $cu
 const pageInfoSchema = z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() });
 const reviewsSchema = z.object({
   pageInfo: pageInfoSchema,
-  nodes: z.array(z.object({ state: z.string() })),
+  nodes: z.array(
+    z.object({
+      state: z.string(),
+      // **null になりうる**（#635）——**承認が付いた commit が force push で消えている。**
+      // **消えているなら head ではない**ので、**承認済みとは言わない。**
+      commit: z.object({ oid: z.string() }).nullable(),
+    }),
+  ),
 });
 
 /** 意見の 1 ページ。**内側の接続も、外側と同じ形をしている。** */
@@ -243,22 +250,28 @@ export function createGitHubPullRequestApprovals({
   }
 
   /**
-   * その PR に、承認が 1 つでもあるか。
+   * その PR の **head を承認した意見が 1 つでもあるか**（#635）。
+   *
+   * **「承認がある」では足りない。** **承認は commit に付く**ので、
+   * **そのあとに push されたら、誰も読んでいない差分が承認済みの顔をする。**
    *
    * **内側の続きも辿る** (#346 のレビュー)——**意見が 100 件を超えた PR で、
    * 唯一の承認が次のページにあると「承認されていない」に化ける。**
-   * **見つかった時点で止める**（要らない往復を作らない）。
+   * **見つかった時点で止める**（要らない往復を作らない）——**ただし、止める条件は
+   * 「head に付いた承認」である**（**古い承認で止めると、head を承認した人が
+   * 次のページにいる PR で「承認されていない」に化ける**）。
    */
-  async function hasApproval(
+  async function approvesHead(
     userAccessToken: string,
     repository: VisibleRepository,
     number: number,
+    head: string,
     firstPage: ReviewsPage,
     signal: AbortSignal | undefined,
   ): Promise<boolean> {
     let page = firstPage;
     for (;;) {
-      if (page.nodes.some((review) => review.state === "APPROVED")) {
+      if (page.nodes.some((review) => review.state === "APPROVED" && review.commit?.oid === head)) {
         return true;
       }
       if (!page.pageInfo.hasNextPage) {
@@ -278,15 +291,14 @@ export function createGitHubPullRequestApprovals({
     async listApprovals(
       userAccessToken: string,
       repository: VisibleRepository,
-      pullRequestNumbers: readonly number[],
+      heads: ReadonlyMap<number, string>,
       request?: PullRequestApprovalRequest,
     ): Promise<PullRequestApprovalListing> {
       // **聞かれていなければ叩かない**——**空の一覧で往復を作らない**
-      if (pullRequestNumbers.length === 0) {
+      if (heads.size === 0) {
         return { approved: new Set(), unavailable: [] };
       }
 
-      const wanted = new Set(pullRequestNumbers);
       const approved = new Set<number>();
       const seen = new Set<number>();
       const signal = request?.signal;
@@ -294,15 +306,17 @@ export function createGitHubPullRequestApprovals({
       // **最後のページまで読む。** **打ち切ると、古い PR から状態が消える**
       // ——**症状は「承認したのに出ない」**で、**この Issue が消しに来たもの**である
       for await (const node of readBoard(userAccessToken, repository, signal)) {
-        if (!wanted.has(node.number)) {
+        const head = heads.get(node.number);
+        if (head === undefined) {
           // **聞いていない PR は持ち帰らない**
           continue;
         }
         seen.add(node.number);
-        const approvedHere = await hasApproval(
+        const approvedHere = await approvesHead(
           userAccessToken,
           repository,
           node.number,
+          head,
           node.latestOpinionatedReviews,
           signal,
         );
@@ -315,7 +329,7 @@ export function createGitHubPullRequestApprovals({
         approved,
         // **答えが返らなかった PR は「読めなかった」**（**承認されていない、ではない**）
         // ——**閉じた PR や、一覧から落ちたものがここへ来る**
-        unavailable: pullRequestNumbers
+        unavailable: [...heads.keys()]
           .filter((number) => !seen.has(number))
           .map((pullRequestNumber) => ({
             pullRequestNumber,
