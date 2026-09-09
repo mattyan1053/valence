@@ -27,14 +27,12 @@ import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import type { ReviewOpinion } from "../../domain/triage/ball";
 import type { AppCredentials } from "./app-credentials";
-import type { InstallationToken } from "./installation-token";
-import { needsRefresh, requestInstallationToken } from "./installation-token";
+import { createInstallationAuthorization } from "./installation-authorization";
 import { nextPageUrl } from "./link-pagination";
 import type { JudgedOpinion, MergeStatusPage } from "./merge-status-mapping";
 import { toBehindBy, toMergeStatusPage } from "./merge-status-mapping";
 import { toPullRequestRefs } from "./pull-request-mapping";
 import type { GitHubRepository } from "./repository-installation";
-import { resolveRepositoryInstallation } from "./repository-installation";
 import { repositoryUrl } from "./repository-url";
 
 export type GitHubPullRequestSourceOptions = {
@@ -86,25 +84,16 @@ export function createGitHubPullRequestSource({
   mergeStatusDeadline = () => AbortSignal.timeout(MERGE_STATUS_DEADLINE_MS),
   baseLagDeadline = () => AbortSignal.timeout(BASE_LAG_DEADLINE_MS),
 }: GitHubPullRequestSourceOptions): PullRequestSource {
-  let cached: InstallationToken | undefined;
-
   /**
    * **installation は実行時に解決する**（`AGENTS.md` §1）。設定に置くと
-   * **1 つのアカウントしか扱えない**。token は installation ごとのものなので、
-   * 取り直すときは解決からやり直す。
+   * **1 つのアカウントしか扱えない**。**持ち回りは `installation-authorization` が持つ。**
    */
-  async function authorization(): Promise<string> {
-    if (cached === undefined || needsRefresh(cached, now())) {
-      const installationId = await resolveRepositoryInstallation({
-        credentials,
-        repository,
-        now: now(),
-        fetchImpl,
-      });
-      cached = await requestInstallationToken(credentials, installationId, now(), fetchImpl);
-    }
-    return `Bearer ${cached.token}`;
-  }
+  const authorization = createInstallationAuthorization({
+    credentials,
+    repository,
+    fetchImpl,
+    now,
+  });
 
   /** PR 一覧を、最後のページまで読む。**読み切れなければ投げる。** */
   async function readPullRequests(header: string): Promise<unknown[]> {
