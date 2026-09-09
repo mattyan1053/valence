@@ -62,6 +62,7 @@ ssh -L 3000:localhost:3000 -L 54321:localhost:54321 <user>@<remote-vm>
 | **Metadata: Read** | リポジトリの解決、見られるリポジトリの一覧 | `GET /repos/{owner}/{repo}`、`GET /user/repos` |
 | **Pull requests: Read and write** | 盤面（PR 一覧・変更の要約・承認の一覧）と **Approve** | `GET /repos/{owner}/{repo}/pulls`、`GET /repos/{owner}/{repo}/pulls/{number}`、`GET /repos/{owner}/{repo}/pulls/{number}/files`、`POST /graphql`、**`POST /repos/{owner}/{repo}/pulls/{number}/reviews`** |
 | **Contents: Read and write** | **Merge**（**Pull requests では足りない**）と、マージ先の先端の解決（落ちている CI の突き合わせ） | **`PUT /repos/{owner}/{repo}/pulls/{number}/merge`**、`GET /repos/{owner}/{repo}/commits/{ref}` |
+| **Issues: Read** | issue のダッシュボード | `GET /repos/{owner}/{repo}/issues` |
 | **Checks: Read** | CI が通っているか | `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` |
 | **Commit statuses: Read** | 古い形式の CI（status API） | `GET /repos/{owner}/{repo}/commits/{sha}/status` |
 

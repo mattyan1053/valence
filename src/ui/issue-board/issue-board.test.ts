@@ -1,0 +1,172 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it } from "vitest";
+import type { IssueAssignment, IssueRef } from "../../domain/triage/issue";
+import type { IssueBoardProps } from "./issue-board";
+import { IssueBoard } from "./issue-board";
+
+function assignment(overrides: Partial<IssueAssignment> = {}): IssueAssignment {
+  return { assignees: [], authoredByBot: false, ...overrides };
+}
+
+const ISSUES: readonly IssueRef[] = [
+  { number: 1, title: "落ちる" },
+  { number: 2, title: "遅い" },
+];
+
+function view(overrides: Partial<IssueBoardProps> = {}): string {
+  return renderToStaticMarkup(
+    createElement(IssueBoard, {
+      issues: ISSUES,
+      assignments: new Map([
+        [1, assignment({ assignees: ["someone"] })],
+        [2, assignment()],
+      ]),
+      unreadable: 0,
+      urlOf: (number: number) => `https://github.com/o/r/issues/${number}`,
+      ...overrides,
+    }),
+  );
+}
+
+describe("IssueBoard", () => {
+  it("番号とタイトルを出す", () => {
+    const markup = view();
+
+    expect(markup).toContain("落ちる");
+    expect(markup).toContain("#2");
+  });
+
+  it("GitHub の issue へ行ける", () => {
+    // **置き換えず拡張する**（`AGENTS.md` §1）——**本文を読むのは GitHub 側**である
+    expect(view()).toContain('href="https://github.com/o/r/issues/1"');
+  });
+
+  it("誰にも振られていない issue が分かる", () => {
+    expect(view()).toContain("誰にも振られていない issue: 1 件");
+  });
+
+  it("振り先を読めなかった issue を、振られていない側へ倒さない", () => {
+    // **「アサインが無い」と「取れなかった」を分ける**（`AGENTS.md` §5）
+    const markup = view({ assignments: new Map() });
+
+    expect(markup).toContain("振り先を読めなかった issue: 2 件");
+    expect(markup, "読めなかったぶんを未アサインに数えている").not.toContain(
+      "誰にも振られていない issue: 2 件",
+    );
+  });
+
+  it("issue が 1 件も無いときは、そう言う", () => {
+    // **「0 件」と「取れなかった」を、同じ顔にしない**
+    const markup = view({ issues: [], assignments: new Map() });
+
+    expect(markup).toContain("open な issue はありません");
+    expect(markup, "読めなかったことにしている").not.toContain("一覧を読めませんでした");
+  });
+
+  it("一覧そのものを取れなかったときは、そう言う", () => {
+    const markup = view({ issues: { unavailable: "unreadable" } });
+
+    expect(markup).toContain("issue の一覧を読めませんでした");
+    expect(markup, "0 件と同じ顔になっている").not.toContain("open な issue はありません");
+  });
+
+  it("待たなかったことを、読めなかったと同じ文にしない", () => {
+    // **#573 で踏んだ形**——**同じ文言だと、遅いだけのときに権限を疑いに行く**
+    const markup = view({ issues: { unavailable: "timedout" } });
+
+    expect(markup).toContain("時間内に返りませんでした");
+    expect(markup).not.toContain("読めませんでした");
+  });
+
+  it("知らない語でも、行を消さない", () => {
+    // **語彙が増えた日に行が消えると、また同じ顔になる**（`changeUnavailableNote` と同じ）
+    expect(view({ issues: { unavailable: "これから増える語" } })).toContain("これから増える語");
+  });
+
+  it("全件が読めなかったときに、0 件と言わない", () => {
+    // **`issues` は空だが `unreadable` がある**——**「読めなかった」が「無かった」に化ける**
+    const markup = view({ issues: [], assignments: new Map(), unreadable: 2 });
+
+    expect(markup, "全件読めていないのに 0 件と言っている").not.toContain(
+      "open な issue はありません",
+    );
+    expect(markup).toContain("読めなかった issue: 2 件");
+  });
+
+  it("読めなかった件数を、黙って落とさない", () => {
+    // **捨てると「取得できたが読めなかった」と「そもそも無かった」が区別できない**
+    expect(view({ unreadable: 3 })).toContain("読めなかった issue: 3 件");
+  });
+
+  it("bot が立てたぶんを、内訳として出す", () => {
+    // **除くと「未アサイン 0 件」に見え、bot の issue を誰も見ていない事実が消える**
+    const markup = view({
+      assignments: new Map([
+        [1, assignment({ authoredByBot: true })],
+        [2, assignment()],
+      ]),
+    });
+
+    expect(markup).toContain("うち bot の issue: 1 件");
+  });
+
+  it("言うことが無ければ、余計な行を出さない", () => {
+    // **全部に持ち主が居て、読めなかったものも無いなら、その行は毎回同じことを言う**（#248）
+    const markup = view({
+      assignments: new Map([
+        [1, assignment({ assignees: ["a"] })],
+        [2, assignment({ assignees: ["b"] })],
+      ]),
+    });
+
+    expect(markup).not.toContain("誰にも振られていない");
+    expect(markup).not.toContain("読めなかった");
+  });
+});
+
+/**
+ * **一覧そのものは畳む**（#597 / #657 のレビュー）。
+ *
+ * **PR の盤面の行とは事情が違う**——**issue は 1 件 1 行**で、**行の中に畳むものが無い。**
+ * **畳まなければ、この節には畳まれたものが 1 つも無く**、**open issue が 200 件ある
+ * リポジトリでは、PR の盤面の下に 200 行が続く。**
+ */
+describe("一覧を畳む（#597）", () => {
+  /** **常時見えている部分**（`<details>` の手前と `<summary>` の中身）。 */
+  function alwaysVisible(markup: string): string {
+    const details = markup.indexOf("<details");
+    expect(details, "畳んでいない").toBeGreaterThanOrEqual(0);
+    const from = markup.indexOf("<summary", details);
+    const to = markup.indexOf("</summary>", from);
+    return markup.slice(0, details) + markup.slice(from, to);
+  }
+
+  it("畳んだ状態で始まる", () => {
+    // **`<summary>` の中身だけを見ると、`<details open>` にしても全部緑になる**
+    const opened = view().match(/<details([^>]*)>/g) ?? [];
+
+    expect(opened, "畳んでいない").toHaveLength(1);
+    expect(opened[0], "開いた状態で始まっている").not.toMatch(/(^|\s)open(=|\s|>)/);
+  });
+
+  it("行そのものは、開くまで見えない", () => {
+    // **「順番を決める材料だけ」を常時出す**——**題は開いてから読む**
+    expect(alwaysVisible(view()), "行が常時出ている").not.toContain("落ちる");
+    expect(view(), "行を消している").toContain("落ちる");
+  });
+
+  it("何件あるかは、畳んだ外に出す", () => {
+    // **件数まで見えなくなると、順番を決める材料が消える**
+    expect(alwaysVisible(view())).toContain("issue: 2 件");
+  });
+
+  it("読めなかったことは、畳んだ外に出す", () => {
+    // **畳んだ中に入れると、「読めなかったを無かったにしない」が
+    // 「開かないと見えない」に化ける**（`AGENTS.md` §5）
+    const markup = view({ assignments: new Map(), unreadable: 3 });
+
+    expect(alwaysVisible(markup)).toContain("振り先を読めなかった issue: 2 件");
+    expect(alwaysVisible(markup)).toContain("読めなかった issue: 3 件");
+  });
+});

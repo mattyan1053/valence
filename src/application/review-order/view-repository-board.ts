@@ -18,6 +18,7 @@
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
 import { errorKind } from "../observability/error-kind";
+import type { IssueListing, IssueSource } from "../ports/issue-source";
 import type {
   PullRequestApprovalListing,
   PullRequestApprovals,
@@ -60,7 +61,28 @@ export type RepositoryBoardResult =
        * 載らない**（#342 のレビュー）ので、**ここが唯一の手掛かり**である。
        */
       readonly approvals: PullRequestApprovalListing;
+      /**
+       * open な issue（#633）。
+       *
+       * **`undefined` は「取れなかった」**である——**空の一覧と混ぜない。**
+       * **混ぜると、取れなかった日に「issue はありません」と出る**（`AGENTS.md` §5）。
+       *
+       * **落ちても、返ってこなくても、盤面は返す**（`approvals` と同じ判断）
+       * ——**依存グラフだけでも交通整理の役に立つ。**
+       *
+       * **「読めなかった」と「待たなかった」を分ける**（#573）——**同じ文言だと、
+       * 遅いだけのときに権限を疑いに行く**（**実際にそうなった**）。
+       */
+      readonly issues: IssueListing | IssuesUnavailable;
     };
+
+/**
+ * issue を出せなかった 1 件（#573 と同じ分け方）。
+ *
+ *   unreadable … 取りに行って読めなかった（落ちた・形が違う）
+ *   timedout   … **間に合わなかった**（取りに行ったが、期限までに返らなかった）
+ */
+export type IssuesUnavailable = { readonly unavailable: "unreadable" | "timedout" };
 
 export type ViewRepositoryBoardInput = {
   /** どのリポジトリを見るか。**要求ごとに決まる**（設定に固定しない。§1）。 */
@@ -107,6 +129,20 @@ export type ViewRepositoryBoardInput = {
    * **合成ルートで作って渡すと、盤面を組み立てるぶんが承認の期限から引かれる。**
    */
   readonly approvalsDeadline?: () => AbortSignal;
+  /**
+   * issue の一覧を読む口（#633）。
+   *
+   * **任意にしない**（`approvals` と同じ理由）——**渡さなければ出ないだけ、にすると、
+   * 合成ルートで渡し忘れた日から静かに消える。**
+   */
+  readonly issues: IssueSource;
+  /**
+   * issue の取得を打ち切る合図を**作る手続き**（`approvalsDeadline` と同じ形）。
+   *
+   * **無期限に待つと、盤面ごと出ない**——**`catch` は reject しか拾わない**ので、
+   * **応答が返らないままだと `Promise.all` も返らない**（#644 のレビューと同じ形）。
+   */
+  readonly issuesDeadline?: () => AbortSignal;
 };
 
 export async function viewRepositoryBoard({
@@ -118,6 +154,8 @@ export async function viewRepositoryBoard({
   plan,
   approvals,
   approvalsDeadline,
+  issues,
+  issuesDeadline,
 }: ViewRepositoryBoardInput): Promise<RepositoryBoardResult> {
   // **認可は共有の判断が持つ** (#315)。**ここへ写すと、Approve / Merge 側と
   // 片方だけ直したときに食い違う**——**症状は「他人のものが見える / 触れる」**である。
@@ -149,10 +187,9 @@ export async function viewRepositoryBoard({
     return { kind: "unavailable", reason: `board/${errorKind(error)}` };
   }
 
-  return {
-    kind: "board",
-    plan: board,
-    approvals: await readApprovals(
+  // **同時に叩く**——**互いの結果は要らない**ので、**順に待つ理由が無い**
+  const [approvalListing, issueListing] = await Promise.all([
+    readApprovals(
       approvals,
       authorization.userAccessToken,
       repository,
@@ -164,7 +201,41 @@ export async function viewRepositoryBoard({
       // 承認の期限から引かない**
       approvalsDeadline?.(),
     ),
-  };
+    // **合図はここで作る**（#316 と同じ理由）——**盤面を組み立てるぶんを、
+    // issue の期限から引かない**
+    readIssues(issues, issuesDeadline?.()),
+  ]);
+
+  return { kind: "board", plan: board, approvals: approvalListing, issues: issueListing };
+}
+
+/**
+ * issue を読む。**落ちても、返ってこなくても、盤面は返す**（`readApprovals` と同じ判断）。
+ *
+ * **空の一覧にしない**——**「取得できなかった」が「issue が 0 件」に化ける**
+ * （`AGENTS.md` §5）。
+ *
+ * **口の行儀に頼らない**（`readApprovals` と同じ理由）——**合図を渡しても、
+ * 受け取らない実装・無視する実装はありうる。** **待つのをやめる側
+ * （`Promise.race`）と、取り消しを伝える側（`signal`）の両方**が要る。
+ */
+async function readIssues(
+  issues: IssueSource,
+  deadline: AbortSignal | undefined,
+): Promise<IssueListing | IssuesUnavailable> {
+  // **切れているなら呼ばない**（`readApprovals` と同じ）——**呼べば往復が始まる**
+  if (deadline?.aborted === true) {
+    return { unavailable: "timedout" };
+  }
+  try {
+    const listing = await Promise.race([
+      issues.listIssues({ signal: deadline }),
+      abortion(deadline),
+    ]);
+    return listing === TIMED_OUT ? { unavailable: "timedout" } : listing;
+  } catch {
+    return { unavailable: "unreadable" };
+  }
 }
 
 /**

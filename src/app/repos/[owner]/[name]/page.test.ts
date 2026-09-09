@@ -11,8 +11,12 @@
 
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { IssueListing } from "../../../../application/ports/issue-source";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
-import type { RepositoryBoardResult } from "../../../../application/review-order/view-repository-board";
+import type {
+  IssuesUnavailable,
+  RepositoryBoardResult,
+} from "../../../../application/review-order/view-repository-board";
 import { mergeBlockFor } from "../../../../domain/graph/merge-block";
 import type { MergeStatusReport } from "../../../../domain/graph/merge-readiness";
 import { showsSignOut } from "../../../../ui/auth/sign-out-button";
@@ -21,6 +25,7 @@ import {
   approveNoticeKind,
   boardUnavailableReason,
   dynamic,
+  issueBoardProps,
   mergeButtonBlock,
   mergeNoticeKind,
   renderRepositoryBoard,
@@ -309,6 +314,7 @@ describe("commit が分からない PR", () => {
               opinions: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
+            issues: { issues: [], invalid: [], assignments: new Map() },
           }),
           report: () => {},
         },
@@ -435,6 +441,7 @@ describe("材料が出せなかったことを、サーバ側に残す（#573）
       opinions: new Map(),
     },
     approvals: { approved: new Set<number>(), unavailable: [] },
+    issues: { issues: [], invalid: [], assignments: new Map() },
   });
 
   it("打ち切られたことが、記録に残る", async () => {
@@ -555,6 +562,7 @@ describe("盤面が、理由を部品まで渡す（#577 のレビュー 2 周�
                 opinions: new Map(),
               },
               approvals: { approved: new Set<number>(), unavailable: [] },
+              issues: { issues: [], invalid: [], assignments: new Map() },
             }) as never,
           report: () => {},
         },
@@ -638,6 +646,7 @@ describe("合流の状況が、行に出る", () => {
               opinions: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
+            issues: { issues: [], invalid: [], assignments: new Map() },
           }),
           report: () => {},
         },
@@ -724,6 +733,7 @@ describe("推奨レビュー順を、盤面とは別に出す", () => {
               opinions: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
+            issues: { issues: [], invalid: [], assignments: new Map() },
           }),
           report: () => {},
         },
@@ -817,6 +827,7 @@ describe("誰に振られているかを、盤面へ渡す", () => {
               opinions: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
+            issues: { issues: [], invalid: [], assignments: new Map() },
           }),
           report: () => {},
         },
@@ -891,6 +902,7 @@ describe("同じファイルを触る PR を、盤面へ出す", () => {
               opinions: new Map(),
             },
             approvals: { approved: new Set<number>(), unavailable: [] },
+            issues: { issues: [], invalid: [], assignments: new Map() },
           }),
           report: () => {},
         },
@@ -910,5 +922,86 @@ describe("同じファイルを触る PR を、盤面へ出す", () => {
   it("「衝突する」とは言わない", async () => {
     // **同じファイルでも、離れた行なら衝突しない**（#637）
     expect(await markup()).not.toMatch(/衝突/);
+  });
+});
+
+describe("issue の盤面（#633）", () => {
+  const PLAN = {
+    pullRequests: [],
+    edges: [],
+    order: { ordered: [], cyclic: [] },
+    invalid: [],
+    changes: new Map(),
+    changesUnavailable: [],
+    heads: new Map(),
+    titles: new Map(),
+    mergeStatuses: new Map(),
+    assignments: new Map(),
+    opinions: new Map(),
+  } as const;
+
+  async function board(issues: IssueListing | IssuesUnavailable) {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard(
+        { owner: "acme", name: "web" },
+        {},
+        {
+          board: async () => ({
+            kind: "board",
+            plan: PLAN,
+            approvals: { approved: new Set<number>(), unavailable: [] },
+            issues,
+          }),
+          report: () => {},
+        },
+      ),
+    );
+  }
+
+  it("open な issue を、GitHub へ行ける形で並べる", async () => {
+    // **置き換えず拡張する**（`AGENTS.md` §1）——**本文を読むのは GitHub 側**である
+    const markup = await board({
+      issues: [{ number: 9, title: "落ちる" }],
+      invalid: [],
+      assignments: new Map(),
+    });
+
+    expect(markup).toContain("落ちる");
+    expect(markup).toContain('href="https://github.com/acme/web/issues/9"');
+  });
+
+  it("issue を読めなくても、PR の盤面は出る", async () => {
+    // **1 本の失敗で画面が真っ白にならない**（#112 と同じ判断）
+    const markup = await board({ unavailable: "unreadable" });
+
+    expect(markup).toContain("issue の一覧を読めませんでした");
+    expect(markup, "盤面ごと消えている").toContain("acme/web");
+  });
+
+  it("待たなかったことを、読めなかったと同じ文にしない", async () => {
+    // **#573 で踏んだ形**——**同じ文言だと、遅いだけのときに権限を疑いに行く**
+    const markup = await board({ unavailable: "timedout" });
+
+    expect(markup).toContain("時間内に返りませんでした");
+  });
+});
+
+describe("issueBoardProps", () => {
+  it("取れなかったことを、0 件と混ぜない", () => {
+    // **混ぜると、取れなかった日に「issue はありません」と出る**（`AGENTS.md` §5）
+    expect(issueBoardProps({ unavailable: "unreadable" }).issues).toEqual({
+      unavailable: "unreadable",
+    });
+    expect(issueBoardProps({ issues: [], invalid: [], assignments: new Map() }).issues).toEqual([]);
+  });
+
+  it("読めなかった件数を、黙って落とさない", () => {
+    const props = issueBoardProps({
+      issues: [],
+      invalid: [{ index: 0, reason: "?" }],
+      assignments: new Map(),
+    });
+
+    expect(props.unreadable).toBe(1);
   });
 });
