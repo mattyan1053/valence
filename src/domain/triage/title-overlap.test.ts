@@ -294,4 +294,59 @@ describe("タイトルが同じ PR を並べる", () => {
       [...shared].some((rune) => rune.charCodeAt(0) >= 0xd800 && rune.charCodeAt(0) <= 0xdbff),
     ).toBe(false);
   });
+  it("絞り込みが多すぎるときは区切って、下限だと言う", () => {
+    // **`COMPARISON_BUDGET` は正確な比較にしか掛からない**（#656）——**絞り込み
+    // そのものが本数の 2 乗**である。**1 組も届かない盤面では、予算に 1 度も
+    // 触れないまま、絞り込みだけが最後まで走る。**
+    //
+    // **求める長さを大きくして、その形を作る**——**どの組も届かない**ので、
+    // **`COMPARISON_BUDGET` は 1 も減らない。**
+    //
+    // **実測**（このコンテナ、**索引を入れる前**）: **どの 2 本も 9 個の並びを
+    // 共有しない 40 文字の題**で、**500 本 2.9 秒 / 1000 本 14.6 秒 / 2000 本 50 秒**
+    // ——**上限のあった DP 側（最悪 0.6 秒）より 2 桁悪い。**
+    //
+    // **見るのは時間ではなく「返ってくること」と「`partial` が立つこと」**である
+    // （#653 が決めた向き。**時間で赤くする根拠は、上限を決めてからしか無い**）。
+    // **同じ 10 文字から作る**——**どの題もほぼ同じ並びを持つ**ので、
+    // **索引の並びが長くなる**（**索引を入れても手数が減らない形**である）
+    let state = 12345;
+    const next = () => {
+      state = (state * 1664525 + 1013904223) % 4294967296;
+      return state / 4294967296;
+    };
+    const alphabet = "あいうえおかきくけこ";
+    const many = Array.from({ length: 200 }, (_, index) =>
+      titled(
+        index + 1,
+        Array.from({ length: 100 }, () => alphabet[Math.floor(next() * 10)] as string).join(""),
+      ),
+    );
+
+    const started = process.hrtime.bigint();
+    const reports = titleOverlapsFor(many, 500, NOTHING_UNREADABLE);
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(reports.size, `200 本で ${elapsed} ms`).toBe(200);
+    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+  });
+
+  it("実物と同じ形の 100 本では、絞り込みを区切らない", () => {
+    // **上限を低く置きすぎると、ふつうの盤面が毎回「下限です」になる**
+    // ——**そちらの向きも測る**（#656 の完了条件）。
+    // **このリポジトリの PR 100 本を数えた**: **題の長さは中央 21 文字・最大 54 文字**、
+    // **索引を引く手数は合計 9,554**（**索引を引かないと 207,702**）。
+    // **同じ形なら 1000 本でも 955,400 手で、上限に届かない。**
+    const reports = titleOverlapsFor(realistic(), 10, NOTHING_UNREADABLE);
+
+    expect(reports.get(1)?.partial, "測り切れているのに下限と言っている").toBe(false);
+  });
+  it("求める長さが 1 なら、並びを 1 つも共有しない相手も落とさない", () => {
+    // **索引は「2 文字の並びを共有する相手」しか出さない**（#656）——**求める長さが
+    // 1 のときは、並びを 1 つも共有しない相手にも 1 文字の一致がありうる。**
+    // **落としてよいのは、求めた長さに届かない相手だけ**である（#653 のレビュー 2 周目）
+    const reports = titleOverlapsFor([titled(1, "あい"), titled(2, "いう")], 1, NOTHING_UNREADABLE);
+
+    expect(reports.get(1)?.match?.shared, "共有する並びが無い相手を落としている").toBe("い");
+  });
 });

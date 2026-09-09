@@ -192,4 +192,44 @@ describe("同じファイルを触る PR を並べる", () => {
     // **1 本が残り 399 本と重なる**
     expect(reports.get(1)?.overlaps, `400 本で ${elapsed} ms`).toHaveLength(399);
   });
+  it("組が多すぎるときは区切って、下限だと言う", () => {
+    // **上限を入れた**（#656。**測ってから決めた**）——**素のままだと
+    // 「共有パスに乗った本数の 2 乗」**で、**全部が同じ 20 パスを触る 1000 本で
+    // 4.7 秒**、**2000 本で 18.4 秒**だった（**このコンテナで実測**）。
+    // **盤面が開かないのは、行が 1 つ黙るのとは違う。**
+    //
+    // **見るのは時間ではなく「返ってくること」と「`partial` が立つこと」**である
+    // （#653 が同じ向きで決めた。**時間で赤くする根拠は、上限を決めてからしか無い**）。
+    // **250 本 × 20 パスで 1,245,000 組**——**上限の 1,000,000 を超える。**
+    const shared = Array.from({ length: 20 }, (_, index) => `shared-${index}.ts`);
+    const many = Array.from({ length: 250 }, (_, index) => candidate(index + 1, shared));
+
+    const started = process.hrtime.bigint();
+    const reports = fileOverlapsFor(NOTHING_UNREADABLE, many);
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(reports.size, `250 本で ${elapsed} ms`).toBe(250);
+    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+  });
+
+  it("実物と同じ形の 100 本では、区切らない", () => {
+    // **上限を低く置きすぎると、ふつうの盤面が毎回「下限です」になる**
+    // ——**そちらの向きも測る**（#656 の完了条件）。
+    // **このリポジトリの PR 100 本を数えた**: **触ったパスは 1 本あたり中央 4 個・
+    // 最大 21 個**、**組は合計 1890**（**同じ形なら 1000 本でも 189,000 で、
+    // 上限に届かない**）。
+    const many = Array.from({ length: 100 }, (_, index) =>
+      candidate(index + 1, [
+        `src/feature-${index % 25}/one.ts`,
+        `src/feature-${index % 25}/two.ts`,
+        `src/feature-${index % 25}/three.ts`,
+        `src/only-${index}.ts`,
+      ]),
+    );
+
+    const reports = fileOverlapsFor(NOTHING_UNREADABLE, many);
+
+    expect(reports.get(1)?.overlaps, "実物の形なのに組が消えている").toHaveLength(3);
+    expect(reports.get(1)?.partial, "測り切れているのに下限と言っている").toBe(false);
+  });
 });

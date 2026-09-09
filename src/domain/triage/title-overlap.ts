@@ -88,6 +88,24 @@ const COMPARED_PREFIX = 128;
 const COMPARISON_BUDGET = 1000;
 
 /**
+ * **1 枚の盤面で行う、絞り込みの手数。**
+ *
+ * **`COMPARISON_BUDGET` は正確な比較にしか掛からない** (#656)——**絞り込みそのものが
+ * 本数の 2 乗**である。**どの 2 本も似ていない盤面では、予算に 1 度も触れないまま
+ * 全部の組を絞り込む**（**似ていないのはふつうの状態**である）。
+ *
+ * **数えて決めた**（**このコンテナで実測**）。**どの 2 本も 9 個の bigram を
+ * 共有しない 40 文字の題**で、**250 本 0.5 秒 / 500 本 2.9 秒 / 1000 本 14.6 秒 /
+ * 2000 本 50 秒**だった——**上限のあった DP 側（最悪 0.6 秒）より 2 桁悪い。**
+ *
+ * **手数は「相手を 1 本見た回数」で数える**——**組の数では上限にならない**
+ * （**1 組あたりのかかりが題の長さで決まる**。**GitHub の上限は 256 文字**）。
+ *
+ * **区切ったぶんは `partial` で言う**——**黙って切らない。**
+ */
+const SCREENING_BUDGET = 1_000_000;
+
+/**
  * **末尾の番号の飾りを外す。**
  *
  * **`（#123）` はほぼ全部の PR に付く**（`.claude/rules/git-workflow.md`）
@@ -98,9 +116,12 @@ const DECORATION = /(（#\d+[^）]*）|\(#\d+[^)]*\))\s*$/;
 /**
  * **一覧ぶんをまとめて出す**（`fileOverlapsFor` と同じ形）。
  *
- * **かかりには上限がある**（`COMPARED_PREFIX` / `COMPARISON_BUDGET`）
- * ——**素のままだと「本数の 2 乗 × タイトルの長さの 2 乗」**で、
+ * **かかりには上限がある**（`COMPARED_PREFIX` / `COMPARISON_BUDGET` /
+ * `SCREENING_BUDGET`）——**素のままだと「本数の 2 乗 × タイトルの長さの 2 乗」**で、
  * **同じ題が並ぶ盤面が開かなくなる**（#653 のレビュー 3 周目）。
+ *
+ * **絞り込みは索引から引く** (#656)——**相手を 1 本ずつ全部見ると、
+ * どの 2 本も似ていない盤面（ふつうの状態）で本数の 2 乗**になる。
  *
  * **区切ったぶんは黙って消えない**——**`partial` が立ち、行に「測り切れていません」と
  * 出る。** **黙って切ると、この Issue が消しに来た状態（重複が見えない）に戻る。**
@@ -114,8 +135,8 @@ export function titleOverlapsFor(
    * 「どこまで探すか」として受ける。** **絞り込みの上限に使う**ので、
    * **domain が知らないと、落としてよいものが決められない。**
    *
-   * **ただし、区切ったぶんは取りこぼす**（`COMPARED_PREFIX` / `COMPARISON_BUDGET`）
-   * ——**そのときは `partial` が立つ。**
+   * **ただし、区切ったぶんは取りこぼす**（`COMPARED_PREFIX` / `COMPARISON_BUDGET` /
+   * `SCREENING_BUDGET`）——**そのときは `partial` が立つ。**
    */
   atLeast: number,
   /**
@@ -137,16 +158,18 @@ export function titleOverlapsFor(
     [...full].map(([number, rune]) => [number, rune.slice(0, COMPARED_PREFIX)]),
   );
   const grams = new Map([...titles].map(([number, title]) => [number, bigrams(title)]));
+  const byGram = indexByGram(grams);
   // **切ったぶんがあるか**——**黙って切らない**（#637 の `partial` と同じ語彙）。
   // **書記素どうしで比べる**——**符号単位の数と比べると、絵文字があるだけで
   // 「切った」になる**
   const cut = [...full].some(([, rune]) => rune.length > COMPARED_PREFIX);
 
   const budget = { left: COMPARISON_BUDGET, spent: false };
+  const screening = { left: SCREENING_BUDGET, spent: false };
   const matches = new Map(
     candidates.map((candidate) => [
       candidate.number,
-      matchOf(candidate.number, atLeast, runes, grams, budget),
+      matchOf(candidate.number, atLeast, { runes, grams, byGram }, budget, screening),
     ]),
   );
   // **読めていない PR が 1 本でもあれば、どの行の結果も下限である**
@@ -154,7 +177,8 @@ export function titleOverlapsFor(
     unreadableCount > 0 ||
     candidates.some((candidate) => candidate.title === undefined) ||
     cut ||
-    budget.spent;
+    budget.spent ||
+    screening.spent;
 
   return new Map(
     candidates.map((candidate) => [
@@ -192,33 +216,35 @@ function bigrams(title: string | undefined): ReadonlyMap<string, number> {
 function matchOf(
   number: number,
   atLeast: number,
-  runes: ReadonlyMap<number, readonly string[]>,
-  grams: ReadonlyMap<number, ReadonlyMap<string, number>>,
+  material: Material,
   budget: { left: number; spent: boolean },
+  screening: { left: number; spent: boolean },
 ): TitleMatch | undefined {
-  const own = runes.get(number);
+  const own = material.runes.get(number);
   if (own === undefined || own.length === 0) {
+    return undefined;
+  }
+  if (budget.left <= 0) {
+    // **予算が尽きているなら、絞り込みもしない** (#656)——**絞り込みは本数の 2 乗**で、
+    // **その結果を使う先がもう無い。** **区切ったことは `partial` で言う**
+    budget.spent = true;
     return undefined;
   }
 
   let best: TitleMatch | undefined;
   let bestLength = 0;
-  for (const other of reachable(number, atLeast, runes, grams)) {
+  for (const other of reachable(number, atLeast, material, screening)) {
     if (budget.left <= 0) {
       // **区切ったことは `partial` で言う**——**黙って切らない**
       budget.spent = true;
       break;
     }
     budget.left -= 1;
-    const shared = longestShared(own, runes.get(other) as readonly string[]);
+    const shared = longestShared(own, material.runes.get(other) as readonly string[]);
     if (shared.length < atLeast) {
       continue;
     }
-    // **同じ長さなら番号の小さいほう**——**呼ぶたびに揺れると、理由が読めない**
-    if (
-      shared.length > bestLength ||
-      (shared.length === bestLength && other < (best?.number ?? other))
-    ) {
+    if (beats(shared.length, other, best, bestLength)) {
       bestLength = shared.length;
       best = { number: other, shared: shared.join("") };
     }
@@ -227,38 +253,123 @@ function matchOf(
 }
 
 /**
+ * **2 文字の並びから引く索引を 1 度だけ作る**（#656。`fileOverlapsFor` と同じ形）。
+ *
+ * **素のままだと、相手を 1 本ずつ全部見る**——**似ていない題ほど並びは短い**ので、
+ * **ふつうの盤面では、ここでほとんどの相手が出てこなくなる**
+ * （**実物の 100 本で 9,554 手。索引を引かないと 207,702 手**）。
+ *
+ * **出現回数も載せる**——**載せないと、相手の表を毎回引き直すことになる**
+ * （**実測で 2〜2.5 倍**）。
+ */
+function indexByGram(
+  grams: ReadonlyMap<number, ReadonlyMap<string, number>>,
+): ReadonlyMap<string, readonly Posting[]> {
+  const byGram = new Map<string, Posting[]>();
+  for (const [number, gram] of grams) {
+    for (const [key, times] of gram) {
+      const found = byGram.get(key);
+      if (found === undefined) {
+        byGram.set(key, [{ number, times }]);
+      } else {
+        found.push({ number, times });
+      }
+    }
+  }
+  return byGram;
+}
+
+/** 索引の 1 件。**番号と、その題での出現回数。** */
+type Posting = {
+  readonly number: number;
+  readonly times: number;
+};
+
+/** **同じ長さなら番号の小さいほう**——**呼ぶたびに揺れると、理由が読めない。** */
+function beats(
+  length: number,
+  other: number,
+  best: TitleMatch | undefined,
+  bestLength: number,
+): boolean {
+  return length > bestLength || (length === bestLength && other < (best?.number ?? other));
+}
+
+/** 比べる材料を 1 つに束ねる。**引数の数を増やさない。** */
+type Material = {
+  readonly runes: ReadonlyMap<number, readonly string[]>;
+  readonly grams: ReadonlyMap<number, ReadonlyMap<string, number>>;
+  readonly byGram: ReadonlyMap<string, readonly Posting[]>;
+};
+
+/**
  * **求めた長さに届きうる相手だけ**を返す。
  *
  * **落としてよいのは、そこに届かないものだけ**である（#653 のレビュー 2 周目）
  * ——**「いちばん近い 1 本」を先に選ばない。**
+ *
+ * **索引から引く** (#656)——**相手を 1 本ずつ全部見ると、本数の 2 乗**である。
+ * **共通する並びを 1 つも持たない相手は、そもそも出てこない。**
  */
 function* reachable(
   number: number,
   atLeast: number,
-  runes: ReadonlyMap<number, readonly string[]>,
-  grams: ReadonlyMap<number, ReadonlyMap<string, number>>,
+  material: Material,
+  screening: { left: number; spent: boolean },
 ): Generator<number> {
-  const ownGrams = grams.get(number) ?? new Map();
-  for (const [other, rune] of runes) {
-    if (other === number || rune.length === 0) {
-      continue;
-    }
-    if (sharedCount(ownGrams, grams.get(other)) >= atLeast - 1) {
+  const floor = atLeast - 1;
+  if (floor <= 0) {
+    // **0 個の共有でも届く**——**索引に出てこない相手も落とせない**
+    yield* everyOther(number, material.runes);
+    return;
+  }
+
+  const shared = sharedCounts(number, material, screening);
+  for (const [other, count] of shared) {
+    if (count >= floor && (material.runes.get(other)?.length ?? 0) > 0) {
       yield other;
     }
   }
 }
 
-/** 共通する 2 文字の並びの**出現数**（少ないほうを取った合計）。 */
-function sharedCount(
-  left: ReadonlyMap<string, number>,
-  right: ReadonlyMap<string, number> | undefined,
-): number {
-  let count = 0;
-  for (const [gram, times] of right ?? []) {
-    count += Math.min(times, left.get(gram) ?? 0);
+function* everyOther(
+  number: number,
+  runes: ReadonlyMap<number, readonly string[]>,
+): Generator<number> {
+  for (const [other, rune] of runes) {
+    if (other !== number && rune.length > 0) {
+      yield other;
+    }
   }
-  return count;
+}
+
+/**
+ * **相手ごとの、共通する 2 文字の並びの出現数**（少ないほうを取った合計）。
+ *
+ * **索引を引いて、出てきた相手だけ数える**——**出てこない相手は 0 個**である。
+ */
+function sharedCounts(
+  number: number,
+  material: Material,
+  screening: { left: number; spent: boolean },
+): ReadonlyMap<number, number> {
+  const counts = new Map<number, number>();
+  const ownGrams = material.grams.get(number) ?? new Map<string, number>();
+  for (const [gram, times] of ownGrams) {
+    for (const posting of material.byGram.get(gram) ?? []) {
+      if (screening.left <= 0) {
+        // **区切ったことは `partial` で言う**——**黙って切らない**
+        screening.spent = true;
+        return counts;
+      }
+      screening.left -= 1;
+      if (posting.number !== number) {
+        const shared = Math.min(times, posting.times);
+        counts.set(posting.number, (counts.get(posting.number) ?? 0) + shared);
+      }
+    }
+  }
+  return counts;
 }
 
 /**
