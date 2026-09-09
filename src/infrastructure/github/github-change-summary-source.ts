@@ -8,8 +8,8 @@
  * **1 本の失敗で全体を落とさない。** 取れたものは返し、取れなかったものは理由を残す
  * （例外にすると、**1 本の失敗で画面が真っ白になる**）。
  *
- * **token の扱いは `github-pull-request-source` と同じ形をここにも書いている。**
- * 2 回目の重複は許容する（`AGENTS.md` §5）。**3 回目に抽象化すること。**
+ * **token の扱いは `installation-authorization` が持つ**（`AGENTS.md` §5）
+ * ——**3 つ目の写しが出たところでまとめた。**
  */
 
 import type {
@@ -27,10 +27,8 @@ import {
   toCommitSha,
   toHeadSha,
 } from "./change-summary-mapping";
-import type { InstallationToken } from "./installation-token";
-import { needsRefresh, requestInstallationToken } from "./installation-token";
+import { createInstallationAuthorization } from "./installation-authorization";
 import type { GitHubRepository } from "./repository-installation";
-import { resolveRepositoryInstallation } from "./repository-installation";
 import { repositoryUrl } from "./repository-url";
 
 /**
@@ -73,29 +71,12 @@ export function createGitHubChangeSummarySource({
   fetchImpl = fetch,
   now = () => new Date(),
 }: GitHubChangeSummarySourceOptions): ChangeSummarySource {
-  let cached: InstallationToken | undefined;
-
-  // **認証の往復にも合図を届ける。** ここが素通しだと、**呼んだ側が縮退したあとも
-  // installation の解決と token の発行だけが走り続ける**——**止まるのは呼んだ側だけ**になる。
-  async function authorization(signal?: AbortSignal): Promise<string> {
-    if (cached === undefined || needsRefresh(cached, now())) {
-      const installationId = await resolveRepositoryInstallation({
-        credentials,
-        repository,
-        now: now(),
-        fetchImpl,
-        signal,
-      });
-      cached = await requestInstallationToken(
-        credentials,
-        installationId,
-        now(),
-        fetchImpl,
-        signal,
-      );
-    }
-    return `Bearer ${cached.token}`;
-  }
+  const authorization = createInstallationAuthorization({
+    credentials,
+    repository,
+    fetchImpl,
+    now,
+  });
 
   /** **応答の中身を理由に載せない。** 秘密が混ざりうる（`AGENTS.md` §6）。 */
   // **合図は最後まで運ぶ。** 途中で落とすと、**中断したのに往復だけ続く**
