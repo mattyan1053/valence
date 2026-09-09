@@ -104,27 +104,37 @@ export function IssueBoard({ issues, assignments, unreadable, urlOf }: IssueBoar
           {unreadable > 0 && <span>　読めなかった issue: {unreadable} 件</span>}
         </p>
       )}
-      <ul className="flex list-none flex-col gap-1">
-        {issues.map((issue) => {
-          const note = ASSIGNMENT_TEXT[issueAssignmentStateOf(assignments.get(issue.number))];
-          return (
-            <li className="text-sm" key={issue.number}>
-              <a className="underline" href={urlOf(issue.number)}>
-                #{issue.number}
-              </a>
-              {/* **区切りは文字で置く**（#605 のレビュー）——**class に頼ると、
+      {/* **一覧そのものは畳む**（#597 / #657 のレビュー）——**issue は 1 件 1 行**で、
+          **行の中に畳むものが無い。** **畳まなければ、この節には畳まれたものが 1 つも
+          無く**、**open issue が 200 件あるリポジトリでは 200 行が続く。**
+          **`<details>` で畳むだけ**にする（**script が要らない**）。 */}
+      <details className="text-sm">
+        {/* **件数は畳んだ外に出す**——**何件あるかまで見えなくなると、
+            順番を決める材料が消える。** **「読めなかった」の行も外**である
+            （**中に入れると、§5 が「開かないと見えない」に化ける**）。 */}
+        <summary>issue: {issues.length} 件</summary>
+        <ul className="flex list-none flex-col gap-1">
+          {issues.map((issue) => {
+            const note = ASSIGNMENT_TEXT[issueAssignmentStateOf(assignments.get(issue.number))];
+            return (
+              <li className="text-sm" key={issue.number}>
+                <a className="underline" href={urlOf(issue.number)}>
+                  #{issue.number}
+                </a>
+                {/* **区切りは文字で置く**（#605 のレビュー）——**class に頼ると、
                   出ていなくても markup は同じ**なので、**試験では気づけない。** */}
-              <span> {issue.title}</span>
-              {note !== undefined && (
-                <>
-                  <span aria-hidden="true">／</span>
-                  <span className="text-[var(--muted)]">{note}</span>
-                </>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+                <span> {issue.title}</span>
+                {note !== undefined && (
+                  <>
+                    <span aria-hidden="true">／</span>
+                    <span className="text-[var(--muted)]">{note}</span>
+                  </>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </details>
     </div>
   );
 }

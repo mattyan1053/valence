@@ -124,3 +124,49 @@ describe("IssueBoard", () => {
     expect(markup).not.toContain("読めなかった");
   });
 });
+
+/**
+ * **一覧そのものは畳む**（#597 / #657 のレビュー）。
+ *
+ * **PR の盤面の行とは事情が違う**——**issue は 1 件 1 行**で、**行の中に畳むものが無い。**
+ * **畳まなければ、この節には畳まれたものが 1 つも無く**、**open issue が 200 件ある
+ * リポジトリでは、PR の盤面の下に 200 行が続く。**
+ */
+describe("一覧を畳む（#597）", () => {
+  /** **常時見えている部分**（`<details>` の手前と `<summary>` の中身）。 */
+  function alwaysVisible(markup: string): string {
+    const details = markup.indexOf("<details");
+    expect(details, "畳んでいない").toBeGreaterThanOrEqual(0);
+    const from = markup.indexOf("<summary", details);
+    const to = markup.indexOf("</summary>", from);
+    return markup.slice(0, details) + markup.slice(from, to);
+  }
+
+  it("畳んだ状態で始まる", () => {
+    // **`<summary>` の中身だけを見ると、`<details open>` にしても全部緑になる**
+    const opened = view().match(/<details([^>]*)>/g) ?? [];
+
+    expect(opened, "畳んでいない").toHaveLength(1);
+    expect(opened[0], "開いた状態で始まっている").not.toMatch(/(^|\s)open(=|\s|>)/);
+  });
+
+  it("行そのものは、開くまで見えない", () => {
+    // **「順番を決める材料だけ」を常時出す**——**題は開いてから読む**
+    expect(alwaysVisible(view()), "行が常時出ている").not.toContain("落ちる");
+    expect(view(), "行を消している").toContain("落ちる");
+  });
+
+  it("何件あるかは、畳んだ外に出す", () => {
+    // **件数まで見えなくなると、順番を決める材料が消える**
+    expect(alwaysVisible(view())).toContain("issue: 2 件");
+  });
+
+  it("読めなかったことは、畳んだ外に出す", () => {
+    // **畳んだ中に入れると、「読めなかったを無かったにしない」が
+    // 「開かないと見えない」に化ける**（`AGENTS.md` §5）
+    const markup = view({ assignments: new Map(), unreadable: 3 });
+
+    expect(alwaysVisible(markup)).toContain("振り先を読めなかった issue: 2 件");
+    expect(alwaysVisible(markup)).toContain("読めなかった issue: 3 件");
+  });
+});
