@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -173,24 +174,48 @@ function stopSpans(dir: string, spans: [number, number | "-"][]): void {
 /**
  * **いま周回を回している状態にする**（**返さない**）。**始めた時刻も決める。**
  *
- * **`bin/loop-lease` は始まりを `valence-loop-rounds-<scope>` に書く**——**試験は
- * 決まった時刻から見る**ので、**取ったあとに、その 1 行だけを置き換える。**
+ * **`bin/loop-lease` は始まりを 2 つの記録に書く**——**`valence-loop-rounds-<scope>`
+ * と `valence-loop-starts-<scope>`** である。**試験は決まった時刻から見る**ので、
+ * **取ったあとに、どちらも試験の時間軸へ戻す。**
+ *
+ * **`rounds` だけ置き換えていた**（#655）——**`starts` には本物の時計の行が残り**、
+ * **読む側が「どう始まったか分からない周回が新しい」と判定していた。**
+ * **`--trigger` を渡していない**ので、**その行は `unknown` に落ちる。**
+ *
+ * **消すのではなく、取る前の中身へ戻す**——**記録を置く順は試験ごとに違う**
+ * （**先に置く試験も、あとから置く試験もある**）ので、**どちらでも同じ結果にする。**
  */
 function running(dir: string, stamp: string, since: number): void {
-  const taken = spawnSync(join(dir, "bin/loop-lease"), ["acquire", "worker", stamp], {
-    cwd: dir,
-    encoding: "utf8",
-  });
-  expect(taken.status, taken.stderr).toBe(0);
   const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
     cwd: dir,
     encoding: "utf8",
   });
   expect(scope.status, scope.stderr).toBe(0);
-  writeFileSync(
-    join(dir, ".git", `valence-loop-rounds-${scope.stdout.trim()}`),
-    `${since}\n${dir}\n`,
+  const name = scope.stdout.trim();
+  // **取る前の中身を控える**——**`acquire` は足すだけでなく、窓で刈りもする**
+  const before = new Map(
+    ["starts", "held"].map((kind) => {
+      const file = join(dir, ".git", `valence-loop-${kind}-${name}`);
+      return [file, existsSync(file) ? readFileSync(file, "utf8") : undefined];
+    }),
   );
+
+  const taken = spawnSync(join(dir, "bin/loop-lease"), ["acquire", "worker", stamp], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  expect(taken.status, taken.stderr).toBe(0);
+
+  for (const [file, content] of before) {
+    // **無かったものは、無いままにする**——**空で作ると「1 行も無い」と
+    // 「読めなかった」の区別が消える**
+    if (content === undefined) {
+      rmSync(file, { force: true });
+    } else {
+      writeFileSync(file, content);
+    }
+  }
+  writeFileSync(join(dir, ".git", `valence-loop-rounds-${name}`), `${since}\n${dir}\n`);
 }
 
 /** その作業場でいちばん長かった周回の秒数（`bin/loop-lease` が書く）。 */
@@ -210,6 +235,56 @@ function cadence(dir: string, env: Record<string, string> = {}, args: string[] =
     env: { ...process.env, ...env },
   });
 }
+
+/**
+ * **砂場の記録に、試験の時間軸の外の値を残さない**（#655）。
+ *
+ * **`running()` は本物の `bin/loop-lease acquire` を呼ぶ**——**あちらは本物の時計で
+ * 記録を 1 行足す**ので、**試験が作った時間軸（1000〜10000）に、実時刻が混ざる。**
+ * **混ざると、読む側は「どう始まったか分からない周回が新しい」と判定する。**
+ *
+ * **見るのは時刻の列だけ**である（#655 のレビュー）。**記録の 1 行は
+ * `<時刻>\t<種別>\t<作業場>`** で、**作業場のパスにも scope の名前にも数字が入る**
+ * ——**行ごと・ファイルごとに数字を拾うと、当てたい列以外にも当たる**（`AGENTS.md` §4）。
+ */
+describe("砂場の記録に、試験の時間軸の外の値を残さない（#655）", () => {
+  /** 記録の**時刻の列**だけを取り出す。 */
+  function startTimes(dir: string): string[] {
+    const scope = spawnSync(join(dir, "bin/loop-lease"), ["scope", "worker"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(scope.status, scope.stderr).toBe(0);
+    const file = join(dir, ".git", `valence-loop-starts-${scope.stdout.trim()}`);
+    return readFileSync(file, "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => line.split("\t")[0] ?? "");
+  }
+
+  it("acquire が書いた本物の時刻を残さない", () => {
+    // **記録を先に置いてから握る**——**落ちた試験と同じ順**である
+    // （**あとから置けば消えるが、この順では残る**）
+    const { dir, stamp } = workspace();
+    records(dir, [
+      [1_000, "cron"],
+      [2_800, "cron"],
+      [4_600, "cron"],
+    ]);
+    running(dir, stamp, 4_700);
+
+    expect(startTimes(dir), "試験が書いていない時刻が残っている").toEqual(["1000", "2800", "4600"]);
+  });
+
+  it("作業場のパスに大きな数字があっても、見るのは時刻の列だけ", () => {
+    // **判定の範囲を、時刻の列に絞る**（#655 のレビュー）——**パスにも数字は入る**
+    const { dir, stamp } = workspace();
+    records(dir, [[1_000, "cron"]], "/run/user/1000/valence-1788901801");
+    running(dir, stamp, 4_700);
+
+    expect(startTimes(dir)).toEqual(["1000"]);
+  });
+});
 
 describe("周回が始まったことを、どう始まったかごと残す", () => {
   it("cron の周回と、人に突かれた周回を見分ける", () => {
