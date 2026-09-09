@@ -58,4 +58,15 @@ describe("重複しているかもしれない PR を、行の言葉にする", 
     expect(note).toContain("#8");
     expect(note).toMatch(/読み切れ|下限/);
   });
+  it("測り切れなかった理由を、行が名指さない", () => {
+    // **理由は 1 つではない**（#656）——**タイトルが読めなかった / 一覧から
+    // 読めなかった / 長すぎて先頭までしか比べていない（`COMPARED_PREFIX`）/
+    // 組が多すぎて区切った（`COMPARISON_BUDGET`）。** **`partial` は真偽値 1 つ**で、
+    // **どれだったかは持っていない**——**行が理由を名指すと、当たっていないほうを言う。**
+    const silent = titleOverlapNote({ match: undefined, partial: true });
+    const found = titleOverlapNote(report("同じ題です", true));
+
+    expect(silent, "行が持っていない理由を名指している").not.toMatch(/読み切れていない/);
+    expect(found, "行が持っていない理由を名指している").not.toMatch(/読み切れていない/);
+  });
 });

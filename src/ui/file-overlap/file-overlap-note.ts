@@ -19,15 +19,18 @@ import type { OverlapReport } from "../../domain/triage/file-overlap";
  *
  * **測り切れていないことは、重なりが見えなくても言う**——**「測れなかった」を
  * 「重なっていない」にしない**（#637。**このリポジトリが繰り返し塞いでいる形**）。
+ *
+ * **理由は名指さない**（#656）——**`OverlapReport.partial` は真偽値 1 つ**で、
+ * **一覧が見切れていたのか、材料が取れなかったのか、一覧から読めなかったのか、
+ * 組が多すぎて区切ったのか（`OVERLAP_BUDGET`）を持っていない。**
+ * **名指すと、当たっていないほうを言う。**
  */
 export function fileOverlapNote(report: OverlapReport | undefined): string | undefined {
   if (report === undefined) {
     return undefined;
   }
   if (report.overlaps.length === 0) {
-    return report.partial
-      ? "変更ファイルの一覧を読み切れていないので、同じファイルを触る PR を測り切れていません"
-      : undefined;
+    return report.partial ? "同じファイルを触る PR を測り切れていません" : undefined;
   }
 
   const pairs = report.overlaps
@@ -35,6 +38,6 @@ export function fileOverlapNote(report: OverlapReport | undefined): string | und
     .join(", ");
   // **見切れているなら、その数は下限である**
   return report.partial
-    ? `同じファイルを触っている PR: ${pairs}（読み切れていないので、下限です）`
+    ? `同じファイルを触っている PR: ${pairs}（測り切れていないので、下限です）`
     : `同じファイルを触っている PR: ${pairs}`;
 }

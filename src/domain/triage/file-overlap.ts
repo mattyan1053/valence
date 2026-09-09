@@ -68,6 +68,30 @@ export type OverlapReport = {
 };
 
 /**
+ * **1 枚の盤面で数える、重なりの回数。**
+ *
+ * **かかりは「共有しているパスに何本が乗っているか」で決まる** (#651 のレビュー)
+ * ——**`pnpm-lock.yaml` を全 PR が触れば、本数の 2 乗**である。**素のままだと
+ * 盤面が開かない**（**行が 1 つ黙るのとは違う**）。
+ *
+ * **数えて決めた** (#656。**このコンテナで実測**)。
+ * **全部が同じ 20 パスを触る 1000 本で 4.7 秒**、**2000 本で 18.4 秒**だった。
+ *
+ * **切る側だけでなく、通す側も数えた**——**このリポジトリの PR 100 本は、
+ * 触ったパスが 1 本あたり中央 4 個・最大 21 個で、組は合計 1890**である。
+ * **同じ形なら 1000 本でも 189,000** で、**ここには届かない。**
+ * **上限を低く置くと、ふつうの盤面が毎回「下限です」になる。**
+ *
+ * **1 組あたり約 360 ナノ秒**（**250 本 × 20 パス = 1,245,000 組で 446 ms**）
+ * ——**この上限でのかかりは 0.4 秒ほど**である。
+ *
+ * **区切ったぶんは `partial` で言う**——**黙って切らない**（#653 と同じ語彙）。
+ * **先の行から順に使う**ので、**使い切ったあとの行は数が小さく出る**
+ * ——**どの行も「下限です」と言う**のはそのためである。
+ */
+const OVERLAP_BUDGET = 1_000_000;
+
+/**
  * **一覧ぶんをまとめて出す**（`mergeBlocksFor` と同じ理由）。
  *
  * **1 件ずつ比べると本数の 2 乗**になる——**盤面は全部の行について呼ぶ。**
@@ -76,7 +100,8 @@ export type OverlapReport = {
  * **それでも「パスの総数で決まる」とは言えない** (#651 のレビュー)——
  * **かかりは「共有しているパスに何本が乗っているか」で決まる。**
  * **`pnpm-lock.yaml` を全 PR が触れば、組の数は本数の 2 乗**である。
- * **上限は入れていない**——**黙って切ると、この Issue が消しに来た状態
+ * **上限がある**（`OVERLAP_BUDGET`。#656 で測ってから入れた）——**区切ったぶんは
+ * `partial` で言う。** **黙って切ると、この Issue が消しに来た状態
  * （順序に影響する相手が見えない）に戻る。** **行が読めなくなる話は #597 の仕事**である。
  *
  * **訊いた PR は、重なりが無くても全部返る**——**行が消えると、
@@ -116,18 +141,28 @@ export function fileOverlapsFor(
     }
   }
 
+  // **`partial` より先に数える**——**区切ったかどうかは、数えてみるまで分からない**
+  const budget = { left: OVERLAP_BUDGET, spent: false };
+  const overlaps = new Map(
+    candidates.map((candidate) => [
+      candidate.number,
+      overlapsOf(candidate.number, pathsOf.get(candidate.number), byPath, budget),
+    ]),
+  );
+
   // **1 本でも測り切れていなければ、どの行の数も下限である**（`OverlapReport.partial`）
   const partial =
     // **読めなかった PR は、そもそも一覧に出てこない**——**触ったパスも分からない**
     unreadableCount > 0 ||
     candidates.some(
       (candidate) => candidate.changedPaths === undefined || candidate.changedPaths.truncated,
-    );
+    ) ||
+    budget.spent;
 
   return new Map(
     candidates.map((candidate) => [
       candidate.number,
-      { overlaps: overlapsOf(candidate.number, pathsOf.get(candidate.number), byPath), partial },
+      { overlaps: overlaps.get(candidate.number) ?? [], partial },
     ]),
   );
 }
@@ -137,18 +172,32 @@ function overlapsOf(
   // **集合を受ける**——**数えるのはファイルの重なりであって、行の数ではない**
   paths: ReadonlySet<string> | undefined,
   byPath: ReadonlyMap<string, readonly number[]>,
+  budget: { left: number; spent: boolean },
 ): readonly FileOverlap[] {
   const counts = new Map<number, number>();
   for (const path of paths ?? []) {
     for (const other of byPath.get(path) ?? []) {
-      // **自分自身とは重ねない**
-      if (other !== number) {
-        counts.set(other, (counts.get(other) ?? 0) + 1);
+      // **自分自身とは重ねない**——**予算を見るより先に外す** (#660 のレビュー)。
+      // **自分自身は予算を使わない**ので、**先に予算を見ると、上限ちょうどで
+      // 残りが自分自身だけのときに「区切った」と言う**——**1 件も落としていない**
+      if (other === number) {
+        continue;
       }
+      if (budget.left <= 0) {
+        // **区切ったことは `partial` で言う**——**黙って切らない**（#656）
+        budget.spent = true;
+        return ranked(counts);
+      }
+      budget.left -= 1;
+      counts.set(other, (counts.get(other) ?? 0) + 1);
     }
   }
 
-  // **多い順、同じなら番号の小さい順**——**呼ぶたびに揺れると、理由が読めない**
+  return ranked(counts);
+}
+
+/** **多い順、同じなら番号の小さい順**——**呼ぶたびに揺れると、理由が読めない。** */
+function ranked(counts: ReadonlyMap<number, number>): readonly FileOverlap[] {
   return [...counts]
     .map(([number, count]) => ({ number, count }))
     .sort((left, right) => right.count - left.count || left.number - right.number);

@@ -45,4 +45,15 @@ describe("同じファイルを触る PR を、行の言葉にする", () => {
   it("報告そのものが無ければ、何も言わない", () => {
     expect(fileOverlapNote(undefined)).toBeUndefined();
   });
+  it("測り切れなかった理由を、行が名指さない", () => {
+    // **理由は 1 つではない**（#656）——**一覧が見切れている / 材料が取れていない /
+    // 一覧から読めなかった / 組が多すぎて区切った。** **`OverlapReport.partial` は
+    // 真偽値 1 つ**で、**どれだったかは持っていない**（**「相手ごとに分けない」と
+    // 同じ理由**）——**行が理由を名指すと、当たっていないほうを言うことがある。**
+    const cut = fileOverlapNote({ overlaps: [], partial: true });
+    const listed = fileOverlapNote({ overlaps: [{ number: 8, count: 1 }], partial: true });
+
+    expect(cut, "行が持っていない理由を名指している").not.toMatch(/読み切れていない/);
+    expect(listed, "行が持っていない理由を名指している").not.toMatch(/読み切れていない/);
+  });
 });

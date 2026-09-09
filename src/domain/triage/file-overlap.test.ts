@@ -192,4 +192,89 @@ describe("同じファイルを触る PR を並べる", () => {
     // **1 本が残り 399 本と重なる**
     expect(reports.get(1)?.overlaps, `400 本で ${elapsed} ms`).toHaveLength(399);
   });
+  it("組が多すぎるときは区切って、下限だと言う", () => {
+    // **上限を入れた**（#656。**測ってから決めた**）——**素のままだと
+    // 「共有パスに乗った本数の 2 乗」**で、**全部が同じ 20 パスを触る 1000 本で
+    // 4.7 秒**、**2000 本で 18.4 秒**だった（**このコンテナで実測**）。
+    // **盤面が開かないのは、行が 1 つ黙るのとは違う。**
+    //
+    // **見るのは時間ではなく「返ってくること」と「`partial` が立つこと」**である
+    // （#653 が同じ向きで決めた。**時間で赤くする根拠は、上限を決めてからしか無い**）。
+    // **250 本 × 20 パスで 1,245,000 組**——**上限の 1,000,000 を超える。**
+    const shared = Array.from({ length: 20 }, (_, index) => `shared-${index}.ts`);
+    const many = Array.from({ length: 250 }, (_, index) => candidate(index + 1, shared));
+
+    const started = process.hrtime.bigint();
+    const reports = fileOverlapsFor(NOTHING_UNREADABLE, many);
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(reports.size, `250 本で ${elapsed} ms`).toBe(250);
+    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+  });
+
+  it("実物と同じ形の 100 本では、区切らない", () => {
+    // **上限を低く置きすぎると、ふつうの盤面が毎回「下限です」になる**
+    // ——**そちらの向きも測る**（#656 の完了条件）。
+    // **このリポジトリの PR 100 本を数えた**: **触ったパスは 1 本あたり中央 4 個・
+    // 最大 21 個**、**組は合計 1890**（**同じ形なら 1000 本でも 189,000 で、
+    // 上限に届かない**）。
+    const many = Array.from({ length: 100 }, (_, index) =>
+      candidate(index + 1, [
+        `src/feature-${index % 25}/one.ts`,
+        `src/feature-${index % 25}/two.ts`,
+        `src/feature-${index % 25}/three.ts`,
+        `src/only-${index}.ts`,
+      ]),
+    );
+
+    const reports = fileOverlapsFor(NOTHING_UNREADABLE, many);
+
+    expect(reports.get(1)?.overlaps, "実物の形なのに組が消えている").toHaveLength(3);
+    expect(reports.get(1)?.partial, "測り切れているのに下限と言っている").toBe(false);
+  });
+  /**
+   * **予算をちょうど使い切る盤面**（#660 のレビュー）。
+   *
+   * **1 本のパスを n 本が共有すると n × (n − 1) 組**である。
+   * **1000 本で 999,000 組**——**あと 1,000 組足して、上限ちょうどにする**
+   * （**25 本で 600 / 20 本で 380 / 5 本で 20**）。
+   *
+   * **最後に見るのは、いちばん大きい番号の行の、自分自身**である
+   * ——**索引の並びは番号順**なので、**自分自身が末尾に来る。**
+   */
+  function onBudget(overshoot: boolean): OverlapCandidate[] {
+    const paths = Array.from({ length: 1000 }, () => ["shared.ts"]);
+    for (const [path, count] of [
+      ["r.ts", 25],
+      ["s.ts", 20],
+      ["t.ts", 5],
+    ] as const) {
+      for (let index = 0; index < count; index += 1) {
+        (paths[index] as string[]).push(path);
+      }
+    }
+    if (overshoot) {
+      // **1 組だけ増やす**——**予算は自分自身へ届く前に尽きる**
+      (paths[0] as string[]).push("u.ts");
+      paths.push(["u.ts"]);
+    }
+    return paths.map((own, index) => candidate(index + 1, own));
+  }
+
+  it("上限ちょうどで、残りが自分自身だけなら、下限だとは言わない", () => {
+    // **自分自身は予算を使わない**（#660 のレビュー）——**使わないものを数える前に
+    // 予算を見ると、1 件も落としていないのに全行が「下限です」になる。**
+    const reports = fileOverlapsFor(NOTHING_UNREADABLE, onBudget(false));
+
+    expect(reports.get(1000)?.overlaps, "最後の行が数え切れていない").toHaveLength(999);
+    expect(reports.get(1)?.partial, "全部数えたのに下限だと言っている").toBe(false);
+  });
+
+  it("上限ちょうどで、まだ相手が残っているなら、下限だと言う", () => {
+    // **境界の反対側**（#660 のレビュー）——**1 組だけ増やすと、予算は自分自身へ
+    // 届く前に尽きる。** **こちらは区切っているので、下限で正しい。**
+    const reports = fileOverlapsFor(NOTHING_UNREADABLE, onBudget(true));
+
+    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+  });
 });
