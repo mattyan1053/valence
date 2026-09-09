@@ -357,6 +357,11 @@ function sharedCounts(
   const ownGrams = material.grams.get(number) ?? new Map<string, number>();
   for (const [gram, times] of ownGrams) {
     for (const posting of material.byGram.get(gram) ?? []) {
+      // **ここは自分自身も手数に数える**——**`overlapsOf`（`file-overlap.ts`）とは
+      // 会計が違う** (#660 のレビュー)。**あちらが数えるのは「重なりの回数」**なので
+      // **自分自身は使わない**が、**ここが数えるのは「並びを 1 本見た回数」**で、
+      // **自分自身も現に見ている。** **同じ形に見えるからと揃えると、予算が
+      // 実際の手数と合わなくなる**
       if (screening.left <= 0) {
         // **区切ったことは `partial` で言う**——**黙って切らない**
         screening.spent = true;

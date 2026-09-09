@@ -177,16 +177,19 @@ function overlapsOf(
   const counts = new Map<number, number>();
   for (const path of paths ?? []) {
     for (const other of byPath.get(path) ?? []) {
+      // **自分自身とは重ねない**——**予算を見るより先に外す** (#660 のレビュー)。
+      // **自分自身は予算を使わない**ので、**先に予算を見ると、上限ちょうどで
+      // 残りが自分自身だけのときに「区切った」と言う**——**1 件も落としていない**
+      if (other === number) {
+        continue;
+      }
       if (budget.left <= 0) {
         // **区切ったことは `partial` で言う**——**黙って切らない**（#656）
         budget.spent = true;
         return ranked(counts);
       }
-      // **自分自身とは重ねない**
-      if (other !== number) {
-        budget.left -= 1;
-        counts.set(other, (counts.get(other) ?? 0) + 1);
-      }
+      budget.left -= 1;
+      counts.set(other, (counts.get(other) ?? 0) + 1);
     }
   }
 
