@@ -32,7 +32,13 @@ const OLDER = "b".repeat(40);
  * である——**commit を書いた試験だけが、ずれた承認の話をしている。**
  */
 type Review = string | { state: string; commit: string | null };
-type Node = { number: number; states: readonly Review[]; moreReviews?: string };
+type Node = {
+  number: number;
+  states: readonly Review[];
+  moreReviews?: string;
+  /** **開いているか。** **書かなければ `OPEN`。** */
+  state?: string;
+};
 
 function review(entry: Review): unknown {
   const { state, commit } = typeof entry === "string" ? { state: entry, commit: HEAD } : entry;
@@ -45,15 +51,20 @@ function heads(...numbers: readonly number[]): ReadonlyMap<number, string> {
   return new Map(numbers.map((number) => [number, HEAD]));
 }
 
-/** 1 ページぶんの応答。**続きがあるかは `endCursor` で表す。** */
-function page(nodes: readonly Node[], endCursor?: string): unknown {
+/**
+ * 聞かれた番号ぶんの応答（#668）。**別名で引くので、鍵は `p<番号>`** である。
+ *
+ * **`state` を書かなければ開いている**——**閉じた PR の話をしている試験だけが書く。**
+ */
+function page(nodes: readonly Node[]): unknown {
   return {
     data: {
-      repository: {
-        pullRequests: {
-          pageInfo: { hasNextPage: endCursor !== undefined, endCursor: endCursor ?? null },
-          nodes: nodes.map(({ number, states, moreReviews }) => ({
+      repository: Object.fromEntries(
+        nodes.map(({ number, states, moreReviews, state }) => [
+          `p${number}`,
+          {
             number,
+            state: state ?? "OPEN",
             latestOpinionatedReviews: {
               // **内側にも続きがある**（#346 のレビュー）——**意見の数は 100 で切れる**
               pageInfo: {
@@ -62,9 +73,9 @@ function page(nodes: readonly Node[], endCursor?: string): unknown {
               },
               nodes: states.map(review),
             },
-          })),
-        },
-      },
+          },
+        ]),
+      ),
     },
   };
 }
@@ -235,20 +246,61 @@ describe("GitHub から承認の状態を読む", () => {
     expect([...listing.approved]).toEqual([7]);
   });
 
-  it("1 ページ目より先にある PR も読む", async () => {
-    // **打ち切ると、古い PR から状態が消える**——**症状は「承認したのに出ない」**で、
-    // **この Issue が消しに来たものと同じ見え方**になる
+  it("100 本を超えて聞かれても、全部読む", async () => {
+    // **まとめる数は一覧のページと同じ 100**（#668）——**打ち切ると、あふれたぶんから
+    // 状態が消える。** **症状は「承認したのに出ない」**で、**#343 が消しに来たもの**である
+    const asked = Array.from({ length: 101 }, (_, index) => index + 1);
+    const fetchImpl = fetcher([
+      { status: 200, body: page(asked.slice(0, 100).map((number) => ({ number, states: [] }))) },
+      { status: 200, body: page([{ number: 101, states: ["APPROVED"] }]) },
+    ]);
+    const approvals = createGitHubPullRequestApprovals({ fetchImpl });
+
+    const listing = await approvals.listApprovals(
+      USER_TOKEN,
+      REPOSITORY,
+      new Map(asked.map((number) => [number, HEAD])),
+    );
+
+    expect(fetchImpl.calls, "1 回で聞ける数を超えたのに 1 回しか叩いていない").toHaveLength(2);
+    // **1 回に載せる数も上限で切る**——**叩いた回数だけを見ると、
+    // 「2 回とも全部を聞く」も緑になる**（**変異で見つけた**）
+    const first = String(JSON.parse(String(fetchImpl.calls[0]?.init?.body)).query);
+    expect(first, "1 回で聞ける数を超えて載せている").not.toContain("pullRequest(number: 101)");
+    expect(first, "上限のぶんを載せていない").toContain("pullRequest(number: 100)");
+    expect([...listing.approved]).toEqual([101]);
+    expect(listing.unavailable, "読めたのに読めなかったと言っている").toEqual([]);
+  });
+
+  it("聞いた番号だけを問い合わせる", async () => {
+    // **前は開いている PR の一覧を丸ごと辿っていた**（#668）——**1 本聞かれても
+    // 本数ぶんの往復**になっていた。**実測: open 898 本のリポジトリで 9 ページ・34.9 秒**
+    const fetchImpl = fetcher([{ status: 200, body: page([{ number: 7, states: [] }]) }]);
+
+    await createGitHubPullRequestApprovals({ fetchImpl }).listApprovals(
+      USER_TOKEN,
+      REPOSITORY,
+      heads(7),
+    );
+
+    const sent = String(JSON.parse(String(fetchImpl.calls[0]?.init?.body)).query);
+    expect(sent, "聞いた番号を名指していない").toContain("pullRequest(number: 7)");
+    expect(sent, "一覧を丸ごと辿っている").not.toContain("pullRequests(");
+  });
+
+  it("閉じた PR は、承認済みにしない", async () => {
+    // **前は `states: OPEN` の一覧に居ることが「開いている」の根拠だった**（#668）
+    // ——**番号で引くと閉じた PR も返る**ので、**ここで見ないと承認済みの顔をする**
     const approvals = createGitHubPullRequestApprovals({
       fetchImpl: fetcher([
-        { status: 200, body: page([{ number: 7, states: [] }], "CURSOR") },
-        { status: 200, body: page([{ number: 8, states: ["APPROVED"] }]) },
+        { status: 200, body: page([{ number: 7, states: ["APPROVED"], state: "MERGED" }]) },
       ]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7, 8));
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
 
-    expect([...listing.approved]).toEqual([8]);
-    expect(listing.unavailable).toEqual([]);
+    expect([...listing.approved], "閉じた PR を承認済みにしている").toEqual([]);
+    expect(listing.unavailable.map((entry) => entry.pullRequestNumber)).toEqual([7]);
   });
 
   it("答えが返らなかった PR は、「承認されていない」ではなく「読めなかった」", async () => {
