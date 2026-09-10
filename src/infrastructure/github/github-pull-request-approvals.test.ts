@@ -96,6 +96,38 @@ function reviewPage(states: readonly Review[], endCursor?: string): unknown {
   };
 }
 
+/**
+ * **聞かれた別名のぶんだけに絞る**（#673）。
+ *
+ * **本物は、聞いた別名のぶんしか返さない。** **fixture が本物より気前が良いと、
+ * 「聞いていないのに通る」試験が作れる**——**実際に作れていた**（#671 のレビュー
+ * 2 周目。**各バッチの末尾しか載せない実装でも緑**だった）。
+ *
+ * **本物より狭くもしない。** **別名は必ず鍵として返り、見つからなければ `null`**
+ * である——**鍵ごと落とすと、今度は「本物では通るのに試験で落ちる」になる。**
+ *
+ * **番号を名指していない問い合わせには当てない**（**意見の続きは `$number` で
+ * 受ける**）——**当てると、そちらの応答まで組み替えてしまう。**
+ */
+function askedOnly(body: unknown, query: string): unknown {
+  const numbers = [...query.matchAll(/pullRequest\(number: (\d+)\)/g)].map((found) =>
+    Number(found[1]),
+  );
+  const repository = (body as { data?: { repository?: Record<string, unknown> } })?.data
+    ?.repository;
+  if (numbers.length === 0 || repository === undefined) {
+    return body;
+  }
+  return {
+    ...(body as object),
+    data: {
+      repository: Object.fromEntries(
+        numbers.map((number) => [`p${number}`, repository[`p${number}`] ?? null]),
+      ),
+    },
+  };
+}
+
 /** 応答を順に返す `fetch`。**何をどこへ送ったか**を控える。 */
 function fetcher(
   responses: readonly { status: number; body: unknown }[],
@@ -104,7 +136,9 @@ function fetcher(
   const impl = (async (url: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(url), init });
     const response = responses[Math.min(calls.length - 1, responses.length - 1)];
-    return new Response(JSON.stringify(response?.body), {
+    // **本物に寄せる**（#673）——**聞かれた別名のぶんだけ返す**
+    const body = askedOnly(response?.body, String(JSON.parse(String(init?.body)).query));
+    return new Response(JSON.stringify(body), {
       status: response?.status ?? 500,
       headers: { "content-type": "application/json" },
     });
@@ -527,5 +561,47 @@ describe("GitHub から承認の状態を読む", () => {
     expect(fetchImpl.calls).toEqual([]);
     expect([...listing.approved]).toEqual([]);
     expect(listing.unavailable).toEqual([]);
+  });
+  it("応答は、聞かれた番号のぶんだけになる", async () => {
+    // **本物は、聞いた別名のぶんしか返さない**（#673）——**fixture が本物より
+    // 気前が良いと、「聞いていないのに通る」試験が作れる。** **実際に作れていた**
+    // （#671 のレビュー 2 周目。**各バッチの末尾しか載せない実装でも緑**だった）
+    const fetchImpl = fetcher([
+      {
+        status: 200,
+        body: page([
+          { number: 7, states: [] },
+          { number: 9, states: [] },
+        ]),
+      },
+    ]);
+
+    const response = await fetchImpl("https://api.github.com/graphql", {
+      method: "POST",
+      body: JSON.stringify({ query: "{ p7: pullRequest(number: 7) { number } }" }),
+    });
+    const repository = ((await response.json()) as { data: { repository: object } }).data
+      .repository;
+
+    expect(Object.keys(repository), "聞いていない番号まで返している").toEqual(["p7"]);
+  });
+
+  it("聞かれた番号が応答に無ければ、無いものとして返る", async () => {
+    // **本物より狭くしない**（#673）——**別名は必ず鍵として返り、
+    // 見つからなければ `null`** である。**鍵ごと落とすと、本物と形が変わる**
+    const fetchImpl = fetcher([{ status: 200, body: page([{ number: 7, states: [] }]) }]);
+
+    const response = await fetchImpl("https://api.github.com/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query: "{ p7: pullRequest(number: 7) { number } p8: pullRequest(number: 8) { number } }",
+      }),
+    });
+    const repository = (
+      (await response.json()) as { data: { repository: Record<string, unknown> } }
+    ).data.repository;
+
+    expect(Object.keys(repository)).toEqual(["p7", "p8"]);
+    expect(repository.p8, "見つからなかった別名は null で返る").toBeNull();
   });
 });
