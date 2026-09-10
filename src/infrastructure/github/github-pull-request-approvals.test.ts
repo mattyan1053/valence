@@ -113,6 +113,22 @@ function fetcher(
   return impl;
 }
 
+/**
+ * 送った問い合わせに載っている番号を、**呼んだぶんまとめて**並べる（#668 のレビュー 2 周目）。
+ *
+ * **集合として比べるため**である——**載せ忘れも載せすぎも、同じ 1 行で落ちる。**
+ */
+function sentNumbers(calls: readonly { init: RequestInit | undefined }[]): readonly number[] {
+  return calls
+    .flatMap((call) => [
+      ...String(JSON.parse(String(call.init?.body)).query).matchAll(
+        /pullRequest\(number: (\d+)\)/g,
+      ),
+    ])
+    .map((found) => Number(found[1]))
+    .sort((left, right) => left - right);
+}
+
 describe("GitHub から承認の状態を読む", () => {
   it("読む人のトークンで読む", async () => {
     // **installation トークンで読むと、誰がログインしていても同じ答えになる**（§6）
@@ -263,11 +279,13 @@ describe("GitHub から承認の状態を読む", () => {
     );
 
     expect(fetchImpl.calls, "1 回で聞ける数を超えたのに 1 回しか叩いていない").toHaveLength(2);
-    // **1 回に載せる数も上限で切る**——**叩いた回数だけを見ると、
-    // 「2 回とも全部を聞く」も緑になる**（**変異で見つけた**）
-    const first = String(JSON.parse(String(fetchImpl.calls[0]?.init?.body)).query);
-    expect(first, "1 回で聞ける数を超えて載せている").not.toContain("pullRequest(number: 101)");
-    expect(first, "上限のぶんを載せていない").toContain("pullRequest(number: 100)");
+    // **送った番号を集合として比べる**（#668 のレビュー 2 周目）——**「含む / 含まない」を
+    // 並べても、載せ忘れと載せすぎのどちらかしか見えない。**
+    //
+    // **応答は聞いた番号と無関係に返る**（この試験の作り）ので、**`approved` と
+    // `unavailable` だけでは、何を聞いたかを 1 つも測れない**——**各バッチの末尾しか
+    // 載せない実装でも、返ってくるものは変わらない**
+    expect(sentNumbers(fetchImpl.calls), "聞いた番号が過不足なく載っていない").toEqual(asked);
     expect([...listing.approved]).toEqual([101]);
     expect(listing.unavailable, "読めたのに読めなかったと言っている").toEqual([]);
   });
