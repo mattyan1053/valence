@@ -16,6 +16,16 @@ on:
   # **人が確かめられるようにする**——**鳴らないことを確かめる手が要る。**
   workflow_dispatch:
 
+# **確認と起票を、同時に走らせない** (#675 のレビュー 2 周目)。**定期実行と
+# `workflow_dispatch` が重なると、どちらも「未起票」と読んで同じ題を 2 つ立てる**
+# ——**確認と起票の間に錠が無い**（**入口 1.0 の lease と同じ形**）。
+#
+# **重なったほうは捨てない**——**捨てると、手で回した確認が、定期実行に食われて
+# 何も見ないまま終わる。**
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 # public リポジトリなので既定を最小権限にする。Issue を立てるぶんだけ足す。
 permissions:
   contents: read

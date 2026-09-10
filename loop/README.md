@@ -108,9 +108,11 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
 要らない**ので、**ループが全部止まっていても動く。**
 
 - **見るのは「動くべき仕事が動いていないこと」**である——**周回そのものは GitHub から
-  見えない**（記録は VM の中）ので、**`ready` / `in-progress` の Issue と open PR の
-  `updatedAt`** を見る。**`blocked` / `parked` / `awaiting-human` / `waiting-condition`
-  は数えない**（**止まっているのが正しい**）
+  見えない**（記録は VM の中）ので、**`ready` / `in-progress` / `backlog` の Issue と
+  open PR の `updatedAt`** を見る（**`backlog` だけが残る盤面は「master が昇格させる番」**
+  である）。**`blocked` と `waiting-condition`、および `parked` と `awaiting-human` が
+  揃ったものは数えない**（**止まっているのが正しい**——**`parked` だけならループが解く。
+  線は `bin/loop-open-work` と同じ**）
 - **止まっていれば Issue を立て、走りも赤くする**（2 つの経路で届く）。
   **同じことは 2 度立てない**——**立てる Issue には `blocked` を付ける**
   （**label の無い open Issue は `unlisted-issue` として積まれ、3 周で `loop/STOP`**

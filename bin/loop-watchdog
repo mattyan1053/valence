@@ -141,19 +141,40 @@ if ! prs="$(open_items pullRequests)"; then
 fi
 
 # **待っているのが正しいものか。** **完全一致で見る**（上記）。
+#
+# **`parked` だけでは待ちにしない** (#675 のレビュー 2 周目)。**人にしか解けないのは
+# `parked` と `awaiting-human` の両方**である（`bin/loop-open-work` の 20〜22 行）
+# ——**`parked` だけなら、先行 PR を待っているだけでループが解く。**
+# **判定を 2 箇所に持たない**（§5）——**あちらと同じ線に揃える。**
+#
+# **`blocked` は待ち**である（**master が着手済みの作業を止めた状態**）。
+# **`waiting-condition` も待ち**である（#312。**完了条件がまだ満たせない**）。
 is_waiting() {
-  local one
-  for one in blocked parked awaiting-human waiting-condition; do
-    [[ $1 == "$one" ]] && return 0
+  local label parked=0 human=0
+  for label in "$@"; do
+    case "$label" in
+      blocked | waiting-condition) return 0 ;;
+      parked) parked=1 ;;
+      awaiting-human) human=1 ;;
+      *) ;;
+    esac
   done
-  return 1
+  [[ $parked -eq 1 && $human -eq 1 ]]
 }
 
-# **動くべき Issue か。** **`backlog` は後回し**であり、**誰も手を付けない状態が正しい。**
+# **動くべき Issue か。**
+#
+# **`backlog` も数える** (#675 のレビュー 2 周目)——**`ready` / `in-progress` /
+# open PR が無く、`waiting-condition` の付かない `backlog` だけが残る盤面は、
+# `bin/loop-handoff` が「master が昇格させる番」と読む状態**である。
+# **数えないと、いちばん静かな盤面で見張りが黙る。**
 is_moving() {
-  local one
-  for one in ready in-progress; do
-    [[ $1 == "$one" ]] && return 0
+  local label
+  for label in "$@"; do
+    case "$label" in
+      ready | in-progress | backlog) return 0 ;;
+      *) ;;
+    esac
   done
   return 1
 }
@@ -163,11 +184,14 @@ is_moving() {
 work=""
 keep() {
   local require_moving="$1"
-  local number="" updated="" waiting=0 moving=0 kind value extra
+  local number="" updated="" kind value extra
+  local labels=()
   flush() {
     [[ -n $number ]] || return 0
-    [[ $waiting -eq 0 ]] || return 0
-    [[ $require_moving -eq 0 || $moving -eq 1 ]] || return 0
+    is_waiting "${labels[@]+"${labels[@]}"}" && return 0
+    if [[ $require_moving -eq 1 ]]; then
+      is_moving "${labels[@]+"${labels[@]}"}" || return 0
+    fi
     work+="$number$FIELD$updated"$'\n'
   }
   while IFS="$FIELD" read -r kind value extra; do
@@ -176,13 +200,9 @@ keep() {
         flush
         number="$value"
         updated="$extra"
-        waiting=0
-        moving=0
+        labels=()
         ;;
-      label)
-        is_waiting "$value" && waiting=1
-        is_moving "$value" && moving=1
-        ;;
+      label) labels+=("$value") ;;
       *) ;;
     esac
   done

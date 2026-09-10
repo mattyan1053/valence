@@ -117,8 +117,8 @@ describe("bin/loop-watchdog", () => {
   }
 
   it("動くべき仕事が 1 つも無ければ、鳴らない", () => {
-    // **`ready` が尽きた夜に鳴ると、そのうち読まれなくなる**（#248）
-    const result = run({ issues: [{ number: 1, hoursAgo: 99, labels: ["backlog"] }], prs: [] });
+    // **止まっているのが正しい盤面で鳴ると、そのうち読まれなくなる**（#248）
+    const result = run({ issues: [{ number: 1, hoursAgo: 99, labels: ["blocked"] }], prs: [] });
 
     expect(result.status).toBe(0);
   });
@@ -144,8 +144,9 @@ describe("bin/loop-watchdog", () => {
   });
 
   it("止まっているのが正しいものは、数えない", () => {
-    // **人待ち・保留・条件待ちは、動かないほうが正しい**
-    for (const label of ["blocked", "parked", "awaiting-human", "waiting-condition"]) {
+    // **master が止めたもの（`blocked`）と、完了条件を待つもの（`waiting-condition`）**
+    // ——**`parked` は別**である（**ループが解く**。下の試験）
+    for (const label of ["blocked", "waiting-condition"]) {
       const result = run({
         issues: [{ number: 1, hoursAgo: 99, labels: ["ready", label] }],
         prs: [{ number: 2, hoursAgo: 99, labels: [label] }],
@@ -153,6 +154,40 @@ describe("bin/loop-watchdog", () => {
 
       expect(result.status, label).toBe(0);
     }
+  });
+
+  it("昇格できる backlog も、動くべき仕事として数える", () => {
+    // **`ready` / `in-progress` / open PR が無く、`waiting-condition` の付かない
+    // `backlog` だけが残る盤面は、`bin/loop-handoff` が「master が昇格させる番」
+    // と読む**（#675 のレビュー 2 周目）——**そこで cron が全部切れると、
+    // いちばん静かな盤面で見張りが黙る。**
+    const result = run({ issues: [{ number: 1, hoursAgo: 30, labels: ["backlog"] }], prs: [] });
+
+    expect(result.status, "昇格の番なのに、静かでよいと言っている").toBe(1);
+  });
+
+  it("完了条件を待つ backlog は、数えない", () => {
+    // **`waiting-condition` が付いた `backlog` は昇格できない**（#312）
+    const result = run({
+      issues: [{ number: 1, hoursAgo: 99, labels: ["backlog", "waiting-condition"] }],
+      prs: [],
+    });
+
+    expect(result.status).toBe(0);
+  });
+
+  it("`parked` だけの PR は、待ち扱いにしない", () => {
+    // **人にしか解けないのは `parked` と `awaiting-human` の両方**である
+    // （`bin/loop-open-work` の 20〜22 行）——**`parked` だけなら、ループが解く。**
+    // **判定を 2 箇所に持たない**（§5）
+    const parkedOnly = run({ issues: [], prs: [{ number: 2, hoursAgo: 30, labels: ["parked"] }] });
+    const humanToo = run({
+      issues: [],
+      prs: [{ number: 2, hoursAgo: 99, labels: ["parked", "awaiting-human"] }],
+    });
+
+    expect(parkedOnly.status, "ループが解く待ちで、黙っている").toBe(1);
+    expect(humanToo.status, "人待ちの PR で鳴っている").toBe(0);
   });
 
   it("カンマを含む label 名を、部分一致で読まない", () => {
@@ -197,10 +232,11 @@ describe("bin/loop-watchdog", () => {
     // 古い `ready` が落ちると、止まっているのに「静かでよい」へ倒れる。**
     // **200 件ちょうどでは落ちない**ので、**超える数で置く。**
     const many: Item[] = [
+      // **数えない側で埋める**——**最後の 1 件に届かなければ、鳴らない**
       ...Array.from({ length: 250 }, (_, index) => ({
         number: index + 1,
         hoursAgo: 1,
-        labels: ["backlog"],
+        labels: ["blocked"],
       })),
       { number: 999, hoursAgo: 99, labels: ["ready"] },
     ];
@@ -233,6 +269,22 @@ describe("bin/loop-watchdog", () => {
     ]);
 
     expect(result.status).toBe(1);
+  });
+
+  it("確認と起票を、同時に走らせない", () => {
+    // **定期実行と `workflow_dispatch` が重なると、どちらも「未起票」と読んで
+    // 同じ題を 2 つ立てる**（#675 のレビュー 2 周目）——**確認と起票の間に
+    // 錠が無い。** **走り自体を直列化する**（入口 1.0 の lease と同じ向き）
+    const workflow = readFileSync(
+      fileURLToPath(new URL("../.github/workflows/loop-watchdog.yml", import.meta.url)),
+      "utf8",
+    );
+
+    // **本文より狭く見る**（#620）——**この語は理由のコメントにも出てくる**ので、
+    // **`toContain` だと、鍵を消してもコメントに当たって緑になる**（**実測**）。
+    // **行そのもの**を見る
+    expect(workflow, "走りが直列化されていない").toMatch(/^concurrency:$/m);
+    expect(workflow, "重なったほうを捨てている").toMatch(/^ {2}cancel-in-progress: false$/m);
   });
 
   describe("--report", () => {
