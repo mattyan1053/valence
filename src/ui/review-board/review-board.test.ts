@@ -948,3 +948,78 @@ describe("行とボタンが、逆のことを言わない（#652 のレビュ�
     expect(rows.match(/マージする人の番/g), "マージする人の番の行が 2 行ではない").toHaveLength(2);
   });
 });
+
+/**
+ * **自分に関係あるものだけに絞る**（#663）。
+ *
+ * **判定は足していない**——**`ballOf`（#636）が返したものを、通すか落とすかに使う。**
+ * **絞るのは一覧だけ**で、**図は絞らない**——**依存の関係は、絞ると辺が消えて嘘になる。**
+ */
+describe("誰の番かで絞る（#663）", () => {
+  /** **#1 は著者の番、#2 はレビューする人の番**になる入力。 */
+  function byBall(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
+    return props({
+      reviewOpinionOf: (number: number) =>
+        number === 1
+          ? { approvesHead: false, changesRequestedOnHead: true, reviewed: true }
+          : REVIEWED,
+      assignmentOf: (number: number) =>
+        number === 2 ? { assignees: [], reviewers: ["r"], authoredByBot: false } : ASSIGNED,
+      ...overrides,
+    });
+  }
+
+  it("既定では絞らない", () => {
+    // **開いた瞬間に一部しか見えていないと、見えていないことに気づけない**（#663）
+    const rows = list(render(byBall()));
+
+    expect(rows).toContain("#1");
+    expect(rows, "渡していない絞りが効いている").toContain("#2");
+  });
+
+  it("選んだ番のものだけが一覧に並ぶ", () => {
+    const rows = list(render(byBall({ ballFilter: "author" })));
+
+    expect(rows).toContain("#1");
+    expect(rows, "絞りに当たらない PR が一覧に残っている").not.toContain("#2");
+  });
+
+  it("絞っても、図からは消えない", () => {
+    // **依存の関係は、絞ると辺が消えて嘘になる**——**図は関係を追うため**、
+    // **一覧は 1 件ずつの中身のため**である（`review-board.tsx` の判断）
+    const markup = render(byBall({ ballFilter: "author" }));
+    const figure = markup.slice(0, markup.indexOf("<ol"));
+
+    expect(figure, "図からも消えている").toContain("#2");
+  });
+
+  it("絞っていることと、隠した件数を言う", () => {
+    // **絞られていることに気づけないと、見えていないものに気づけない**
+    expect(render(byBall({ ballFilter: "author" }))).toContain("1 件を隠しています");
+  });
+
+  it("絞って 0 件になっても黙らない", () => {
+    // **「絞って 0 件」と「1 件も無い」は違う**（#410 と同じ形）——
+    // **#1 は著者の番、#2 はレビューする人の番**なので、**「誰の番でもない」は 0 件**
+    const markup = render(byBall({ ballFilter: "nobody" }));
+
+    expect(list(markup), "当てはまらないのに行が並んでいる").not.toContain("#1");
+    expect(markup, "0 件になったことを言っていない").toContain(
+      "「誰の番でもない」の PR はありません",
+    );
+  });
+
+  it("読めなかった件数は、絞りに関係なく出る", () => {
+    // **絞りで隠れると、抜けたことが消える**（#663 の「気をつけること」。§5）
+    const markup = render(
+      byBall({ ballFilter: "author", invalid: [{ index: 4, reason: "番号が数値ではありません" }] }),
+    );
+
+    expect(markup, "抜けが絞りに巻き込まれている").toContain("読めなかった PR が 1 件");
+  });
+
+  it("絞る口は、絞っていなくても出る", () => {
+    // **口が無ければ、絞れることに気づけない**
+    expect(render(byBall())).toContain("誰の番かで絞る");
+  });
+});

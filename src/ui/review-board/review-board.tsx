@@ -20,11 +20,14 @@ import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { Assignment } from "../../domain/triage/assignment";
 import type { ReviewOpinion } from "../../domain/triage/ball";
 import { ballOf } from "../../domain/triage/ball";
+import { filterByBall } from "../../domain/triage/board-filter";
 import { fileOverlapsFor } from "../../domain/triage/file-overlap";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import { classifyRiskTier } from "../../domain/triage/risk-tier";
 import { titleOverlapsFor } from "../../domain/triage/title-overlap";
 import { assignmentNote } from "../assignment/assignment-note";
+import type { BallFilter } from "../ball/ball-filter";
+import { BallFilterView } from "../ball/ball-filter-view";
 import { ballNote } from "../ball/ball-note";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
 import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
@@ -194,6 +197,16 @@ export type ReviewBoardProps = {
    * ——**同じ画面が逆のことを言う。**
    */
   readonly mergeBlockOf: (pullRequestNumber: number) => MergeBlock | undefined;
+  /**
+   * **一覧を、誰の番かで絞る**（#663）。**渡さなければ絞らない。**
+   *
+   * **既定は絞らない**——**開いた瞬間に一部しか見えていないと、
+   * 見えていないことに気づけない。**
+   *
+   * **判定は足さない**——**`ballOf`（#636）が返したものを、通すか落とすかに使う。**
+   * **絞るのは一覧だけ**で、**図は絞らない**（`rowShown`）。
+   */
+  readonly ballFilter?: BallFilter;
 };
 
 export function ReviewBoard({
@@ -212,6 +225,7 @@ export function ReviewBoard({
   assignmentOf,
   reviewOpinionOf,
   mergeBlockOf,
+  ballFilter,
 }: ReviewBoardProps) {
   // **行ごとに計算しない**（`mergeBlocksFor` と同じ理由）——**1 件ずつ比べると
   // 本数の 2 乗**になる。**材料が取れていない PR も渡す**——**「触っていない」
@@ -239,88 +253,123 @@ export function ReviewBoard({
     invalid.length,
   );
 
+  // **誰の番かは、行ごとに 1 度だけ決める**（#663）——**絞りと行の文の両方が
+  // 同じ答えを使う。** **2 度呼ぶと、片方だけが変わった日に画面が食い違う**
+  const balls = pullRequests.map((pullRequest) => ({
+    number: pullRequest.number,
+    ball: ballOf({
+      opinion: reviewOpinionOf(pullRequest.number),
+      readiness: mergeReadinessOf(mergeStatusOf(pullRequest.number)).kind,
+      block: mergeBlockOf(pullRequest.number),
+      assignment: assignmentOf(pullRequest.number),
+    }),
+  }));
+  const ballOfNumber = new Map(balls.map((row) => [row.number, row.ball]));
+  const filtered = filterByBall(balls, ballFilter);
+  const shown = new Set(filtered.shown);
+
   return (
-    <DependencyGraphView
-      pullRequests={pullRequests}
-      edges={edges}
-      order={order}
-      invalid={invalid}
-      // **図の箱にも危なさを載せる**（#540）。**脇の文章にしか無いと、
-      // 10 本並んだとき全部読むまで順番が決まらない**——**判定は同じ
-      // `classifyRiskTier`** なので、**箱と脇で食い違わない。**
-      tierOf={(number) => {
-        const change = changes.get(number);
-        // **材料が無いことを「危なくない」に倒さない**（下の行と同じ判断）
-        return change === undefined ? undefined : classifyRiskTier(change);
-      }}
-      headKnown={headKnown}
-      titleOf={titleOf}
-      urlOf={urlOf}
-      renderAside={(number) => {
-        const change = changes.get(number);
-        // **材料の有無に関わらず出す**（#629）——**リスク Tier が揃っていないことと、
-        // 合流できるかは別**である。**片方の行にだけ出すと、押せない理由が消える**
-        // （`renderStatus` と同じ判断）
-        const status = mergeStatusOf(number);
-        // **2 行になりうる**（#639）。**同じことを 2 度言っているのではない**——
-        // **`mergeReadinessNote` は「入るかどうか」**（`mergeStateStatus`）、
-        // **`baseLagNote` は「どれだけ」**（compare の `behindBy`）で、**出どころが違う。**
-        // **最新化を要求しない設定では、遅れていても `BEHIND` は返らない**（#644 のレビュー）
-        // ので、**片方だけが出る場面がある。**
-        const notes = [
-          mergeReadinessNote(mergeReadinessOf(status)),
-          baseLagNote(status?.behindBy),
-        ].filter((line) => line !== undefined);
-        const readiness = notes.map((line) => (
-          <span className="text-sm" key={line}>
-            {line}
-          </span>
-        ));
-        // **持ち主は常に出す**（#631）——**合流の状況（上）とは違う。**
-        // **あちらは「押せない理由」で平常時は言うことが無い**が、
-        // **こちらは「誰の持ち物か」**であり、**振られていないこと自体が主題**である
-        //
-        // **押せるかの話が先、持ち主の話が後**である（#650 の取り込み直し）——
-        // **base の遅れは合流の状況の側**なので、**`readiness` に並ぶ。**
-        // **ファイルの重なりは、その間に入る**（#637）——**押せるかの話ではなく、
-        // 持ち主の話でもない。** **依存の順序とは別の目安**である
-        const overlap = fileOverlapNote(overlaps.get(number));
-        // **重複しているかもしれない相手**（#630）——**「似ています」とは言わない。**
-        // **言うことが無ければ出ない**（#248 / #597）。
-        //
-        // **ファイルの重なり（上）と同じ「順序の目安」の族**である
-        // ——**#630 が「似ている」と「同じ」を分けた、その両側**（#653 の取り込み直し）
-        const duplicate = titleOverlapNote(titleOverlaps.get(number));
-        // **誰の番か**（#636）——**「誰の持ち物か」（下）とは別の軸**である。
-        // **判定は domain が持つ**（`ballOf`）ので、**ここは詰め替えるだけ**である。
-        //
-        // **「誰の持ち物か」の直前に置く**——**役割の話が先、人の話が後**である。
-        const ball = ballNote(
-          ballOf({
-            opinion: reviewOpinionOf(number),
-            readiness: mergeReadinessOf(status).kind,
-            block: mergeBlockOf(number),
-            assignment: assignmentOf(number),
-          }),
-        );
-        const assignment = (
-          <span className="text-sm opacity-70">{assignmentNote(assignmentOf(number))}</span>
-        );
-        // **材料が無い PR を黙って落とさない。** 行は残し、
-        // 「出せなかった」ことが分かる形にする（#107 の `invalid` と同じ形）。
-        if (change === undefined) {
-          const kind = changeUnavailableOf?.(number);
-          // **材料が無くても操作は出す。** **Tier は目安**であって、
-          // **承認してよいかの判断ではない**——**揃うまで押せないのは、
-          // 交通整理をしに来た人を待たせるだけである**
+    <>
+      {/* **絞る口は、一覧の手前に置く**——**何が出ているかの断りでもある** */}
+      <BallFilterView
+        current={ballFilter}
+        counts={{ shown: filtered.shown.length, hidden: filtered.hidden }}
+      />
+      <DependencyGraphView
+        pullRequests={pullRequests}
+        edges={edges}
+        order={order}
+        invalid={invalid}
+        // **絞りは一覧だけに効く**（#663）——**図は絞らない。**
+        // **依存の関係は、絞ると辺が消えて嘘になる**
+        rowShown={(number) => shown.has(number)}
+        // **図の箱にも危なさを載せる**（#540）。**脇の文章にしか無いと、
+        // 10 本並んだとき全部読むまで順番が決まらない**——**判定は同じ
+        // `classifyRiskTier`** なので、**箱と脇で食い違わない。**
+        tierOf={(number) => {
+          const change = changes.get(number);
+          // **材料が無いことを「危なくない」に倒さない**（下の行と同じ判断）
+          return change === undefined ? undefined : classifyRiskTier(change);
+        }}
+        headKnown={headKnown}
+        titleOf={titleOf}
+        urlOf={urlOf}
+        renderAside={(number) => {
+          const change = changes.get(number);
+          // **材料の有無に関わらず出す**（#629）——**リスク Tier が揃っていないことと、
+          // 合流できるかは別**である。**片方の行にだけ出すと、押せない理由が消える**
+          // （`renderStatus` と同じ判断）
+          const status = mergeStatusOf(number);
+          // **2 行になりうる**（#639）。**同じことを 2 度言っているのではない**——
+          // **`mergeReadinessNote` は「入るかどうか」**（`mergeStateStatus`）、
+          // **`baseLagNote` は「どれだけ」**（compare の `behindBy`）で、**出どころが違う。**
+          // **最新化を要求しない設定では、遅れていても `BEHIND` は返らない**（#644 のレビュー）
+          // ので、**片方だけが出る場面がある。**
+          const notes = [
+            mergeReadinessNote(mergeReadinessOf(status)),
+            baseLagNote(status?.behindBy),
+          ].filter((line) => line !== undefined);
+          const readiness = notes.map((line) => (
+            <span className="text-sm" key={line}>
+              {line}
+            </span>
+          ));
+          // **持ち主は常に出す**（#631）——**合流の状況（上）とは違う。**
+          // **あちらは「押せない理由」で平常時は言うことが無い**が、
+          // **こちらは「誰の持ち物か」**であり、**振られていないこと自体が主題**である
+          //
+          // **押せるかの話が先、持ち主の話が後**である（#650 の取り込み直し）——
+          // **base の遅れは合流の状況の側**なので、**`readiness` に並ぶ。**
+          // **ファイルの重なりは、その間に入る**（#637）——**押せるかの話ではなく、
+          // 持ち主の話でもない。** **依存の順序とは別の目安**である
+          const overlap = fileOverlapNote(overlaps.get(number));
+          // **重複しているかもしれない相手**（#630）——**「似ています」とは言わない。**
+          // **言うことが無ければ出ない**（#248 / #597）。
+          //
+          // **ファイルの重なり（上）と同じ「順序の目安」の族**である
+          // ——**#630 が「似ている」と「同じ」を分けた、その両側**（#653 の取り込み直し）
+          const duplicate = titleOverlapNote(titleOverlaps.get(number));
+          // **誰の番か**（#636）——**「誰の持ち物か」（下）とは別の軸**である。
+          // **判定は domain が持つ**（`ballOf`）ので、**ここは詰め替えるだけ**である。
+          //
+          // **「誰の持ち物か」の直前に置く**——**役割の話が先、人の話が後**である。
+          //
+          // **絞りと同じ答えを使う**（#663）——**上で 1 度だけ決めたものを引く。**
+          // **ここで呼び直すと、絞りに当たっていない行に別のことが書ける**
+          const ball = ballNote(ballOfNumber.get(number) ?? "unknown");
+          const assignment = (
+            <span className="text-sm opacity-70">{assignmentNote(assignmentOf(number))}</span>
+          );
+          // **材料が無い PR を黙って落とさない。** 行は残し、
+          // 「出せなかった」ことが分かる形にする（#107 の `invalid` と同じ形）。
+          if (change === undefined) {
+            const kind = changeUnavailableOf?.(number);
+            // **材料が無くても操作は出す。** **Tier は目安**であって、
+            // **承認してよいかの判断ではない**——**揃うまで押せないのは、
+            // 交通整理をしに来た人を待たせるだけである**
+            return (
+              <>
+                <span>
+                  {kind === undefined
+                    ? // **本当に材料が無い**（**取りに行った跡が無い**）
+                      "リスク判定の材料がありません（まだ取得できていません）"
+                    : changeUnavailableNote(kind)}
+                </span>
+                {readiness}
+                <Note text={overlap} />
+                <Note text={duplicate} />
+                <Note text={ball} />
+                {assignment}
+                <ActionRow>
+                  {renderStatus?.(number)}
+                  {renderActions?.(number)}
+                </ActionRow>
+              </>
+            );
+          }
           return (
             <>
-              <span>
-                {kind === undefined
-                  ? // **本当に材料が無い**（**取りに行った跡が無い**）
-                    "リスク判定の材料がありません（まだ取得できていません）"
-                  : changeUnavailableNote(kind)}
-              </span>
+              <RiskTierView tier={classifyRiskTier(change)} change={change} />
               {readiness}
               <Note text={overlap} />
               <Note text={duplicate} />
@@ -332,22 +381,8 @@ export function ReviewBoard({
               </ActionRow>
             </>
           );
-        }
-        return (
-          <>
-            <RiskTierView tier={classifyRiskTier(change)} change={change} />
-            {readiness}
-            <Note text={overlap} />
-            <Note text={duplicate} />
-            <Note text={ball} />
-            {assignment}
-            <ActionRow>
-              {renderStatus?.(number)}
-              {renderActions?.(number)}
-            </ActionRow>
-          </>
-        );
-      }}
-    />
+        }}
+      />
+    </>
   );
 }
