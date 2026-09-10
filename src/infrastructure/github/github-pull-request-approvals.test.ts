@@ -110,19 +110,29 @@ function reviewPage(states: readonly Review[], endCursor?: string): unknown {
  * 受ける**）——**当てると、そちらの応答まで組み替えてしまう。**
  */
 function askedOnly(body: unknown, query: string): unknown {
-  const numbers = [...query.matchAll(/pullRequest\(number: (\d+)\)/g)].map((found) =>
-    Number(found[1]),
-  );
+  // **別名も読む**（#673 のレビュー）——**番号から鍵を作り直すと、
+  // 別名を取り違えた実装でも通る**
+  const asked = [...query.matchAll(/(\w+):\s*pullRequest\(number:\s*(\d+)\)/g)].map((found) => ({
+    alias: String(found[1]),
+    number: Number(found[2]),
+  }));
   const repository = (body as { data?: { repository?: Record<string, unknown> } })?.data
     ?.repository;
-  if (numbers.length === 0 || repository === undefined) {
+  if (asked.length === 0 || repository === undefined) {
     return body;
+  }
+  if (new Set(asked.map((entry) => entry.alias)).size !== asked.length) {
+    // **GitHub は競合する別名をエラーにする**——**通すと、別名を作り間違えた
+    // 実装が緑になる**
+    return { errors: [{ message: "Fields conflict because they have differing arguments" }] };
   }
   return {
     ...(body as object),
     data: {
       repository: Object.fromEntries(
-        numbers.map((number) => [`p${number}`, repository[`p${number}`] ?? null]),
+        // **中身は番号で引く**（fixture が `p<番号>` で書くため）が、
+        // **鍵は問い合わせに書かれた別名**である
+        asked.map(({ alias, number }) => [alias, repository[`p${number}`] ?? null]),
       ),
     },
   };
@@ -603,5 +613,35 @@ describe("GitHub から承認の状態を読む", () => {
 
     expect(Object.keys(repository)).toEqual(["p7", "p8"]);
     expect(repository.p8, "見つからなかった別名は null で返る").toBeNull();
+  });
+  it("応答の鍵は、問い合わせに書かれた別名になる", async () => {
+    // **番号から鍵を作り直すと、別名を取り違えた実装でも通る**（#673 のレビュー）
+    // ——**本物は、書かれた別名で返す**
+    const fetchImpl = fetcher([{ status: 200, body: page([{ number: 7, states: [] }]) }]);
+
+    const response = await fetchImpl("https://api.github.com/graphql", {
+      method: "POST",
+      body: JSON.stringify({ query: "{ x7: pullRequest(number: 7) { number } }" }),
+    });
+    const repository = ((await response.json()) as { data: { repository: object } }).data
+      .repository;
+
+    expect(Object.keys(repository), "別名を読まずに鍵を作り直している").toEqual(["x7"]);
+  });
+
+  it("同じ別名を 2 つの番号に付けたら、本物と同じく通らない", async () => {
+    // **GitHub は競合する別名をエラーにする**（#673 のレビュー）——**fixture が
+    // 通すと、別名を作り間違えた実装が緑になる**
+    const fetchImpl = fetcher([{ status: 200, body: page([{ number: 7, states: [] }]) }]);
+
+    const response = await fetchImpl("https://api.github.com/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query: "{ p: pullRequest(number: 7) { number } p: pullRequest(number: 8) { number } }",
+      }),
+    });
+    const payload = (await response.json()) as { errors?: unknown };
+
+    expect(payload.errors, "競合する別名を通している").toBeDefined();
   });
 });
