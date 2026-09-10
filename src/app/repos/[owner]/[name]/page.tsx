@@ -30,6 +30,8 @@ import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-but
 import { AssignmentSummaryView } from "../../../../ui/assignment/assignment-summary-view";
 import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button";
 import { ballFilterOf } from "../../../../ui/ball/ball-filter";
+import { BoardFreshness } from "../../../../ui/board/board-freshness";
+import { boardReloadHref } from "../../../../ui/board/board-reload-href";
 import type { IssueBoardProps } from "../../../../ui/issue-board/issue-board";
 import { IssueBoard } from "../../../../ui/issue-board/issue-board";
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
@@ -265,6 +267,16 @@ export type BoardPageDeps = {
   }) => Promise<RepositoryBoardResult>;
   /** 出せなかった理由を残す口（`reportBoardActionUnavailable`）。 */
   readonly report: (action: "view", kind: string) => void;
+  /**
+   * **いま何時か**（#664）。**盤面を取った時刻として出す。**
+   *
+   * **時計は外から受ける**（§3）——**画面の中で `new Date()` を呼ぶと、
+   * 何時のものを描いたかを試験から決められない。**
+   *
+   * **既定を持つ。** **渡し忘れても、出るのは本物の時刻**である
+   * ——**倒れる先が「その要求の時刻」なので、嘘にならない。**
+   */
+  readonly now?: () => Date;
 };
 
 /**
@@ -279,6 +291,11 @@ export type BoardPageDeps = {
  * 書いてあるのに、記録が 1 行も出ていなかった**（**実測: 期限 5000 ms に対して
  * 取得は 5627 ms。毎回打ち切られていた**）。
  */
+/** **既定の時計**（#664）。**渡し忘れても、出るのは本物の時刻**である。 */
+function systemClock(): Date {
+  return new Date();
+}
+
 function reportMissingChanges(
   unavailable: readonly { readonly kind: string }[],
   report: BoardPageDeps["report"],
@@ -298,6 +315,11 @@ export async function renderRepositoryBoard(
   // **戻り先でも同じ絞りが効く。** **知らない値は「絞らない」へ落ちる**
   // （**絞ること自体は #663 が持つ**——**どちらが先に入っても壊れない**）
   const ball = ballFilterOf(query.ball);
+  // **取りに行く前に読む**（#664）——**取れた時刻ではなく、取りに行った時刻**である。
+  // **どちらでも「この時刻より前のもの」**で、**先に読むほうが、遅い日に
+  // 実際より新しく見えることが無い**
+  const { now = systemClock } = deps;
+  const at = now();
   const result = await deps.board({ owner, name });
   // **落ちどころを、サーバ側に残す** (#513 のレビュー)——**押した経路と同じ**
   const unavailable = boardUnavailableReason(result);
@@ -346,6 +368,11 @@ export async function renderRepositoryBoard(
       ))}
       {result.kind === "board" ? (
         <>
+          {/* **いつ取ったものかと、引き直す手**（#664）——**盤面は開いた瞬間の
+              スナップショット**で、**開いたまま置いておくと古くなる。**
+              **出せなかったときは出さない**——**盤面が無いのに時刻だけ出ると、
+              何かが取れたように見える**（§5） */}
+          <BoardFreshness at={at} reloadHref={boardReloadHref(query)} />
           {/* **何件が誰にも振られていないかを出す**（#631）——**数えるのは domain が
               持つ**（`summarizeAssignments`）。**言うことが無ければ、この行は出ない** */}
           <AssignmentSummaryView

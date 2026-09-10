@@ -1145,3 +1145,70 @@ describe("絞りを、押したあとへ持ち越す", () => {
     expect(await markup({ ball: ["merger", "author"] })).not.toContain('name="ball"');
   });
 });
+
+/**
+ * **いつ取ったものかを出す**（#664）。
+ *
+ * **盤面は開いた瞬間のスナップショット**である。**開いたまま置いておくと古くなる**が、
+ * **サーバは、その画面がまだ開いていることを知らない**——**取れた時刻を出せば、
+ * 読む人が決められる。**
+ */
+describe("いつ取ったものかを出す（#664）", () => {
+  const AT = new Date("2026-09-10T12:20:02.000Z");
+
+  async function board(
+    kind: "board" | "unavailable",
+    query: Record<string, string | string[] | undefined> = {},
+  ): Promise<string> {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard({ owner: "acme", name: "web" }, query, {
+        board: async () =>
+          kind === "unavailable"
+            ? { kind: "unavailable" }
+            : {
+                kind: "board",
+                plan: {
+                  pullRequests: [],
+                  edges: [],
+                  order: { ordered: [], cyclic: [] },
+                  invalid: [],
+                  changes: new Map(),
+                  changesUnavailable: [],
+                  heads: new Map(),
+                  titles: new Map(),
+                  mergeStatuses: new Map(),
+                  assignments: new Map(),
+                  opinions: new Map(),
+                },
+                approvals: { approved: new Set<number>(), unavailable: [] },
+                issues: { issues: [], invalid: [], assignments: new Map() },
+              },
+        report: () => {},
+        now: () => AT,
+      }),
+    );
+  }
+
+  it("盤面には、取った時刻が出る", async () => {
+    expect(await board("board")).toContain("2026-09-10T12:20:02Z");
+  });
+
+  it("出せなかったときは、時刻を出さない", async () => {
+    // **引き直しに失敗したとき、古い盤面を新しい顔で出さない**（#664 の
+    // 「気をつけること」。§5）——**盤面が無いのに時刻だけ出ると、
+    // 何かが取れたように見える**
+    expect(await board("unavailable"), "盤面が無いのに時刻が出ている").not.toContain(
+      "2026-09-10T12:20:02Z",
+    );
+  });
+
+  it("引き直す手がある", async () => {
+    // **「開いている側が引き直す」を選んだ**（#664）——**合図がここである**
+    expect(await board("board")).toContain("引き直す");
+  });
+
+  it("引き直しても、絞りは残る", async () => {
+    // **引き直したら全部出てきた、では絞った意味が消える**（#663）
+    expect(await board("board", { ball: "author" })).toContain('href="?ball=author"');
+  });
+});
