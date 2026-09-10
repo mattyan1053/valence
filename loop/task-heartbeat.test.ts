@@ -96,4 +96,73 @@ describe("./task の心拍", () => {
 
     expect(result.status, "落ちたコマンドの終了コードが消えている").toBe(3);
   });
+
+  it("途中で落ちたコマンドを、そこで止める", () => {
+    // **`set -e` を殺さない**（#684 のレビュー）。**`"$fn" "$@" || status=$?` と書くと、
+    // **Bash は呼んだ関数の本体全体で errexit を無効にする**（**`||` の左辺は
+    // 「失敗してよい文脈」**）——**`task` は `set -euo pipefail` で始まっている**ので、
+    // **その 1 行で、すべての `cmd_*` の途中の失敗が無視される**。
+    //
+    // **`cmd_red` では捕まらない** (#684 のレビュー)——**末尾の `return` は
+    // errexit と関係がない**（**関数の戻り値がそのまま返るだけ**）。
+    // **関数の「途中」で落とす**。
+    const sandbox = mkdtempSync(join(tmpdir(), "task-heartbeat-errexit-"));
+    mkdirSync(join(sandbox, "bin"), { recursive: true });
+    copyFileSync(join(REPO_ROOT, "task"), join(sandbox, "task"));
+    const stub = join(sandbox, "bin/loop-lease");
+    writeFileSync(stub, "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(stub, 0o755);
+
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        [
+          "source ./task",
+          "ensure_commit_guard() { :; }",
+          "warn_stale_containers() { :; }",
+          'cmd_mid() { false; echo "ここへ来てはいけない"; }',
+          "main mid",
+        ].join("\n"),
+      ],
+      { cwd: sandbox, encoding: "utf8" },
+    );
+
+    expect(result.stdout, "途中で落ちたのに、後続が走っている").not.toContain(
+      "ここへ来てはいけない",
+    );
+    expect(result.status, "途中で落ちたのに、成功として返っている").not.toBe(0);
+  });
+
+  it("自分で exit するコマンドのあとにも打つ", () => {
+    // **`trap` で打つから届く** (#684 のレビュー)。**呼び出しの後ろに 1 行置く形では、
+    // `cmd_help` / `cmd_smee` のように自分で `exit` するものには届かない**
+    // ——**「終わりにも打つ」が、経路によって効いたり効かなかったりする。**
+    const sandbox = mkdtempSync(join(tmpdir(), "task-heartbeat-exit-"));
+    const beats = join(sandbox, "beats");
+    mkdirSync(join(sandbox, "bin"), { recursive: true });
+    copyFileSync(join(REPO_ROOT, "task"), join(sandbox, "task"));
+    const stub = join(sandbox, "bin/loop-lease");
+    writeFileSync(stub, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >>${JSON.stringify(beats)}\n`);
+    chmodSync(stub, 0o755);
+
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        [
+          "source ./task",
+          "ensure_commit_guard() { :; }",
+          "warn_stale_containers() { :; }",
+          "cmd_bye() { exit 4; }",
+          "main bye",
+        ].join("\n"),
+      ],
+      { cwd: sandbox, encoding: "utf8" },
+    );
+
+    expect(result.status, "自分で打った終了コードが消えている").toBe(4);
+    const written = existsSync(beats) ? readFileSync(beats, "utf8").trimEnd().split("\n") : [];
+    expect(written.length, "自分で exit するコマンドに、終わりの心拍が届いていない").toBe(2);
+  });
 });
