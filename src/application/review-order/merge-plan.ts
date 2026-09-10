@@ -18,7 +18,10 @@
 import { authorizeRepository } from "../auth/authorize-repository";
 import type { UsableToken } from "../auth/ensure-usable-token";
 import { errorKind } from "../observability/error-kind";
-import type { PullRequestApprovals } from "../ports/pull-request-approvals";
+import type {
+  PullRequestApprovalListing,
+  PullRequestApprovals,
+} from "../ports/pull-request-approvals";
 import type { RepositoryPermissions } from "../ports/repository-permissions";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type { VisibleRepositories, VisibleRepository } from "../ports/visible-repositories";
@@ -148,22 +151,28 @@ export async function mergePlan({
       remaining: steps.slice(index).map((rest) => rest.number),
     });
 
-    let approved: ReadonlySet<number>;
+    let listing: PullRequestApprovalListing;
     try {
       // **入れる直前に、この 1 本の commit で聞く**（#635 / #665 のレビュー）
       // ——**先の本が入るまでの間に、承認は外れうる**
-      const listing = await approvals.listApprovals(
+      listing = await approvals.listApprovals(
         authorization.userAccessToken,
         repository,
         new Map([[step.number, step.headSha]]),
       );
-      approved = listing.approved;
     } catch (error) {
       // **読めなかったものを「承認済み」へ倒さない**——**そこで止める。**
       // **`unavailable` を返さない**——**ここまでに入ったぶんが消える**（#191 のレビュー）
       return stop("unavailable", `approvals/${errorKind(error)}`);
     }
-    if (!approved.has(step.number)) {
+    // **口は投げるとは限らない**（#665 のレビュー）——**閉じた PR や一覧から
+    // 落ちたものは `unavailable` に入って返る。** **`approved` に無いことだけを見ると、
+    // 「読めなかった」が「承認されていない」に化ける**——**この口が分けたもの**である
+    if (listing.unavailable.some((one) => one.pullRequestNumber === step.number)) {
+      // **理由の文面は運ばない**（§6）——**落ちどころは種類だけ**（#506 の 2-b）
+      return stop("unavailable", "approvals/unreadable");
+    }
+    if (!listing.approved.has(step.number)) {
       return stop("not-approved");
     }
     // **入れるたびに判定をやり直す**（`mergePullRequest` の中）——**1 本入ると、

@@ -82,7 +82,13 @@ function reasonOf(kind: MergePlanNoticeKind): string {
  * ので、**残っている行がそのまま「入っていないもの」**である。
  */
 export function mergePlanNotice(kind: MergePlanNoticeKind, at: number | undefined): string {
-  if (kind === "nothing-to-run" || kind === "forbidden" || at === undefined) {
+  // **`forbidden` を特例にしない**（#665 のレビュー）——**最初の認可で拒まれたときは
+  // 番号そのものが無い**（`at === undefined`）ので、**特例を外しても
+  // 「1 本も入っていない」側は変わらない。** **write を途中で失った場合だけが
+  // 落ちていた**——**入ったぶんが「何も起きなかった」ように見えていた。**
+  // **`nothing-to-run` は残す**——**あれは 1 本も流していない**ので、
+  // **止まった位置という概念が無い**（**URL には何でも書ける**）
+  if (kind === "nothing-to-run" || at === undefined) {
     return `プランを流せませんでした: ${reasonOf(kind)}。`;
   }
   return `#${at} で止まりました: ${reasonOf(kind)}。#${at} とそれ以降は入っていません（入ったぶんは、この盤面から消えています）。`;

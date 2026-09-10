@@ -58,7 +58,17 @@ describe("mergePlanNotice", () => {
 
   it("1 本も流していないときは、番号を言わない", () => {
     expect(mergePlanNotice("nothing-to-run", undefined)).not.toContain("#");
-    expect(mergePlanNotice("forbidden", 3), "止まった番号があるように見える").not.toContain("#3");
+    // **最初の認可で拒まれたときは、止まった番号そのものが無い**
+    expect(mergePlanNotice("forbidden", undefined)).not.toContain("#");
+  });
+
+  it("途中で権限を失ったときも、止まった番号を言う", () => {
+    // **先の本が入ったあとに write を失うと、そこから先が `forbidden` になる**（#665 のレビュー）
+    // ——**理由だけを出すと、入ったぶんまで「何も起きなかった」ように見える**
+    const line = mergePlanNotice("forbidden", 3);
+
+    expect(line, "止まった番号が消えている").toContain("#3");
+    expect(line).toContain("権限がありません");
   });
 
   it("理由ごとに、別のことを言う", () => {

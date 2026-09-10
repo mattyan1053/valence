@@ -180,6 +180,39 @@ describe("mergePlan", () => {
     );
   });
 
+  it("口が「読めなかった」と言った PR を、未承認と言わない", async () => {
+    // **口は投げるとは限らない**——**閉じた PR や一覧から落ちたものは
+    // `unavailable` に入って返る**（#665 のレビュー）。**`approved` だけを見ると、
+    // 「読めなかった」が「承認されていない」に化ける**（この口が消しに来た形である）
+    const runner = merges();
+    const silent: PullRequestApprovals = {
+      async listApprovals(_token, _repository, heads): Promise<PullRequestApprovalListing> {
+        const [number = 0] = [...heads.keys()];
+        return number === 2
+          ? {
+              approved: new Set(),
+              unavailable: [
+                { pullRequestNumber: 2, reason: "開いている PR の一覧に見つかりませんでした" },
+              ],
+            }
+          : { approved: new Set([number]), unavailable: [] };
+      },
+    };
+
+    const result = await mergePlan(input({ approvals: silent, merge: runner.merge }));
+
+    expect(runner.pressed, "読めていない PR を押している").toEqual([1]);
+    expect(result.kind === "ran" && result.merged).toEqual([1]);
+    expect(result.kind === "ran" && result.stoppedAt?.number).toBe(2);
+    expect(result.kind === "ran" && result.stoppedAt?.reason, "未承認へ倒れている").toBe(
+      "unavailable",
+    );
+    expect(result.kind === "ran" && result.stoppedAt?.detail, "落ちどころが残っていない").toMatch(
+      /approvals\//,
+    );
+    expect(result.kind === "ran" && result.remaining).toEqual([2, 3]);
+  });
+
   it("承認を読めなければ、1 本も押さない", async () => {
     // **読めなかったものを「承認されていない」とも「承認済み」とも言わない**
     // ——**止める側へ倒す**
