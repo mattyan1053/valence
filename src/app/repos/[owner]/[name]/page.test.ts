@@ -23,11 +23,14 @@ import { showsSignOut } from "../../../../ui/auth/sign-out-button";
 import {
   approvalDisplay,
   approveNoticeKind,
+  boardNotices,
   boardUnavailableReason,
   dynamic,
   issueBoardProps,
   mergeButtonBlock,
   mergeNoticeKind,
+  planNoticeKind,
+  planStoppedAt,
   renderRepositoryBoard,
   unreadableNote,
 } from "./page";
@@ -1003,5 +1006,45 @@ describe("issueBoardProps", () => {
     });
 
     expect(props.unreadable).toBe(1);
+  });
+});
+
+describe("流したプランの結果（#661）", () => {
+  it("語彙に無い値は捨てる", () => {
+    // **URL から渡ってくる**ので、**利用者が任意に作れる**
+    expect(planNoticeKind("not-mergeable")).toBe("not-mergeable");
+    expect(planNoticeKind("入りました")).toBeUndefined();
+  });
+
+  it("成功は語彙に無い", () => {
+    // **`?plan=` を開くだけで「マージしました」と出せないこと**（#342 のレビュー）
+    expect(planNoticeKind("ran")).toBeUndefined();
+    expect(planNoticeKind("merged")).toBeUndefined();
+  });
+
+  it("止まった番号は、形で絞る", () => {
+    expect(planStoppedAt("12")).toBe(12);
+    expect(planStoppedAt("1e3"), "指数表記を通している").toBeUndefined();
+    expect(planStoppedAt("-1")).toBeUndefined();
+    expect(planStoppedAt("0")).toBeUndefined();
+    expect(planStoppedAt(undefined)).toBeUndefined();
+  });
+
+  it("押せなかった理由を、押した画面に並べる", () => {
+    const lines = boardNotices({ plan: "not-mergeable", "plan-at": "7" });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("#7");
+  });
+
+  it("3 つの注記は、同時にも出る", () => {
+    // **1 つにまとめると、片方の理由が消える**
+    expect(
+      boardNotices({ approve: "forbidden", merge: "not-mergeable", plan: "not-approved" }),
+    ).toHaveLength(3);
+  });
+
+  it("言うことが無ければ、1 行も出さない", () => {
+    expect(boardNotices({})).toEqual([]);
   });
 });

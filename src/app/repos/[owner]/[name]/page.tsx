@@ -33,6 +33,12 @@ import type { IssueBoardProps } from "../../../../ui/issue-board/issue-board";
 import { IssueBoard } from "../../../../ui/issue-board/issue-board";
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
 import { MergeButton, mergeNotice } from "../../../../ui/merge/merge-button";
+import type { MergePlanNoticeKind } from "../../../../ui/merge/merge-plan-button";
+import {
+  MergePlanButton,
+  mergePlanNotice,
+  mergePlanSteps,
+} from "../../../../ui/merge/merge-plan-button";
 import { ReviewBoard } from "../../../../ui/review-board/review-board";
 import { SuggestedReviewOrder } from "../../../../ui/review-order/suggested-review-order";
 
@@ -198,6 +204,58 @@ export function issueBoardProps(
   };
 }
 
+/**
+ * 流すプランの結果（#661）。**URL から渡ってくる値**なので、**語彙に無いものは捨てる**
+ * ——**`mergeNoticeKind` と同じ形**である（**成功は語彙に無い**）。
+ */
+const PLAN_NOTICE_KINDS: readonly MergePlanNoticeKind[] = [
+  "not-approved",
+  "not-mergeable",
+  "dependency-pending",
+  "base-changed",
+  "not-orderable",
+  "forbidden",
+  "nothing-to-run",
+  "unavailable",
+];
+
+export function planNoticeKind(value: unknown): MergePlanNoticeKind | undefined {
+  return PLAN_NOTICE_KINDS.find((kind) => kind === value);
+}
+
+/**
+ * 止まった PR の番号（#661）。**URL から渡ってくる**ので、**形で絞る。**
+ *
+ * **これは「入らなかった」の側**である——**入った本数は URL から出さない**
+ * （**流していない人が「N 本入りました」と出せる**。#342 のレビュー）。
+ */
+export function planStoppedAt(value: unknown): number | undefined {
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * 盤面に出す注記（#661 のレビューで 3 つ目が増えた）。
+ *
+ * **どれも「押せなかった理由」**である（**成功は語彙に無い**。#342 のレビュー）。
+ * **判定をここへ集める**——**描く側は並べるだけ**にする。
+ */
+export function boardNotices(
+  query: Record<string, string | string[] | undefined>,
+): readonly string[] {
+  const approve = approveNoticeKind(query.approve);
+  const merge = mergeNoticeKind(query.merge);
+  const plan = planNoticeKind(query.plan);
+  return [
+    approve === undefined ? undefined : approveNotice(approve),
+    merge === undefined ? undefined : mergeNotice(merge),
+    plan === undefined ? undefined : mergePlanNotice(plan, planStoppedAt(query["plan-at"])),
+  ].filter((line): line is string => line !== undefined);
+}
+
 export type BoardPageDeps = {
   /** 盤面を引く口（`repositoryBoardForCurrentUser`）。 */
   readonly board: (repository: {
@@ -234,8 +292,7 @@ export async function renderRepositoryBoard(
   query: Record<string, string | string[] | undefined>,
   deps: BoardPageDeps,
 ) {
-  const outcome = approveNoticeKind(query.approve);
-  const mergeOutcome = mergeNoticeKind(query.merge);
+  const notices = boardNotices(query);
   const result = await deps.board({ owner, name });
   // **落ちどころを、サーバ側に残す** (#513 のレビュー)——**押した経路と同じ**
   const unavailable = boardUnavailableReason(result);
@@ -276,11 +333,12 @@ export async function renderRepositoryBoard(
             **判定は `showsSignOut` が持つ**（入口の画面と 2 箇所に置かない） */}
         {showsSignOut(result.kind) ? <SignOutButton action="/auth/logout" /> : undefined}
       </div>
-      {/* **押せなかった理由は、押した画面に出す** */}
-      {outcome === undefined ? undefined : <p className="text-sm">{approveNotice(outcome)}</p>}
-      {mergeOutcome === undefined ? undefined : (
-        <p className="text-sm">{mergeNotice(mergeOutcome)}</p>
-      )}
+      {/* **押せなかった理由は、押した画面に出す**（判定は `boardNotices` が持つ） */}
+      {notices.map((line) => (
+        <p className="text-sm" key={line}>
+          {line}
+        </p>
+      ))}
       {result.kind === "board" ? (
         <>
           {/* **何件が誰にも振られていないかを出す**（#631）——**数えるのは domain が
@@ -293,6 +351,13 @@ export async function renderRepositoryBoard(
               である。**混ぜて 1 つの並びにすると、土台より先に積み荷をマージしようとする**
               （`review-board.tsx` の判断）。**並べ替えは domain が持つ**——
               **ここは材料を渡すだけ**である */}
+          {/* **順序はもう出ている**（#661）——**流すのだけが手作業**だった。
+           **1 本ずつ押す道は残す**（行の `MergeButton`）。
+           **commit が分からない PR は並びに入らない**（#331） */}
+          <MergePlanButton
+            action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/merge-plan`}
+            steps={mergePlanSteps(result.plan.order, (number) => result.plan.heads.get(number))}
+          />
           <SuggestedReviewOrder
             pullRequests={result.plan.pullRequests}
             order={result.plan.order}
