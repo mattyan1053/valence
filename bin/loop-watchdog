@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# **無人運転が止まっていないかを、ループの外から見る** (#670)。
+#
+#   bin/loop-watchdog [--hours N] [--report]
+#
+#   exit 0 = 動いている / 見るべき仕事が無い
+#   exit 1 = 止まっている（人を呼ぶ）
+#   exit 2 = 判定できない（GitHub を読めない / 残せない）
+#
+# **なぜ外に置くか。** **予定表（cron）は 7 日で切れ、切れたことに気づく仕組み
+# （`bin/loop-cadence`）は、切れる側で走っている**——**cron が死ぬと検出器も走らない。**
+# **1 つだけ死ぬなら他の役が見つける**が、**全部が同時に死ぬと誰も走らない。**
+#
+# **実測**（#670。`.git` の共通ディレクトリの記録から）: **2026-09-09 13:47〜13:52 に
+# 3 つの作業場が揃って止まり、次の周回は 09-10 20:2x**——**30.6 時間、誰も気づかず、
+# 人が戻って突いて再開した。** **通常時の間隔は最大 2.1 時間**である。
+#
+# **これは GitHub Actions から走らせる**（`.github/workflows/loop-watchdog.yml`）
+# ——**VM もセッションも要らない**ので、**ループが全部止まっていても動く。**
+#
+# **周回そのものは GitHub から見えない**（**記録は VM の中**）。**心拍は足さない**
+# ——**見るのは「動くべき仕事が動いていないこと」**である。
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+# **既定の閾値。** **通常時の最大間隔（2.1 時間）の 5 倍以上**であり、
+# **実測した障害（30.6 時間）の半分より短い。** **2 時間ごとに見る**ので、
+# **気づくまでは最長 14 時間**である。
+HOURS=12
+REPORT=0
+
+usage() {
+  echo "使い方: bin/loop-watchdog [--hours N] [--report]" >&2
+  echo "        exit 0 動いている / exit 1 止まっている / exit 2 判定できない" >&2
+  echo "        --report: 止まっていたら Issue に残す（既に立っていれば足さない）" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --hours)
+      shift
+      [[ $# -gt 0 ]] || {
+        usage
+        exit 2
+      }
+      HOURS="$1"
+      ;;
+    --report) REPORT=1 ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if ! [[ $HOURS =~ ^[0-9]+$ ]] || [[ $HOURS -eq 0 ]]; then
+  echo "[FAIL] 設定: --hours は 1 以上の整数で指定してください" >&2
+  exit 2
+fi
+readonly HOURS REPORT
+
+NOW="${LOOP_WATCHDOG_NOW:-$(date +%s)}"
+if ! [[ $NOW =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_WATCHDOG_NOW は epoch 秒で指定してください" >&2
+  exit 2
+fi
+readonly NOW
+
+# **止まっているのが正しいものと、動くべきもの**は、下の `waiting` / `moving` が持つ。
+# **立てる Issue の題。** **同じことを 2 度立てないための鍵でもある。**
+readonly TITLE="無人運転が止まっています（自動検出）"
+
+# **読めなかったものを「無かった」と言わない** (#210 と同じ形)。
+# **0 件に見えると、止まっているのに「静かでよい」へ倒れる。**
+#
+# **`--jq` には判定を持たせない**——**形を整えるだけ**である
+# （`<番号>\t<更新時刻>\t<ラベル,…>`）。**持たせると、どのラベルを外すかが
+# 試験の外へ出る**（`AGENTS.md` §5）。
+readonly SHAPE='.[] | "\(.number)\t\(.updatedAt)\t\([.labels[].name] | join(","))"'
+
+if ! issues="$(gh issue list --state open --limit 200 --json number,updatedAt,labels --jq "$SHAPE")"; then
+  echo "[FAIL] GitHub: open な issue を読めませんでした" >&2
+  exit 2
+fi
+if ! prs="$(gh pr list --state open --limit 200 --json number,updatedAt,labels --jq "$SHAPE")"; then
+  echo "[FAIL] GitHub: open な PR を読めませんでした" >&2
+  exit 2
+fi
+
+# **待っているのが正しいものか。** **1 つでも付いていれば数えない。**
+waiting() {
+  local labels=",$1,"
+  local one
+  for one in blocked parked awaiting-human waiting-condition; do
+    [[ $labels == *",$one,"* ]] && return 0
+  done
+  return 1
+}
+
+# **動くべき Issue か。** **`backlog` は後回し**であり、**誰も手を付けない状態が正しい。**
+moving() {
+  local labels=",$1,"
+  local one
+  for one in ready in-progress; do
+    [[ $labels == *",$one,"* ]] && return 0
+  done
+  return 1
+}
+
+# **待ちのラベルが付いていないものだけを残す。** **Issue は、そのうえで
+# 動くべきラベルを持つものだけ**である。
+work=""
+while IFS=$'\t' read -r number updated labels; do
+  [[ -n $number ]] || continue
+  waiting "$labels" && continue
+  moving "$labels" || continue
+  work+="$number\t$updated"$'\n'
+done <<<"$issues"
+while IFS=$'\t' read -r number updated labels; do
+  [[ -n $number ]] || continue
+  waiting "$labels" && continue
+  work+="$number\t$updated"$'\n'
+done <<<"$prs"
+work="$(printf '%b' "$work")"
+
+if [[ -z $work ]]; then
+  echo "[OK] 動くべき仕事はありません（静かでよい）"
+  exit 0
+fi
+
+# **いちばん新しい動きを探す。** **1 つでも動いていれば、ループは生きている**
+# ——**どれが動いたかではなく、何かが動いたか**を見る。
+newest=0
+while IFS=$'\t' read -r number updated; do
+  [[ -n $updated ]] || continue
+  if ! at="$(date -u -d "$updated" +%s 2>/dev/null)"; then
+    echo "[FAIL] GitHub: #$number の更新時刻を読めませんでした" >&2
+    exit 2
+  fi
+  if [[ $at -gt $newest ]]; then
+    newest="$at"
+  fi
+done <<<"$work"
+
+if [[ $newest -eq 0 ]]; then
+  echo "[FAIL] GitHub: 更新時刻が 1 つも読めませんでした" >&2
+  exit 2
+fi
+
+count="$(printf '%s\n' "$work" | grep -c '')"
+idle=$((NOW - newest))
+readonly idle count
+printf -v hours '%.1f' "$(awk -v s="$idle" 'BEGIN { print s / 3600 }')"
+
+if [[ $idle -le $((HOURS * 3600)) ]]; then
+  echo "[OK] 動いています（$count 件のうち、いちばん新しい動きは $hours 時間前）"
+  exit 0
+fi
+
+echo "[FAIL] 止まっています: 動くべき $count 件が、$hours 時間 動いていません" >&2
+
+if [[ $REPORT -eq 0 ]]; then
+  exit 1
+fi
+
+# **同じことを 2 度立てない** (#248)。**2 時間ごとに走る**ので、
+# **毎回立てると、そのうち読まれなくなる。**
+if ! open="$(gh issue list --state open --limit 5 --search "in:title \"$TITLE\"" --json number --jq '.[].number')"; then
+  echo "[FAIL] GitHub: 既に立っているかを読めませんでした" >&2
+  exit 2
+fi
+if [[ -n $open ]]; then
+  echo "[INFO] 既に立っています（足しません）" >&2
+  exit 1
+fi
+
+body="$(
+  cat <<BODY
+**動くべき仕事が $count 件あるのに、$hours 時間 どれも動いていません。**
+
+**この Issue は GitHub Actions から立てています**（\`bin/loop-watchdog\`。#670）
+——**ループの外から見ている**ので、**ループが全部止まっていても届きます。**
+
+## 見に行くところ
+
+- **各セッションで \`CronList\` を引く**（**引けるのはそのセッション自身だけ**）。
+  **空なら \`/loop 30m /loop-worker\` を打ち直す**
+- **\`bin/loop-cadence\`** —— **どの作業場が止まっているか**
+- **\`loop/STOP\`** —— **人が止めているなら、この Issue は閉じてください**
+  （**STOP は GitHub から見えません**）
+
+## 直したことにしないでください
+
+**入れ直しは応急処置です**（#670）。**7 日後にまた切れます。**
+BODY
+)"
+
+if ! gh issue create --title "$TITLE" --body "$body" >/dev/null; then
+  echo "[FAIL] GitHub: Issue を立てられませんでした" >&2
+  exit 2
+fi
+
+exit 1
