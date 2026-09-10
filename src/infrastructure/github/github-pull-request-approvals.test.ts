@@ -121,7 +121,12 @@ function askedOnly(body: unknown, query: string): unknown {
   if (asked.length === 0 || repository === undefined) {
     return body;
   }
-  if (new Set(asked.map((entry) => entry.alias)).size !== asked.length) {
+  // **落ちるのは「同じ別名に違う引数が付いたとき」だけ**（#673 のレビュー 2 周目）
+  // ——**同じ別名・同じ番号は仕様上は通る。** **弾くと、この試験群が守っている
+  // 「本物より狭くしない」と食い違う**
+  const aliases = new Set(asked.map((entry) => entry.alias));
+  const pairs = new Set(asked.map((entry) => `${entry.alias}:${entry.number}`));
+  if (aliases.size !== pairs.size) {
     // **GitHub は競合する別名をエラーにする**——**通すと、別名を作り間違えた
     // 実装が緑になる**
     return { errors: [{ message: "Fields conflict because they have differing arguments" }] };
@@ -643,5 +648,22 @@ describe("GitHub から承認の状態を読む", () => {
     const payload = (await response.json()) as { errors?: unknown };
 
     expect(payload.errors, "競合する別名を通している").toBeDefined();
+  });
+  it("同じ別名・同じ番号なら、エラーにならずに返る", async () => {
+    // **GraphQL が落とすのは「同じ別名に違う引数が付いたとき」**である
+    // （#673 のレビュー 2 周目）——**同じ別名・同じ番号は仕様上は通る。**
+    // **弾くと、この PR 自身が書いた「本物より狭くしない」と食い違う**
+    const fetchImpl = fetcher([{ status: 200, body: page([{ number: 7, states: [] }]) }]);
+
+    const response = await fetchImpl("https://api.github.com/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query: "{ p7: pullRequest(number: 7) { number } p7: pullRequest(number: 7) { state } }",
+      }),
+    });
+    const payload = (await response.json()) as { errors?: unknown; data?: { repository: object } };
+
+    expect(payload.errors, "本物が通すものを弾いている").toBeUndefined();
+    expect(Object.keys(payload.data?.repository ?? {})).toEqual(["p7"]);
   });
 });
