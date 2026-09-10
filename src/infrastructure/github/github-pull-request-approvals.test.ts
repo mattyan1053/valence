@@ -32,7 +32,13 @@ const OLDER = "b".repeat(40);
  * である——**commit を書いた試験だけが、ずれた承認の話をしている。**
  */
 type Review = string | { state: string; commit: string | null };
-type Node = { number: number; states: readonly Review[]; moreReviews?: string };
+type Node = {
+  number: number;
+  states: readonly Review[];
+  moreReviews?: string;
+  /** **開いているか。** **書かなければ `OPEN`。** */
+  state?: string;
+};
 
 function review(entry: Review): unknown {
   const { state, commit } = typeof entry === "string" ? { state: entry, commit: HEAD } : entry;
@@ -45,15 +51,20 @@ function heads(...numbers: readonly number[]): ReadonlyMap<number, string> {
   return new Map(numbers.map((number) => [number, HEAD]));
 }
 
-/** 1 ページぶんの応答。**続きがあるかは `endCursor` で表す。** */
-function page(nodes: readonly Node[], endCursor?: string): unknown {
+/**
+ * 聞かれた番号ぶんの応答（#668）。**別名で引くので、鍵は `p<番号>`** である。
+ *
+ * **`state` を書かなければ開いている**——**閉じた PR の話をしている試験だけが書く。**
+ */
+function page(nodes: readonly Node[]): unknown {
   return {
     data: {
-      repository: {
-        pullRequests: {
-          pageInfo: { hasNextPage: endCursor !== undefined, endCursor: endCursor ?? null },
-          nodes: nodes.map(({ number, states, moreReviews }) => ({
+      repository: Object.fromEntries(
+        nodes.map(({ number, states, moreReviews, state }) => [
+          `p${number}`,
+          {
             number,
+            state: state ?? "OPEN",
             latestOpinionatedReviews: {
               // **内側にも続きがある**（#346 のレビュー）——**意見の数は 100 で切れる**
               pageInfo: {
@@ -62,9 +73,9 @@ function page(nodes: readonly Node[], endCursor?: string): unknown {
               },
               nodes: states.map(review),
             },
-          })),
-        },
-      },
+          },
+        ]),
+      ),
     },
   };
 }
@@ -100,6 +111,22 @@ function fetcher(
   }) as typeof fetch & { calls: typeof calls };
   impl.calls = calls;
   return impl;
+}
+
+/**
+ * 送った問い合わせに載っている番号を、**呼んだぶんまとめて**並べる（#668 のレビュー 2 周目）。
+ *
+ * **集合として比べるため**である——**載せ忘れも載せすぎも、同じ 1 行で落ちる。**
+ */
+function sentNumbers(calls: readonly { init: RequestInit | undefined }[]): readonly number[] {
+  return calls
+    .flatMap((call) => [
+      ...String(JSON.parse(String(call.init?.body)).query).matchAll(
+        /pullRequest\(number: (\d+)\)/g,
+      ),
+    ])
+    .map((found) => Number(found[1]))
+    .sort((left, right) => left - right);
 }
 
 describe("GitHub から承認の状態を読む", () => {
@@ -235,20 +262,63 @@ describe("GitHub から承認の状態を読む", () => {
     expect([...listing.approved]).toEqual([7]);
   });
 
-  it("1 ページ目より先にある PR も読む", async () => {
-    // **打ち切ると、古い PR から状態が消える**——**症状は「承認したのに出ない」**で、
-    // **この Issue が消しに来たものと同じ見え方**になる
+  it("100 本を超えて聞かれても、全部読む", async () => {
+    // **まとめる数は一覧のページと同じ 100**（#668）——**打ち切ると、あふれたぶんから
+    // 状態が消える。** **症状は「承認したのに出ない」**で、**#343 が消しに来たもの**である
+    const asked = Array.from({ length: 101 }, (_, index) => index + 1);
+    const fetchImpl = fetcher([
+      { status: 200, body: page(asked.slice(0, 100).map((number) => ({ number, states: [] }))) },
+      { status: 200, body: page([{ number: 101, states: ["APPROVED"] }]) },
+    ]);
+    const approvals = createGitHubPullRequestApprovals({ fetchImpl });
+
+    const listing = await approvals.listApprovals(
+      USER_TOKEN,
+      REPOSITORY,
+      new Map(asked.map((number) => [number, HEAD])),
+    );
+
+    expect(fetchImpl.calls, "1 回で聞ける数を超えたのに 1 回しか叩いていない").toHaveLength(2);
+    // **送った番号を集合として比べる**（#668 のレビュー 2 周目）——**「含む / 含まない」を
+    // 並べても、載せ忘れと載せすぎのどちらかしか見えない。**
+    //
+    // **応答は聞いた番号と無関係に返る**（この試験の作り）ので、**`approved` と
+    // `unavailable` だけでは、何を聞いたかを 1 つも測れない**——**各バッチの末尾しか
+    // 載せない実装でも、返ってくるものは変わらない**
+    expect(sentNumbers(fetchImpl.calls), "聞いた番号が過不足なく載っていない").toEqual(asked);
+    expect([...listing.approved]).toEqual([101]);
+    expect(listing.unavailable, "読めたのに読めなかったと言っている").toEqual([]);
+  });
+
+  it("聞いた番号だけを問い合わせる", async () => {
+    // **前は開いている PR の一覧を丸ごと辿っていた**（#668）——**1 本聞かれても
+    // 本数ぶんの往復**になっていた。**実測: open 898 本のリポジトリで 9 ページ・34.9 秒**
+    const fetchImpl = fetcher([{ status: 200, body: page([{ number: 7, states: [] }]) }]);
+
+    await createGitHubPullRequestApprovals({ fetchImpl }).listApprovals(
+      USER_TOKEN,
+      REPOSITORY,
+      heads(7),
+    );
+
+    const sent = String(JSON.parse(String(fetchImpl.calls[0]?.init?.body)).query);
+    expect(sent, "聞いた番号を名指していない").toContain("pullRequest(number: 7)");
+    expect(sent, "一覧を丸ごと辿っている").not.toContain("pullRequests(");
+  });
+
+  it("閉じた PR は、承認済みにしない", async () => {
+    // **前は `states: OPEN` の一覧に居ることが「開いている」の根拠だった**（#668）
+    // ——**番号で引くと閉じた PR も返る**ので、**ここで見ないと承認済みの顔をする**
     const approvals = createGitHubPullRequestApprovals({
       fetchImpl: fetcher([
-        { status: 200, body: page([{ number: 7, states: [] }], "CURSOR") },
-        { status: 200, body: page([{ number: 8, states: ["APPROVED"] }]) },
+        { status: 200, body: page([{ number: 7, states: ["APPROVED"], state: "MERGED" }]) },
       ]),
     });
 
-    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7, 8));
+    const listing = await approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7));
 
-    expect([...listing.approved]).toEqual([8]);
-    expect(listing.unavailable).toEqual([]);
+    expect([...listing.approved], "閉じた PR を承認済みにしている").toEqual([]);
+    expect(listing.unavailable.map((entry) => entry.pullRequestNumber)).toEqual([7]);
   });
 
   it("答えが返らなかった PR は、「承認されていない」ではなく「読めなかった」", async () => {
@@ -378,6 +448,9 @@ describe("GitHub から承認の状態を読む", () => {
     // **`hasNextPage: true` なのに `endCursor` が無い**——**辿れないだけ**であって、
     // **「意見はここで終わり」ではない**（#346 のレビュー 2 周目）。
     // **黙って止まると、次のページの承認が未承認として出る。**
+    //
+    // **応答は番号で引く形で書く**（#668 のレビュー）——**古い形のまま書くと、
+    // `askedSchema` が先に弾いて `rejects` が通り**、**カーソルの検査を消しても緑**になる
     const approvals = createGitHubPullRequestApprovals({
       fetchImpl: fetcher([
         {
@@ -385,46 +458,23 @@ describe("GitHub から承認の状態を読む", () => {
           body: {
             data: {
               repository: {
-                pullRequests: {
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                  nodes: [
-                    {
-                      number: 7,
-                      latestOpinionatedReviews: {
-                        // **続きがあると言いながら、行き先が無い**
-                        pageInfo: { hasNextPage: true, endCursor: null },
-                        nodes: [{ state: "CHANGES_REQUESTED", commit: { oid: HEAD } }],
-                      },
-                    },
-                  ],
+                p7: {
+                  number: 7,
+                  state: "OPEN",
+                  latestOpinionatedReviews: {
+                    // **続きがあると言いながら、行き先が無い**
+                    pageInfo: { hasNextPage: true, endCursor: null },
+                    nodes: [{ state: "CHANGES_REQUESTED", commit: { oid: HEAD } }],
+                  },
                 },
               },
             },
           },
         },
-      ]),
-    });
-
-    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7))).rejects.toThrow();
-  });
-
-  it("PR の一覧も、続きを辿れないなら投げる", async () => {
-    // **外側でも同じ**——**打ち切ると、読めていない PR が「一覧に無い」へ落ちる**
-    const approvals = createGitHubPullRequestApprovals({
-      fetchImpl: fetcher([
-        {
-          status: 200,
-          body: {
-            data: {
-              repository: {
-                pullRequests: {
-                  pageInfo: { hasNextPage: true, endCursor: null },
-                  nodes: [],
-                },
-              },
-            },
-          },
-        },
+        // **辿れたら返るはずのものを置く**（#668 のレビューのあと、変異で確かめた）
+        // ——**置かないと、続きの要求が別の形で落ちて、同じ `rejects` が通る。**
+        // **カーソルの検査を消しても緑**になり、**守れていない**
+        { status: 200, body: reviewPage(["APPROVED"]) },
       ]),
     });
 
