@@ -246,6 +246,18 @@ export function planStoppedAt(value: unknown): number | undefined {
  * **どれも「押せなかった理由」**である（**成功は語彙に無い**。#342 のレビュー）。
  * **判定をここへ集める**——**描く側は並べるだけ**にする。
  */
+/**
+ * **「さっき押した結果」の断りが載る鍵**（#664 のレビュー 2 周目）。
+ *
+ * **下の `boardNotices` が読む鍵と、同じ集合**である——**断りを 1 つ増やすなら、
+ * ここにも足す。** **引き直す先（`boardReloadHref`）はこれを落とす**
+ * ——**持ち越すと、押していないのに同じ断りがもう一度出る。**
+ *
+ * **読む側の隣に置く。** **離した結果、`?plan=` が足された日に片方だけが古くなった**
+ * （`AGENTS.md` §5）。
+ */
+export const BOARD_OUTCOME_KEYS: readonly string[] = ["approve", "merge", "plan", "plan-at"];
+
 export function boardNotices(
   query: Record<string, string | string[] | undefined>,
 ): readonly string[] {
@@ -372,7 +384,7 @@ export async function renderRepositoryBoard(
               スナップショット**で、**開いたまま置いておくと古くなる。**
               **出せなかったときは出さない**——**盤面が無いのに時刻だけ出ると、
               何かが取れたように見える**（§5） */}
-          <BoardFreshness at={at} reloadHref={boardReloadHref(query)} />
+          <BoardFreshness at={at} reloadHref={boardReloadHref(query, BOARD_OUTCOME_KEYS)} />
           {/* **何件が誰にも振られていないかを出す**（#631）——**数えるのは domain が
               持つ**（`summarizeAssignments`）。**言うことが無ければ、この行は出ない** */}
           <AssignmentSummaryView

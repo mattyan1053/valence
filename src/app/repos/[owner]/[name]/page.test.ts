@@ -1211,4 +1211,16 @@ describe("いつ取ったものかを出す（#664）", () => {
     // **引き直したら全部出てきた、では絞った意味が消える**（#663）
     expect(await board("board", { ball: "author" })).toContain('href="?ball=author"');
   });
+
+  it("直前の結果の断りは、引き直しで持ち越さない", async () => {
+    // **押していない操作の結果が、もう一度出る**（#664 のレビュー 2 周目）。
+    // **`?plan=` は #661 が足したもの**で、**この PR を書いた時点の `main` には
+    // 無かった**——**取り込み直しで初めて同じ画面に並んだ**（`AGENTS.md` §5）。
+    //
+    // **落とす鍵は `boardNotices` が読む鍵と同じ集合**である
+    const markup = await board("board", { plan: "not-approved", "plan-at": "2" });
+
+    expect(markup, "押していない操作の結果を持ち越している").toContain('href="?"');
+    expect(markup, "断りの鍵が引き直す先に残っている").not.toContain("plan-at");
+  });
 });
