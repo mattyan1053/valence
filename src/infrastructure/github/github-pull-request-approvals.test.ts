@@ -112,14 +112,21 @@ function reviewPage(states: readonly Review[], endCursor?: string): unknown {
 function askedOnly(body: unknown, query: string): unknown {
   // **別名も読む**（#673 のレビュー）——**番号から鍵を作り直すと、
   // 別名を取り違えた実装でも通る**
-  const asked = [...query.matchAll(/(\w+):\s*pullRequest\(number:\s*(\d+)\)/g)].map((found) => ({
-    alias: String(found[1]),
-    number: Number(found[2]),
-  }));
+  // **名前として通らないものも拾う**（#673 のレビュー 3 周目）——**拾わずに
+  // 当たらなくすると、「番号を名指していない問い合わせ」の素通しへ落ちる。**
+  // **拾ってから弾く**
+  const asked = [...query.matchAll(/([^\s{}]+):\s*pullRequest\(number:\s*(\d+)\)/g)].map(
+    (found) => ({ alias: String(found[1]), number: Number(found[2]) }),
+  );
   const repository = (body as { data?: { repository?: Record<string, unknown> } })?.data
     ?.repository;
   if (asked.length === 0 || repository === undefined) {
     return body;
+  }
+  if (asked.some((entry) => !/^[A-Za-z_]\w*$/.test(entry.alias))) {
+    // **GraphQL の名前は数字で始められない**——**通すと、別名を作り損ねた
+    // 実装が緑になる**（**`p` が落ちた問い合わせは、本物なら構文で落ちる**）
+    return { errors: [{ message: "Syntax Error: Expected Name" }] };
   }
   // **落ちるのは「同じ別名に違う引数が付いたとき」だけ**（#673 のレビュー 2 周目）
   // ——**同じ別名・同じ番号は仕様上は通る。** **弾くと、この試験群が守っている
@@ -665,5 +672,22 @@ describe("GitHub から承認の状態を読む", () => {
 
     expect(payload.errors, "本物が通すものを弾いている").toBeUndefined();
     expect(Object.keys(payload.data?.repository ?? {})).toEqual(["p7"]);
+  });
+  it("数字で始まる別名は、本物と同じく通らない", async () => {
+    // **GraphQL の名前は数字で始められない**（#673 のレビュー 3 周目）——**`\w+` は
+    // 数字にも当たる**ので、**`askedQuery` から `p` が落ちた問い合わせを、
+    // fixture が別名として受け取っていた。**
+    //
+    // **「当たらなくする」だけでは足りない**——**当たらなくなると
+    // 「番号を名指していない問い合わせ」の素通しへ落ちる。** **弾く側へ落とす**
+    const fetchImpl = fetcher([{ status: 200, body: page([{ number: 7, states: [] }]) }]);
+
+    const response = await fetchImpl("https://api.github.com/graphql", {
+      method: "POST",
+      body: JSON.stringify({ query: "{ 7: pullRequest(number: 7) { number } }" }),
+    });
+    const payload = (await response.json()) as { errors?: unknown };
+
+    expect(payload.errors, "本物が構文で落とすものを通している").toBeDefined();
   });
 });
