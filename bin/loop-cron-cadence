@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# **予定表の刻みを、生きているうちに残す** (#677。#679 のレビュー 2 周目)。
+#
+#   bin/loop-cron-cadence <役> <刻み>     いまの刻みを残す（例: worker 30m）
+#   bin/loop-cron-cadence <役>            残してある刻みを出す
+#   bin/loop-cron-cadence <役> --verbose  いつ残したかも出す
+#
+#   exit 0 = 残した / 出した
+#   exit 1 = 残っていない（**「無い」であって「読めない」ではない**）
+#   exit 2 = 判定できない（役や刻みの形が違う / git の外 / 記録が壊れている）
+#
+# **通知で起こされた周回は、cron に運ばれていない**——**「この周回を運んできた刻み」が
+# 無い。** **予定表が切れたあとに起こされた周回こそ入れ直したい**のに、**入れ直す先を
+# 決められない**（#679 のレビュー）。
+#
+# **生きている間なら `CronList` が答える**ので、**そのときに残しておく。**
+#
+# **役ごとに分けて持つ。** **master と worker で刻みが違う**ので、**畳むと片方の刻みで
+# 両方を入れ直す。**
+#
+# **作業場ごとに持つ**（`--git-dir`。**共通ディレクトリへ置かない**）——**同じ
+# リポジトリの別の作業場が別の刻みで回っている**ので、**共通の場所へ置くと、
+# 最後に書いた作業場の刻みで全部が入れ直る。**
+#
+# **入れ直したことの記録は別である**（`bin/loop-cron-restored`）。**あちらは
+# 「いつ入れ直したか」**で、**こちらは「いまの刻み」**——**混ぜると、窓で押し出された
+# ときに刻みまで消える。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-cron-cadence <役> <刻み>     いまの刻みを残す（例: worker 30m）" >&2
+  echo "        bin/loop-cron-cadence <役>            残してある刻みを出す" >&2
+  echo "        bin/loop-cron-cadence <役> --verbose  いつ残したかも出す" >&2
+  echo "        exit 0 残した / 出した, exit 1 残っていない, exit 2 判定できない" >&2
+  exit 2
+}
+
+[[ $# -ge 1 && $# -le 2 ]] || usage
+
+ROLE="${1-}"
+case "$ROLE" in
+  master | worker) ;;
+  *)
+    echo "[FAIL] 役は master か worker です: ${ROLE:-（空）}" >&2
+    exit 2
+    ;;
+esac
+readonly ROLE
+
+# **作業場ごとに持つ**（上記）。**リンクされた作業ツリーでは、ここが作業場の git ディレクトリ**
+# である（**共通ディレクトリではない**）。
+if ! git_dir="$(git rev-parse --git-dir 2>/dev/null)" || [[ -z $git_dir ]]; then
+  echo "[FAIL] git の作業ツリーの中で実行してください" >&2
+  exit 2
+fi
+git_dir="$(cd "$git_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git ディレクトリを解決できません" >&2
+  exit 2
+}
+readonly RECORD="$git_dir/valence-loop-cron-cadence-$ROLE"
+
+if [[ $# -eq 1 || ${2-} == "--verbose" ]]; then
+  if [[ ! -e $RECORD ]]; then
+    exit 1
+  fi
+  if ! line="$(cat -- "$RECORD")"; then
+    echo "[FAIL] 記録を読めません: $RECORD" >&2
+    exit 2
+  fi
+  [[ -n $line ]] || exit 1
+  # **形の違う行を刻みとして返さない**——**その形のまま入れ直しに行く**
+  if ! [[ $line =~ ^([0-9]+)$'\t'([1-9][0-9]*[smhd])$ ]]; then
+    echo "[FAIL] 記録の形が違います: $RECORD" >&2
+    exit 2
+  fi
+  if [[ ${2-} == "--verbose" ]]; then
+    printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  else
+    printf '%s\n' "${BASH_REMATCH[2]}"
+  fi
+  exit 0
+fi
+
+EVERY="$2"
+if ! [[ $EVERY =~ ^[1-9][0-9]*[smhd]$ ]]; then
+  echo "[FAIL] 刻みの形が違います: $EVERY（例: 30m）" >&2
+  exit 2
+fi
+readonly EVERY
+
+# **いま。** **試験のためだけに外から渡せる**（`bin/loop-cadence` と同じ形）。
+NOW="${LOOP_CRON_CADENCE_NOW:-$(date +%s)}"
+if ! [[ $NOW =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_CRON_CADENCE_NOW は epoch 秒で指定してください" >&2
+  exit 2
+fi
+
+# **1 行で上書きする。** **窓は要らない**——**いまの刻みは 1 つ**である。
+# **同じ作業場の周回は直列化されている**（`bin/loop-lease`）ので、**取り合いにならない。**
+if ! printf '%s\t%s\n' "$NOW" "$EVERY" >"$RECORD"; then
+  echo "[FAIL] 記録を書けません: $RECORD" >&2
+  exit 2
+fi
