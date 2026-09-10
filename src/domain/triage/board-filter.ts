@@ -1,0 +1,46 @@
+/**
+ * **盤面の一覧を、誰の番かで絞る**（#663）。
+ *
+ * **判定は足さない。** **`ballOf`（#636）が返したものを受けて、通すか落とすかを
+ * 決めるだけ**である——**#663 の本文のとおり、要るのは絞る口だけ**である。
+ *
+ * **既定は絞らない**（`ball` が `undefined`）。**開いた瞬間に一部しか見えていないと、
+ * 見えていないことに気づけない。**
+ *
+ * **落とした件数を返す。** **「絞って 0 件」と「1 件も無い」は違う**（#410 が
+ * `EmptyNotice` で塞いだのと同じ形）——**数を返さないと、呼ぶ側がその 2 つを
+ * 言い分けられない。**
+ *
+ * **純粋関数である**（§3）。
+ */
+
+import type { Ball } from "./ball";
+
+/** 絞った結果。 */
+export type BoardFilterOutcome = {
+  /** **通った番号。** **渡された順のまま**——**並びはここで決めない。** */
+  readonly shown: readonly number[];
+  /**
+   * **絞りで落ちた件数。**
+   *
+   * **読めなかった PR は入らない**——**そちらは絞りに関係なく出す**（#663 の
+   * 「気をつけること」）。**混ぜると、抜けが絞りのせいに見える。**
+   */
+  readonly hidden: number;
+};
+
+/**
+ * **その番のものだけを通す。**
+ *
+ * **`ball` が `undefined` なら全部通す**（既定は絞らない）。
+ */
+export function filterByBall(
+  rows: readonly { readonly number: number; readonly ball: Ball }[],
+  ball: Ball | undefined,
+): BoardFilterOutcome {
+  if (ball === undefined) {
+    return { shown: rows.map((row) => row.number), hidden: 0 };
+  }
+  const shown = rows.filter((row) => row.ball === ball).map((row) => row.number);
+  return { shown, hidden: rows.length - shown.length };
+}

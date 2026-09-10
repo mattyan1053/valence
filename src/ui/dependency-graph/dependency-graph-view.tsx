@@ -85,6 +85,16 @@ export type DependencyGraphViewProps = {
    * **組み立てるのは呼ぶ側**（**owner / name を知っているのは経路の側**）。
    */
   readonly urlOf: (pullRequestNumber: number) => string;
+  /**
+   * **一覧にその行を出すか**（#663）。**渡さなければ全部出す**（既定は絞らない）。
+   *
+   * **図には効かない。** **依存の関係は、絞ると辺が消えて嘘になる**
+   * ——**図は関係を追うため**、**一覧は 1 件ずつの中身のため**である（#471）。
+   *
+   * **絞ったことを言うのは呼ぶ側**である——**ここは「何件が当てはまったか」を
+   * 知らない**（**渡された関数しか持っていない**）。
+   */
+  readonly rowShown?: (pullRequestNumber: number) => boolean;
 };
 
 /**
@@ -180,6 +190,7 @@ export function DependencyGraphView({
   headKnown,
   titleOf,
   urlOf,
+  rowShown,
 }: DependencyGraphViewProps) {
   const byNumber = new Map(pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]));
   const dependsOn = dependsOnIndex(edges);
@@ -187,6 +198,8 @@ export function DependencyGraphView({
     numbers
       .map((number) => byNumber.get(number))
       .filter((pullRequest): pullRequest is PullRequestRef => pullRequest !== undefined)
+      // **絞りは一覧だけに効く**（#663）——**渡されていなければ全部出す**
+      .filter((pullRequest) => rowShown?.(pullRequest.number) !== false)
       .map((pullRequest) => (
         <PullRequestRow
           key={pullRequest.number}

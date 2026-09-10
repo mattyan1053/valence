@@ -451,6 +451,9 @@ export async function renderRepositoryBoard(
             // ——**`MergeButton` へ渡しているのと同じ `blocks`** である
             // （**1 度だけ作ったものを配る**。#541 のレビュー）
             mergeBlockOf={(number) => blocks?.get(number)}
+            // **一覧を、誰の番かで絞る**（#663）——**運ぶ側（#667）と同じ値を渡す。**
+            // **もう一度読み直さない**——**読み方が 2 つになると、片方だけが直る**
+            ballFilter={ball}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

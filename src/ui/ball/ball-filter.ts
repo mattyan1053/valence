@@ -1,14 +1,14 @@
 /**
  * **誰の番かで絞る口**（#663 / #667）。**画面の語彙だけを持つ。**
  *
- * **判定はしない**（`ballNote` と同じ）——**通すかどうかは絞る側が決める。**
+ * **判定はしない**（`ballNote` と同じ）——**通すかどうかは `filterByBall` が決める。**
  *
  * **受ける値と、出す選択肢を 1 つの並びから作る。** **離すと、画面に無い絞りを
  * URL で選べる**（**その逆も起きる**）——**`?ball=` は誰でも好きな文字列を
  * 入れられる**ので、**並べたものだけを通す**（`approveNoticeKind` と同じ判断。#330）。
  *
- * **絞る口（#663 / PR #666）とは別の周回で入る。** **こちらが足すのは運ぶ側**
- * ——**どちらが先に入っても壊れない**（**知らない値は「絞らない」へ落ちる**）。
+ * **運ぶ側（#667）と絞る側（#663）が、ここで揃った。** **知らない値は
+ * 「絞らない」へ落ちる**ので、**どちらが先に入っても壊れなかった。**
  */
 
 import type { Ball } from "../../domain/triage/ball";
@@ -34,6 +34,23 @@ export const BALL_FILTERS = [
 export type BallFilter = (typeof BALL_FILTERS)[number];
 
 /**
+ * **短い名前。** **`Record` で持つ**ので、**選択肢を足して書き忘れると型検査が落ちる**
+ * （`BALL_TEXT` と同じ形）。
+ *
+ * **行の文（`ballNote`）とは別**である——**あちらは 1 件の説明**、**こちらは束の名前。**
+ */
+const FILTER_LABEL: Record<BallFilter, string> = {
+  author: "著者の番",
+  reviewer: "レビューする人の番",
+  merger: "マージする人の番",
+  nobody: "誰の番でもない",
+};
+
+export function ballFilterLabel(ball: BallFilter): string {
+  return FILTER_LABEL[ball];
+}
+
+/**
  * **URL の値を、絞り込みへ落とす。** **分からなければ絞らない。**
  *
  * **同じ鍵が 2 つ載っていたら絞らない**（配列で来る）——**片方を選ぶと、
@@ -43,4 +60,29 @@ export function ballFilterOf(
   value: string | readonly string[] | undefined,
 ): BallFilter | undefined {
   return BALL_FILTERS.find((ball) => ball === value);
+}
+
+/**
+ * **いま絞っていることを言う 1 文。** **絞っていなければ `undefined`。**
+ *
+ * **隠した件数を必ず出す**（#663）——**絞られていることに気づけないと、
+ * 見えていないものに気づけない。** **隠した件数が 0 でも言う**
+ * ——**「全部が当てはまった」と「絞っていない」は違う。**
+ *
+ * **通ったものが 0 件なら、そう言う**（#410 が `EmptyNotice` で塞いだ形）
+ * ——**一覧が空のまま隠した件数だけ言っても、当てはまるものが無いのか、
+ * 読み落としたのかが分からない。**
+ */
+export function ballFilterNote(
+  ball: BallFilter | undefined,
+  counts: { readonly shown: number; readonly hidden: number },
+): string | undefined {
+  if (ball === undefined) {
+    return undefined;
+  }
+  const label = ballFilterLabel(ball);
+  const hidden = `${counts.hidden} 件を隠しています`;
+  return counts.shown === 0
+    ? `「${label}」の PR はありません（${hidden}）`
+    : `「${label}」だけを出しています（${hidden}）`;
 }
