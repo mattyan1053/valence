@@ -17,7 +17,7 @@ import {
   reportBoardActionUnavailable,
 } from "../../../../../composition/auth";
 import type { MergeNoticeKind } from "../../../../../ui/merge/merge-button";
-import { boardRedirect } from "../board-redirect";
+import { boardRedirect, submittedBallFilter } from "../board-redirect";
 
 /**
  * 送られてきた PR 番号。**境界なので Zod で検証する**（§3。#342 のレビュー）。
@@ -134,12 +134,14 @@ export async function respondToMerge(
   const form = await request.formData().catch(() => undefined);
   const number = pullRequestNumberFrom(form?.get("number"));
   const headSha = headShaFrom(form?.get("sha"));
+  // **絞ったまま押せるようにする**（#667）
+  const ball = submittedBallFilter(form);
 
   if (number === undefined || headSha === undefined) {
     // **読めない要求で GitHub を叩かない。** **commit が無い要求も通さない**
     // ——**通すと、見せていない head がマージできる。**
     deps.report("merge", "unreadable-request");
-    return boardRedirect(request, repository, { param: "merge", value: "unavailable" });
+    return boardRedirect(request, repository, { param: "merge", value: "unavailable" }, ball);
   }
 
   const result = await deps.merge(repository, number, headSha);
@@ -154,6 +156,7 @@ export async function respondToMerge(
     request,
     repository,
     outcome === undefined ? undefined : { param: "merge", value: outcome },
+    ball,
   );
 }
 

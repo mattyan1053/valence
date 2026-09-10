@@ -8,6 +8,9 @@
  * 押した先で対象が決まらない**——**別の PR へ承認が出る。**
  */
 
+import type { BallFilter } from "../ball/ball-filter";
+import { BallFilterField } from "../ball/ball-filter-field";
+
 /**
  * **押せなかった理由。** **画面へ出す語彙で持つ**（`application` の型は import しない）。
  *
@@ -30,6 +33,12 @@ export type ApproveButtonProps = {
    * `approvePullRequest` が持つ**——**押せてしまっても、そこで止まる。**
    */
   readonly disabled?: boolean;
+  /**
+   * **いま絞っているもの**（#667）。**押したあとも同じ絞りへ戻すために運ぶ。**
+   *
+   * **絞っていなければ何も出さない**（`BallFilterField`）。
+   */
+  readonly ball?: BallFilter;
 };
 
 /**
@@ -54,11 +63,13 @@ export function approveNotice(kind: ApproveNoticeKind): string {
   }
 }
 
-export function ApproveButton({ number, action, disabled }: ApproveButtonProps) {
+export function ApproveButton({ number, action, disabled, ball }: ApproveButtonProps) {
   return (
     <form action={action} method="post">
       {/* **どの PR かを、送る本文が持つ** */}
       <input type="hidden" name="number" value={number} />
+      {/* **いま絞っているものも持つ**（#667）——**押すたびに「すべて」へ戻さない** */}
+      <BallFilterField ball={ball} />
       <button
         className="rounded border px-2 py-1 text-sm disabled:opacity-50"
         disabled={disabled}

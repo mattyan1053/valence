@@ -8,6 +8,9 @@
  * **いまは 2 つ目**で、**まとめるとどちらの文面も直しにくくなる。**
  */
 
+import type { BallFilter } from "../ball/ball-filter";
+import { BallFilterField } from "../ball/ball-filter-field";
+
 /**
  * **押せなかった理由。** **成功を並べない**（#342 のレビュー）——
  * **これは URL から渡ってくる値**であり、**利用者が任意に作れる。**
@@ -53,6 +56,10 @@ export type MergeButtonProps = {
    * **原因は言い分けない**（**言い分けるには理由を運ぶ必要がある**）。
    */
   readonly notOrderable?: boolean;
+  /**
+   * **いま絞っているもの**（#667）。**押したあとも同じ絞りへ戻すために運ぶ。**
+   */
+  readonly ball?: BallFilter;
   readonly disabled?: boolean;
 };
 
@@ -98,6 +105,7 @@ export function MergeButton({
   blockedBy,
   notOrderable,
   disabled,
+  ball,
 }: MergeButtonProps) {
   const waiting = blockedBy !== undefined && blockedBy.length > 0;
   return (
@@ -106,6 +114,8 @@ export function MergeButton({
       <input type="hidden" name="number" value={number} />
       {/* **どの commit を見せたか**も持つ——**押した対象を、見せた対象に固定する** */}
       {headSha === undefined ? undefined : <input type="hidden" name="sha" value={headSha} />}
+      {/* **いま絞っているものも持つ**（#667）——**押すたびに「すべて」へ戻さない** */}
+      <BallFilterField ball={ball} />
       <button
         className="rounded border px-2 py-1 text-sm disabled:opacity-50"
         // **commit が分からなければ押せない**——**確かめられない対象をマージさせない**
