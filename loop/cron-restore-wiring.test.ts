@@ -41,20 +41,35 @@ describe.each(ROLES)("%s の周回は、自分の予定表を見る", (role) => 
     // **空でないときに足すと、同じ役の予定が 2 つになる**——**周回が 2 倍鳴る**
     const section = restoreSection(role);
 
-    expect(section).toMatch(/^2\. \*\*空のときだけ入れ直す\*\*/m);
+    expect(section).toMatch(/^3\. \*\*空のときだけ入れ直す\*\*/m);
     expect(section, "入れ直す手が書かれていない").toMatch(/CronCreate|\/loop /);
+  });
+
+  it("生きているうちに、刻みを残す", () => {
+    // **通知で起こされた周回は cron に運ばれていない**（#679 のレビュー 2 周目）
+    // ——**「この周回を運んできた刻み」が無い**ので、**生きている間に残しておく**
+    const section = restoreSection(role);
+
+    expect(section).toMatch(/^2\. \*\*空でなければ、いまの刻みを残す\*\*/m);
+    expect(section, "残す口を名指ししていない").toContain("bin/loop-cron-cadence");
+  });
+
+  it("刻みが残っていなければ、入れ直さない", () => {
+    // **判定不能を「無い」へ倒さない**——**刻みを決められないまま足すと、
+    // 別の刻みの予定が増える**
+    expect(restoreSection(role)).toContain("**刻みが残っていないときも足さない**");
   });
 
   it("引けなかったときは、入れ直さない", () => {
     // **判定不能を「無い」へ倒さない**——**二重登録のほうが害が大きい**
     expect(restoreSection(role), "読めなかったときの向きが無い").toMatch(
-      /^3\. \*\*引けなかったときは足さない\*\*/m,
+      /^4\. \*\*引けなかったときは足さない\*\*/m,
     );
   });
 
   it("入れ直したことを記録する", () => {
     // **メッセージは揮発する**——**次に読む人が「なぜ刻みが変わったか」を追えない**
-    expect(restoreSection(role)).toMatch(/^4\. \*\*入れ直したら残す\*\*/m);
+    expect(restoreSection(role)).toMatch(/^5\. \*\*入れ直したら残す\*\*/m);
     expect(restoreSection(role)).toContain("bin/loop-cron-restored");
   });
 

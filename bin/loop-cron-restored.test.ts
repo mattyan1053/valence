@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,6 +96,62 @@ describe("bin/loop-cron-restored", () => {
     expect(lines(), "窓が効いていない").toHaveLength(window);
     expect(lines()[0], "いちばん古い行が残っている").not.toBe(`0\t${sandbox}\t30m`);
     expect(lines()[window - 1], "入れたものが落ちている").toContain("45m");
+  });
+
+  it("上限まで埋めてから 2 つ同時に足しても、どちらも残る", async () => {
+    // **追記 → `tail` → `>` の間に別のセッションが入ると、後から足された行が消える**
+    // （#679 のレビュー 2 周目。**指摘は 100/100 回で消えたと書いている**）。
+    // **上限まで埋めてから測る**——**埋めないと刈り込みが走らず、競合も起きない**（#537）
+    const window = 100;
+    writeFileSync(
+      record,
+      `${Array.from({ length: window }, (_, index) => `${index}\t${sandbox}\t30m`).join("\n")}\n`,
+    );
+
+    const started = ["45m", "10m"].map(
+      (every) =>
+        new Promise<number>((resolve) => {
+          const child = spawn(SCRIPT, [every], {
+            cwd: sandbox,
+            env: { ...process.env, LOOP_CRON_RESTORED_NOW: "1789052740" },
+          });
+          child.on("close", (code) => resolve(code ?? -1));
+        }),
+    );
+
+    expect(await Promise.all(started)).toEqual([0, 0]);
+    expect(lines(), "窓が効いていない").toHaveLength(window);
+    const body = lines().join("\n");
+    expect(body, "後から足された行が消えている").toContain("45m");
+    expect(body, "後から足された行が消えている").toContain("10m");
+  });
+
+  it("誰かが書いている最中なら、書き込まずに判定できないと言う", async () => {
+    // **上のは「同時に走らせても壊れない」**——**こちらは「錠を取っていること」**を見る。
+    // **並べて走らせるだけでは、噛み合う瞬間に当たるとは限らない**（**指摘の側は
+    // 100/100 回で消えたが、こちらの環境では毎回は起きない**）ので、
+    // **錠そのものを外から握って測る。**
+    const lock = join(sandbox, ".git", "valence-loop-cron-restored.lock");
+    const holder = spawn("bash", ["-c", `exec 9>${JSON.stringify(lock)}; flock 9; sleep 2`]);
+    // **握るまで待つ**——**握る前に打つと、こちらが先に取ってしまう**
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    try {
+      const result = spawnSync(SCRIPT, ["30m"], {
+        cwd: sandbox,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LOOP_CRON_RESTORED_NOW: "1789052740",
+          LOOP_CRON_RESTORED_LOCK_WAIT_SEC: "0",
+        },
+      });
+
+      expect(result.status, "錠を取らずに書いている").toBe(2);
+      expect(lines(), "待てなかったのに行が増えている").toHaveLength(0);
+    } finally {
+      holder.kill();
+    }
   });
 
   it("--list で、残っているものを読める", () => {

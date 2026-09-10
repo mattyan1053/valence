@@ -44,6 +44,9 @@ usage() {
 # **残す行数の上限。** **溢れたら古い側から落とす**（上記）。
 readonly WINDOW=100
 
+# **取り合いを待つ秒数。** **試験のためだけに外から渡せる。**
+readonly LOCK_WAIT_SEC="${LOOP_CRON_RESTORED_LOCK_WAIT_SEC:-10}"
+
 if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
   echo "[FAIL] git の作業ツリーの中で実行してください" >&2
   exit 2
@@ -53,6 +56,23 @@ common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
   exit 2
 }
 readonly RECORD="$common_dir/valence-loop-cron-restored"
+
+# **追記・刈り込み・置換・読み取りを、同じロックの中でやる** (#679 のレビュー 2 周目)。
+# **追記 → `tail` → `>` の間に別のセッションが入ると、後から足された行が消える**
+# ——**共通ディレクトリの記録は、作業場をまたいで同時に書かれる**（**周回の直列化は
+# 作業場の中だけ**）。**上書きの最中に読むと、空を「記録なし」と読む**のも同じ根である。
+#
+# **待てなかったら判定できないと言う**——**黙って書くと、この Issue が消しに来た
+# 「消える行」が戻る。** **入れ直し自体はもう済んでいる**ので、**ここで止めても
+# ループは進む。**
+exec 9>"$common_dir/valence-loop-cron-restored.lock" || {
+  echo "[FAIL] 取り合いのロックを作成できません" >&2
+  exit 2
+}
+if ! flock -w "$LOCK_WAIT_SEC" 9; then
+  echo "[FAIL] 記録の取り合いのロックを取得できません（${LOCK_WAIT_SEC} 秒待機）" >&2
+  exit 2
+fi
 
 if [[ $1 == "--list" ]]; then
   # **読めなかったものを「無い」と言わない**——**exit 1 は「空だった」ときだけ**
