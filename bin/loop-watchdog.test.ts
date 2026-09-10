@@ -19,19 +19,22 @@ type Item = {
 };
 
 /**
- * **`gh --jq` が返す形**（`<番号>\t<更新時刻>\t<ラベル,…>`）。
+ * **`gh api graphql --jq` が返す形**（`item<US><番号><US><更新時刻>` と `label<US><名前>`）。
+ *
+ * **label は 1 行ずつ**である（#550。#675 のレビュー）——**繋いでから探すと、
+ * カンマを含む label 名が部分一致で当たる。**
  *
  * **`--jq` には判定を持たせない**（**形を整えるだけ**）——**持たせると、
- * どのラベルを外すかが試験の外へ出る**（**stub は素通しなので、何も見ていないことになる**）。
+ * どの label を外すかが試験の外へ出る**（**stub は素通しなので、何も見ていないことになる**）。
  */
-function itemsTsv(items: readonly Item[]): string {
+const US = "\u001f";
+
+function itemsRecords(items: readonly Item[]): string {
   return items
-    .map(
-      (item) =>
-        `${item.number}\t${new Date((NOW - item.hoursAgo * 3600) * 1000).toISOString()}\t${(
-          item.labels ?? []
-        ).join(",")}`,
-    )
+    .flatMap((item) => [
+      `item${US}${item.number}${US}${new Date((NOW - item.hoursAgo * 3600) * 1000).toISOString()}`,
+      ...(item.labels ?? []).map((name) => `label${US}${name}`),
+    ])
     .join("\n");
 }
 
@@ -67,19 +70,23 @@ describe("bin/loop-watchdog", () => {
         "#!/usr/bin/env bash",
         'args="$*"',
         `printf '%s\\n' "$args" >> ${JSON.stringify(calls)}`,
-        ...(world.listFails === true ? ['if [[ $args == *" list"* ]]; then exit 1; fi'] : []),
+        ...(world.listFails === true ? ['if [[ $args == *"graphql"* ]]; then exit 1; fi'] : []),
+        // **リポジトリは実行時に決める**（§1）
+        'if [[ $args == *"repo view"* ]]; then',
+        "  printf 'acme\\nweb\\n'",
+        "  exit 0",
+        "fi",
         // **既に立っているか**（**同じことを何度も立てない**）
         'if [[ $args == *"issue list"* && $args == *"--search"* ]]; then',
         `  printf '%s' ${JSON.stringify((world.reported ?? []).map((n) => `${n}\n`).join(""))}`,
         "  exit 0",
         "fi",
-        'if [[ $args == *"issue list"* ]]; then',
-        // **`%b` で出す**——**`%s` は `\\t` をそのまま出す**ので、**タブで割れない**
-        `  printf '%b\\n' ${JSON.stringify(itemsTsv(world.issues ?? []))}`,
+        'if [[ $args == *"issues(states:OPEN"* ]]; then',
+        `  printf '%b\\n' ${JSON.stringify(itemsRecords(world.issues ?? []))}`,
         "  exit 0",
         "fi",
-        'if [[ $args == *"pr list"* ]]; then',
-        `  printf '%b\\n' ${JSON.stringify(itemsTsv(world.prs ?? []))}`,
+        'if [[ $args == *"pullRequests(states:OPEN"* ]]; then',
+        `  printf '%b\\n' ${JSON.stringify(itemsRecords(world.prs ?? []))}`,
         "  exit 0",
         "fi",
         'if [[ $args == *"issue create"* ]]; then',
@@ -148,6 +155,61 @@ describe("bin/loop-watchdog", () => {
     }
   });
 
+  it("カンマを含む label 名を、部分一致で読まない", () => {
+    // **GitHub の label 名にはカンマを入れられる**（#550。#675 のレビュー）
+    // ——**繋いでから探すと、`foo,ready,bar` という 1 つの label が `ready` に当たる**
+    const result = run({
+      issues: [{ number: 1, hoursAgo: 99, labels: ["foo,ready,bar"] }],
+      prs: [],
+    });
+
+    expect(result.status, "付いていない `ready` を、付いていると読んでいる").toBe(0);
+  });
+
+  it("カンマを含む label 名で、本物の待ちでないものを外さない", () => {
+    // **逆側**——**`foo,parked,bar` を「保留」と読むと、止まっているのに黙る**
+    const result = run({
+      issues: [{ number: 1, hoursAgo: 99, labels: ["ready", "foo,parked,bar"] }],
+      prs: [],
+    });
+
+    expect(result.status, "止まっているのに黙っている").toBe(1);
+  });
+
+  it("一覧は、ページの終わりまで辿る", () => {
+    // **`--limit N` は「最大 N 件」**（#328 のレビュー。#675 のレビュー）
+    // ——**窓で切ると、古い `ready` が検査の外へ出て「静かでよい」へ倒れる**
+    //
+    // **stub が `gh` そのもの**なので、**ページの送り自体はここでは動かせない**
+    // （**送るのは `gh --paginate`**）。**確かめるのは 2 つ**——
+    // **問い合わせが続きを辿れる形か**と、**件数で打ち切っていないか**である。
+    const result = run({ issues: [{ number: 1, hoursAgo: 99, labels: ["ready"] }] });
+
+    expect(result.asked, "ページを辿る問い合わせをしていない").toContain("--paginate");
+    expect(result.asked, "続きの場所を渡していない").toContain("after:$endCursor");
+    expect(result.asked, "続きがあるかを聞いていない").toContain("pageInfo");
+    expect(result.asked, "件数で打ち切っている").not.toContain("--limit");
+    expect(result.status).toBe(1);
+  });
+
+  it("窓より多くても、最後の 1 件まで見る", () => {
+    // **打ち切りは、いちばん見たい状態で効く**——**新しいものだけが返り、
+    // 古い `ready` が落ちると、止まっているのに「静かでよい」へ倒れる。**
+    // **200 件ちょうどでは落ちない**ので、**超える数で置く。**
+    const many: Item[] = [
+      ...Array.from({ length: 250 }, (_, index) => ({
+        number: index + 1,
+        hoursAgo: 1,
+        labels: ["backlog"],
+      })),
+      { number: 999, hoursAgo: 99, labels: ["ready"] },
+    ];
+
+    const result = run({ issues: many, prs: [] });
+
+    expect(result.status, "最後の 1 件を見ていない").toBe(1);
+  });
+
   it("読めなかったものを「無かった」と言わない", () => {
     // **0 件に見えると、止まっているのに「静かでよい」へ倒れる**
     const result = run({ listFails: true });
@@ -174,6 +236,22 @@ describe("bin/loop-watchdog", () => {
   });
 
   describe("--report", () => {
+    it("立てる Issue に、状態 label を付ける", () => {
+      // **付けないと、この Issue 自身がループを止める**（#675 のレビュー）
+      // ——**label の無い open Issue は `unlisted-issue` として積まれ、3 周で `loop/STOP`**。
+      // **`blocked` にする**——**一覧に載る 4 つの 1 つ**であり、
+      // **昇格できる `backlog` でもない**ので、**`no-work` はこれまでどおり積まれる**
+      const result = run({ issues: [{ number: 1, hoursAgo: 30, labels: ["ready"] }] }, [
+        "--report",
+      ]);
+
+      // **本文に改行があるので、行では切れない**——**`issue create` から先を見る**
+      const created = result.asked.slice(result.asked.indexOf("issue create"));
+      expect(created, "一覧に載らない Issue を立てている").toContain("--label blocked");
+      // **`ready` にしない**——**worker が実装しに来る**（**何を実装するのか、が無い**）
+      expect(created, "worker が実装しに来る label を付けている").not.toContain("--label ready");
+    });
+
     it("止まっていたら、人に届く形で残す", () => {
       const result = run({ issues: [{ number: 1, hoursAgo: 30, labels: ["ready"] }] }, [
         "--report",

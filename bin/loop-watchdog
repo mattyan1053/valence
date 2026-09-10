@@ -72,58 +72,126 @@ readonly NOW
 # **立てる Issue の題。** **同じことを 2 度立てないための鍵でもある。**
 readonly TITLE="無人運転が止まっています（自動検出）"
 
-# **読めなかったものを「無かった」と言わない** (#210 と同じ形)。
-# **0 件に見えると、止まっているのに「静かでよい」へ倒れる。**
+# **状態 label を付けて立てる** (#675 のレビュー)。**付けないと、この Issue 自身が
+# ループを止める**——**`bin/loop-unlisted-issues` は label の無い open Issue を
+# `unlisted-issue:<番号>` として毎周回積み**、**3 周で `loop/STOP`** になる
+# （**人が予定表だけ直して、この Issue を開いたままにするだけで起きる**）
+# ——**見張りが、復旧したループを止める。**
+#
+# **`blocked` にする。** **`bin/loop-unlisted-issues` が「一覧に載っている」と数える
+# 4 つの 1 つ**（`backlog` / `ready` / `in-progress` / `blocked`）であり、
+# **`ready` / `in-progress` でも、昇格できる `backlog` でもない**ので、
+# **作業が尽きたときの `no-work` はこれまでどおり積まれる**（**第 4 層を殺さない**）。
+#
+# **`ready` にしない**——**worker が実装しに来る**（**何を実装するのか、が無い**）。
+# **`backlog` にもしない**——**昇格の候補として読まれる。**
+readonly LABELS=(blocked)
+
+# **リポジトリは実行時に決める** (§1)。**設定に固定しない。**
+if ! repo_ref="$(gh repo view --json owner,name --jq '.owner.login, .name')"; then
+  echo "[FAIL] GitHub: リポジトリを特定できません" >&2
+  exit 2
+fi
+mapfile -t repo_parts <<<"$repo_ref"
+
+# **区切りは US。** **タブや空白を使わない**——**label 名には空白が入る。**
+readonly FIELD=$'\037'
+
+# **件数で打ち切らない** (#328 のレビュー。#675 のレビュー)。**`gh issue list --limit N`
+# は「最大 N 件」**なので、**open がそれを超えたリポジトリでは、古いものから
+# 検査の外へ出る**——**返ってきた窓が backlog と待ちだけなら「静かでよい」へ倒れ**、
+# **止まっているのに黙る。** **内側の connection を明示的に辿る**
+# （**`pageInfo` と `after` が無いと `--paginate` は外側しか進めない**）。
+#
+# **label は 1 行ずつ受ける** (#550。#675 のレビュー)——**繋いでから探さない。**
+# **GitHub の label 名にはカンマを入れられる**ので、**`foo,ready,bar` という 1 つの
+# label が `,ready,` に部分一致する**（**逆に、本物の `ready` を持つ Issue が
+# `foo,parked,bar` で待ち扱いになり、監視から消える**）。
 #
 # **`--jq` には判定を持たせない**——**形を整えるだけ**である
-# （`<番号>\t<更新時刻>\t<ラベル,…>`）。**持たせると、どのラベルを外すかが
-# 試験の外へ出る**（`AGENTS.md` §5）。
-readonly SHAPE='.[] | "\(.number)\t\(.updatedAt)\t\([.labels[].name] | join(","))"'
+# （`item<US><番号><US><更新時刻>` と `label<US><名前>`）。**持たせると、
+# どのラベルを外すかが試験の外へ出る**（`AGENTS.md` §5）。
+#
+# **`labels(first:100)` を超えて付いた label は読めない**——**そのとき倒れる先は
+# 「数える」側**である（**待ちの label を読み落とすと鳴る**）。**黙る側ではない。**
+# **`$owner` などは GraphQL / jq の変数**である——**シェルに展開させない。**
+# shellcheck disable=SC2016
+readonly SHAPE='.nodes[]
+  | "item\u001f\(.number)\u001f\(.updatedAt)", (.labels.nodes[] | "label\u001f\(.name)")'
 
-if ! issues="$(gh issue list --state open --limit 200 --json number,updatedAt,labels --jq "$SHAPE")"; then
+open_items() {
+  local field="$1"
+  gh api graphql --paginate \
+    -f owner="${repo_parts[0]-}" -f repo="${repo_parts[1]-}" \
+    -f query="query(\$owner:String!,\$repo:String!,\$endCursor:String){
+      repository(owner:\$owner,name:\$repo){
+        $field(states:OPEN, first:100, after:\$endCursor){
+          pageInfo{hasNextPage endCursor}
+          nodes{number updatedAt labels(first:100){nodes{name}}}}}}" \
+    --jq ".data.repository.$field$SHAPE"
+}
+
+if ! issues="$(open_items issues)"; then
   echo "[FAIL] GitHub: open な issue を読めませんでした" >&2
   exit 2
 fi
-if ! prs="$(gh pr list --state open --limit 200 --json number,updatedAt,labels --jq "$SHAPE")"; then
+if ! prs="$(open_items pullRequests)"; then
   echo "[FAIL] GitHub: open な PR を読めませんでした" >&2
   exit 2
 fi
 
-# **待っているのが正しいものか。** **1 つでも付いていれば数えない。**
-waiting() {
-  local labels=",$1,"
+# **待っているのが正しいものか。** **完全一致で見る**（上記）。
+is_waiting() {
   local one
   for one in blocked parked awaiting-human waiting-condition; do
-    [[ $labels == *",$one,"* ]] && return 0
+    [[ $1 == "$one" ]] && return 0
   done
   return 1
 }
 
 # **動くべき Issue か。** **`backlog` は後回し**であり、**誰も手を付けない状態が正しい。**
-moving() {
-  local labels=",$1,"
+is_moving() {
   local one
   for one in ready in-progress; do
-    [[ $labels == *",$one,"* ]] && return 0
+    [[ $1 == "$one" ]] && return 0
   done
   return 1
 }
 
-# **待ちのラベルが付いていないものだけを残す。** **Issue は、そのうえで
-# 動くべきラベルを持つものだけ**である。
+# **待ちの label が付いていないものだけを残す。** **Issue は、そのうえで
+# 動くべき label を持つものだけ**である。
 work=""
-while IFS=$'\t' read -r number updated labels; do
-  [[ -n $number ]] || continue
-  waiting "$labels" && continue
-  moving "$labels" || continue
-  work+="$number\t$updated"$'\n'
-done <<<"$issues"
-while IFS=$'\t' read -r number updated labels; do
-  [[ -n $number ]] || continue
-  waiting "$labels" && continue
-  work+="$number\t$updated"$'\n'
-done <<<"$prs"
-work="$(printf '%b' "$work")"
+keep() {
+  local require_moving="$1"
+  local number="" updated="" waiting=0 moving=0 kind value extra
+  flush() {
+    [[ -n $number ]] || return 0
+    [[ $waiting -eq 0 ]] || return 0
+    [[ $require_moving -eq 0 || $moving -eq 1 ]] || return 0
+    work+="$number$FIELD$updated"$'\n'
+  }
+  while IFS="$FIELD" read -r kind value extra; do
+    case "$kind" in
+      item)
+        flush
+        number="$value"
+        updated="$extra"
+        waiting=0
+        moving=0
+        ;;
+      label)
+        is_waiting "$value" && waiting=1
+        is_moving "$value" && moving=1
+        ;;
+      *) ;;
+    esac
+  done
+  flush
+}
+
+keep 1 <<<"$issues"
+keep 0 <<<"$prs"
+work="${work%$'\n'}"
 
 if [[ -z $work ]]; then
   echo "[OK] 動くべき仕事はありません（静かでよい）"
@@ -133,7 +201,7 @@ fi
 # **いちばん新しい動きを探す。** **1 つでも動いていれば、ループは生きている**
 # ——**どれが動いたかではなく、何かが動いたか**を見る。
 newest=0
-while IFS=$'\t' read -r number updated; do
+while IFS="$FIELD" read -r number updated; do
   [[ -n $updated ]] || continue
   if ! at="$(date -u -d "$updated" +%s 2>/dev/null)"; then
     echo "[FAIL] GitHub: #$number の更新時刻を読めませんでした" >&2
@@ -191,13 +259,19 @@ body="$(
 - **\`loop/STOP\`** —— **人が止めているなら、この Issue は閉じてください**
   （**STOP は GitHub から見えません**）
 
+## 動き出したら、閉じてください
+
+**この Issue は、止まっていることを人へ届けるためだけに在ります。** **周回が戻ったら
+閉じてください**——**開いたままでも次のぶんは立ちません**（**同じ題のものが
+開いていれば足さない**）が、**盤面には残り続けます。**
+
 ## 直したことにしないでください
 
 **入れ直しは応急処置です**（#670）。**7 日後にまた切れます。**
 BODY
 )"
 
-if ! gh issue create --title "$TITLE" --body "$body" >/dev/null; then
+if ! gh issue create --title "$TITLE" --body "$body" --label "${LABELS[0]}" >/dev/null; then
   echo "[FAIL] GitHub: Issue を立てられませんでした" >&2
   exit 2
 fi

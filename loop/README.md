@@ -112,7 +112,9 @@ master (~/valence-master, worktree, 読み専用)   worker (~/valence, 実装・
   `updatedAt`** を見る。**`blocked` / `parked` / `awaiting-human` / `waiting-condition`
   は数えない**（**止まっているのが正しい**）
 - **止まっていれば Issue を立て、走りも赤くする**（2 つの経路で届く）。
-  **同じことは 2 度立てない**
+  **同じことは 2 度立てない**——**立てる Issue には `blocked` を付ける**
+  （**label の無い open Issue は `unlisted-issue` として積まれ、3 周で `loop/STOP`**
+  ——**見張りが、復旧したループを止めてしまう**）
 - **`loop/STOP` は GitHub から見えない**——**人が止めている間に対象が残っていれば、
   12 時間後に 1 度鳴る。** **鳴らさない側へ倒すと、この仕組みが消しに来たもの
   （誰も気づかない）に戻る**ので、**鳴る側へ倒してある**
