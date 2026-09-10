@@ -33,9 +33,17 @@ import { openedOrigin } from "../../../auth/urls";
  * **語彙から外すのは各機能の側**で、**ここはその値を運ぶだけ**である。
  */
 export type BoardNotice = {
-  /** クエリの名前（`approve` / `merge`）。 */
+  /** クエリの名前（`approve` / `merge` / `plan`）。 */
   readonly param: string;
   readonly value: string;
+  /**
+   * **どの PR で止まったか**（#661）。**あれば `<param>-at` に載る。**
+   *
+   * **載せてよいのは、これが「入らなかった」の側だから**である
+   * ——**「入った」は盤面が示す**（**消えている**）。**数を載せると、
+   * 操作していない人が「N 本入りました」と出せる**（#342 のレビューと同じ形）。
+   */
+  readonly at?: number;
 };
 
 export function boardRedirect(
@@ -49,6 +57,9 @@ export function boardRedirect(
   );
   if (notice !== undefined) {
     board.searchParams.set(notice.param, notice.value);
+    if (notice.at !== undefined) {
+      board.searchParams.set(`${notice.param}-at`, String(notice.at));
+    }
   }
   return NextResponse.redirect(board, { status: 303 });
 }

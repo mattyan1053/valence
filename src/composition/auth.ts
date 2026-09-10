@@ -20,6 +20,8 @@ import type { VisibleRepositoriesResult } from "../application/repositories/list
 import { listVisibleRepositories } from "../application/repositories/list-visible-repositories";
 import type { ApprovePullRequestResult } from "../application/review-order/approve-pull-request";
 import { approvePullRequest } from "../application/review-order/approve-pull-request";
+import type { MergePlanResult, MergePlanStep } from "../application/review-order/merge-plan";
+import { mergePlan } from "../application/review-order/merge-plan";
 import type { MergePullRequestResult } from "../application/review-order/merge-pull-request";
 import { mergePullRequest } from "../application/review-order/merge-pull-request";
 import { planReviewOrder } from "../application/review-order/plan-review-order";
@@ -447,5 +449,40 @@ export async function mergePullRequestForCurrentUser(
         }).listPullRequestRefs();
       },
     },
+  });
+}
+
+/**
+ * **マージ順のプランを、順に流す**（#661）。
+ *
+ * **1 本ずつ入れるのは `mergePullRequestForCurrentUser`** である
+ * ——**判定を 2 通り持たない**（§5）。**ここが持つのは「順に呼ぶ」だけ**。
+ */
+export async function mergePlanForCurrentUser(
+  repository: { readonly owner: string; readonly name: string },
+  steps: readonly MergePlanStep[],
+): Promise<MergePlanResult> {
+  const { credentials, connection, key } = settings();
+  const client = await sessionClient(connection);
+  const budget = createWinnersSaveBudget();
+  return mergePlan({
+    repository,
+    steps,
+    openStore: () => storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
+    ensure: (store) =>
+      ensureUsableToken({
+        store,
+        refresh: (refreshToken) =>
+          refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+        now: new Date(),
+        waitForWinnersSave: createWaitForWinnersSave({ budget }),
+      }),
+    // **ユーザートークンで解決する**（§6）
+    repositories: createUserVisibleRepositories(),
+    permissions: createUserRepositoryPermissions(),
+    // **承認も、その人のトークンで読む**（#343。§6）——**見せた commit で聞く**（#635）
+    approvals: createGitHubPullRequestApprovals(),
+    // **1 本ぶんは、1 本ずつ押す道と同じもの**（#345 / #350 の判定ごと）
+    merge: (step) => mergePullRequestForCurrentUser(repository, step.number, step.headSha),
   });
 }
