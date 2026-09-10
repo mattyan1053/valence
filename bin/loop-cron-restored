@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# **予定表を入れ直したことを、周回をまたいで残す** (#677)。
+#
+#   bin/loop-cron-restored <刻み>   入れ直したことを 1 行残す（例: 30m）
+#   bin/loop-cron-restored --list   残っているものを出す
+#
+#   exit 0 = 残した / 出した
+#   exit 1 = 出すものが無い（`--list` のみ）
+#   exit 2 = 判定できない（刻みの形が違う / git の外 / 書けない）
+#
+# **予定表（cron）は 7 日で切れる。** **切れたことに気づく経路は #670 / #675 が
+# 持つ**が、**切れている時間そのものは短くならない**——**周回が来たときに自分の
+# 予定表を見て、無ければ入れ直せば、窓は「次の周回まで」になる。**
+#
+# **入れ直せるのはセッション自身だけ**である（`CronList` / `CronCreate` は
+# そのセッションの中にしかない）。**このスクリプトは引くことも足すこともできない**
+# ——**残すだけ**である。**判定と入れ直しは手順書が持つ。**
+#
+# **メッセージは揮発する。** **入れ直したことが記録に無いと、次に読む人は
+# 「なぜ刻みが変わったのか」を追えない**——**予定表そのものは、引いたセッションに
+# しか見えない。**
+#
+# ## 窓を持つ既存の記録へ足さない (#537)
+#
+# **`valence-loop-starts-*` は `bin/loop-cadence` が全行を読み、行数の窓を持っている**
+# ——**別の種類の行を足すと、元からあった cron の行が押し出される**（**落ちた行は
+# 「無かったこと」になる**）。**自分の記録を持ち、窓もここで閉じる。**
+#
+# **この記録を読むのは、人とこのスクリプトだけ**である——**押し出されて困るのは
+# 古い入れ直しの行だけ**であり、**他の道具の判定は変わらない。**
+#
+# -e は使わない。理由を最後まで集めてから 1 回で報告する。
+set -uo pipefail
+
+usage() {
+  echo "使い方: bin/loop-cron-restored <刻み>   入れ直したことを残す（例: 30m）" >&2
+  echo "        bin/loop-cron-restored --list   残っているものを出す" >&2
+  echo "        exit 0 残した / 出した, exit 1 出すものが無い, exit 2 判定できない" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+
+# **残す行数の上限。** **溢れたら古い側から落とす**（上記）。
+readonly WINDOW=100
+
+if ! common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || [[ -z $common_dir ]]; then
+  echo "[FAIL] git の作業ツリーの中で実行してください" >&2
+  exit 2
+fi
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+  echo "[FAIL] git の共通ディレクトリを解決できません" >&2
+  exit 2
+}
+readonly RECORD="$common_dir/valence-loop-cron-restored"
+
+if [[ $1 == "--list" ]]; then
+  # **読めなかったものを「無い」と言わない**——**exit 1 は「空だった」ときだけ**
+  if [[ ! -e $RECORD ]]; then
+    exit 1
+  fi
+  if ! body="$(cat -- "$RECORD")"; then
+    echo "[FAIL] 記録を読めません: $RECORD" >&2
+    exit 2
+  fi
+  [[ -n $body ]] || exit 1
+  printf '%s\n' "$body"
+  exit 0
+fi
+
+# **刻みは記録の形の一部である** (#677)。**欠けた行・崩れた行を混ぜない**
+# ——**あとから読む人が、この形を頼りにする。**
+if ! [[ $1 =~ ^[1-9][0-9]*[smhd]$ ]]; then
+  echo "[FAIL] 刻みの形が違います: $1（例: 30m）" >&2
+  exit 2
+fi
+readonly EVERY="$1"
+
+# **いま。** **試験のためだけに外から渡せる**（`bin/loop-cadence` と同じ形）。
+NOW="${LOOP_CRON_RESTORED_NOW:-$(date +%s)}"
+if ! [[ $NOW =~ ^[0-9]+$ ]]; then
+  echo "[FAIL] 設定: LOOP_CRON_RESTORED_NOW は epoch 秒で指定してください" >&2
+  exit 2
+fi
+
+# **どの作業場か**を残す。**作業場ごとに刻みが違う**ので、**番号だけでは追えない。**
+if ! workspace="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z $workspace ]]; then
+  echo "[FAIL] 作業場を特定できません" >&2
+  exit 2
+fi
+
+if ! printf '%s\t%s\t%s\n' "$NOW" "$workspace" "$EVERY" >>"$RECORD"; then
+  echo "[FAIL] 記録を書けません: $RECORD" >&2
+  exit 2
+fi
+
+# **溢れたぶんを落とす。** **書いたあとに刈る**——**先に刈ると、書けなかった周回でも
+# 窓だけが動く。**
+if [[ $(grep -c '' "$RECORD") -gt $WINDOW ]]; then
+  trimmed="$(tail -n "$WINDOW" -- "$RECORD")" || {
+    echo "[FAIL] 記録を刈れません: $RECORD" >&2
+    exit 2
+  }
+  printf '%s\n' "$trimmed" >"$RECORD" || {
+    echo "[FAIL] 記録を書き直せません: $RECORD" >&2
+    exit 2
+  }
+fi
+
+echo "[OK] 予定表を入れ直したことを残しました（$EVERY）"
