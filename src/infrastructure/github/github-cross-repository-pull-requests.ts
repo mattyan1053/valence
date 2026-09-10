@@ -80,16 +80,25 @@ const headSchema = z.object({ headRefOid: z.string().min(1) });
  * （`pull-request-mapping.ts` と同じ判断。**あちらは REST の `user.type`** で、
  * **口が違うだけで規則は同じ**である）。
  *
- * **依頼のうち User でないもの**（team）**は login を持たない**ので、**数えない。**
+ * **依頼された 1 人は、User なら login、Team なら slug** である（#685 のレビュー）。
+ * **`Assignment.reviewers` は team の slug も含む**と決めてある——**User だけの
+ * fragment にすると、team だけに依頼した PR は `{}` が返って箱ごと落ち**、
+ * **「依頼あり」が「読み取り不能」になる。**
  */
+const reviewerSchema = z.union([
+  z.object({ login: z.string().min(1) }).transform((user) => user.login),
+  z.object({ slug: z.string().min(1) }).transform((team) => team.slug),
+]);
+
+/** **一覧と、その全体の件数。** **読み切れたかどうかを、ここで見る。** */
+function peopleSchema<T extends z.ZodTypeAny>(item: T) {
+  return z.object({ totalCount: z.number().int().nonnegative(), nodes: z.array(item) });
+}
+
 const assignmentSchema = z.object({
   author: z.object({ __typename: z.string(), login: z.string().min(1) }).nullable(),
-  assignees: z.object({ nodes: z.array(z.object({ login: z.string().min(1) })) }),
-  reviewRequests: z.object({
-    nodes: z.array(
-      z.object({ requestedReviewer: z.object({ login: z.string().min(1) }).nullish() }),
-    ),
-  }),
+  assignees: peopleSchema(z.object({ login: z.string().min(1) })),
+  reviewRequests: peopleSchema(z.object({ requestedReviewer: reviewerSchema.nullish() })),
 });
 
 /**
@@ -122,10 +131,24 @@ function assignmentOf(item: unknown): Assignment | undefined {
   if (!parsed.success) {
     return undefined;
   }
+  const { assignees, reviewRequests } = parsed.data;
+  // **読み切れていなければ、分からない側へ倒す**（#685 のレビュー）——**切り取った
+  // 一覧をそのまま返すと、`assignmentNote` が「これで全部」として出す。**
+  // **11 人目以降が黙って消える**のが、いちばん静かな壊れ方である。
+  // **PR の一覧では `truncated` を作ったのに、依頼の一覧では作っていなかった**
+  if (
+    assignees.totalCount > assignees.nodes.length ||
+    reviewRequests.totalCount > reviewRequests.nodes.length
+  ) {
+    return undefined;
+  }
   return {
-    assignees: parsed.data.assignees.nodes.map((assignee) => assignee.login),
-    reviewers: parsed.data.reviewRequests.nodes.flatMap((request) =>
-      request.requestedReviewer?.login === undefined ? [] : [request.requestedReviewer.login],
+    assignees: assignees.nodes.map((assignee) => assignee.login),
+    // **依頼の相手が読めない 1 件は落とす**——**`null` は「もう居ない人」である**
+    reviewers: reviewRequests.nodes.flatMap((request) =>
+      request.requestedReviewer === undefined || request.requestedReviewer === null
+        ? []
+        : [request.requestedReviewer],
     ),
     authoredByBot: parsed.data.author?.__typename === "Bot",
   };
@@ -138,8 +161,18 @@ const boxSchema = z.object({
   }),
 });
 
+/**
+ * **要求そのものが通ったか。**
+ *
+ * **`data` を必須にする**（#685 のレビュー）——**GitHub は HTTP 200 のまま
+ * `{errors:[…]}` を返すことがある**（**実測: `MAX_NODE_LIMIT_EXCEEDED` はこの形**）。
+ * **`data` を任意にすると、要求ごと落ちた応答が「全リポジトリが読めなかった」に化け**、
+ * **呼ぶ側が 2 つを区別できない。**
+ *
+ * **部分的な失敗は、別名ごとの `null`** である（**そちらは `data` の中**）。
+ */
 const responseSchema = z.object({
-  data: z.record(z.string(), z.unknown()).nullish(),
+  data: z.record(z.string(), z.unknown()),
 });
 
 /** 別名を作る。**位置から決まる**ので、応答を並びへ戻せる。 */
@@ -166,8 +199,9 @@ function queryFor(count: number): string {
       ` pullRequests(states:OPEN, first:${PAGE_SIZE}, orderBy:{field:UPDATED_AT, direction:DESC}){` +
       " totalCount nodes{ number title updatedAt headRefOid mergeable mergeStateStatus" +
       " author{ __typename login }" +
-      " assignees(first:10){ nodes{ login } }" +
-      " reviewRequests(first:10){ nodes{ requestedReviewer{ ... on User{ login } } } }" +
+      " assignees(first:10){ totalCount nodes{ login } }" +
+      " reviewRequests(first:10){ totalCount nodes{ requestedReviewer{" +
+      " ... on User{ login } ... on Team{ slug } } } }" +
       " reviews{ totalCount }" +
       ` latestOpinionatedReviews(first:${PAGE_SIZE}){ pageInfo{ hasNextPage } nodes{ state commit{ oid } } }` +
       " } } }",
@@ -219,7 +253,7 @@ export function createGitHubCrossRepositoryPullRequests({
       // **応答そのものが読めない。** **空の一覧を返すと「0 本」に化ける**
       throw new CrossRepositoryLookupFailed(response.status);
     }
-    return parsed.data.data ?? {};
+    return parsed.data.data;
   }
 
   /** 1 リポジトリぶんの箱を読む。**読めた PR と、落ちた理由を分けて返す。** */

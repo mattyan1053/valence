@@ -209,8 +209,11 @@ describe("createGitHubCrossRepositoryPullRequests", () => {
                 mergeable: "MERGEABLE",
                 mergeStateStatus: "CLEAN",
                 author: { __typename: "Bot", login: "dependabot" },
-                assignees: { nodes: [{ login: "hana" }] },
-                reviewRequests: { nodes: [{ requestedReviewer: { login: "taro" } }] },
+                assignees: { totalCount: 1, nodes: [{ login: "hana" }] },
+                reviewRequests: {
+                  totalCount: 1,
+                  nodes: [{ requestedReviewer: { __typename: "User", login: "taro" } }],
+                },
                 reviews: { totalCount: 2 },
                 latestOpinionatedReviews: {
                   pageInfo: { hasNextPage: false },
@@ -270,6 +273,103 @@ describe("createGitHubCrossRepositoryPullRequests", () => {
       "repository",
       "title",
       "updatedAt",
+    ]);
+  });
+
+  it("Team へのレビュー依頼も、依頼として残す", async () => {
+    // **User 専用の fragment だけだと、Team の依頼は `{}` で返る**（#685 のレビュー）
+    // ——**そこで箱ごと落ちると、「依頼あり」が「読み取り不能」になる。**
+    // **`Assignment.reviewers` は team の slug も含む**と決めてある
+    const { fetchImpl } = responding({
+      data: {
+        r0: {
+          pullRequests: {
+            totalCount: 1,
+            nodes: [
+              {
+                number: 1,
+                title: "図を出す",
+                updatedAt: "2026-09-11T00:00:00Z",
+                author: { __typename: "User", login: "hana" },
+                assignees: { totalCount: 0, nodes: [] },
+                reviewRequests: {
+                  totalCount: 2,
+                  nodes: [
+                    { requestedReviewer: { __typename: "User", login: "taro" } },
+                    { requestedReviewer: { __typename: "Team", slug: "reviewers" } },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const source = createGitHubCrossRepositoryPullRequests({ fetchImpl });
+
+    const [pullRequest] = (await source.list(TOKEN, [repo("web")])).pullRequests;
+
+    expect(pullRequest?.assignment?.reviewers, "team の依頼が消えている").toEqual([
+      "taro",
+      "reviewers",
+    ]);
+  });
+
+  it("依頼が多すぎて読み切れなければ、分からない側へ倒す", async () => {
+    // **`first:10` しか取っていない**（#685 のレビュー）——**そのまま返すと、
+    // 11 人目以降が黙って消える。** **`assignmentNote` はこの配列をそのまま出す**
+    const { fetchImpl } = responding({
+      data: {
+        r0: {
+          pullRequests: {
+            totalCount: 1,
+            nodes: [
+              {
+                number: 1,
+                title: "図を出す",
+                updatedAt: "2026-09-11T00:00:00Z",
+                author: { __typename: "User", login: "hana" },
+                assignees: { totalCount: 0, nodes: [] },
+                reviewRequests: {
+                  totalCount: 11,
+                  nodes: Array.from({ length: 10 }, (_, index) => ({
+                    requestedReviewer: { __typename: "User", login: `reviewer-${index}` },
+                  })),
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const source = createGitHubCrossRepositoryPullRequests({ fetchImpl });
+
+    const [pullRequest] = (await source.list(TOKEN, [repo("web")])).pullRequests;
+
+    expect(pullRequest?.assignment, "切り取った一覧を、全部だと見せている").toBeUndefined();
+  });
+
+  it("要求そのものが落ちた応答を、リポジトリごとの「読めなかった」にしない", async () => {
+    // **HTTP 200 のまま `{errors:[…]}` で返ることがある**（#685 のレビュー）
+    // ——**実測: `MAX_NODE_LIMIT_EXCEEDED` はこの形**である。
+    // **呼ぶ側が「要求ごと落ちた」と「1 つだけ読めなかった」を区別できなくなる**
+    const { fetchImpl } = responding({
+      errors: [{ type: "MAX_NODE_LIMIT_EXCEEDED", message: "…exceeds the maximum limit…" }],
+    });
+    const source = createGitHubCrossRepositoryPullRequests({ fetchImpl });
+
+    await expect(source.list(TOKEN, [repo("web"), repo("api")])).rejects.toThrow();
+  });
+
+  it("`data` が空でも、応答として読めていれば返す", async () => {
+    // **上と区別する**——**`data` が在って中身が無いのは、聞かれていないだけ**である
+    const { fetchImpl } = responding({ data: {} });
+    const source = createGitHubCrossRepositoryPullRequests({ fetchImpl });
+
+    const listing = await source.list(TOKEN, [repo("web")]);
+
+    expect(listing.unavailable).toEqual([
+      { repository: { owner: "acme", name: "web" }, kind: "unreadable" },
     ]);
   });
 
