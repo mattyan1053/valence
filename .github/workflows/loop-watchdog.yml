@@ -1,0 +1,48 @@
+name: Loop watchdog
+
+# **無人運転が止まっていないかを、ループの外から見る** (#670)。
+#
+# **予定表（cron）は 7 日で切れる**が、**切れたことに気づく仕組み
+# （bin/loop-cadence）は、切れる側で走っている**——**cron が死ぬと検出器も走らない。**
+# **1 つだけ死ぬなら他の役が見つける**が、**全部が同時に死ぬと誰も走らない**
+# （**実測: 3 つの作業場が 30.6 時間そろって無音だった**）。
+#
+# **ここは GitHub の側で走る**ので、**VM もセッションも要らない。**
+on:
+  schedule:
+    # **2 時間ごと**。**:00 を避ける**——**世界中の予定が同じ瞬間に集まる**ので、
+    # **混み合う時刻ほど遅れる。**
+    - cron: "17 */2 * * *"
+  # **人が確かめられるようにする**——**鳴らないことを確かめる手が要る。**
+  workflow_dispatch:
+
+# **確認と起票を、同時に走らせない** (#675 のレビュー 2 周目)。**定期実行と
+# `workflow_dispatch` が重なると、どちらも「未起票」と読んで同じ題を 2 つ立てる**
+# ——**確認と起票の間に錠が無い**（**入口 1.0 の lease と同じ形**）。
+#
+# **重なったほうは捨てない**——**捨てると、手で回した確認が、定期実行に食われて
+# 何も見ないまま終わる。**
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# public リポジトリなので既定を最小権限にする。Issue を立てるぶんだけ足す。
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    name: unattended loop is moving
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # **判定は bin/loop-watchdog が持つ** (#670)——**ここに閾値や、外すラベルを
+      # 書き写さない**（`AGENTS.md` §5）。**止まっていれば、この step が赤くなる**
+      # ——**Issue と合わせて、2 つの経路で人へ届く。**
+      - name: Watch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bin/loop-watchdog --report
