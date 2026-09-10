@@ -1058,7 +1058,31 @@ describe("流したプランの結果（#661）", () => {
  * **知らない値は「絞らない」へ落ちる**ので、**絞る口が入る前でも壊れない。**
  */
 describe("絞りを、押したあとへ持ち越す", () => {
-  async function markup(query: Record<string, string | string[] | undefined>): Promise<string> {
+  /**
+   * **絞りに当たる行を置く**（#663 との噛み合わせ）。
+   *
+   * **一覧は絞られる**ので、**当たらない行は行ごと消える**——**フォームも一緒に
+   * 消えるため、「運べているか」を見る前に見るものが無くなる**（**当たらない行で
+   * 数えると `0 件` になり、運ぶ側を消しても同じ 0 件**である）。
+   *
+   * **#667 と #663 は別の周回で入った**ので、**この噛み合わせは取り込み直しで
+   * 初めて同じ画面に並んだ**（`AGENTS.md` §5。**`plan` / `plan-at` と同じ形**）。
+   */
+  const ROW = {
+    author: {
+      opinion: { approvesHead: false, changesRequestedOnHead: true, reviewed: true },
+      assignment: { assignees: [], reviewers: [], authoredByBot: false },
+    },
+    reviewer: {
+      opinion: { approvesHead: false, changesRequestedOnHead: false, reviewed: true },
+      assignment: { assignees: [], reviewers: ["r"], authoredByBot: false },
+    },
+  } as const;
+
+  async function markup(
+    query: Record<string, string | string[] | undefined>,
+    ball: keyof typeof ROW = "reviewer",
+  ): Promise<string> {
     return renderToStaticMarkup(
       await renderRepositoryBoard({ owner: "acme", name: "web" }, query, {
         board: async () => ({
@@ -1079,8 +1103,8 @@ describe("絞りを、押したあとへ持ち越す", () => {
             heads: new Map([[1, "abc1234"]]),
             titles: new Map(),
             mergeStatuses: new Map(),
-            assignments: new Map(),
-            opinions: new Map(),
+            assignments: new Map([[1, ROW[ball].assignment]]),
+            opinions: new Map([[1, ROW[ball].opinion]]),
           },
           approvals: { approved: new Set<number>(), unavailable: [] },
           issues: { issues: [], invalid: [], assignments: new Map() },
@@ -1110,23 +1134,23 @@ describe("絞りを、押したあとへ持ち越す", () => {
   }
 
   it("Approve のフォームが、いま選んでいる絞りを運ぶ", async () => {
-    const html = await markup({ ball: "merger" });
+    const html = await markup({ ball: "reviewer" }, "reviewer");
 
     const forms = formsOf(html, "/repos/acme/web/approve");
     expect(forms.length, "Approve のフォームが見つからない").toBe(1);
-    expect(carriesBall(forms[0] ?? "", "merger"), "絞りが運ばれていない").toBe(true);
+    expect(carriesBall(forms[0] ?? "", "reviewer"), "絞りが運ばれていない").toBe(true);
   });
 
   it("Merge のフォームでも、同じ絞りを運ぶ", async () => {
-    const html = await markup({ ball: "author" });
+    const html = await markup({ ball: "author" }, "author");
 
     const forms = formsOf(html, "/repos/acme/web/merge");
-    expect(forms.length).toBe(1);
+    expect(forms.length, "Merge のフォームが見つからない").toBe(1);
     expect(carriesBall(forms[0] ?? "", "author")).toBe(true);
   });
 
   it("マージ順に流すボタンでも、同じ絞りを運ぶ", async () => {
-    const html = await markup({ ball: "reviewer" });
+    const html = await markup({ ball: "reviewer" }, "reviewer");
 
     const forms = formsOf(html, "/repos/acme/web/merge-plan");
     expect(forms.length).toBe(1);
@@ -1224,7 +1248,6 @@ describe("いつ取ったものかを出す（#664）", () => {
     expect(markup, "断りの鍵が引き直す先に残っている").not.toContain("plan-at");
   });
 });
-
 
 /**
  * **URL から絞り込みを受ける**（#663）。
