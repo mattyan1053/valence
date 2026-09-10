@@ -68,7 +68,12 @@ export type MergePlanResult =
   | {
       readonly kind: "ran";
       readonly merged: readonly number[];
-      readonly stoppedAt?: { readonly number: number; readonly reason: MergePlanStopReason };
+      readonly stoppedAt?: {
+        readonly number: number;
+        readonly reason: MergePlanStopReason;
+        /** **落ちどころ**（#506 の 2-b）。**画面には出さない**（§6）。 */
+        readonly detail?: string;
+      };
       readonly remaining: readonly number[];
     };
 
@@ -88,6 +93,10 @@ export type MergePlanInput = {
    *
    * **見せた commit で問い合わせる**——**番号だけで聞くと、口は「どの差分の話か」を
    * 知らないまま答える。**
+   *
+   * **入れる直前に、その 1 本だけ聞く**（#665 のレビュー）——**まとめて先に聞くと、
+   * 流している間に外れた承認を見逃す**（**先の本が入るまでには時間がある**）。
+   * **`mergePullRequest` は承認を見ない**ので、**ここで見なければ誰も見ていない。**
    */
   readonly approvals: PullRequestApprovals;
   /**
@@ -126,29 +135,34 @@ export async function mergePlan({
     return { kind: "nothing-to-run" };
   }
 
-  let approved: ReadonlySet<number>;
-  try {
-    // **見せた commit で聞く**（#635）——**番号だけでは「どの差分の話か」が伝わらない**
-    const listing = await approvals.listApprovals(
-      authorization.userAccessToken,
-      repository,
-      new Map(steps.map((step) => [step.number, step.headSha])),
-    );
-    approved = listing.approved;
-  } catch (error) {
-    // **読めなかったものを「承認済み」へ倒さない**——**1 本も押さない**
-    return { kind: "unavailable", reason: `approvals/${errorKind(error)}` };
-  }
-
   const merged: number[] = [];
   for (const [index, step] of steps.entries()) {
-    const stop = (reason: MergePlanStopReason): MergePlanResult => ({
+    const stop = (reason: MergePlanStopReason, detail?: string): MergePlanResult => ({
       kind: "ran",
       merged,
-      stoppedAt: { number: step.number, reason },
+      stoppedAt:
+        detail === undefined
+          ? { number: step.number, reason }
+          : { number: step.number, reason, detail },
       // **止まった本人も残りに入れる**——**入っていないため**
       remaining: steps.slice(index).map((rest) => rest.number),
     });
+
+    let approved: ReadonlySet<number>;
+    try {
+      // **入れる直前に、この 1 本の commit で聞く**（#635 / #665 のレビュー）
+      // ——**先の本が入るまでの間に、承認は外れうる**
+      const listing = await approvals.listApprovals(
+        authorization.userAccessToken,
+        repository,
+        new Map([[step.number, step.headSha]]),
+      );
+      approved = listing.approved;
+    } catch (error) {
+      // **読めなかったものを「承認済み」へ倒さない**——**そこで止める。**
+      // **`unavailable` を返さない**——**ここまでに入ったぶんが消える**（#191 のレビュー）
+      return stop("unavailable", `approvals/${errorKind(error)}`);
+    }
     if (!approved.has(step.number)) {
       return stop("not-approved");
     }

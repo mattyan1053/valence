@@ -74,6 +74,17 @@ describe("planStepsFrom", () => {
     // **止める側へ倒す**——**進むほうが取り返しがつかない**
     expect(planStepsFrom([`1:${SHA_A}`, "2:abc"])).toBeUndefined();
   });
+
+  it("同じ PR を 2 度含む並びは、1 本も流さない", () => {
+    // **番号が重なると、どの commit の話かが並びの中で 2 通りになる**（#665 のレビュー）
+    // ——**片方が承認済みなら、もう片方も承認済みとして扱われうる**
+    expect(planStepsFrom([`7:${SHA_A}`, `7:${SHA_B}`])).toBeUndefined();
+  });
+
+  it("同じ commit でも、番号が重なれば捨てる", () => {
+    // **重なり自体を断つ**——**「同じだから害が無い」を数えに行かない**
+    expect(planStepsFrom([`7:${SHA_A}`, `7:${SHA_A}`])).toBeUndefined();
+  });
 });
 
 describe("planOutcomeParam", () => {
@@ -188,6 +199,15 @@ describe("respondToMergePlan", () => {
 
     expect(runner.reported).toEqual(["unavailable/approvals/network"]);
   });
+
+  it("重なった並びは、流しに行かない", async () => {
+    const { runner } = await locationOf(form(`7:${SHA_A}`, `7:${SHA_B}`), {
+      kind: "nothing-to-run",
+    });
+
+    expect(runner.ran, "重なった並びで流している").toEqual([]);
+    expect(runner.reported).toEqual(["unreadable-request"]);
+  });
 });
 
 describe("planUnavailableReason", () => {
@@ -200,6 +220,18 @@ describe("planUnavailableReason", () => {
         remaining: [1],
       }),
     ).toBe("stopped/needs-login");
+  });
+
+  it("落ちどころも一緒に残す", () => {
+    // **握り潰した例外の落ちどころを添える**（#506 の 2-b）
+    expect(
+      planUnavailableReason({
+        kind: "ran",
+        merged: [1],
+        stoppedAt: { number: 2, reason: "unavailable", detail: "approvals/network" },
+        remaining: [2],
+      }),
+    ).toBe("stopped/unavailable/approvals/network");
   });
 
   it("届いている理由は残さない", () => {

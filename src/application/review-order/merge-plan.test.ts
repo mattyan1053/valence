@@ -30,6 +30,21 @@ function approvals(approved: readonly number[]): PullRequestApprovals & { seen: 
   };
 }
 
+/** 呼ばれるたびに答えが変わる口。**流している最中に承認が外れる**形を作る。 */
+function approvalsChanging(
+  answers: readonly (readonly number[])[],
+): PullRequestApprovals & { asked: [number, string][][] } {
+  const asked: [number, string][][] = [];
+  return {
+    asked,
+    async listApprovals(_token, _repository, heads): Promise<PullRequestApprovalListing> {
+      const answer = answers[asked.length] ?? [];
+      asked.push([...heads]);
+      return { approved: new Set(answer), unavailable: [] };
+    },
+  };
+}
+
 const STEPS: readonly MergePlanStep[] = [
   { number: 1, headSha: "a".repeat(40) },
   { number: 2, headSha: "b".repeat(40) },
@@ -113,19 +128,56 @@ describe("mergePlan", () => {
     });
   });
 
-  it("承認を、見せた commit で問い合わせる", async () => {
-    // **番号だけで聞くと、口は「どの差分の話か」を知らないまま答える**（#635）
-    const asked: [number, string][][] = [];
-    const reader: PullRequestApprovals = {
-      async listApprovals(_token, _repository, heads) {
-        asked.push([...heads]);
-        return { approved: new Set([1, 2, 3]), unavailable: [] };
-      },
-    };
+  it("承認を、入れる直前に、その 1 本の commit で問い合わせる", async () => {
+    // **番号だけで聞くと、口は「どの差分の話か」を知らないまま答える**（#635）。
+    // **1 本ずつ聞く**——**まとめて先に聞くと、流している間に外れた承認を見逃す**
+    const reader = approvalsChanging([[1], [2], [3]]);
 
     await mergePlan(input({ approvals: reader }));
 
-    expect(asked).toEqual([STEPS.map((step) => [step.number, step.headSha])]);
+    expect(reader.asked).toEqual(STEPS.map((step) => [[step.number, step.headSha]]));
+  });
+
+  it("流している間に承認が外れたら、そこで止まる", async () => {
+    // **マージは取り消せない**——**古い答えを信じて進まない**（#665 のレビュー）
+    const runner = merges();
+    // **1 本目は承認済み。2 本目を聞くときには外れている**
+    const reader = approvalsChanging([[1, 2, 3], []]);
+
+    const result = await mergePlan(input({ approvals: reader, merge: runner.merge }));
+
+    expect(runner.pressed).toEqual([1]);
+    expect(result).toEqual({
+      kind: "ran",
+      merged: [1],
+      stoppedAt: { number: 2, reason: "not-approved" },
+      remaining: [2, 3],
+    });
+  });
+
+  it("途中で承認を読めなくなっても、どこまで進んだかを言う", async () => {
+    // **「1 本も入っていない」と「2 本目で止まった」は別の状態**（#191 のレビュー）
+    const runner = merges();
+    let asked = 0;
+    const flaky: PullRequestApprovals = {
+      async listApprovals() {
+        asked += 1;
+        if (asked > 1) {
+          throw new Error("承認の状態を取得できませんでした (HTTP 502)");
+        }
+        return { approved: new Set([1]), unavailable: [] };
+      },
+    };
+
+    const result = await mergePlan(input({ approvals: flaky, merge: runner.merge }));
+
+    expect(runner.pressed).toEqual([1]);
+    expect(result.kind === "ran" && result.merged).toEqual([1]);
+    expect(result.kind === "ran" && result.stoppedAt?.number).toBe(2);
+    expect(result.kind === "ran" && result.stoppedAt?.reason).toBe("unavailable");
+    expect(result.kind === "ran" && result.stoppedAt?.detail, "落ちどころが消えている").toMatch(
+      /approvals\//,
+    );
   });
 
   it("承認を読めなければ、1 本も押さない", async () => {
@@ -141,7 +193,8 @@ describe("mergePlan", () => {
     const result = await mergePlan(input({ approvals: down, merge: runner.merge }));
 
     expect(runner.pressed).toEqual([]);
-    expect(result.kind).toBe("unavailable");
+    expect(result.kind === "ran" && result.merged).toEqual([]);
+    expect(result.kind === "ran" && result.stoppedAt?.reason).toBe("unavailable");
   });
 
   it("押してよいと分かるまで、承認もマージも呼ばない", async () => {

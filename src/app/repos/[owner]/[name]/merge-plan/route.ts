@@ -50,7 +50,14 @@ const stepSchema = z
  * ——**読めたぶんだけ流すと、見せていない並びで押すことになる。**
  */
 export function planStepsFrom(values: readonly unknown[]): readonly MergePlanStep[] | undefined {
-  const parsed = z.array(stepSchema).min(1).safeParse(values);
+  const parsed = z
+    .array(stepSchema)
+    .min(1)
+    // **同じ番号を 2 度含む並びは、1 本も流さない**（#665 のレビュー）
+    // ——**番号が重なると、どの commit の話かが並びの中で 2 通りになる**。
+    // **重なり自体を断つ**（**害が出るかどうかを数えに行かない**）
+    .refine((steps) => new Set(steps.map((step) => step.number)).size === steps.length)
+    .safeParse(values);
   return parsed.success ? parsed.data : undefined;
 }
 
@@ -107,7 +114,10 @@ export function planUnavailableReason(result: MergePlanResult): string | undefin
     return undefined;
   }
   if (result.kind === "ran") {
-    return `stopped/${result.stoppedAt?.reason ?? "unknown"}`;
+    const stopped = result.stoppedAt;
+    // **落ちどころも添える**（#506 の 2-b）
+    const detail = stopped?.detail === undefined ? "" : `/${stopped.detail}`;
+    return `stopped/${stopped?.reason ?? "unknown"}${detail}`;
   }
   return result.kind === "unavailable" && result.reason !== undefined
     ? `${result.kind}/${result.reason}`
