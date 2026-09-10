@@ -430,6 +430,9 @@ describe("GitHub から承認の状態を読む", () => {
     // **`hasNextPage: true` なのに `endCursor` が無い**——**辿れないだけ**であって、
     // **「意見はここで終わり」ではない**（#346 のレビュー 2 周目）。
     // **黙って止まると、次のページの承認が未承認として出る。**
+    //
+    // **応答は番号で引く形で書く**（#668 のレビュー）——**古い形のまま書くと、
+    // `askedSchema` が先に弾いて `rejects` が通り**、**カーソルの検査を消しても緑**になる
     const approvals = createGitHubPullRequestApprovals({
       fetchImpl: fetcher([
         {
@@ -437,46 +440,23 @@ describe("GitHub から承認の状態を読む", () => {
           body: {
             data: {
               repository: {
-                pullRequests: {
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                  nodes: [
-                    {
-                      number: 7,
-                      latestOpinionatedReviews: {
-                        // **続きがあると言いながら、行き先が無い**
-                        pageInfo: { hasNextPage: true, endCursor: null },
-                        nodes: [{ state: "CHANGES_REQUESTED", commit: { oid: HEAD } }],
-                      },
-                    },
-                  ],
+                p7: {
+                  number: 7,
+                  state: "OPEN",
+                  latestOpinionatedReviews: {
+                    // **続きがあると言いながら、行き先が無い**
+                    pageInfo: { hasNextPage: true, endCursor: null },
+                    nodes: [{ state: "CHANGES_REQUESTED", commit: { oid: HEAD } }],
+                  },
                 },
               },
             },
           },
         },
-      ]),
-    });
-
-    await expect(approvals.listApprovals(USER_TOKEN, REPOSITORY, heads(7))).rejects.toThrow();
-  });
-
-  it("PR の一覧も、続きを辿れないなら投げる", async () => {
-    // **外側でも同じ**——**打ち切ると、読めていない PR が「一覧に無い」へ落ちる**
-    const approvals = createGitHubPullRequestApprovals({
-      fetchImpl: fetcher([
-        {
-          status: 200,
-          body: {
-            data: {
-              repository: {
-                pullRequests: {
-                  pageInfo: { hasNextPage: true, endCursor: null },
-                  nodes: [],
-                },
-              },
-            },
-          },
-        },
+        // **辿れたら返るはずのものを置く**（#668 のレビューのあと、変異で確かめた）
+        // ——**置かないと、続きの要求が別の形で落ちて、同じ `rejects` が通る。**
+        // **カーソルの検査を消しても緑**になり、**守れていない**
+        { status: 200, body: reviewPage(["APPROVED"]) },
       ]),
     });
 
