@@ -20,7 +20,7 @@ import {
   reportBoardActionUnavailable,
 } from "../../../../../composition/auth";
 import type { MergePlanNoticeKind } from "../../../../../ui/merge/merge-plan-button";
-import { boardRedirect } from "../board-redirect";
+import { boardRedirect, submittedBallFilter } from "../board-redirect";
 
 /**
  * 送られてきた 1 本（`<番号>:<commit>`）。**境界なので Zod で検証する**（§3）。
@@ -140,11 +140,13 @@ export async function respondToMergePlan(
 ): Promise<Response> {
   const form = await request.formData().catch(() => undefined);
   const steps = planStepsFrom(form?.getAll("step") ?? []);
+  // **絞ったまま流せるようにする**（#667）——**盤面の 3 つ目のフォーム**である
+  const ball = submittedBallFilter(form);
 
   if (steps === undefined) {
     // **読めない要求で GitHub を叩かない**——**1 本も流さない**
     deps.report("merge-plan", "unreadable-request");
-    return boardRedirect(request, repository, { param: "plan", value: "unavailable" });
+    return boardRedirect(request, repository, { param: "plan", value: "unavailable" }, ball);
   }
 
   const result = await deps.run(repository, steps);
@@ -157,6 +159,7 @@ export async function respondToMergePlan(
     request,
     repository,
     outcome === undefined ? undefined : { param: "plan", ...outcome },
+    ball,
   );
 }
 

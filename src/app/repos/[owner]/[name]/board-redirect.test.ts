@@ -11,7 +11,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { boardRedirect } from "./board-redirect";
+import { boardRedirect, submittedBallFilter } from "./board-redirect";
 
 const SUPPLIED = "AUTH_ALLOWED_ORIGINS";
 const before = process.env[SUPPLIED];
@@ -66,5 +66,75 @@ describe("盤面へ戻す先を、開いたオリジンから組む", () => {
     expect(() =>
       boardRedirect(pressedFrom("127.0.0.1:3940"), { owner: "acme", name: "web" }, undefined),
     ).toThrow(/読めません/);
+  });
+});
+
+describe("絞ったまま、操作を続けられるようにする（#667）", () => {
+  const pressed = pressedFrom("localhost:3000");
+
+  it("いま選んでいる絞りを、戻り先へ持ち越す", () => {
+    // **絞りが 1 回の操作ごとに解けると、同じ区分を続けて処理できない**
+    process.env[SUPPLIED] = "http://localhost:3000";
+
+    const response = boardRedirect(pressed, { owner: "acme", name: "web" }, undefined, "merger");
+
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/repos/acme/web?ball=merger",
+    );
+  });
+
+  it("押せなかった理由と、一緒に持ち越す", () => {
+    process.env[SUPPLIED] = "http://localhost:3000";
+
+    const response = boardRedirect(
+      pressed,
+      { owner: "acme", name: "web" },
+      { param: "approve", value: "forbidden" },
+      "author",
+    );
+
+    const location = response.headers.get("location") ?? "";
+    expect(location).toContain("approve=forbidden");
+    expect(location).toContain("ball=author");
+  });
+
+  it("絞っていなければ、空の鍵を付けて回らない", () => {
+    process.env[SUPPLIED] = "http://localhost:3000";
+
+    const response = boardRedirect(pressed, { owner: "acme", name: "web" }, undefined, undefined);
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/repos/acme/web");
+  });
+});
+
+describe("送られてきた絞りを読む（#667）", () => {
+  function submitted(values: readonly string[]): FormData {
+    const form = new FormData();
+    for (const value of values) {
+      form.append("ball", value);
+    }
+    return form;
+  }
+
+  it("画面が出している絞りだけを通す", () => {
+    expect(submittedBallFilter(submitted(["merger"]))).toBe("merger");
+  });
+
+  it("画面に無い絞りは、URL 経由でも通さない", () => {
+    // **`ball` はフォームから来る**——**利用者が任意に作れる**
+    for (const value of ["unknown", "everyone", "", "MERGER"]) {
+      expect(submittedBallFilter(submitted([value])), value).toBeUndefined();
+    }
+  });
+
+  it("同じ鍵が 2 つ載っていたら、絞らない", () => {
+    // **片方を選ぶと、URL と画面が食い違う**
+    expect(submittedBallFilter(submitted(["merger", "author"]))).toBeUndefined();
+    expect(submittedBallFilter(submitted(["merger", "merger"]))).toBeUndefined();
+  });
+
+  it("本文そのものが読めなくても、落ちない", () => {
+    expect(submittedBallFilter(undefined)).toBeUndefined();
+    expect(submittedBallFilter(submitted([]))).toBeUndefined();
   });
 });

@@ -191,6 +191,61 @@ describe("押した要求そのものが、記録の口を呼ぶ（#510 のレ�
     expect(recorded).toEqual(["approve=unavailable/approve/TypeError"]);
   });
 
+  it("絞ったまま押しても、戻り先で同じ絞りが効いている", async () => {
+    // **絞りが 1 回の操作ごとに解けると、同じ区分を続けて処理できない**（#667）
+    const { report } = recorder();
+
+    const response = await respondToApprove(
+      pressed({ number: "42", ball: "merger" }),
+      { owner: "acme", name: "web" },
+      { approve: async () => ({ kind: "approved" }), report },
+    );
+
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/repos/acme/web?ball=merger",
+    );
+  });
+
+  it("押せなかったときも、絞りは残る", async () => {
+    const { report } = recorder();
+
+    const response = await respondToApprove(
+      pressed({ number: "42", ball: "author" }),
+      { owner: "acme", name: "web" },
+      { approve: async () => ({ kind: "self-approval" }), report },
+    );
+
+    const location = response.headers.get("location") ?? "";
+    expect(location).toContain("approve=self-approval");
+    expect(location).toContain("ball=author");
+  });
+
+  it("画面に無い絞りを、戻り先へ載せない", async () => {
+    // **フォームから来る値は、利用者が任意に作れる**——**壊れた値なら「すべて」へ戻す**
+    const { report } = recorder();
+
+    const response = await respondToApprove(
+      pressed({ number: "42", ball: "everyone" }),
+      { owner: "acme", name: "web" },
+      { approve: async () => ({ kind: "approved" }), report },
+    );
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/repos/acme/web");
+  });
+
+  it("読めない要求でも、絞りは残る", async () => {
+    // **押した人は、絞った一覧に居る**——**理由を出す先も、そこである**
+    const { report } = recorder();
+
+    const response = await respondToApprove(
+      pressed({ number: "abc", ball: "merger" }),
+      { owner: "acme", name: "web" },
+      { approve: async () => ({ kind: "approved" }), report },
+    );
+
+    expect(response.headers.get("location") ?? "").toContain("ball=merger");
+  });
+
   it("押せたときは、何も残さない", async () => {
     const { recorded, report } = recorder();
 

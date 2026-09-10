@@ -245,3 +245,53 @@ describe("planUnavailableReason", () => {
     ).toBeUndefined();
   });
 });
+
+describe("絞ったまま、プランを流す（#667）", () => {
+  function withBall(ball: string, ...steps: string[]): URLSearchParams {
+    const body = form(...steps);
+    body.append("ball", ball);
+    return body;
+  }
+
+  it("いま選んでいる絞りを、戻り先へ持ち越す", async () => {
+    const { location } = await locationOf(withBall("merger", `1:${SHA_A}`), {
+      kind: "ran",
+      merged: [1],
+      remaining: [],
+    });
+
+    expect(location.searchParams.get("ball")).toBe("merger");
+  });
+
+  it("止まった理由と、一緒に持ち越す", async () => {
+    const { location } = await locationOf(withBall("author", `1:${SHA_A}`), {
+      kind: "ran",
+      merged: [],
+      stoppedAt: { number: 1, reason: "not-approved" },
+      remaining: [1],
+    });
+
+    expect(location.searchParams.get("plan")).toBe("not-approved");
+    expect(location.searchParams.get("ball")).toBe("author");
+  });
+
+  it("画面に無い絞りは、載せない", async () => {
+    const { location } = await locationOf(withBall("everyone", `1:${SHA_A}`), {
+      kind: "ran",
+      merged: [1],
+      remaining: [],
+    });
+
+    expect(location.searchParams.get("ball")).toBeNull();
+  });
+
+  it("読めない要求でも、絞りは残る", async () => {
+    const { location } = await locationOf(withBall("merger", "1"), {
+      kind: "ran",
+      merged: [],
+      remaining: [],
+    });
+
+    expect(location.searchParams.get("ball")).toBe("merger");
+  });
+});

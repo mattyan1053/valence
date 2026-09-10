@@ -159,6 +159,59 @@ describe("押した要求そのものが、記録の口を呼ぶ（#510 のレ�
     expect(recorded).toEqual(["merge=unavailable/merge/Error"]);
   });
 
+  it("絞ったまま押しても、戻り先で同じ絞りが効いている", async () => {
+    // **絞りが 1 回の操作ごとに解けると、同じ区分を続けて処理できない**（#667）
+    const { report } = recorder();
+
+    const response = await respondToMerge(
+      pressed({ number: "42", sha: SHA, ball: "merger" }),
+      { owner: "acme", name: "web" },
+      { merge: async () => ({ kind: "merged" }), report },
+    );
+
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/repos/acme/web?ball=merger",
+    );
+  });
+
+  it("押せなかったときも、絞りは残る", async () => {
+    const { report } = recorder();
+
+    const response = await respondToMerge(
+      pressed({ number: "42", sha: SHA, ball: "merger" }),
+      { owner: "acme", name: "web" },
+      { merge: async () => ({ kind: "not-mergeable" }), report },
+    );
+
+    const location = response.headers.get("location") ?? "";
+    expect(location).toContain("merge=not-mergeable");
+    expect(location).toContain("ball=merger");
+  });
+
+  it("画面に無い絞りを、戻り先へ載せない", async () => {
+    const { report } = recorder();
+
+    const response = await respondToMerge(
+      pressed({ number: "42", sha: SHA, ball: "unknown" }),
+      { owner: "acme", name: "web" },
+      { merge: async () => ({ kind: "merged" }), report },
+    );
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/repos/acme/web");
+  });
+
+  it("commit が無い要求でも、絞りは残る", async () => {
+    const { report } = recorder();
+
+    const response = await respondToMerge(
+      pressed({ number: "42", ball: "author" }),
+      { owner: "acme", name: "web" },
+      { merge: async () => ({ kind: "merged" }), report },
+    );
+
+    expect(response.headers.get("location") ?? "").toContain("ball=author");
+  });
+
   it("マージできたときは、何も残さない", async () => {
     const { recorded, report } = recorder();
 

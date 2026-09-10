@@ -8,6 +8,8 @@
  */
 
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
+import type { BallFilter } from "../ball/ball-filter";
+import { BallFilterField } from "../ball/ball-filter-field";
 
 /**
  * 流す 1 本。**commit まで持つ**（#331）——**押した対象を、盤面が見せた対象に固定する。**
@@ -99,9 +101,15 @@ export type MergePlanButtonProps = {
   readonly action: string;
   /** 流す並び。**空なら押させない**——**流すものが無い。** */
   readonly steps: readonly MergePlanStepView[];
+  /**
+   * **いま絞っているもの**（#667）。**流したあとも同じ絞りへ戻すために運ぶ。**
+   *
+   * **並びは絞りに関係なく作る**——**絞りは見せ方**であって、**依存の順ではない。**
+   */
+  readonly ball?: BallFilter;
 };
 
-export function MergePlanButton({ action, steps }: MergePlanButtonProps) {
+export function MergePlanButton({ action, steps, ball }: MergePlanButtonProps) {
   return (
     <form action={action} method="post">
       {/* **見せた並びと commit を、そのまま送る**（#331）——**口の側でも
@@ -114,6 +122,8 @@ export function MergePlanButton({ action, steps }: MergePlanButtonProps) {
           value={`${step.number}:${step.headSha}`}
         />
       ))}
+      {/* **いま絞っているものも持つ**（#667）——**流すたびに「すべて」へ戻さない** */}
+      <BallFilterField ball={ball} />
       <button className="underline" disabled={steps.length === 0} type="submit">
         マージ順に流す（{steps.length} 本）
       </button>

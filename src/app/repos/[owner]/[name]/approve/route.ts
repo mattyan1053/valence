@@ -18,7 +18,7 @@ import {
   reportBoardActionUnavailable,
 } from "../../../../../composition/auth";
 import type { ApproveNoticeKind } from "../../../../../ui/approve/approve-button";
-import { boardRedirect } from "../board-redirect";
+import { boardRedirect, submittedBallFilter } from "../board-redirect";
 
 /**
  * 送られてきた PR 番号。**境界なので Zod で検証する**（`AGENTS.md` §3。#342 のレビュー）。
@@ -124,11 +124,14 @@ export async function respondToApprove(
 ): Promise<Response> {
   const form = await request.formData().catch(() => undefined);
   const number = pullRequestNumberFrom(form?.get("number"));
+  // **絞ったまま押せるようにする**（#667）——**押した人は絞った一覧に居る**ので、
+  // **理由を出す先も、次に押す先も、そこである**
+  const ball = submittedBallFilter(form);
 
   if (number === undefined) {
     // **読めない要求で GitHub を叩かない**
     deps.report("approve", "unreadable-request");
-    return boardRedirect(request, repository, { param: "approve", value: "unavailable" });
+    return boardRedirect(request, repository, { param: "approve", value: "unavailable" }, ball);
   }
 
   const result = await deps.approve(repository, number);
@@ -143,6 +146,7 @@ export async function respondToApprove(
     request,
     repository,
     outcome === undefined ? undefined : { param: "approve", value: outcome },
+    ball,
   );
 }
 

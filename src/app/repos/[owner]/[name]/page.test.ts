@@ -1048,3 +1048,100 @@ describe("流したプランの結果（#661）", () => {
     expect(boardNotices({})).toEqual([]);
   });
 });
+
+/**
+ * **絞ったまま、Approve / Merge を続けられるようにする**（#667）。
+ *
+ * **絞りが 1 回の操作ごとに解けると、件数を減らした意味が押した瞬間に消える。**
+ *
+ * **ここで見るのは運ぶ側**である——**絞ること自体は #663 が持つ。**
+ * **知らない値は「絞らない」へ落ちる**ので、**絞る口が入る前でも壊れない。**
+ */
+describe("絞りを、押したあとへ持ち越す", () => {
+  async function markup(query: Record<string, string | string[] | undefined>): Promise<string> {
+    return renderToStaticMarkup(
+      await renderRepositoryBoard({ owner: "acme", name: "web" }, query, {
+        board: async () => ({
+          kind: "board",
+          plan: {
+            pullRequests: [
+              {
+                number: 1,
+                base: { repository: "r", branch: "main" },
+                head: { repository: "r", branch: "feat/a" },
+              },
+            ],
+            edges: [],
+            order: { ordered: [1], cyclic: [] },
+            invalid: [],
+            changes: new Map(),
+            changesUnavailable: [],
+            heads: new Map([[1, "abc1234"]]),
+            titles: new Map(),
+            mergeStatuses: new Map(),
+            assignments: new Map(),
+            opinions: new Map(),
+          },
+          approvals: { approved: new Set<number>(), unavailable: [] },
+          issues: { issues: [], invalid: [], assignments: new Map() },
+        }),
+        report: () => {},
+      }),
+    );
+  }
+
+  /** **押す先ごとのフォーム**。**`action` から数える**——**行にはボタンが 2 つある。** */
+  function formsOf(html: string, action: string): readonly string[] {
+    return [...html.matchAll(/<form[^>]*>[\s\S]*?<\/form>/g)]
+      .map(([one]) => one)
+      .filter((one) => one.includes(`action="${action}"`));
+  }
+
+  /**
+   * **同じ 1 つの `input` が、鍵と値の両方を持っているか。**
+   *
+   * **属性の並びは書いた順ではない**（`type` が先に出る）——**並びに寄りかからない。**
+   * **フォーム全体へ `toContain` しない**——**別の `input` の値に当たる。**
+   */
+  function carriesBall(form: string, ball: string): boolean {
+    return [...form.matchAll(/<input[^>]*>/g)].some(
+      ([tag]) => tag.includes('name="ball"') && tag.includes(`value="${ball}"`),
+    );
+  }
+
+  it("Approve のフォームが、いま選んでいる絞りを運ぶ", async () => {
+    const html = await markup({ ball: "merger" });
+
+    const forms = formsOf(html, "/repos/acme/web/approve");
+    expect(forms.length, "Approve のフォームが見つからない").toBe(1);
+    expect(carriesBall(forms[0] ?? "", "merger"), "絞りが運ばれていない").toBe(true);
+  });
+
+  it("Merge のフォームでも、同じ絞りを運ぶ", async () => {
+    const html = await markup({ ball: "author" });
+
+    const forms = formsOf(html, "/repos/acme/web/merge");
+    expect(forms.length).toBe(1);
+    expect(carriesBall(forms[0] ?? "", "author")).toBe(true);
+  });
+
+  it("マージ順に流すボタンでも、同じ絞りを運ぶ", async () => {
+    const html = await markup({ ball: "reviewer" });
+
+    const forms = formsOf(html, "/repos/acme/web/merge-plan");
+    expect(forms.length).toBe(1);
+    expect(carriesBall(forms[0] ?? "", "reviewer")).toBe(true);
+  });
+
+  it("絞っていなければ、何も運ばない", async () => {
+    // **空の鍵を付けて回らない**
+    expect(await markup({})).not.toContain('name="ball"');
+  });
+
+  it("画面に無い絞りは、運ばない", async () => {
+    // **`?ball=` は誰でも好きな文字列を入れられる**——**知らない値は「絞らない」へ落ちる**
+    expect(await markup({ ball: "everyone" })).not.toContain('name="ball"');
+    // **同じ鍵が 2 つ載っていたら、どちらも選ばない**
+    expect(await markup({ ball: ["merger", "author"] })).not.toContain('name="ball"');
+  });
+});

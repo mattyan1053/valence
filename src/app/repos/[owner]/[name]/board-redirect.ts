@@ -23,6 +23,8 @@
  */
 
 import { NextResponse } from "next/server";
+import type { BallFilter } from "../../../../ui/ball/ball-filter";
+import { ballFilterOf } from "../../../../ui/ball/ball-filter";
 import { openedOrigin } from "../../../auth/urls";
 
 /**
@@ -46,10 +48,34 @@ export type BoardNotice = {
   readonly at?: number;
 };
 
+/**
+ * **送られてきた絞りを読む**（#667）。**画面に無い絞りは通さない。**
+ *
+ * **フォームから来る値は、利用者が任意に作れる**——**そのまま戻り先へ載せると、
+ * 画面に出していない絞りを URL 経由で選べる**（**その逆も起きる**）。
+ * **通してよいものは `BALL_FILTERS` が並べている**——**判定を写さない。**
+ *
+ * **同じ鍵が 2 つ載っていたら絞らない**（`ballFilterOf` と同じ判断）
+ * ——**片方を選ぶと、URL と画面が食い違う。**
+ */
+export function submittedBallFilter(form: FormData | undefined): BallFilter | undefined {
+  const values = (form?.getAll("ball") ?? []).filter(
+    (value): value is string => typeof value === "string",
+  );
+  return values.length === 1 ? ballFilterOf(values[0]) : undefined;
+}
+
 export function boardRedirect(
   request: Request,
   repository: { readonly owner: string; readonly name: string },
   notice: BoardNotice | undefined,
+  /**
+   * **いま絞っているもの**（#667）。**あれば `?ball=` に載る。**
+   *
+   * **注記とは別に受ける**——**押せたときは注記が無い**ので、
+   * **注記に相乗りさせると、成功したときだけ絞りが解ける。**
+   */
+  ball?: BallFilter,
 ): NextResponse {
   const board = new URL(
     `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`,
@@ -60,6 +86,9 @@ export function boardRedirect(
     if (notice.at !== undefined) {
       board.searchParams.set(`${notice.param}-at`, String(notice.at));
     }
+  }
+  if (ball !== undefined) {
+    board.searchParams.set("ball", ball);
   }
   return NextResponse.redirect(board, { status: 303 });
 }

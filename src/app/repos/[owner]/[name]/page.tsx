@@ -29,6 +29,7 @@ import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
 import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
 import { AssignmentSummaryView } from "../../../../ui/assignment/assignment-summary-view";
 import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button";
+import { ballFilterOf } from "../../../../ui/ball/ball-filter";
 import type { IssueBoardProps } from "../../../../ui/issue-board/issue-board";
 import { IssueBoard } from "../../../../ui/issue-board/issue-board";
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
@@ -293,6 +294,10 @@ export async function renderRepositoryBoard(
   deps: BoardPageDeps,
 ) {
   const notices = boardNotices(query);
+  // **絞ったまま操作を続けられるようにする**（#667）——**押す本文へ載せて運ぶ**ので、
+  // **戻り先でも同じ絞りが効く。** **知らない値は「絞らない」へ落ちる**
+  // （**絞ること自体は #663 が持つ**——**どちらが先に入っても壊れない**）
+  const ball = ballFilterOf(query.ball);
   const result = await deps.board({ owner, name });
   // **落ちどころを、サーバ側に残す** (#513 のレビュー)——**押した経路と同じ**
   const unavailable = boardUnavailableReason(result);
@@ -356,6 +361,7 @@ export async function renderRepositoryBoard(
            **commit が分からない PR は並びに入らない**（#331） */}
           <MergePlanButton
             action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/merge-plan`}
+            ball={ball}
             steps={mergePlanSteps(result.plan.order, (number) => result.plan.heads.get(number))}
           />
           <SuggestedReviewOrder
@@ -416,10 +422,15 @@ export async function renderRepositoryBoard(
                 <ApproveButton
                   number={number}
                   action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/approve`}
+                  // **絞ったまま押せるようにする**（#667）——**押すたびに
+                  // 「すべて」へ戻ると、同じ区分を続けて処理できない**
+                  ball={ball}
                 />
                 <MergeButton
                   number={number}
                   action={`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/merge`}
+                  // **絞ったまま押せるようにする**（#667）
+                  ball={ball}
                   // **盤面が見せている commit をそのまま渡す**（#331 のレビュー）
                   // ——**押した対象を、見せた対象に固定する**
                   headSha={result.plan.heads.get(number)}
