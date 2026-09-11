@@ -29,6 +29,12 @@ function cruise(sandbox: string): { status: number; out: string } {
   return { status: run.status ?? -1, out: `${run.stdout}${run.stderr}` };
 }
 
+/**
+ * **1 件ごとに depcruise を起こす**ので、**既定の 5 秒では足りない**
+ * （**この機械で 1 回およそ 5 秒**）。**待つ長さは呼ぶ側の段取り**である。
+ */
+const TIMEOUT_MS = 60_000;
+
 describe("ルートの入口は、ほかから import できない", () => {
   let sandbox: string;
 
@@ -58,45 +64,78 @@ describe("ルートの入口は、ほかから import できない", () => {
     writeFileSync(full, body);
   }
 
-  it("ルート同士が import し合うと、規則の名前で落ちる", () => {
-    // **#690 で実際に踏んだ形**——**入口の画面が、別のルートの `page.tsx` から
-    // 判定を import していた**
-    write("src/app/repos/x/page.tsx", 'export function judge(): string {\n  return "x";\n}\n');
-    write(
-      "src/app/page.tsx",
-      'import { judge } from "./repos/x/page";\n\nexport const home = judge;\n',
-    );
+  it(
+    "ルート同士が import し合うと、規則の名前で落ちる",
+    () => {
+      // **#690 で実際に踏んだ形**——**入口の画面が、別のルートの `page.tsx` から
+      // 判定を import していた**
+      write("src/app/repos/x/page.tsx", 'export function judge(): string {\n  return "x";\n}\n');
+      write(
+        "src/app/page.tsx",
+        'import { judge } from "./repos/x/page";\n\nexport const home = judge;\n',
+      );
 
-    const { status, out } = cruise(sandbox);
+      const { status, out } = cruise(sandbox);
 
-    expect(status, "違反しているのに通っている").not.toBe(0);
-    expect(out).toContain("app-routes-are-not-imported");
-  });
+      expect(status, "違反しているのに通っている").not.toBe(0);
+      expect(out).toContain("app-routes-are-not-imported");
+    },
+    TIMEOUT_MS,
+  );
 
-  it("名前が `route` で終わるだけの普通のモジュールは、落ちない", () => {
-    // **`[^?]*(page|route)` だと `candidate-route.ts` にも当たる**（#691 のレビュー）
-    // ——**規則の文言と、実際に落ちるものが食い違う**
-    write("src/app/repos/candidate-route.ts", "export const candidate = 1;\n");
-    write(
-      "src/app/page.tsx",
-      'import { candidate } from "./repos/candidate-route";\n\nexport const home = candidate;\n',
-    );
+  it(
+    "ルート直下の入口を import しても、規則の名前で落ちる",
+    () => {
+      // **規則は枝が 2 本ある**（#691 のレビュー 2 周目）——**入れ子の下（`.../page.tsx`）と、
+      // ルート直下（`src/app/page.tsx`）。** **前者だけを踏むと、後者の枝を消しても緑**で、
+      // **別のモジュールが入口の画面を import する形**（**#690 で踏んだ向きそのもの**）
+      // **が、また落ちなくなる**
+      write("src/app/page.tsx", 'export function home(): string {\n  return "home";\n}\n');
+      write(
+        "src/app/repos/x/route.ts",
+        'import { home } from "../../page";\n\nexport const GET = home;\n',
+      );
 
-    const { status, out } = cruise(sandbox);
+      const { status, out } = cruise(sandbox);
 
-    expect(status, out).toBe(0);
-  });
+      expect(status, "違反しているのに通っている").not.toBe(0);
+      expect(out).toContain("app-routes-are-not-imported");
+    },
+    TIMEOUT_MS,
+  );
 
-  it("同じルートの中の、入口でないモジュールは、これまでどおり import できる", () => {
-    // **`approve/route.ts` が `../board-redirect` を読む形**（既にある）
-    write("src/app/repos/x/board-redirect.ts", "export const redirect = 1;\n");
-    write(
-      "src/app/repos/x/approve/route.ts",
-      'import { redirect } from "../board-redirect";\n\nexport const POST = redirect;\n',
-    );
+  it(
+    "名前が `route` で終わるだけの普通のモジュールは、落ちない",
+    () => {
+      // **`[^?]*(page|route)` だと `candidate-route.ts` にも当たる**（#691 のレビュー）
+      // ——**規則の文言と、実際に落ちるものが食い違う**
+      write("src/app/repos/candidate-route.ts", "export const candidate = 1;\n");
+      write(
+        "src/app/page.tsx",
+        'import { candidate } from "./repos/candidate-route";\n\nexport const home = candidate;\n',
+      );
 
-    const { status, out } = cruise(sandbox);
+      const { status, out } = cruise(sandbox);
 
-    expect(status, out).toBe(0);
-  });
+      expect(status, out).toBe(0);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    "同じルートの中の、入口でないモジュールは、これまでどおり import できる",
+    () => {
+      // **`approve/route.ts` が `../board-redirect` を読む形**（既にある）
+      write("src/app/repos/x/board-redirect.ts", "export const redirect = 1;\n");
+      write(
+        "src/app/repos/x/approve/route.ts",
+        'import { redirect } from "../board-redirect";\n\nexport const POST = redirect;\n',
+      );
+
+      const { status, out } = cruise(sandbox);
+
+      expect(status, out).toBe(0);
+    },
+    TIMEOUT_MS,
+  );
 });
