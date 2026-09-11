@@ -81,6 +81,22 @@ export function selectorFor(className: string): string {
   return `.${className.replaceAll(/[^A-Za-z0-9_-]/g, (one) => `\\${one}`)}`;
 }
 
+/**
+ * **その class の規則が、本当に在るか。**
+ *
+ * **部分一致で見ない** (#688 のレビュー 3 周目)。**`.flex` は `.flex-col` にも
+ * `.flex-wrap` にも当たり**、**`.border` は `.border-t` に当たる**——**短い class の
+ * 規則が丸ごと落ちても、長いほうに当たって緑**になる。**前の周回で直した検査が、
+ * 別の形で同じ穴を残していた。**
+ *
+ * **selector の終わりまで見る**——**続く文字が名前の一部**（英数字・`-`・`_`・
+ * 逃がしの `\`）**なら、それは別の class である。**
+ */
+export function hasRule(style: string, className: string): boolean {
+  const selector = selectorFor(className).replaceAll(/[.*+?^${}()|[\]\\]/g, (one) => `\\${one}`);
+  return new RegExp(`${selector}(?![A-Za-z0-9_\\-\\\\])`).test(style);
+}
+
 async function styleFor(markup: string): Promise<string> {
   const source = await readFile(resolve(REPO_ROOT, "src/app/globals.css"), "utf8");
   const compiled = await compile(source, { base: resolve(REPO_ROOT, "src/app"), loadStylesheet });
@@ -102,6 +118,46 @@ export function outputPath(env: Record<string, string | undefined>): string | un
 }
 
 /**
+ * **本番の器を、そのまま映す** (#688 のレビュー 3 周目)。
+ *
+ * **`src/app/layout.tsx` から読む**——**書き写さない**（`AGENTS.md` §5。
+ * **写すと、向こうが変わった日にここだけ古くなり、誰も気づかない**）。
+ *
+ * **落ちていたのは `flex min-h-full flex-col` と `h-full antialiased`**
+ * ——**縦の伸び方と字の均しが本番と違っていた。**
+ */
+export async function layoutClasses(): Promise<{ readonly html: string; readonly body: string }> {
+  const source = await readFile(resolve(REPO_ROOT, "src/app/layout.tsx"), "utf8");
+  const html =
+    /<html[^>]*className=\{`\$\{geistSans\.variable\} \$\{geistMono\.variable\} ([^`]*)`\}/.exec(
+      source,
+    );
+  const body = /<body className="([^"]*)"/.exec(source);
+  if (html?.[1] === undefined || body?.[1] === undefined) {
+    throw new Error("src/app/layout.tsx から器の class を読めません（形が変わりました）");
+  }
+  return { html: html[1], body: body[1] };
+}
+
+/**
+ * **フォントの変数を埋める** (#688 のレビュー 3 周目)。
+ *
+ * **本番は `next/font` が `--font-geist-sans` / `--font-geist-mono` を配る**が、
+ * **静止した 1 枚には配る人が居ない**——**未定義のまま `font-mono` を当てると、
+ * `var()` が空になり、等幅ではない字で描かれる**（**文字幅と折り返しが変わる**）。
+ *
+ * **Geist そのものは埋め込んでいない**（**woff2 を焼き込むと、この 1 枚の目的
+ * ——開けば見られる——に対して重すぎる**）。**判定する人が見るのは、
+ * 「等幅かどうか」「どこで折り返すか」までは本番と同じ、字面は環境のもの**である。
+ */
+const FONT_FALLBACK = [
+  ":root{",
+  '--font-geist-sans:"Geist",ui-sans-serif,system-ui,sans-serif;',
+  '--font-geist-mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;',
+  "}",
+].join("");
+
+/**
  * **判定用の 1 枚。** **開けば見られる**——**サーバもログインも要らない。**
  *
  * **CSS は、組み上がった 1 枚を材料に組む** (#688 のレビュー 2 周目)。**盤面の
@@ -121,17 +177,18 @@ export async function renderBoardSample(): Promise<string> {
       },
     ),
   );
+  const layout = await layoutClasses();
   const page = (style: string) =>
     [
       "<!doctype html>",
-      '<html lang="ja">',
+      `<html lang="ja" class="${layout.html}">`,
       "<head>",
       '<meta charset="utf-8">',
       '<meta name="viewport" content="width=device-width, initial-scale=1">',
       "<title>盤面の見本（作った材料・#687）</title>",
-      `<style>${style}</style>`,
+      `<style>${FONT_FALLBACK}${style}</style>`,
       "</head>",
-      '<body class="bg-background text-foreground">',
+      `<body class="${layout.body} bg-background text-foreground">`,
       markup,
       "</body>",
       "</html>",

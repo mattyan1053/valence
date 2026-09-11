@@ -13,7 +13,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { classesIn, outputPath, renderBoardSample, selectorFor } from "./render";
+import { classesIn, hasRule, layoutClasses, outputPath, renderBoardSample } from "./render";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -40,6 +40,60 @@ beforeAll(async () => {
   }
 }, 60_000);
 
+/**
+ * **規則の突き合わせそのものを見る** (#688 のレビュー 3 周目)。
+ *
+ * **盤面越しには測れない**——**いまの見本では、どの class にも規則が在る**ので、
+ * **部分一致に戻しても緑のまま**だった（**変異を打って確かめた**）。
+ * **落ちている規則が無い状態では、広い判定と狭い判定の差が出ない。**
+ *
+ * **差が出る形をここで作る**——**短い class の規則だけを落とす。**
+ */
+describe("CSS の規則の突き合わせ", () => {
+  it("長いほうの class に当たらない", () => {
+    // **`.flex` は `.flex-col` の一部**である——**部分一致だと、`.flex` の規則が
+    // 丸ごと落ちても緑**になる
+    expect(hasRule(".flex-col{display:flex}", "flex"), "`.flex-col` を `.flex` と読んだ").toBe(
+      false,
+    );
+    expect(
+      hasRule(".border-t{border-top:1px}", "border"),
+      "`.border-t` を `.border` と読んだ",
+    ).toBe(false);
+  });
+
+  it("その class の規則は見つける", () => {
+    expect(hasRule(".flex{display:flex}", "flex")).toBe(true);
+    // **区切りは `{` だけではない**——**まとめられた selector にも当たる**
+    expect(hasRule(".flex, .grid{display:flex}", "flex")).toBe(true);
+    expect(hasRule(".flex:hover{display:flex}", "flex")).toBe(true);
+  });
+
+  it("逃がした class も見つける", () => {
+    // **`[` や `(` を含む class**（`AGENTS.md` の色は `var(--…)` で受ける）
+    expect(hasRule(".bg-\\[var\\(--node-fill\\)\\]{background:red}", "bg-[var(--node-fill)]")).toBe(
+      true,
+    );
+    expect(
+      hasRule(".bg-\\[var\\(--node-stroke\\)\\]{background:red}", "bg-[var(--node-fill)]"),
+    ).toBe(false);
+  });
+});
+
+/**
+ * **盤面の一覧の中だけ**（**先頭の `<ol>` は推奨レビュー順**。`AGENTS.md` §4）。
+ *
+ * **見出しから数える**——**先頭の `<ol>` を取ると、盤面が空でも推奨レビュー順の
+ * 行に当たる**（**実際に一度そうなった**）。
+ */
+function dependencyList(markup: string): string {
+  const heading = markup.indexOf("PR の依存");
+  expect(heading, "依存の見出しが出ていない").toBeGreaterThanOrEqual(0);
+  const from = markup.indexOf("<ol", heading);
+  expect(from, "依存の一覧が出ていない").toBeGreaterThanOrEqual(0);
+  return markup.slice(from, markup.indexOf("</ol>", from));
+}
+
 describe("判定用の盤面", () => {
   it("10 本以上が並んでいる", () => {
     // **#597 の完了条件がこれ**である。**実データでは 31.5 日で一度も並ばなかった**
@@ -47,10 +101,16 @@ describe("判定用の盤面", () => {
     //
     // **`<li>` を数えない**（`AGENTS.md` §4。**実際に 50 個あった**——**行ごとに
     // いくつも入るし、別の一覧も混ざる**ので、**行数を減らしても緑のままだった**）。
-    // **PR そのものを数える**——**見出しの番号は 1 本につき 1 つ**である。
-    const numbers = new Set([...html.matchAll(/\/pull\/(\d+)"/g)].map(([, one]) => one));
+    //
+    // **文書全体からも数えない** (#688 のレビュー 3 周目)——**先に描かれる
+    // 推奨レビュー順が、同じ 12 件の `/pull/<番号>` を出す**（**数えた。見出しより
+    // 前だけで 12 件**）ので、**盤面が 1 行も描かれなくても 10 件として通る。**
+    // **確かめたいのは「10 本並んだ盤面」**なので、**盤面の一覧の中だけを数える。**
+    const numbers = new Set(
+      [...dependencyList(html).matchAll(/\/pull\/(\d+)"/g)].map(([, one]) => one),
+    );
 
-    expect(numbers.size, "画面に出ている PR が 10 本に足りない").toBeGreaterThanOrEqual(10);
+    expect(numbers.size, "盤面に並んでいる PR が 10 本に足りない").toBeGreaterThanOrEqual(10);
   });
 
   it("読めなかった・切れた・分からない の行も出る", () => {
@@ -96,7 +156,7 @@ describe("判定用の盤面", () => {
     // 材料として足りていない。**
     const style = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
     const used = classesIn(html);
-    const missing = used.filter((one) => !style.includes(selectorFor(one)));
+    const missing = used.filter((one) => !hasRule(style, one));
 
     expect(used.length, "class が集まっていない").toBeGreaterThan(20);
     expect(missing, `規則の無い class がある: ${missing.join(" ")}`).toEqual([]);
@@ -116,6 +176,35 @@ describe("判定用の盤面", () => {
     // （**書かない側が既定**なので）。**渡している行を名指しで見る**
     // （`AGENTS.md` §4。**この語を持つ行は `task` に 1 行しか無い**）。
     expect(readFileSync(join(REPO_ROOT, "task"), "utf8")).toContain("BOARD_SAMPLE_OUT=");
+  });
+
+  it("器が、本番のレイアウトと同じ class を持っている", async () => {
+    // **見た目を目で判定するための 1 枚**なので、**器が違うと縦の伸び方と字の均しが
+    // 変わる** (#688 のレビュー 3 周目。**`flex min-h-full flex-col` と
+    // `h-full antialiased` が落ちていた**)。
+    //
+    // **`src/app/layout.tsx` から読んで突き合わせる**——**書き写すと、向こうが
+    // 変わった日にここだけ古くなる**（`AGENTS.md` §5）。
+    const layout = await layoutClasses();
+
+    expect(html, `<html> の class が本番と違う: ${layout.html}`).toContain(
+      `<html lang="ja" class="${layout.html}">`,
+    );
+    expect(html, `<body> の class に本番のものが無い: ${layout.body}`).toContain(
+      `<body class="${layout.body} `,
+    );
+  });
+
+  it("等幅の指定が、等幅の字に届く", () => {
+    // **本番は `next/font` が変数を配る**が、**静止した 1 枚には配る人が居ない**
+    // ——**未定義のまま `font-mono` を当てると `var()` が空になり、等幅でない字で
+    // 描かれる**（**文字幅と折り返しが本番と変わる**。#688 のレビュー 3 周目）。
+    const style = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
+    const mono = /--font-geist-mono:([^;]*)/.exec(style)?.[1] ?? "";
+
+    expect(mono, "等幅の変数が定義されていない").not.toBe("");
+    expect(mono, `等幅でない字に落ちる: ${mono}`).toContain("monospace");
+    expect(style, "字面の変数が定義されていない").toContain("--font-geist-sans:");
   });
 
   it("盤面の色が、明と暗の両方で定義されている", () => {
