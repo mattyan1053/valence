@@ -54,11 +54,17 @@ function render(overrides: Partial<SuggestedReviewOrderProps> = {}): string {
   return renderToStaticMarkup(createElement(SuggestedReviewOrder, props(overrides)));
 }
 
-/** 一覧の中だけを見る。**見出しや注記に当てない。** */
+/**
+ * 一覧の中だけを見る。**見出しや注記に当てない。**
+ *
+ * **閉じは最後のものを取る** (#705 のレビュー)——**束の中も `<ol>` になった**ので、
+ * **最初の `</ol>` は内側のもの**である。**そこで切ると、2 つ目以降の束が
+ * 範囲から落ちる**（**束をまたぐ順の試験が、黙って 1 つ目だけを見る**）。
+ */
 function list(markup: string): string {
   const from = markup.indexOf("<ol");
   expect(from, "一覧が出ていない").toBeGreaterThanOrEqual(0);
-  const to = markup.indexOf("</ol>", from);
+  const to = markup.lastIndexOf("</ol>");
   expect(to, "一覧が閉じていない").toBeGreaterThan(from);
   return markup.slice(from, to);
 }
@@ -181,6 +187,18 @@ describe("同じ理由を束ねる", () => {
 
     expect(list(html), "行が出ていない").toContain("#1");
     expect(html.split(reviewReasonNote("needs-review")).length - 1).toBe(1);
+  });
+
+  it("束の中も、順のある一覧である", () => {
+    // **束の中の並びにも意味がある** (#705 のレビュー)——**`suggestReviewOrder` が
+    // 依存の順をタイブレークにして決めている。** **`<ul>` にすると「順序なし」として
+    // 読み上げられる**ので、**見た目は同じでも、読み上げでは順が消える。**
+    //
+    // **数える**——**束が 1 つなら、外側 1 つ + 中 1 つ**である
+    const html = render(THREE_SAME);
+
+    expect(html.match(/<ol/g), "順のある一覧が 2 つではない").toHaveLength(2);
+    expect(html, "順序なしの一覧で束の中を出している").not.toContain("<ul");
   });
 
   it("束ねても、順は保たれる", () => {

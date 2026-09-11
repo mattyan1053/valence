@@ -134,7 +134,10 @@ export function SuggestedReviewOrder({
           <li className="flex flex-col gap-1" key={`${group.reason}-${group.numbers[0]}`}>
             {/* **理由は束に 1 回**（#704）。**消さない**——**#632 が要るとしている** */}
             <p className="text-sm opacity-70">{reviewReasonNote(group.reason)}</p>
-            <ul className="flex flex-col gap-1">
+            {/* **束の中も順のある一覧である** (#705 のレビュー)——**`suggestReviewOrder`
+                が依存の順をタイブレークにして決めている。** **`<ul>` にすると
+                「順序なし」として読み上げられ、見た目が同じまま順だけが消える** */}
+            <ol className="flex flex-col gap-1">
               {group.numbers.map((number) => (
                 <li className="flex flex-wrap items-baseline gap-2 text-sm" key={number}>
                   {/* **番号とタイトルを 1 つのリンクにする**（#621 と同じ形） */}
@@ -144,7 +147,7 @@ export function SuggestedReviewOrder({
                   </a>
                 </li>
               ))}
-            </ul>
+            </ol>
           </li>
         ))}
       </ol>
