@@ -80,10 +80,21 @@ const headSchema = z.object({ headRefOid: z.string().min(1) });
  * （`pull-request-mapping.ts` と同じ判断。**あちらは REST の `user.type`** で、
  * **口が違うだけで規則は同じ**である）。
  *
- * **依頼された 1 人は、User なら login、Team なら slug** である（#685 のレビュー）。
- * **`Assignment.reviewers` は team の slug も含む**と決めてある——**User だけの
- * fragment にすると、team だけに依頼した PR は `{}` が返って箱ごと落ち**、
- * **「依頼あり」が「読み取り不能」になる。**
+ * **依頼の相手は 5 つある**（#685 のレビュー 2 周目。**introspection で数えた**）
+ * ——**`User` / `Bot` / `Mannequin` は `login`**、**`Team` / `EnterpriseTeam` は `slug`**。
+ * **`Assignment.reviewers` は team の slug も含む**と決めてある。
+ *
+ * **拾い漏らすと `{}` が返り、その PR のアサインが丸ごと落ちる**
+ * ——**実際には依頼済みの PR が「読み取り不能」になる**（**2 度踏んだ形**。
+ * **1 度目は Team、2 度目は Bot / Mannequin**）。**union を足したときは、
+ * そこに他へ何が居るかを数える**（`AGENTS.md` §5）。
+ *
+ * **知らない型が来たら、その PR のアサインを持たない。** **union はこれからも増え**、
+ * **知らない型は `{}` で返る**——**その 1 件を落として残りを返すと、依頼された人が
+ * 黙って消える。** **切り捨てと同じ倒し方**にする（**分からない側**）。
+ *
+ * **`assignees` は `UserConnection`** なので、**こちらは `login` だけでよい**
+ * （**introspection で確かめた**）。
  */
 const reviewerSchema = z.union([
   z.object({ login: z.string().min(1) }).transform((user) => user.login),
@@ -201,7 +212,8 @@ function queryFor(count: number): string {
       " author{ __typename login }" +
       " assignees(first:10){ totalCount nodes{ login } }" +
       " reviewRequests(first:10){ totalCount nodes{ requestedReviewer{" +
-      " ... on User{ login } ... on Team{ slug } } } }" +
+      " ... on User{ login } ... on Bot{ login } ... on Mannequin{ login }" +
+      " ... on Team{ slug } ... on EnterpriseTeam{ slug } } } }" +
       " reviews{ totalCount }" +
       ` latestOpinionatedReviews(first:${PAGE_SIZE}){ pageInfo{ hasNextPage } nodes{ state commit{ oid } } }` +
       " } } }",

@@ -315,6 +315,58 @@ describe("createGitHubCrossRepositoryPullRequests", () => {
     ]);
   });
 
+  it("login や slug を持つ依頼の型を、全部拾う", async () => {
+    // **`RequestedReviewer` は 5 つある**（#685 のレビュー 2 周目。**introspection で数えた**）
+    // ——**User / Bot / Mannequin が `login`、Team / EnterpriseTeam が `slug`**。
+    // **拾い漏らすと `{}` が返り、アサインごと「読み取り不能」になる**
+    const { sent, fetchImpl } = responding({ data: { r0: box([]) } });
+    const source = createGitHubCrossRepositoryPullRequests({ fetchImpl });
+
+    await source.list(TOKEN, [repo("web")]);
+
+    const query = (sent[0]?.body as { query?: string } | undefined)?.query ?? "";
+    for (const type of ["User", "Bot", "Mannequin", "Team", "EnterpriseTeam"]) {
+      expect(query, `${type} への依頼が読めない`).toContain(`... on ${type}{`);
+    }
+  });
+
+  it("知らない型の依頼が 1 件でもあれば、アサインを持たない", async () => {
+    // **union はこれからも増える**（#685 のレビュー 2 周目）——**知らない型は `{}` で返る。**
+    // **その 1 件を落として残りを返すと、依頼された人が黙って消える**
+    // ——**切り捨てと同じ倒し方**にする（**分からない側**）
+    const { fetchImpl } = responding({
+      data: {
+        r0: {
+          pullRequests: {
+            totalCount: 1,
+            nodes: [
+              {
+                number: 1,
+                title: "図を出す",
+                updatedAt: "2026-09-11T00:00:00Z",
+                author: { __typename: "User", login: "hana" },
+                assignees: { totalCount: 0, nodes: [] },
+                reviewRequests: {
+                  totalCount: 2,
+                  nodes: [
+                    { requestedReviewer: { __typename: "User", login: "taro" } },
+                    // **これから増える型**——**fragment が当たらないと `{}` が返る**
+                    { requestedReviewer: {} },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const source = createGitHubCrossRepositoryPullRequests({ fetchImpl });
+
+    const [pullRequest] = (await source.list(TOKEN, [repo("web")])).pullRequests;
+
+    expect(pullRequest?.assignment, "知らない型を黙って落としている").toBeUndefined();
+  });
+
   it("依頼が多すぎて読み切れなければ、分からない側へ倒す", async () => {
     // **`first:10` しか取っていない**（#685 のレビュー）——**そのまま返すと、
     // 11 人目以降が黙って消える。** **`assignmentNote` はこの配列をそのまま出す**
