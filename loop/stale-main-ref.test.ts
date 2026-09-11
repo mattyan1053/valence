@@ -20,26 +20,38 @@ import { type LoopRole, procedureText } from "./procedure-doc";
 const ROLES: readonly LoopRole[] = ["master", "worker"];
 
 /**
+ * **裸の `main`。**
+ *
+ * **`origin/main` も `bin/loop-sync-main` も別の語**である（`/` と `-` で切る）。
+ */
+const BARE_MAIN = /(?<![\w/-])main(?![\w/-])/;
+
+/**
+ * **名前として扱っている使い方を消す。** **残った裸の `main` が版**である。
+ *
+ * **動詞の許可リストにしない**（#699 のレビュー）——**`git cherry main HEAD` のように、
+ * 履歴を読む名前は列挙しきれない**。**列挙から漏れたコマンドは黙って通る**ので、
+ * **向きを逆にして、名前として使っている形だけを除く。**
+ */
+function withoutNameUses(line: string): string {
+  return line
+    .replace(/\b(fetch|push)\s+(origin|upstream)\s+main\b/g, "$1 $2") // 取りに行く先・送る先
+    .replace(/(['"])(\^?)main\$?\1/g, "$1$2$1") // 一覧から名前で除く（`grep -v '^main$'`）
+    .replace(/--base\s+main\b/g, "--base"); // PR の宛先
+}
+
+/**
  * **版として `main` を渡している行。**
  *
- * **名前として扱っている行は数えない**——**`git branch … | grep -v '^main$'` は
- * 一覧から名前で除いているだけ**で、**`git fetch origin main` は上流の枝名**である。
- * **数えるのは「履歴を引く動詞に、版として渡している」形だけ**にする。
+ * **`git` のコマンド行**か、**範囲指定**（`main..`）だけを見る。
  */
 function staleRefLines(text: string): readonly string[] {
-  const verbs = ["log", "diff", "merge-base", "rev-parse", "rev-list", "show", "describe"];
   return text.split("\n").filter((line) => {
-    if (/\bmain\.\.\.?/.test(line) && !line.includes("origin/main..")) {
-      return true;
+    const rest = withoutNameUses(line);
+    if (!BARE_MAIN.test(rest)) {
+      return false;
     }
-    return verbs.some((verb) => {
-      const at = line.indexOf(`git ${verb} `);
-      if (at === -1) {
-        return false;
-      }
-      const rest = line.slice(at).replace(/origin\/main/g, "");
-      return /\bmain\b/.test(rest);
-    });
+    return /\bgit\s/.test(rest) || /main\.\.\.?/.test(rest);
   });
 }
 
@@ -80,11 +92,25 @@ describe("数える手そのもの", () => {
     expect(staleRefLines("git merge-base main HEAD")).toHaveLength(1);
   });
 
+  it("列挙していない動詞でも見つける", () => {
+    // **動詞を並べると、並べ損ねたものが黙って通る**（#699 のレビュー）
+    expect(staleRefLines("git cherry main HEAD")).toHaveLength(1);
+    expect(staleRefLines("git range-diff main...HEAD")).toHaveLength(1);
+    expect(staleRefLines("git rebase main")).toHaveLength(1);
+    expect(staleRefLines("git bisect start HEAD main")).toHaveLength(1);
+  });
+
   it("名前として扱っている形は数えない", () => {
     // **一覧から名前で除いているだけ**／**上流の枝名**——**どちらも古い印を読まない**
     expect(staleRefLines("git branch --format='%(refname:short)' | grep -v '^main$'")).toEqual([]);
     expect(staleRefLines("git fetch origin main")).toEqual([]);
     expect(staleRefLines("gh pr create --base main")).toEqual([]);
+  });
+
+  it("`main` を含む別の語は数えない", () => {
+    // **`-` で切る**——**手順書のほぼ全行に出てくる**
+    expect(staleRefLines('if ! after="$(bin/loop-sync-main)"; then')).toEqual([]);
+    expect(staleRefLines("bin/loop-return-main # 枝の上で終えない")).toEqual([]);
   });
 
   it("`origin/main` は数えない", () => {
