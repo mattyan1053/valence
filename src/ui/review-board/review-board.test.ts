@@ -576,6 +576,142 @@ describe("行を区別しない断りは、盤面に 1 回だけ出す（#702）
   // （`merge-button.test.ts`）——**押せるかどうかを決めているのはそちら**である。
 });
 
+/**
+ * **行の中の事実は、区切られている**（#703）。
+ *
+ * **見本を読んだ**（`./task board:sample`）——**1 行の中で、独立した事実が
+ * `<span>` のまま続いていた。**
+ *
+ * ```
+ * <span>レビューする人の番です（依頼が返っていません）</span>
+ * <span>アサイン: sample-aoi／レビュー依頼: sample-kaede</span>
+ * ```
+ *
+ * **`<span>` は inline** なので、**並べても改行されない。** **器の `flex-col` は
+ * 効いていない**——**見本に埋まっている CSS を数えたら、`.flex` も `.flex-col` も
+ * 生成されていなかった**（#583。**人待ちの Issue**）。**その Issue を待たずに直す**
+ * ため、**区切りは要素の側で付ける**（**既定で改行されるもの**）。
+ *
+ * **読む順も決める**——**「誰の番か」が行の主語**で、**振り先は添え物**である。
+ */
+describe("行の中の事実は、区切られている（#703）", () => {
+  /**
+   * その番号の行（一覧の直下の `<li>` 1 つ）。
+   *
+   * **入れ子を数える**——**行の中にも `<li>` が居る**（Tier の内訳と、行の事実）ので、
+   * **文字列で割ると、行の途中で切れる**（**実際に切れて、この試験が空を読んだ**）。
+   */
+  function topLevelItems(html: string): readonly string[] {
+    const items: string[] = [];
+    let depth = 0;
+    let from = 0;
+    for (const found of html.matchAll(/<li[\s>]|<\/li>/g)) {
+      if (found[0] !== "</li>") {
+        from = depth === 0 ? found.index : from;
+        depth += 1;
+        continue;
+      }
+      depth -= 1;
+      if (depth === 0) {
+        items.push(html.slice(from, found.index));
+      }
+    }
+    return items;
+  }
+
+  function rowOf(markup: string, number: number): string {
+    const row = topLevelItems(list(markup)).find((item) => item.includes(`#${number} `));
+    expect(row, `#${number} の行が無い`).toBeDefined();
+    return row ?? "";
+  }
+
+  /**
+   * その行が言っている事実（**1 つずつ**）。
+   *
+   * **最後の `<ul>` を読む**——**Tier の内訳は `<details>` の中**にあり、
+   * **操作の並びに `<ul>` は無い。**
+   */
+  function factsOf(row: string): readonly string[] {
+    // **Tier の内訳より後ろを読む**——**あれも `<ul>` を持っている**ので、
+    // **行ぜんたいから探すと、事実が `<span>` のままでも内訳を読んで緑になる**
+    // （**実際に緑のままだった**）
+    const after = row.lastIndexOf("</details>");
+    const from = row.indexOf("<ul", after === -1 ? 0 : after);
+    if (from === -1) {
+      return [];
+    }
+    const facts = row.slice(from, row.indexOf("</ul>", from));
+    return [...facts.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/g)].map((found) =>
+      (found[1] ?? "").replace(/<[^>]*>/g, ""),
+    );
+  }
+
+  /** **依頼が返っていない行**（#636）——**誰の番かと、振り先の両方を言う。** */
+  const WAITING: Partial<ReviewBoardProps> = {
+    assignmentOf: () => ({ assignees: ["someone"], reviewers: ["kaede"], authoredByBot: false }),
+  };
+
+  it("事実ごとに、別の要素へ分かれている", () => {
+    // **空白だけで繋がっていない**（完了条件）
+    const facts = factsOf(rowOf(render(props(WAITING)), 1));
+
+    expect(facts, "誰の番かが、単独の事実になっていない").toContain(
+      "レビューする人の番です（依頼が返っていません）",
+    );
+    expect(facts, "振り先が、単独の事実になっていない").toContain(
+      "アサイン: someone／レビュー依頼: kaede",
+    );
+  });
+
+  it("区切りは、当たっていない CSS に頼らない", () => {
+    // **`class` を全部外しても、事実の分かれ方は変わらない**（#583 を待たない）
+    const row = rowOf(render(props(WAITING)), 1);
+    const bare = factsOf(row.replace(/ class="[^"]*"/g, ""));
+
+    // **class を全部外しても、同じだけ分かれている**——**分かれ方が `class` から
+    // 来ていたら、ここが空になる**（**`<span>` を並べていた形がそれ**）
+    expect(bare.length, "class を外すと事実が消える").toBeGreaterThan(1);
+    expect(bare, "見た目が当たらないと繋がる").toEqual(factsOf(row));
+  });
+
+  it("誰の番かが、先に来る", () => {
+    // **行の主語**である——**振り先は添え物**
+    const facts = factsOf(rowOf(render(props(WAITING)), 1));
+
+    expect(
+      facts.findIndex((fact) => fact.includes("レビューする人の番")),
+      "主語が添え物より後ろに居る",
+    ).toBeLessThan(facts.findIndex((fact) => fact.includes("アサイン")));
+  });
+
+  it("誰の番かは、強く出す", () => {
+    // **強弱は要素で付ける**（#583 を待たない）——**`<strong>` は CSS が無くても太い**
+    const row = rowOf(render(props(WAITING)), 1);
+
+    expect(row).toContain("<strong>レビューする人の番です（依頼が返っていません）</strong>");
+  });
+
+  it("言うことが無い事実は、空の枠を残さない", () => {
+    // **`ballNote` は `unknown` で何も言わない**（#636）——**空の行が並ぶと、
+    // 区切りそのものがノイズになる**
+    const facts = factsOf(
+      rowOf(render(props({ reviewOpinionOf: () => undefined, assignmentOf: () => undefined })), 1),
+    );
+
+    expect(
+      facts.filter((fact) => fact.trim() === ""),
+      "空の事実が並んでいる",
+    ).toEqual([]);
+  });
+
+  it("盤面の断りが消えても、空振りしない", () => {
+    // **#702 の前後どちらでも壊れない**（完了条件）——**測り切れている盤面**
+    const facts = factsOf(rowOf(render(props(WAITING)), 1));
+
+    expect(facts.length, "行が何も言わなくなっている").toBeGreaterThan(0);
+  });
+});
+
 describe("1 件も無いとき", () => {
   it("盤面にも、何が無いのかが出る", () => {
     const markup = render(

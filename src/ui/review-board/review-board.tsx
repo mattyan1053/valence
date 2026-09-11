@@ -90,8 +90,46 @@ export function changeUnavailableNote(kind: string): string {
  * **行はもう長い**ので、**「出すか出さないか」を 1 箇所に集める**
  * ——**足すたびに三項演算子が増えると、`renderAside` が読めなくなる。**
  */
-function Note({ text }: { readonly text: string | undefined }) {
-  return text === undefined ? undefined : <span className="text-sm">{text}</span>;
+/**
+ * **行が言っている事実**（#703）。**言うことが無ければ、その枠は出ない。**
+ */
+type RowFact = {
+  readonly text: string | undefined;
+  /** **行の主語**。**強く出す**（`<strong>`）。 */
+  readonly lead?: boolean;
+  /** **添え物**。 */
+  readonly muted?: boolean;
+};
+
+/**
+ * **行の中の事実を、1 つずつ並べる**（#703）。
+ *
+ * **`<span>` を並べていた**——**inline なので、見た目が当たっていない画面では
+ * 空白だけで繋がる**（**見本の 1 行に 4 つの事実が続いていた**）。
+ * **器の `flex-col` は効いていない**——**見本に埋まっている CSS を数えたら、
+ * `.flex` も `.flex-col` も生成されていなかった**（#583。**人待ち**）。
+ *
+ * **区切りは要素で付ける**——**`<li>` は既定で改行される**ので、
+ * **その Issue が入る前でも繋がらない。** **強弱も `<strong>` で付ける。**
+ *
+ * **読む順は 1 つ**——**「誰の番か」が主語**で、**押せるかの話・順序の目安と続き、
+ * **「誰の持ち物か」が最後**である（**振られていないこと自体が主題**なので、
+ * **消さずに添える**。#631）。
+ */
+function RowFacts({ facts }: { readonly facts: readonly RowFact[] }) {
+  const shown = facts.filter((fact) => fact.text !== undefined);
+  if (shown.length === 0) {
+    return undefined;
+  }
+  return (
+    <ul className="flex list-disc flex-col gap-0.5 pl-5 text-sm">
+      {shown.map((fact) => (
+        <li className={fact.muted === true ? "opacity-70" : undefined} key={fact.text}>
+          {fact.lead === true ? <strong>{fact.text}</strong> : fact.text}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /**
@@ -370,11 +408,7 @@ export function ReviewBoard({
             mergeReadinessNote(mergeReadinessOf(status)),
             baseLagNote(status?.behindBy),
           ].filter((line) => line !== undefined);
-          const readiness = notes.map((line) => (
-            <span className="text-sm" key={line}>
-              {line}
-            </span>
-          ));
+
           // **持ち主は常に出す**（#631）——**合流の状況（上）とは違う。**
           // **あちらは「押せない理由」で平常時は言うことが無い**が、
           // **こちらは「誰の持ち物か」**であり、**振られていないこと自体が主題**である
@@ -398,8 +432,18 @@ export function ReviewBoard({
           // **絞りと同じ答えを使う**（#663）——**上で 1 度だけ決めたものを引く。**
           // **ここで呼び直すと、絞りに当たっていない行に別のことが書ける**
           const ball = ballNote(ballOfNumber.get(number) ?? "unknown");
-          const assignment = (
-            <span className="text-sm opacity-70">{assignmentNote(assignmentOf(number))}</span>
+          const assignment = assignmentNote(assignmentOf(number));
+          // **行が言っていることを、1 つずつ並べる**（#703）——**主語が先、添え物が後**
+          const facts = (
+            <RowFacts
+              facts={[
+                { text: ball, lead: true },
+                ...notes.map((line) => ({ text: line })),
+                { text: overlap },
+                { text: duplicate },
+                { text: assignment, muted: true },
+              ]}
+            />
           );
           // **材料が無い PR を黙って落とさない。** 行は残し、
           // 「出せなかった」ことが分かる形にする（#107 の `invalid` と同じ形）。
@@ -410,17 +454,15 @@ export function ReviewBoard({
             // 交通整理をしに来た人を待たせるだけである**
             return (
               <>
-                <span>
+                {/* **Tier の代わりに置く**——**`<p>` は既定で改行される**ので、
+                 **見た目が当たっていなくても、次の事実と繋がらない**（#583 を待たない） */}
+                <p className="text-sm">
                   {kind === undefined
                     ? // **本当に材料が無い**（**取りに行った跡が無い**）
                       "リスク判定の材料がありません（まだ取得できていません）"
                     : changeUnavailableNote(kind)}
-                </span>
-                {readiness}
-                <Note text={overlap} />
-                <Note text={duplicate} />
-                <Note text={ball} />
-                {assignment}
+                </p>
+                {facts}
                 <ActionRow>
                   {renderStatus?.(number)}
                   {renderActions?.(number)}
@@ -431,11 +473,7 @@ export function ReviewBoard({
           return (
             <>
               <RiskTierView tier={classifyRiskTier(change)} change={change} />
-              {readiness}
-              <Note text={overlap} />
-              <Note text={duplicate} />
-              <Note text={ball} />
-              {assignment}
+              {facts}
               <ActionRow>
                 {renderStatus?.(number)}
                 {renderActions?.(number)}
