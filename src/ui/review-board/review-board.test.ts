@@ -641,9 +641,10 @@ describe("行の中の事実は、区切られている（#703）", () => {
       return [];
     }
     const facts = row.slice(from, row.indexOf("</ul>", from));
-    return [...facts.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/g)].map((found) =>
-      (found[1] ?? "").replace(/<[^>]*>/g, ""),
-    );
+    // **中身はそのまま返す**——**タグを剥がす正規表現は書かない**（CodeQL が
+    // `js/incomplete-multi-character-sanitization` を出す。**実際に赤くなった**）。
+    // **読みたいのは「どれが 1 つの事実か」**なので、**中身の markup のままで足りる**
+    return [...facts.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/g)].map((found) => found[1] ?? "");
   }
 
   /** **依頼が返っていない行**（#636）——**誰の番かと、振り先の両方を言う。** */
@@ -654,13 +655,12 @@ describe("行の中の事実は、区切られている（#703）", () => {
   it("事実ごとに、別の要素へ分かれている", () => {
     // **空白だけで繋がっていない**（完了条件）
     const facts = factsOf(rowOf(render(props(WAITING)), 1));
+    const ball = facts.findIndex((fact) => fact.includes("レビューする人の番"));
+    const assignment = facts.findIndex((fact) => fact.includes("アサイン: someone"));
 
-    expect(facts, "誰の番かが、単独の事実になっていない").toContain(
-      "レビューする人の番です（依頼が返っていません）",
-    );
-    expect(facts, "振り先が、単独の事実になっていない").toContain(
-      "アサイン: someone／レビュー依頼: kaede",
-    );
+    expect(ball, "誰の番かが、単独の事実になっていない").toBeGreaterThanOrEqual(0);
+    expect(assignment, "振り先が、単独の事実になっていない").toBeGreaterThanOrEqual(0);
+    expect(ball, "2 つが同じ枠に入っている").not.toBe(assignment);
   });
 
   it("区切りは、当たっていない CSS に頼らない", () => {
