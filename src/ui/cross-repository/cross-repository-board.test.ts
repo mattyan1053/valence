@@ -146,3 +146,101 @@ describe("CrossRepositoryBoard", () => {
     expect(html).not.toContain(">open な PR はありません。</p>");
   });
 });
+
+/**
+ * **誰の番かで絞る**（#683）。
+ *
+ * **1 リポジトリの盤面（#663）と同じ口**である——**別の並びを作らない。**
+ */
+describe("横断の一覧を、誰の番かで絞る", () => {
+  /** **#1 は著者の番**（変更が求められている）、**#2 はレビューする人の番。** */
+  const AUTHOR = row({
+    repository: { owner: "acme", name: "web" },
+    number: 1,
+    opinion: { approvesHead: false, changesRequestedOnHead: true, reviewed: true },
+    assignment: { assignees: [], reviewers: [], authoredByBot: false },
+  });
+  const REVIEWER = row({
+    repository: { owner: "acme", name: "api" },
+    number: 2,
+    opinion: { approvesHead: false, changesRequestedOnHead: false, reviewed: true },
+    assignment: { assignees: [], reviewers: ["r"], authoredByBot: false },
+  });
+
+  /** **一覧の中だけ**——**絞りの口も断りも外に出る**ので、本文で数えない */
+  function list(markup: string): string {
+    const from = markup.indexOf("<ul");
+    return from < 0 ? "" : markup.slice(from, markup.indexOf("</ul>", from));
+  }
+
+  it("渡された絞りが、一覧に効く", () => {
+    const html = render({ rows: [AUTHOR, REVIEWER], ballFilter: "author" });
+
+    expect(list(html)).toContain("acme/web");
+    expect(list(html), "絞りに当たらない行が残っている").not.toContain("acme/api");
+  });
+
+  it("渡されなければ、絞らない", () => {
+    const html = render({ rows: [AUTHOR, REVIEWER] });
+
+    expect(list(html)).toContain("acme/web");
+    expect(list(html)).toContain("acme/api");
+  });
+
+  it("絞っても、読めなかった件数は出る", () => {
+    // **読めなかったものは絞りの外**（#663 の「気をつけること」）——**混ぜると、
+    // 抜けが絞りのせいに見える**
+    const html = render({
+      rows: [AUTHOR, REVIEWER],
+      ballFilter: "author",
+      unavailable: { ...NONE, unreadable: 3 },
+    });
+
+    expect(html, "絞ると読めなかった件数が消える").toContain("3 件は読めませんでした");
+  });
+
+  it("絞って 0 件と、1 件も無いを言い分ける", () => {
+    // **#410 が `EmptyNotice` で塞いだ形**——**「ありません」だけだと、
+    // 絞ったせいなのか、本当に無いのかが分からない**
+    const filtered = render({ rows: [AUTHOR], ballFilter: "merger" });
+    const empty = render({ rows: [] });
+
+    expect(filtered, "絞って 0 件なのに「open な PR はありません」と言っている").not.toContain(
+      "open な PR はありません",
+    );
+    expect(filtered, "隠した件数を言っていない").toContain("1 件を隠しています");
+    expect(empty).toContain("open な PR はありません");
+  });
+
+  it("絞る口は、絞っていなくても出る", () => {
+    // **無ければ、絞れることに気づけない**（`BallFilterView` の但し書き）
+    expect(render({ rows: [AUTHOR] })).toContain("誰の番かで絞る");
+  });
+});
+
+/**
+ * **並びは、最後に動いたものから**（#683）。
+ *
+ * **根拠は `crossReviewOrder` が持つ**——**ここで見るのは「その順で出ていること」**
+ * だけである（**繋ぎ忘れても、domain の試験は緑のまま**）。
+ */
+describe("横断の一覧の並び", () => {
+  it("最後に動いたものから出る", () => {
+    const html = render({
+      rows: [
+        row({
+          repository: { owner: "a", name: "old" },
+          number: 1,
+          updatedAt: "2026-01-01T00:00:00Z",
+        }),
+        row({
+          repository: { owner: "b", name: "new" },
+          number: 2,
+          updatedAt: "2026-03-01T00:00:00Z",
+        }),
+      ],
+    });
+
+    expect(html.indexOf("b/new"), "動いたものが下にある").toBeLessThan(html.indexOf("a/old"));
+  });
+});

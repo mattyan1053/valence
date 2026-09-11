@@ -250,3 +250,77 @@ describe("入口の画面に、横断の一覧が出る", () => {
     expect(renderToStaticMarkup(renderHome(LISTED))).not.toContain("横断の一覧");
   });
 });
+
+/**
+ * **入口の画面でも、誰の番かで絞れる**（#683）。
+ *
+ * **1 リポジトリの盤面（#663 / #667）と同じ口**である——**別の並びを作らない。**
+ */
+describe("入口の画面の絞り", () => {
+  const LISTED: VisibleRepositoriesResult = {
+    kind: "listed",
+    listing: { repositories: [], invalid: [] },
+  };
+
+  const pullRequest = (owner: string, number: number, reviewers: readonly string[]) => ({
+    repository: { owner, name: "web" },
+    number,
+    title: "図を出す",
+    updatedAt: "2026-09-11T00:00:00Z",
+    opinion: { approvesHead: false, changesRequestedOnHead: false, reviewed: true },
+    assignment: { assignees: [], reviewers, authoredByBot: false },
+  });
+
+  const CROSS: CrossRepositoryBoardResult = {
+    kind: "board",
+    listing: {
+      // **#1 はレビューする人の番**（依頼が残っている）、**#2 は誰の番でもない**
+      pullRequests: [pullRequest("acme", 1, ["r"]), pullRequest("beta", 2, [])],
+      unavailable: [],
+      invalid: [],
+    },
+    unreadableRepositories: 0,
+  };
+
+  /** **一覧の中だけ**——**絞りの口は外に出る** */
+  function list(markup: string): string {
+    const from = markup.indexOf("<ul");
+    return from < 0 ? "" : markup.slice(from, markup.indexOf("</ul>", from));
+  }
+
+  it("`?ball=` が横断の一覧に効く", () => {
+    const html = renderToStaticMarkup(
+      renderHome(LISTED, CROSS, undefined, undefined, { ball: "reviewer" }),
+    );
+
+    expect(list(html)).toContain("acme/web");
+    expect(list(html), "絞りに当たらない行が残っている").not.toContain("beta/web");
+  });
+
+  it("画面に無い絞りは、効かせない", () => {
+    // **`?ball=` は誰でも好きな文字列を入れられる**（#330 と同じ判断）
+    // ——**並べたものだけを通す**
+    const html = renderToStaticMarkup(
+      renderHome(LISTED, CROSS, undefined, undefined, { ball: "いたずら" }),
+    );
+
+    expect(list(html)).toContain("acme/web");
+    expect(list(html)).toContain("beta/web");
+  });
+
+  it("引き直しても、絞りは残る", () => {
+    // **#672 が決めた線**（**絞りは残す／操作の結果は残さない**）——**引き直したら
+    // 全部出てきた、では絞った意味が消える**
+    const html = renderToStaticMarkup(
+      renderHome(LISTED, CROSS, new Date("2026-09-11T00:00:00Z"), undefined, { ball: "reviewer" }),
+    );
+
+    expect(html, "引き直す先が絞りを落としている").toContain('href="/?ball=reviewer"');
+  });
+
+  it("絞っていなければ、入口へ戻る", () => {
+    const html = renderToStaticMarkup(renderHome(LISTED, CROSS, new Date("2026-09-11T00:00:00Z")));
+
+    expect(html).toContain('href="/"');
+  });
+});

@@ -17,7 +17,11 @@ import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { Assignment } from "../../domain/triage/assignment";
 import type { ReviewOpinion } from "../../domain/triage/ball";
 import { ballOf } from "../../domain/triage/ball";
+import { partitionByBall } from "../../domain/triage/board-filter";
+import { crossReviewOrder } from "../../domain/triage/cross-review-order";
 import { assignmentNote } from "../assignment/assignment-note";
+import type { BallFilter } from "../ball/ball-filter";
+import { BallFilterView } from "../ball/ball-filter-view";
 import { ballNote } from "../ball/ball-note";
 import { mergeReadinessNote } from "../merge/merge-readiness-note";
 
@@ -55,6 +59,13 @@ export type CrossRepositoryUnavailable = {
 export type CrossRepositoryBoardProps = {
   readonly rows: readonly CrossRepositoryRow[];
   readonly unavailable: CrossRepositoryUnavailable;
+  /**
+   * **いま選ばれている絞り**（#683）。**絞っていなければ `undefined`。**
+   *
+   * **1 リポジトリの盤面（#663）と同じ口**である——**別の並びを作らない**
+   * （**受ける値も出す選択肢も `BALL_FILTERS` から作る**）。
+   */
+  readonly ballFilter?: BallFilter;
 };
 
 /**
@@ -95,25 +106,45 @@ function ballFor(row: CrossRepositoryRow) {
   });
 }
 
-export function CrossRepositoryBoard({ rows, unavailable }: CrossRepositoryBoardProps) {
+export function CrossRepositoryBoard({ rows, unavailable, ballFilter }: CrossRepositoryBoardProps) {
   const note = unavailableNote(unavailable);
+  // **誰の番かは、行ごとに 1 度だけ決める**（#663 と同じ形）——**絞りと行の文の
+  // 両方が同じ答えを使う。** **2 度呼ぶと、片方だけが変わった日に画面が食い違う**
+  const balls = rows.map((row) => ({ row, ball: ballFor(row) }));
+  const filtered = partitionByBall(balls, ballFilter);
+  // **並べるのは絞ったあと**——**根拠は `crossReviewOrder` が持つ**（§5。
+  // **画面に書き写すと、向こうが変わった日にここだけ古くなる**）
+  const shown = crossReviewOrder(filtered.shown.map((one) => one.row));
   return (
     <section className="flex flex-col gap-3">
-      <h2 className="font-semibold text-lg">横断の一覧（{rows.length} 本）</h2>
-      {/* **読めなかったことを残す**——**黙ると、盤面は静かに不完全になる** */}
+      <h2 className="font-semibold text-lg">横断の一覧（{shown.length} 本）</h2>
+      {/* **読めなかったことを残す**——**黙ると、盤面は静かに不完全になる。**
+          **絞りの外に置く**（#663 の「気をつけること」）——**混ぜると、
+          抜けが絞りのせいに見える** */}
       {note === undefined ? undefined : <p className="text-sm opacity-70">{note}</p>}
-      {rows.length === 0 ? (
+      {/* **絞る口は、絞っていなくても出す**——**無ければ、絞れることに気づけない** */}
+      <BallFilterView
+        current={ballFilter}
+        counts={{ shown: shown.length, hidden: filtered.hidden }}
+      />
+      {shown.length === 0 ? (
         // **読めていない範囲が残るなら、0 件と断定しない**（#686 のレビュー）
         // ——**「読めませんでした」と言った直後に「ありません」と言うと、
         // 同じ画面が逆のことを言う**
-        <p className="text-sm">
-          {note === undefined
-            ? "open な PR はありません。"
-            : "読めたぶんに、open な PR はありません。"}
-        </p>
+        //
+        // **絞って 0 件なら、ここでは言わない**（#683）——**「ありません」は嘘**である
+        // （**あるが、この番のものが無い**）。**言うのは `ballFilterNote` の側**で、
+        // **隠した件数と一緒に出る**（#410 が `EmptyNotice` で塞いだ形）
+        ballFilter === undefined ? (
+          <p className="text-sm">
+            {note === undefined
+              ? "open な PR はありません。"
+              : "読めたぶんに、open な PR はありません。"}
+          </p>
+        ) : undefined
       ) : (
         <ul className="flex flex-col gap-2">
-          {rows.map((row) => {
+          {shown.map((row) => {
             const ball = ballNote(ballFor(row));
             const readiness = mergeReadinessNote(mergeReadinessOf(row.mergeStatus));
             return (

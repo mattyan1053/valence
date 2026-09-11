@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Ball } from "./ball";
-import { filterByBall } from "./board-filter";
+import { filterByBall, partitionByBall } from "./board-filter";
 
 function row(number: number, ball: Ball) {
   return { number, ball };
@@ -53,5 +53,46 @@ describe("盤面の一覧を、誰の番かで絞る", () => {
     const outcome = filterByBall([row(1, "unknown"), row(2, "author")], "unknown");
 
     expect(outcome.shown).toEqual([1]);
+  });
+});
+
+/**
+ * **番号で引けないものも絞る**（#683）。
+ *
+ * **横断の一覧は、番号だけでは行を指せない**——**別のリポジトリの同じ番号がある。**
+ * **規則そのものは 1 つ**（**既定は絞らない／落とした件数を返す**）なので、
+ * **`filterByBall` と同じところに置く**——**2 箇所に書くと、片方だけが直る。**
+ */
+describe("行そのものを返す絞り", () => {
+  const at = (owner: string, number: number, ball: Ball) => ({ owner, number, ball });
+
+  it("その番のものだけを通す", () => {
+    const outcome = partitionByBall(
+      [at("a", 1, "author"), at("b", 1, "reviewer"), at("c", 2, "author")],
+      "author",
+    );
+
+    expect(
+      outcome.shown.map((one) => one.owner),
+      "同じ番号の別の行まで通している",
+    ).toEqual(["a", "c"]);
+    expect(outcome.hidden).toBe(1);
+  });
+
+  it("絞りが無ければ全部通す", () => {
+    // **既定は絞らない**——**開いた瞬間に一部しか見えていないと、気づけない**
+    const rows = [at("a", 1, "author"), at("b", 2, "nobody")];
+    const outcome = partitionByBall(rows, undefined);
+
+    expect(outcome.shown).toEqual(rows);
+    expect(outcome.hidden).toBe(0);
+  });
+
+  it("絞って 0 件でも、落とした件数は返る", () => {
+    // **「絞って 0 件」と「1 件も無い」を、呼ぶ側が言い分けられるようにする**
+    const outcome = partitionByBall([at("a", 1, "author"), at("b", 2, "author")], "merger");
+
+    expect(outcome.shown).toEqual([]);
+    expect(outcome.hidden).toBe(2);
   });
 });

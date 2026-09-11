@@ -16,6 +16,8 @@ import {
   reportBoardActionUnavailable,
 } from "../composition/auth";
 import { SignOutButton, showsSignOut } from "../ui/auth/sign-out-button";
+import type { BallFilter } from "../ui/ball/ball-filter";
+import { ballFilterOf } from "../ui/ball/ball-filter";
 import { BoardFreshness } from "../ui/board/board-freshness";
 import type { CrossRepositoryRow } from "../ui/cross-repository/cross-repository-board";
 import { CrossRepositoryBoard } from "../ui/cross-repository/cross-repository-board";
@@ -114,12 +116,24 @@ export type HomeDeps = {
   readonly report: (action: "home", kind: string) => void;
 };
 
+/**
+ * **引き直す先**（#683）。**絞りは持ち越す**（#672 が決めた線）。
+ *
+ * **落とす鍵は無い**——**入口の画面には、押した操作の結果が載らない**
+ * （**盤面の `BOARD_OUTCOME_KEYS` に当たるものが無い**）。**増えたらここへ足す。**
+ */
+export function homeReloadHref(ball: BallFilter | undefined): string {
+  return ball === undefined ? "/" : `/?ball=${encodeURIComponent(ball)}`;
+}
+
 function CrossRepositorySection({
   result,
   at,
+  ball,
 }: {
   readonly result?: CrossRepositoryBoardResult;
   readonly at?: Date;
+  readonly ball?: BallFilter;
 }) {
   if (result === undefined) {
     return null;
@@ -134,10 +148,11 @@ function CrossRepositorySection({
   return (
     <>
       {/* **「新しい」とは言わない**（#664）——**取りに行った時刻を出す** */}
-      {at === undefined ? undefined : <BoardFreshness at={at} reloadHref="/" />}
+      {at === undefined ? undefined : <BoardFreshness at={at} reloadHref={homeReloadHref(ball)} />}
       <CrossRepositoryBoard
         rows={crossRepositoryRows(result)}
         unavailable={crossRepositoryUnavailable(result)}
+        ballFilter={ball}
       />
     </>
   );
@@ -148,7 +163,12 @@ export function renderHome(
   cross?: CrossRepositoryBoardResult,
   at?: Date,
   deps?: HomeDeps,
+  query?: Record<string, string | string[] | undefined>,
 ) {
+  // **受ける値と出す選択肢を 1 つの並びから作る**（#663 / #672 の線）
+  // ——**`?ball=` は誰でも好きな文字列を入れられる**ので、**並べたものだけを通す**
+  // （**知らない値は「絞らない」へ落ちる**）
+  const ball = ballFilterOf(query?.ball);
   // **落ちどころを、サーバ側に残す**（#686 のレビュー）——**例外は既に catch 済み**で、
   // **通常のサーバログにも残らない。** **画面には出さない**（§6。**応答の中身が混ざりうる**）。
   // **判定は `unavailableReason` のまま 1 箇所**である（§5。#690 で `application` へ移した）
@@ -193,16 +213,26 @@ export function renderHome(
       )}
       {/* **横断の一覧**（#682）。**1 つが読めなくても、他を出す**
           ——**「読めなかった」は数と一緒に残る**（#681 が分けて返している） */}
-      <CrossRepositorySection at={at} result={cross} />
+      <CrossRepositorySection at={at} ball={ball} result={cross} />
     </main>
   );
 }
 
-export default async function Home() {
+export default async function Home({
+  searchParams,
+}: {
+  readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   // **取りに行く前に読む**（#664）——**遅い日に、実際より新しく見えることが無い**
   const at = new Date();
   // **見えるリポジトリは 1 度だけ引く**（#686 のレビュー）——**2 つを別々に呼ぶと、
   // 同じ `/user/repos` が二重になる**
   const { repositories, cross } = await homeForCurrentUser();
-  return renderHome(repositories, cross, at, { report: reportBoardActionUnavailable });
+  return renderHome(
+    repositories,
+    cross,
+    at,
+    { report: reportBoardActionUnavailable },
+    await searchParams,
+  );
 }
