@@ -106,6 +106,48 @@ export type MergeStatusPage = {
  * **`mergeReadinessOf` は地図に無い番号を `unknown` へ倒す**——**黙って
  * 「マージできる」にはならない。**
  */
+/**
+ * **1 件の node から、合流の状況を読む**（#681）。
+ *
+ * **横断の口とも共有する**——**`mergeable` / `mergeStateStatus` をドメインの語へ
+ * 移す規則を 2 箇所に持たない**（`AGENTS.md` §5）。**読めなければ `undefined`**
+ * ——**「マージできる」へ倒さない。**
+ */
+export function mergeStatusOf(
+  item: unknown,
+): { readonly number: number; readonly status: MergeStatusReport } | undefined {
+  const node = nodeSchema.safeParse(item);
+  if (!node.success) {
+    return undefined;
+  }
+  return {
+    number: node.data.number,
+    status: {
+      mergeable: toMergeable(node.data.mergeable),
+      state: toMergeState(node.data.mergeStateStatus),
+    },
+  };
+}
+
+/**
+ * **1 件の node から、意見と、それを判定した commit を読む**（#681）。
+ *
+ * **横断の口とも共有する**（`mergeStatusOf` と同じ理由）。
+ * **最後まで読めていなければ `undefined`**——**「放置」へ倒さない。**
+ */
+export function judgedOpinionOf(
+  item: unknown,
+): { readonly number: number; readonly judged: JudgedOpinion } | undefined {
+  const opinion = opinionSchema.safeParse(item);
+  if (!opinion.success) {
+    return undefined;
+  }
+  const seen = toReviewOpinion(opinion.data);
+  return seen === undefined
+    ? undefined
+    : { number: opinion.data.number, judged: { head: opinion.data.headRefOid, opinion: seen } };
+}
+
 export function toMergeStatusPage(response: unknown): MergeStatusPage {
   const parsed = pageSchema.safeParse(response);
   if (!parsed.success) {
@@ -116,20 +158,14 @@ export function toMergeStatusPage(response: unknown): MergeStatusPage {
   const statuses = new Map<number, MergeStatusReport>();
   const opinions = new Map<number, JudgedOpinion>();
   for (const item of nodes) {
-    const node = nodeSchema.safeParse(item);
-    if (node.success) {
-      statuses.set(node.data.number, {
-        mergeable: toMergeable(node.data.mergeable),
-        state: toMergeState(node.data.mergeStateStatus),
-      });
+    const status = mergeStatusOf(item);
+    if (status !== undefined) {
+      statuses.set(status.number, status.status);
     }
     // **意見は別に読む**——**合流の状況が読めた PR でも、意見だけ読めないことがある**
-    const opinion = opinionSchema.safeParse(item);
-    if (opinion.success) {
-      const seen = toReviewOpinion(opinion.data);
-      if (seen !== undefined) {
-        opinions.set(opinion.data.number, { head: opinion.data.headRefOid, opinion: seen });
-      }
+    const opinion = judgedOpinionOf(item);
+    if (opinion !== undefined) {
+      opinions.set(opinion.number, opinion.judged);
     }
   }
   return { statuses, opinions, nextCursor: nextCursor(pageInfo) };
