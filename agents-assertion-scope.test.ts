@@ -52,17 +52,6 @@ function squeeze(text: string): string {
   return text.replace(/\s+/g, "");
 }
 
-/** **手と場面が、その組で並んでいるか。** */
-function hasPair(scenes: string, way: string, scene: string): boolean {
-  return squeeze(scenes).includes(squeeze(`**${way}**（${scene}）`));
-}
-
-/** **並べた 1 行**（§4 の項の末尾）。 */
-function sceneLine(): string {
-  const item = guidanceItem();
-  return item.slice(item.indexOf("4 つは場面が違う"));
-}
-
 /** 4 つの組。**本文と、この一覧が食い違ったら赤くなる。** */
 const WAYS: readonly (readonly [string, string])[] = [
   ["書く前に数える", "当たる相手が居るか"],
@@ -70,6 +59,36 @@ const WAYS: readonly (readonly [string, string])[] = [
   ["変異で測る", "守りたい 1 行を消して赤くなるか"],
   ["判定だけを取り出す", "変異が黙ったとき"],
 ];
+
+/**
+ * **並べた 1 行**（§4 の項の末尾）。
+ *
+ * **空行で切る**——**項の終わりには節の区切り（`---`）が続く**ので、
+ * **そのままだと、一覧そのものと突き合わせられない。**
+ */
+function sceneLine(): string {
+  const item = guidanceItem();
+  return item.slice(item.indexOf("**4 つは場面が違う**")).split("\n\n")[0] ?? "";
+}
+
+/**
+ * **並んでいるものが、この 4 組ちょうどか。**
+ *
+ * **部分一致で見ない**（#695 のレビュー 2 周目）——**「4 組が在る」だけだと、
+ * 5 組目や重複を足しても通る**ので、**本文が言っている数と、並んでいる数が
+ * 食い違ったまま**になる。
+ *
+ * **`／` で割って数えない。** **場面の説明に `／` が入った日に、静かに壊れる**
+ * ——**一覧そのものを組み立てて、丸ごと突き合わせる**（**区切りが何であっても、
+ * 両側に同じものが入る**）。
+ *
+ * **折り返しは畳む**——**`AGENTS.md` は 1 行が折り返されている**ので、
+ * **畳まないと、書き直すたびに赤くなる。**
+ */
+function matchesWays(scenes: string): boolean {
+  const expected = `**4 つは場面が違う**: ${WAYS.map(([way, scene]) => `**${way}**（${scene}）`).join("／")}`;
+  return squeeze(scenes) === squeeze(expected);
+}
 
 describe("AGENTS.md §4 — 文字列で見る検査", () => {
   it("書く前に、その語を持つ行を全部出すと書いてある", () => {
@@ -119,29 +138,44 @@ describe("AGENTS.md §4 — 文字列で見る検査", () => {
     // **組で見る**（#695 のレビュー）——**語が「どこかに在る」だけだと、
     // 手と場面を入れ替えても緑**で、**この試験が名乗っていること（どの場面の手か）は
     // 壊れたまま**になる
-    for (const [way, scene] of WAYS) {
-      expect(hasPair(sceneLine(), way, scene), `「${way}（${scene}）」の組が無い`).toBe(true);
-    }
+    expect(matchesWays(sceneLine()), "並んでいるものが、4 組ちょうどではない").toBe(true);
   });
 
   it("組が入れ替わっていたら、そう言える", () => {
     // **本物の材料には、対応が壊れたものが無い**（#693 の 4 つ目の場面）
     // ——**手で 1 度入れ替えて確かめても残らない**ので、**突き合わせだけを取り出して測る。**
     // **入れ替えた材料では `false`**、**その材料でも正しい組なら `true`**
-    const swapped =
-      "**書く前に数える**（変異が黙ったとき）／**判定だけを取り出す**（当たる相手が居るか）";
+    const map = (pairs: readonly (readonly [string, string])[]) =>
+      `**4 つは場面が違う**: ${pairs.map(([way, scene]) => `**${way}**（${scene}）`).join("／")}`;
+    const swapped: readonly (readonly [string, string])[] = [
+      ["書く前に数える", "変異が黙ったとき"],
+      ["書き終えたら数え直す", "書いている間に増えていないか"],
+      ["変異で測る", "守りたい 1 行を消して赤くなるか"],
+      ["判定だけを取り出す", "当たる相手が居るか"],
+    ];
 
-    expect(hasPair(swapped, "書く前に数える", "当たる相手が居るか")).toBe(false);
-    expect(hasPair(swapped, "判定だけを取り出す", "変異が黙ったとき")).toBe(false);
-    expect(hasPair(swapped, "書く前に数える", "変異が黙ったとき")).toBe(true);
+    expect(matchesWays(map(WAYS)), "正しい組で `false` になっている").toBe(true);
+    expect(matchesWays(map(swapped)), "入れ替えても `true` のまま").toBe(false);
+    // **足しても気づけること**（#695 のレビュー 2 周目）——**「4 組が在る」だけを
+    // 見ていると、5 組目や重複が通る**。**部分一致へ戻す変異は、ここだけが赤くなる**
+    expect(
+      matchesWays(map([...WAYS, ["もう 1 つ", "増やしてみる"]])),
+      "5 組目を足しても `true` のまま",
+    ).toBe(false);
+    expect(
+      matchesWays(map([...WAYS, WAYS[0] ?? ["", ""]])),
+      "同じ組を 2 度並べても `true` のまま",
+    ).toBe(false);
   });
 
   it("折り返しを動かしただけでは、赤くならない", () => {
     // **`AGENTS.md` は 1 行が折り返されている**——**組が改行をまたぐ**ので、
     // **畳まずに突き合わせると、正しい組でも落ちる**（**書き直すたびに赤くなる試験**）
-    const wrapped = "**書き終えたら数え直す**\n  （書いている間に増えていないか）";
+    const wrapped = `**4 つは場面が違う**: ${WAYS.map(
+      ([way, scene]) => `**${way}**\n  （${scene}）`,
+    ).join("／\n  ")}`;
 
-    expect(hasPair(wrapped, "書き終えたら数え直す", "書いている間に増えていないか")).toBe(true);
+    expect(matchesWays(wrapped), "折り返しを動かしただけで赤くなる").toBe(true);
   });
 
   it("変異は、守りたい 1 行だけを消すと書いてある", () => {
