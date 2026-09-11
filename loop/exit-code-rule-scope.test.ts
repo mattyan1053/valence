@@ -25,15 +25,47 @@ const ROLES: readonly LoopRole[] = ["master", "worker"];
  */
 const ANCHOR = "**終了コードは、打ったコマンドのもの**";
 
-/** **規則の段落**（その行の頭から、次の空行まで）。 */
-function ruleSection(role: LoopRole): string {
-  const text = procedureText(role);
+/** **規則の段落の場所**（その行の頭から、次の空行まで）。**無ければ長さ 0**。 */
+function ruleAt(text: string): { readonly from: number; readonly length: number } {
   const at = text.indexOf(ANCHOR);
   if (at === -1) {
-    return "";
+    return { from: 0, length: 0 };
   }
   // **行の頭から取る**——**途中で切ると、同じ行が「規則の外」にも見える**
-  return text.slice(text.lastIndexOf("\n", at) + 1).split("\n\n")[0] ?? "";
+  const from = text.lastIndexOf("\n", at) + 1;
+  return { from, length: (text.slice(from).split("\n\n")[0] ?? "").length };
+}
+
+/** **規則の段落。** */
+function ruleParagraph(text: string): string {
+  const { from, length } = ruleAt(text);
+  return text.slice(from, from + length);
+}
+
+/**
+ * **規則の段落を、1 度だけ取り除いた残り。**
+ *
+ * **値ではなく場所で外す**（#701 のレビュー 2 周目）——**同じ行を写した箇所があると、
+ * 「規則の中にも同じ値がある」だけで写しまで除かれ、重複が見えなくなる。**
+ */
+function withoutRule(text: string): string {
+  const { from, length } = ruleAt(text);
+  return text.slice(0, from) + text.slice(from + length);
+}
+
+/**
+ * **規則の外で、規則を言い直している行。**
+ *
+ * **判定はこの 1 つが持つ**——**本物の手順書と、隣どうしに並べた入力の、両方をここへ通す**
+ * （`AGENTS.md` §4）。**本物には写しが無い**ので、**材料越しでは写しを見分けられない。**
+ */
+function restatementsOutsideRule(text: string): readonly string[] {
+  return restatementLines(withoutRule(text));
+}
+
+/** 役ごとの規則の段落。 */
+function ruleSection(role: LoopRole): string {
+  return ruleParagraph(procedureText(role));
 }
 
 /**
@@ -81,10 +113,7 @@ describe.each(ROLES)("%s は、終了コードの規則を 1 箇所で読む", (
 
   it("言い直しが、規則の外に無い", () => {
     // **足すほど畳まれる**ので、**例つきの言い直しを 4 箇所に残さない**
-    const outside = restatementLines(procedureText(role)).filter(
-      (line) => !restatementLines(ruleSection(role)).includes(line),
-    );
-    expect(outside, "規則の外で言い直している").toEqual([]);
+    expect(restatementsOutsideRule(procedureText(role)), "規則の外で言い直している").toEqual([]);
   });
 });
 
@@ -107,6 +136,14 @@ describe("数える手そのもの", () => {
     // **裸の `$?` は、正しく受けている行**である
     expect(restatementLines('case "$?" in')).toEqual([]);
     expect(restatementLines('./task check >"$log" 2>&1; status=$?')).toEqual([]);
+  });
+
+  it("同じ行を写しても、写しのほうが残る", () => {
+    // **値で外すと、写しまで一緒に消える**（#701 のレビュー 2 周目）
+    const rule = `${ANCHOR}——\`$?\` はパイプの右のもの。`;
+    const twice = `${rule}\n\n間の文\n\n${rule}\n`;
+    expect(restatementsOutsideRule(twice)).toHaveLength(1);
+    expect(restatementsOutsideRule(`${rule}\n\n間の文\n`)).toEqual([]);
   });
 
   it("道具の名前は、バッククォートごと拾う", () => {
