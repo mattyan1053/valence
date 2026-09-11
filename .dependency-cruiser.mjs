@@ -94,6 +94,23 @@ export default {
       to: { path: "^src/(application|infrastructure|composition)/" },
     },
     {
+      name: "app-routes-are-not-imported",
+      severity: "error",
+      comment:
+        "page.tsx / route.ts はルートの入口である。ほかの場所から import すると、" +
+        "ルート同士に依存ができる (AGENTS.md §3 の「app はルーティングと配線のみ」)。" +
+        "実際に踏んだ (#690): 入口の画面が、リポジトリ別ページから判定を import していた。" +
+        "共有したい判定は application など、両方から参照できる場所へ置くこと。" +
+        "塞いでいるのは入口 (page/route) の import だけである。ルート同士で入口以外の " +
+        "モジュールを共有する形は、この規則では落ちない——まだ踏んでいない (§5)。",
+      from: { path: "^src/", pathNot: TEST_FILE },
+      // **basename を完全一致で見る** (#691 のレビュー)。**`[^?]*(page|route)` だと
+      // `candidate-route.ts` のような普通のモジュールにも当たる**——**規則の文言と、
+      // 実際に落ちるものが食い違う。** **`/` を挟む形と、ルート直下の形を並べる**
+      // （**`(.*/)?` と書くと dependency-cruiser が「unsafe」で止める**）
+      to: { path: "^src/app/[^?]*/(page|route)\\.tsx?$|^src/app/(page|route)\\.tsx?$" },
+    },
+    {
       name: "adapters-are-wired-only-in-composition",
       severity: "error",
       comment:

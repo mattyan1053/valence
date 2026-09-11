@@ -7,6 +7,7 @@
  * **infrastructure を直に触らない**（§3）。**合成ルートだけを呼ぶ。**
  */
 
+import { unavailableReason } from "../application/observability/unavailable-reason";
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
 import type { CrossRepositoryBoardResult } from "../application/review-order/view-cross-repository-board";
 import {
@@ -19,7 +20,6 @@ import { BoardFreshness } from "../ui/board/board-freshness";
 import type { CrossRepositoryRow } from "../ui/cross-repository/cross-repository-board";
 import { CrossRepositoryBoard } from "../ui/cross-repository/cross-repository-board";
 import { RepositoryList } from "../ui/repository-list/repository-list";
-import { boardUnavailableReason } from "./repos/[owner]/[name]/page";
 
 /**
  * **要求ごとに描く。静的に生成させない** (#213 のレビュー)。
@@ -151,8 +151,8 @@ export function renderHome(
 ) {
   // **落ちどころを、サーバ側に残す**（#686 のレビュー）——**例外は既に catch 済み**で、
   // **通常のサーバログにも残らない。** **画面には出さない**（§6。**応答の中身が混ざりうる**）。
-  // **判定は `boardUnavailableReason` のまま 1 箇所**である（§5）
-  const unavailable = cross === undefined ? undefined : boardUnavailableReason(cross);
+  // **判定は `unavailableReason` のまま 1 箇所**である（§5。#690 で `application` へ移した）
+  const unavailable = cross === undefined ? undefined : unavailableReason(cross);
   if (unavailable !== undefined) {
     deps?.report("home", unavailable);
   }
