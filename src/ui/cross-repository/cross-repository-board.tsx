@@ -21,6 +21,7 @@ import { partitionByBall } from "../../domain/triage/board-filter";
 import { crossReviewOrder } from "../../domain/triage/cross-review-order";
 import { assignmentNote } from "../assignment/assignment-note";
 import type { BallFilter } from "../ball/ball-filter";
+import { CROSS_BALL_FILTERS } from "../ball/ball-filter";
 import { BallFilterView } from "../ball/ball-filter-view";
 import { ballNote } from "../ball/ball-note";
 import { mergeReadinessNote } from "../merge/merge-readiness-note";
@@ -128,16 +129,29 @@ export function CrossRepositoryBoard({ rows, unavailable, ballFilter }: CrossRep
         counts={{
           shown: shown.length,
           hidden: filtered.hidden,
-          // **盤面に出ていない PR を数える**（#694 のレビュー）——**4 つとも
-          // 「行がここに無い」側**である（**読めなかった／読み切れなかった／
-          // 一覧の時点で読めなかった／形を読み取れなかった**）。
-          // **その番のものだったかもしれない**ので、**0 件と言い切らせない**
-          unread:
+          // **判定できなかった PR を数える**（#694 のレビュー）。**2 つある。**
+          //
+          // **1. 盤面に出ていないもの**——**4 つとも「行がここに無い」側**である
+          // （**読めなかった／読み切れなかった／一覧の時点で読めなかった／
+          // 形を読み取れなかった**）。
+          //
+          // **2. 出ているが「分からない」に倒れたもの**（**レビュー 2 周目**）
+          // ——**`opinion` か `assignment` を読めなかった行**は `unknown` になる
+          // （`ballOf`）。**行は並んでいるので 1 では数えられない**が、
+          // **本当はその番だったかもしれない。**
+          //
+          // **「分からない」で絞っているときは数えない**——**そのときは出ている**
+          undecided:
             unavailable.unreadable +
             unavailable.truncated +
             unavailable.repositories +
-            unavailable.pullRequests,
+            unavailable.pullRequests +
+            // **「分からない」は選択肢に無い**（`BALL_FILTERS`）ので、**`unknown` の行は
+            // 必ず隠れる側**である——**型がそれを言っている**（**`BallFilter` に
+            // `unknown` は入らない**）
+            balls.filter((one) => one.ball === "unknown").length,
         }}
+        options={CROSS_BALL_FILTERS}
       />
       {shown.length === 0 ? (
         // **読めていない範囲が残るなら、0 件と断定しない**（#686 のレビュー）

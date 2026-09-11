@@ -1043,9 +1043,48 @@ describe("絞って 0 件のとき、読めなかったものが残る", () => {
     expect(html, "読めていない範囲があるのに言い切っている").toContain("読めた範囲");
   });
 
-  it("読めなかったものが無ければ、これまでどおり言い切る", () => {
-    const html = render(props({ ballFilter: "merger", invalid: [] }));
+  it("全部が判定できるなら、これまでどおり言い切る", () => {
+    // **`unknown` の行が 1 本でもあれば限定する**ので、**全部が判定できる盤面で見る**
+    // ——**`ballOf` は `opinion` と `assignment` の両方を要る**ので、**既定の材料は
+    // `unknown` へ倒れる。** **判定できる形を置いてから、限定が消えることを見る**
+    const html = render(
+      props({
+        ballFilter: "merger",
+        invalid: [],
+        reviewOpinionOf: () => ({
+          approvesHead: false,
+          changesRequestedOnHead: true,
+          reviewed: true,
+        }),
+        assignmentOf: () => ({ assignees: [], reviewers: [], authoredByBot: false }),
+      }),
+    );
 
     expect(html, "読めているのに限定している").not.toContain("読めた範囲");
+  });
+});
+
+/**
+ * **判定できなかった行を、無いことにしない**（#694 のレビュー 2 周目）。
+ *
+ * **横断の盤面と同じ穴**である——**片方だけ直さない。**
+ */
+describe("一覧に出ていても、判定できない行がある", () => {
+  it("分からない行があれば、言い切らない", () => {
+    // **`opinion` を読めなかった行は `unknown` へ倒れる**（`ballOf`）——**行は
+    // 並んでいるので `invalid` では数えられない**が、**その番だったかもしれない**
+    const html = render(
+      props({
+        ballFilter: "merger",
+        invalid: [],
+        reviewOpinionOf: (number: number) =>
+          number === 1
+            ? { approvesHead: false, changesRequestedOnHead: true, reviewed: true }
+            : undefined,
+        assignmentOf: () => ({ assignees: [], reviewers: [], authoredByBot: false }),
+      }),
+    );
+
+    expect(html, "分からない行があるのに言い切っている").toContain("読めた範囲");
   });
 });

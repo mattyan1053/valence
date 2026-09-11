@@ -273,3 +273,48 @@ describe("絞って 0 件のとき、読めなかったものが残る", () => {
     expect(html, "読めているのに限定している").not.toContain("読めた範囲");
   });
 });
+
+/**
+ * **判定できなかった行を、無いことにしない**（#694 のレビュー 2 周目）。
+ */
+describe("判定できなかった行があるとき", () => {
+  /** **材料が揃っている行**（著者の番）。 */
+  const DECIDED = row({
+    repository: { owner: "acme", name: "web" },
+    number: 1,
+    opinion: { approvesHead: false, changesRequestedOnHead: true, reviewed: true },
+    assignment: { assignees: [], reviewers: [], authoredByBot: false },
+  });
+  /** **`assignment` を読めなかった行**——**`ballOf` は `unknown` へ倒す。** */
+  const UNDECIDED = row({
+    repository: { owner: "acme", name: "api" },
+    number: 2,
+    opinion: { approvesHead: false, changesRequestedOnHead: false, reviewed: true },
+  });
+
+  it("一覧に出ていても、分からない行があれば言い切らない", () => {
+    // **行は並んでいるので「盤面に出ていない」では数えられない**——**それでも、
+    // 本当はその番だったかもしれない**
+    const html = render({ rows: [DECIDED, UNDECIDED], ballFilter: "reviewer" });
+
+    expect(html, "分からない行があるのに言い切っている").toContain("読めた範囲");
+  });
+
+  it("全部が判定できるなら、言い切る", () => {
+    const html = render({ rows: [DECIDED], ballFilter: "reviewer" });
+
+    expect(html, "判定できているのに限定している").not.toContain("読めた範囲");
+  });
+
+  it("「マージする人の番」は選択肢に出さない", () => {
+    // **依存を跨がないので、この画面では構造的に出ない**（`CROSS_BALL_FILTERS`）
+    // ——**押すと必ず 0 件になる選択肢**である
+    const html = render({ rows: [DECIDED] });
+
+    // **札の文字で見ない**（`AGENTS.md` §4。**数えた**——**「レビューする人の番」は
+    // 選択肢と断りの 2 箇所に出る**ので、**選択肢が消えても断りに当たって緑**になる）。
+    // **選択肢そのものの行き先**（`?ball=…`）**で見る**——**そこにしか無い**
+    expect(html, "判定できない選択肢を出している").not.toContain("?ball=merger");
+    expect(html, "他の選択肢まで消えている").toContain("?ball=reviewer");
+  });
+});

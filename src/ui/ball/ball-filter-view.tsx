@@ -11,7 +11,7 @@
  */
 
 import type { BallFilter } from "./ball-filter";
-import { BALL_FILTERS, ballFilterLabel, ballFilterNote } from "./ball-filter";
+import { ballFilterLabel, ballFilterNote } from "./ball-filter";
 
 /**
  * **いま選ばれているものは、リンクにしない。**
@@ -41,6 +41,7 @@ function FilterLink({
 export function BallFilterView({
   current,
   counts,
+  options,
 }: {
   /** いま選ばれている絞り込み。**絞っていなければ `undefined`。** */
   readonly current: BallFilter | undefined;
@@ -48,15 +49,22 @@ export function BallFilterView({
   /**
    * 通った件数と、絞りで隠れた件数と、**盤面に出ていない件数**（#694 のレビュー）。
    *
-   * **`unread` は絞りの外**である——**読めなかったものは絞りに関係なく数える**
+   * **`undecided` は絞りの外**である——**判定できなかったものは絞りに関係なく数える**
    * （**混ぜると、抜けが絞りのせいに見える**）。**言い切ってよいかの判定は
    * `ballFilterNote` が持つ**（2 箇所に置かない）。
    */
   readonly counts: {
     readonly shown: number;
     readonly hidden: number;
-    readonly unread: number;
+    readonly undecided: number;
   };
+  /**
+   * **この画面が出す選択肢**（#694 のレビュー 2 周目）。
+   *
+   * **既定を置かない**——**画面によって出せる絞りが違う**（**横断は
+   * 「マージする人の番」を判定できない**）ので、**渡す側が決める。**
+   */
+  readonly options: readonly BallFilter[];
 }) {
   const note = ballFilterNote(current, counts);
   return (
@@ -67,7 +75,7 @@ export function BallFilterView({
         <FilterLink href="?" active={current === undefined}>
           すべて
         </FilterLink>
-        {BALL_FILTERS.map((ball) => (
+        {options.map((ball) => (
           <FilterLink key={ball} href={`?ball=${ball}`} active={current === ball}>
             {ballFilterLabel(ball)}
           </FilterLink>

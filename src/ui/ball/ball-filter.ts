@@ -34,6 +34,24 @@ export const BALL_FILTERS = [
 export type BallFilter = (typeof BALL_FILTERS)[number];
 
 /**
+ * **横断の盤面が出す絞り込み**（#694 のレビュー 2 周目）。
+ *
+ * **「マージする人の番」を出さない。** **`ballOf` が `merger` を返すのは
+ * `block?.kind === "ready"` のときだけ**だが、**横断は依存を跨がないので
+ * `block` を渡せない**（`cross-repository-board.tsx` の但し書き）——**構造的に
+ * 出ない選択肢**である。
+ *
+ * **出しても必ず 0 件になる**ので、**押した人は「無い」と読む**——**実際は
+ * 「この画面では判定していない」**であって、**同じことではない。**
+ *
+ * **`BALL_FILTERS` から作る**——**並べ直さない**（**片方だけ増えると、
+ * 画面によって語彙が変わる**）。
+ */
+export const CROSS_BALL_FILTERS: readonly BallFilter[] = BALL_FILTERS.filter(
+  (ball) => ball !== "merger",
+);
+
+/**
  * **短い名前。** **`Record` で持つ**ので、**選択肢を足して書き忘れると型検査が落ちる**
  * （`BALL_TEXT` と同じ形）。
  *
@@ -58,8 +76,15 @@ export function ballFilterLabel(ball: BallFilter): string {
  */
 export function ballFilterOf(
   value: string | readonly string[] | undefined,
+  /**
+   * **その画面が出している選択肢**（#694 のレビュー 2 周目）。
+   *
+   * **既定を置かない**——**置くと、画面が並びを狭めても URL からは広いまま通る**
+   * （**#663 が塞いだ「画面に無い絞りを URL で選べる」に戻る**）。
+   */
+  options: readonly BallFilter[],
 ): BallFilter | undefined {
-  return BALL_FILTERS.find((ball) => ball === value);
+  return options.find((ball) => ball === value);
 }
 
 /**
@@ -78,7 +103,7 @@ export function ballFilterOf(
  * **「読めませんでした」と言った直後に「ありません」と言うと、同じ画面が逆のことを言う**
  * ——**読めなかった PR が、その番のものだったかもしれない。**
  *
- * **`unread` に既定を置かない**（#669 のレビューと同じ判断）——**置くと、
+ * **`undecided` に既定を置かない**（#669 のレビューと同じ判断）——**置くと、
  * 渡し忘れても動く**ので、**読めない範囲を持つ画面が増えたときに片方だけが直る。**
  */
 export function ballFilterNote(
@@ -86,8 +111,17 @@ export function ballFilterNote(
   counts: {
     readonly shown: number;
     readonly hidden: number;
-    /** **盤面に出ていない PR の数**（読めなかった・読み切れなかった）。 */
-    readonly unread: number;
+    /**
+     * **この絞りで判定できなかった PR の数。**
+     *
+     * **2 つが入る**（#694 のレビュー 2 周目で広げた）——**盤面に出ていないもの**
+     * （**読めなかった・読み切れなかった**）と、**出ているが「分からない」に
+     * 倒れたもの**（`ballOf` の `unknown`。**材料を読めなかった行**）。
+     *
+     * **どちらも「その番のものだったかもしれない」**側である——**数えないと、
+     * 画面が「ありません」と言い切る。**
+     */
+    readonly undecided: number;
   },
 ): string | undefined {
   if (ball === undefined) {
@@ -99,7 +133,7 @@ export function ballFilterNote(
     return `「${label}」だけを出しています（${hidden}）`;
   }
   // **限定が要るのは「無い」と言うときだけ**——**平常時に断りを足すと読まれなくなる**（#248）
-  return counts.unread === 0
+  return counts.undecided === 0
     ? `「${label}」の PR はありません（${hidden}）`
     : `読めた範囲に「${label}」の PR はありません（${hidden}）`;
 }

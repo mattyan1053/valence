@@ -30,7 +30,7 @@ import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
 import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
 import { AssignmentSummaryView } from "../../../../ui/assignment/assignment-summary-view";
 import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button";
-import { ballFilterOf } from "../../../../ui/ball/ball-filter";
+import { BALL_FILTERS, ballFilterOf } from "../../../../ui/ball/ball-filter";
 import { BoardFreshness } from "../../../../ui/board/board-freshness";
 import { boardReloadHref } from "../../../../ui/board/board-reload-href";
 import type { IssueBoardProps } from "../../../../ui/issue-board/issue-board";
@@ -308,7 +308,7 @@ export async function renderRepositoryBoard(
   // **絞ったまま操作を続けられるようにする**（#667）——**押す本文へ載せて運ぶ**ので、
   // **戻り先でも同じ絞りが効く。** **知らない値は「絞らない」へ落ちる**
   // （**絞ること自体は #663 が持つ**——**どちらが先に入っても壊れない**）
-  const ball = ballFilterOf(query.ball);
+  const ball = ballFilterOf(query.ball, BALL_FILTERS);
   // **取りに行く前に読む**（#664）——**取れた時刻ではなく、取りに行った時刻**である。
   // **どちらでも「この時刻より前のもの」**で、**先に読むほうが、遅い日に
   // 実際より新しく見えることが無い**

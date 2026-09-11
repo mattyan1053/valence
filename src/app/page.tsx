@@ -17,7 +17,7 @@ import {
 } from "../composition/auth";
 import { SignOutButton, showsSignOut } from "../ui/auth/sign-out-button";
 import type { BallFilter } from "../ui/ball/ball-filter";
-import { ballFilterOf } from "../ui/ball/ball-filter";
+import { ballFilterOf, CROSS_BALL_FILTERS } from "../ui/ball/ball-filter";
 import { BoardFreshness } from "../ui/board/board-freshness";
 import type { CrossRepositoryRow } from "../ui/cross-repository/cross-repository-board";
 import { CrossRepositoryBoard } from "../ui/cross-repository/cross-repository-board";
@@ -168,7 +168,7 @@ export function renderHome(
   // **受ける値と出す選択肢を 1 つの並びから作る**（#663 / #672 の線）
   // ——**`?ball=` は誰でも好きな文字列を入れられる**ので、**並べたものだけを通す**
   // （**知らない値は「絞らない」へ落ちる**）
-  const ball = ballFilterOf(query?.ball);
+  const ball = ballFilterOf(query?.ball, CROSS_BALL_FILTERS);
   // **落ちどころを、サーバ側に残す**（#686 のレビュー）——**例外は既に catch 済み**で、
   // **通常のサーバログにも残らない。** **画面には出さない**（§6。**応答の中身が混ざりうる**）。
   // **判定は `unavailableReason` のまま 1 箇所**である（§5。#690 で `application` へ移した）
