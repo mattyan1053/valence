@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 import type { SuggestedReviewOrderProps } from "./suggested-review-order";
-import { reviewReasonNote, SuggestedReviewOrder } from "./suggested-review-order";
+import { groupByReason, reviewReasonNote, SuggestedReviewOrder } from "./suggested-review-order";
 
 function pullRequest(number: number, head: string): PullRequestRef {
   return {
@@ -54,11 +54,17 @@ function render(overrides: Partial<SuggestedReviewOrderProps> = {}): string {
   return renderToStaticMarkup(createElement(SuggestedReviewOrder, props(overrides)));
 }
 
-/** 一覧の中だけを見る。**見出しや注記に当てない。** */
+/**
+ * 一覧の中だけを見る。**見出しや注記に当てない。**
+ *
+ * **閉じは最後のものを取る** (#705 のレビュー)——**束の中も `<ol>` になった**ので、
+ * **最初の `</ol>` は内側のもの**である。**そこで切ると、2 つ目以降の束が
+ * 範囲から落ちる**（**束をまたぐ順の試験が、黙って 1 つ目だけを見る**）。
+ */
 function list(markup: string): string {
   const from = markup.indexOf("<ol");
   expect(from, "一覧が出ていない").toBeGreaterThanOrEqual(0);
-  const to = markup.indexOf("</ol>", from);
+  const to = markup.lastIndexOf("</ol>");
   expect(to, "一覧が閉じていない").toBeGreaterThan(from);
   return markup.slice(from, to);
 }
@@ -87,10 +93,17 @@ describe("推奨レビュー順", () => {
     // **並べ替えであって、絞り込みではない**——**材料が 1 件も無くても、行は残る**
     //
     // **`#1` を数えない**（`AGENTS.md` §4）——**タイトル（`#1 のタイトル`）にも
-    // 出るので、1 件あたり 2 回当たる。** **数えるのは行そのもの。**
+    // 出るので、1 件あたり 2 回当たる。**
+    //
+    // **`<li>` も数えない** (#704)。**理由で束ねたので、`<li>` は束のぶんも増える**
+    // ——**2 件が 1 つの束に入ると 3 つ**になる（**材料が無ければ理由は同じ**）。
+    // **数えるのは PR の行き先**——**1 件につき 1 回で、他には出ない。**
     const rows = list(render({ changes: new Map() }));
 
-    expect(rows.match(/<li/g), "行が 2 件ではない").toHaveLength(2);
+    expect(
+      rows.match(/href="https:\/\/github\.com\/o\/n\/pull\//g),
+      "行が 2 件ではない",
+    ).toHaveLength(2);
   });
 
   it("PR が 1 件も無ければ、何も出さない", () => {
@@ -105,5 +118,134 @@ describe("推奨レビュー順", () => {
     ).map(reviewReasonNote);
 
     expect(new Set(notes).size, "言い分けられていない").toBe(5);
+  });
+});
+
+/**
+ * **同じ理由を、行ごとに繰り返さない**（#704）。
+ *
+ * **数えた**（`./task board:sample` の 12 行）——**5 行が「いつもどおり読むものです」**、
+ * **4 行が「著者の手が要ります（…）」**。**12 行のうち 9 行が、2 つの文のどちらか**だった。
+ *
+ * **理由は消さない**（#632 の完了条件）——**束ねる。**
+ */
+describe("同じ理由を束ねる", () => {
+  /**
+   * **ふつうに読むもの**（`classifyRiskTier` の `normal`）。
+   *
+   * **既定の `change()` は `fast-track` になる**（**3 ファイル・50 行まで**）
+   * ——**理由を名指しする試験では、その理由になる材料を置く。**
+   */
+  const NORMAL: ChangeSummary = change({ changedFileCount: 5, changedLineCount: 200 });
+
+  /** **同じ理由になる PR を 3 本**（**材料が同じなら理由も同じ**）。 */
+  const THREE_SAME = {
+    pullRequests: [pullRequest(1, "a"), pullRequest(2, "b"), pullRequest(3, "c")],
+    order: { ordered: [1, 2, 3], cyclic: [] },
+    changes: new Map([
+      [1, NORMAL],
+      [2, NORMAL],
+      [3, NORMAL],
+    ]),
+  };
+
+  it("理由は 1 回だけ出る", () => {
+    // **「行の属性ではないもの」を行ごとに言わない**——**3 本で 3 回出ていた**
+    const html = render(THREE_SAME);
+    const note = reviewReasonNote("needs-review");
+
+    expect(html.split(note).length - 1, `理由が繰り返されている: ${note}`).toBe(1);
+  });
+
+  it("束ねても、PR は全部出る", () => {
+    const rows = list(render(THREE_SAME));
+
+    for (const number of ["#1", "#2", "#3"]) {
+      expect(rows, `${number} が消えている`).toContain(number);
+    }
+  });
+
+  it("理由が違えば、別々に出る", () => {
+    // **#632 の完了条件**——**なぜその順かが読めること**
+    const html = render({
+      changes: new Map([
+        [1, NORMAL],
+        [2, RISKY],
+      ]),
+    });
+
+    expect(html).toContain(reviewReasonNote("needs-review"));
+    expect(html).toContain(reviewReasonNote("high-risk"));
+  });
+
+  it("1 本だけでも破綻しない", () => {
+    const html = render({
+      pullRequests: [pullRequest(1, "a")],
+      order: { ordered: [1], cyclic: [] },
+      changes: new Map([[1, NORMAL]]),
+    });
+
+    expect(list(html), "行が出ていない").toContain("#1");
+    expect(html.split(reviewReasonNote("needs-review")).length - 1).toBe(1);
+  });
+
+  it("束の中も、順のある一覧である", () => {
+    // **束の中の並びにも意味がある** (#705 のレビュー)——**`suggestReviewOrder` が
+    // 依存の順をタイブレークにして決めている。** **`<ul>` にすると「順序なし」として
+    // 読み上げられる**ので、**見た目は同じでも、読み上げでは順が消える。**
+    //
+    // **数える**——**束が 1 つなら、外側 1 つ + 中 1 つ**である
+    const html = render(THREE_SAME);
+
+    expect(html.match(/<ol/g), "順のある一覧が 2 つではない").toHaveLength(2);
+    expect(html, "順序なしの一覧で束の中を出している").not.toContain("<ul");
+  });
+
+  it("束ねても、順は保たれる", () => {
+    // **推奨レビュー順は「順」が中身である**——**束ねて順が消えたら意味が無い**
+    const rows = list(
+      render({
+        pullRequests: [pullRequest(1, "a"), pullRequest(2, "b"), pullRequest(3, "c")],
+        order: { ordered: [1, 2, 3], cyclic: [] },
+        changes: new Map([
+          [1, NORMAL],
+          [2, RISKY],
+          [3, NORMAL],
+        ]),
+      }),
+    );
+
+    // **時間が要るもの（#2）が先**、**そのあと #1 → #3**（依存の順）
+    expect(rows.indexOf("#2")).toBeLessThan(rows.indexOf("#1"));
+    expect(rows.indexOf("#1")).toBeLessThan(rows.indexOf("#3"));
+  });
+});
+
+/**
+ * **束ね方そのものを見る**（#693 の形）。
+ *
+ * **画面越しには測れない**——**`suggestReviewOrder` が理由で並べ替えたあと**なので、
+ * **同じ理由が離れて出る入力は、この画面には来ない。** **「連なりだけを束ねる」と
+ * 「全部を集める」の差が、本物の材料からは出ない**ので、**束ね方を単体で見る。**
+ */
+describe("連なりを束ねる", () => {
+  it("続いているものだけを 1 つにする", () => {
+    const groups = groupByReason([
+      { number: 1, reason: "needs-review" },
+      { number: 2, reason: "needs-review" },
+      { number: 3, reason: "high-risk" },
+      { number: 4, reason: "needs-review" },
+    ]);
+
+    expect(groups.map((group) => group.reason)).toEqual([
+      "needs-review",
+      "high-risk",
+      "needs-review",
+    ]);
+    expect(groups.map((group) => group.numbers)).toEqual([[1, 2], [3], [4]]);
+  });
+
+  it("1 件も無ければ、束も無い", () => {
+    expect(groupByReason([])).toEqual([]);
   });
 });

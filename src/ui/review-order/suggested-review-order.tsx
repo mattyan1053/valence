@@ -15,7 +15,7 @@ import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
-import type { ReviewReason } from "../../domain/triage/review-priority";
+import type { ReviewReason, ReviewSuggestion } from "../../domain/triage/review-priority";
 import { suggestReviewOrder } from "../../domain/triage/review-priority";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
 
@@ -36,9 +36,48 @@ const REASON_TEXT: Record<ReviewReason, string> = {
   "needs-author": "著者の手が要ります（conflict・下書き・base の遅れ・CI）",
 };
 
-/** その行に出す 1 文。 */
+/** その束に出す 1 文。 */
 export function reviewReasonNote(reason: ReviewReason): string {
   return REASON_TEXT[reason];
+}
+
+/** 同じ理由で続いている PR のまとまり。 */
+export type ReviewReasonGroup = {
+  readonly reason: ReviewReason;
+  /** **並びは渡された順のまま**——**束ねるだけで、並べ替えない。** */
+  readonly numbers: readonly number[];
+};
+
+/**
+ * **同じ理由が続いているものを束ねる**（#704）。
+ *
+ * **数えた**（`./task board:sample` の 12 行）——**5 行が「いつもどおり読むものです」**、
+ * **4 行が「著者の手が要ります（…）」**。**12 行のうち 9 行が、2 つの文のどちらか**だった。
+ * **全行に同じ理由で出るなら、それは行の属性ではない。**
+ *
+ * **理由は消さない**（#632 の完了条件）——**束の側へ 1 回だけ出す。**
+ *
+ * **続いているものだけを束ねる。** **`suggestReviewOrder` は理由で並べ替えたあと**
+ * なので、**いまの材料では「離れて同じ理由」は来ない**——**それでも、離れていたら
+ * 別の束にする。** **並べ替えを 2 箇所に持たない**（**束ねる側が順を変えると、
+ * 推奨レビュー順の「順」が壊れる**）。
+ */
+export function groupByReason(
+  suggestions: readonly ReviewSuggestion[],
+): readonly ReviewReasonGroup[] {
+  const groups: ReviewReasonGroup[] = [];
+  for (const suggestion of suggestions) {
+    const last = groups[groups.length - 1];
+    if (last !== undefined && last.reason === suggestion.reason) {
+      groups[groups.length - 1] = {
+        reason: last.reason,
+        numbers: [...last.numbers, suggestion.number],
+      };
+      continue;
+    }
+    groups.push({ reason: suggestion.reason, numbers: [suggestion.number] });
+  }
+  return groups;
 }
 
 export type SuggestedReviewOrderProps = {
@@ -89,15 +128,26 @@ export function SuggestedReviewOrder({
       <p className="text-sm opacity-70">
         時間の使い方の目安です。マージできる順は、下の図と Merge ボタンが持っています。
       </p>
-      <ol className="flex flex-col gap-1">
-        {suggestions.map((suggestion) => (
-          <li className="flex flex-wrap items-baseline gap-2 text-sm" key={suggestion.number}>
-            {/* **番号とタイトルを 1 つのリンクにする**（#621 と同じ形） */}
-            <a className="font-mono font-bold underline" href={urlOf(suggestion.number)}>
-              #{suggestion.number}
-              {titleOf(suggestion.number) === undefined ? "" : ` ${titleOf(suggestion.number)}`}
-            </a>
-            <span className="opacity-70">{reviewReasonNote(suggestion.reason)}</span>
+      {/* **束が並びである**——**上から順に見る**（**束の中も、渡された順のまま**） */}
+      <ol className="flex flex-col gap-3">
+        {groupByReason(suggestions).map((group) => (
+          <li className="flex flex-col gap-1" key={`${group.reason}-${group.numbers[0]}`}>
+            {/* **理由は束に 1 回**（#704）。**消さない**——**#632 が要るとしている** */}
+            <p className="text-sm opacity-70">{reviewReasonNote(group.reason)}</p>
+            {/* **束の中も順のある一覧である** (#705 のレビュー)——**`suggestReviewOrder`
+                が依存の順をタイブレークにして決めている。** **`<ul>` にすると
+                「順序なし」として読み上げられ、見た目が同じまま順だけが消える** */}
+            <ol className="flex flex-col gap-1">
+              {group.numbers.map((number) => (
+                <li className="flex flex-wrap items-baseline gap-2 text-sm" key={number}>
+                  {/* **番号とタイトルを 1 つのリンクにする**（#621 と同じ形） */}
+                  <a className="font-mono font-bold underline" href={urlOf(number)}>
+                    #{number}
+                    {titleOf(number) === undefined ? "" : ` ${titleOf(number)}`}
+                  </a>
+                </li>
+              ))}
+            </ol>
           </li>
         ))}
       </ol>
