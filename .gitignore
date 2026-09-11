@@ -52,3 +52,4 @@ loop/STOP
 # Codex CLI のローカル状態。skills は共有したいので除外しない
 .codex/*
 !.codex/skills
+tmp/
