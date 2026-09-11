@@ -69,25 +69,6 @@ export function ballFilterLabel(ball: BallFilter): string {
 }
 
 /**
- * **URL の値を、絞り込みへ落とす。** **分からなければ絞らない。**
- *
- * **同じ鍵が 2 つ載っていたら絞らない**（配列で来る）——**片方を選ぶと、
- * URL と画面が食い違う。**
- */
-export function ballFilterOf(
-  value: string | readonly string[] | undefined,
-  /**
-   * **その画面が出している選択肢**（#694 のレビュー 2 周目）。
-   *
-   * **既定を置かない**——**置くと、画面が並びを狭めても URL からは広いまま通る**
-   * （**#663 が塞いだ「画面に無い絞りを URL で選べる」に戻る**）。
-   */
-  options: readonly BallFilter[],
-): BallFilter | undefined {
-  return options.find((ball) => ball === value);
-}
-
-/**
  * **いま絞っていることを言う 1 文。** **絞っていなければ `undefined`。**
  *
  * **隠した件数を必ず出す**（#663）——**絞られていることに気づけないと、

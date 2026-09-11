@@ -1,30 +1,27 @@
 import { describe, expect, it } from "vitest";
-import {
-  BALL_FILTERS,
-  ballFilterLabel,
-  ballFilterNote,
-  ballFilterOf,
-  CROSS_BALL_FILTERS,
-} from "./ball-filter";
+import { BALL_FILTERS, ballFilterLabel, ballFilterNote, CROSS_BALL_FILTERS } from "./ball-filter";
 
 describe("誰の番かで絞る口", () => {
   it("並べたものだけを通す", () => {
     // **`?ball=` は URL に載っている**ので、**誰でも好きな文字列を入れられる**
     // （`approveNoticeKind` と同じ判断。#330）
-    expect(ballFilterOf("author", BALL_FILTERS)).toBe("author");
-    expect(ballFilterOf("いたずら", BALL_FILTERS), "並べていない値を通している").toBeUndefined();
+    // **受ける口は `src/app/query-input.ts` にある**（#696）——**ここが持つのは並びだけ**
+    expect(BALL_FILTERS).toContain("author");
+    expect(BALL_FILTERS, "並べていない値が入っている").not.toContain("いたずら");
   });
 
   it("出していない選択肢は受けない", () => {
     // **受ける値と、出す選択肢を 1 つの並びから作る** (#663)——**離すと、
     // 出していないものを URL で選べる**（**その逆も起きる**）
-    expect(ballFilterOf("unknown", BALL_FILTERS), "画面に無い絞りを受けている").toBeUndefined();
+    expect(BALL_FILTERS, "画面に出せない絞りが並んでいる").not.toContain("unknown");
   });
 
   it("同じ鍵が 2 つ載っていたら、絞らない", () => {
     // **`?ball=author&ball=merger` は配列で来る**——**片方を選ぶと、
     // URL と画面が食い違う**
-    expect(ballFilterOf(["author", "merger"], BALL_FILTERS)).toBeUndefined();
+    // **同じ鍵が 2 つ載っていたら通さない**のは受け口の仕事である
+    // （`allowedValueFrom`。`src/app/query-input.test.ts` が見ている）
+    expect(BALL_FILTERS.length, "選択肢が 1 つも無い").toBeGreaterThan(1);
   });
 
   it("絞っていなければ、何も言わない", () => {
@@ -109,10 +106,7 @@ describe("画面ごとの並び", () => {
   });
 
   it("その画面に無い絞りは、URL からも受けない", () => {
-    expect(ballFilterOf("merger", BALL_FILTERS), "盤面が受けられない").toBe("merger");
-    expect(
-      ballFilterOf("merger", CROSS_BALL_FILTERS),
-      "画面に出していない絞りを URL で選べる",
-    ).toBeUndefined();
+    expect(BALL_FILTERS, "盤面の並びから消えている").toContain("merger");
+    expect(CROSS_BALL_FILTERS, "横断の並びに残っている").not.toContain("merger");
   });
 });

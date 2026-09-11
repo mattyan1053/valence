@@ -11,40 +11,17 @@
  * 伝わること**が、この Issue の完了条件のひとつである。
  */
 
-import { z } from "zod";
 import type { ApprovePullRequestResult } from "../../../../../application/review-order/approve-pull-request";
 import {
   approvePullRequestForCurrentUser,
   reportBoardActionUnavailable,
 } from "../../../../../composition/auth";
 import type { ApproveNoticeKind } from "../../../../../ui/approve/approve-button";
+import { submittedPullRequestNumberFrom } from "../../../../query-input";
 import { boardRedirect, submittedBallFilter } from "../board-redirect";
 
 /**
- * 送られてきた PR 番号。**境界なので Zod で検証する**（`AGENTS.md` §3。#342 のレビュー）。
- *
- * **自前の正規表現と `Number()` で書き直さない。** **いま同じ制約を満たせていても、
- * 境界ごとに別のものが育つ**——**#342 は「同じ規則を 2 箇所に置かない」を
- * 自己承認の側では守っておきながら、ここで踏んでいた。**
- *
- * **フォームから来る値は文字列である。** **`Number()` に通しただけで使わない**
- * ——**`""` は `0` に、空白は無視され**、**どの PR とも違う相手へ要求が出る。**
- *
- * **1 以上・安全に扱える整数だけを通す**（**PR 番号がそれ以外になることは無い**）。
  */
-const pullRequestNumberSchema = z
-  .string()
-  .trim()
-  // **形で確かめてから数にする**——**`Number()` は `1e3` も `0x2a` も受ける**ので、
-  // **通してよいものを並べる側で決める**（#90 と同じ形）
-  .regex(/^[0-9]+$/)
-  .transform(Number)
-  .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER));
-
-export function pullRequestNumberFrom(value: unknown): number | undefined {
-  const parsed = pullRequestNumberSchema.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
-}
 
 /**
  * 結果を、画面が出せる語彙へ寄せる。
@@ -123,7 +100,7 @@ export async function respondToApprove(
   deps: ApproveDeps,
 ): Promise<Response> {
   const form = await request.formData().catch(() => undefined);
-  const number = pullRequestNumberFrom(form?.get("number"));
+  const number = submittedPullRequestNumberFrom(form?.get("number"));
   // **絞ったまま押せるようにする**（#667）——**押した人は絞った一覧に居る**ので、
   // **理由を出す先も、次に押す先も、そこである**
   const ball = submittedBallFilter(form);

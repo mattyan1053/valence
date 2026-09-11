@@ -24,8 +24,9 @@
 
 import { NextResponse } from "next/server";
 import type { BallFilter } from "../../../../ui/ball/ball-filter";
-import { BALL_FILTERS, ballFilterOf } from "../../../../ui/ball/ball-filter";
+import { BALL_FILTERS } from "../../../../ui/ball/ball-filter";
 import { openedOrigin } from "../../../auth/urls";
+import { allowedValueFrom } from "../../../query-input";
 
 /**
  * 盤面に載せる注記。**押せなかった理由**である。
@@ -55,14 +56,14 @@ export type BoardNotice = {
  * 画面に出していない絞りを URL 経由で選べる**（**その逆も起きる**）。
  * **通してよいものは `BALL_FILTERS` が並べている**——**判定を写さない。**
  *
- * **同じ鍵が 2 つ載っていたら絞らない**（`ballFilterOf` と同じ判断）
+ * **同じ鍵が 2 つ載っていたら絞らない**（`allowedValueFrom` と同じ判断）
  * ——**片方を選ぶと、URL と画面が食い違う。**
  */
 export function submittedBallFilter(form: FormData | undefined): BallFilter | undefined {
   const values = (form?.getAll("ball") ?? []).filter(
     (value): value is string => typeof value === "string",
   );
-  return values.length === 1 ? ballFilterOf(values[0], BALL_FILTERS) : undefined;
+  return values.length === 1 ? allowedValueFrom(values[0], BALL_FILTERS) : undefined;
 }
 
 export function boardRedirect(

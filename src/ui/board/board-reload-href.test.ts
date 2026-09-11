@@ -36,7 +36,7 @@ describe("引き直す先を組む", () => {
   });
 
   it("同じ鍵が 2 つ載っていたら、その鍵は持ち越さない", () => {
-    // **どちらを選んでも、URL と画面が食い違う**（`ballFilterOf` と同じ判断）
+    // **どちらを選んでも、URL と画面が食い違う**（`allowedValueFrom` と同じ判断）
     expect(boardReloadHref({ ball: ["author", "merger"] }, OUTCOMES)).toBe("?");
   });
 

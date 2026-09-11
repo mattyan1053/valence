@@ -17,25 +17,11 @@ import {
   reportBoardActionUnavailable,
 } from "../../../../../composition/auth";
 import type { MergeNoticeKind } from "../../../../../ui/merge/merge-button";
+import { submittedPullRequestNumberFrom } from "../../../../query-input";
 import { boardRedirect, submittedBallFilter } from "../board-redirect";
 
 /**
- * 送られてきた PR 番号。**境界なので Zod で検証する**（§3。#342 のレビュー）。
- *
- * **`Number()` は `1e3` / `0x2a` / `Infinity` を受ける**ので、
- * **形（`regex`）で絞ってから数にする**（#90 と同じ形）。
  */
-const pullRequestNumberSchema = z
-  .string()
-  .trim()
-  .regex(/^[0-9]+$/)
-  .transform(Number)
-  .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER));
-
-export function pullRequestNumberFrom(value: unknown): number | undefined {
-  const parsed = pullRequestNumberSchema.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
-}
 
 /**
  * 送られてきた head の commit（#331 のレビュー）。**境界なので Zod で検証する**。
@@ -132,7 +118,7 @@ export async function respondToMerge(
   deps: MergeDeps,
 ): Promise<Response> {
   const form = await request.formData().catch(() => undefined);
-  const number = pullRequestNumberFrom(form?.get("number"));
+  const number = submittedPullRequestNumberFrom(form?.get("number"));
   const headSha = headShaFrom(form?.get("sha"));
   // **絞ったまま押せるようにする**（#667）
   const ball = submittedBallFilter(form);

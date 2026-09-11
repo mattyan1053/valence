@@ -7,13 +7,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { boardRedirect } from "../board-redirect";
-import {
-  headShaFrom,
-  mergeOutcomeParam,
-  mergeUnavailableReason,
-  pullRequestNumberFrom,
-  respondToMerge,
-} from "./route";
+import { headShaFrom, mergeOutcomeParam, mergeUnavailableReason, respondToMerge } from "./route";
 
 /**
  * **戻り先は、開いたオリジンから組む** (#506)——**`Host` が許可一覧に載っている
@@ -33,24 +27,6 @@ afterAll(() => {
   } else {
     process.env[SUPPLIED] = suppliedBefore;
   }
-});
-
-describe("送られてきた PR 番号を読む", () => {
-  it("数として読めるものだけを通す", () => {
-    expect(pullRequestNumberFrom("42")).toBe(42);
-    expect(pullRequestNumberFrom(" 42 ")).toBe(42);
-  });
-
-  it("数でないもの・整数でないもの・負のものを通さない", () => {
-    for (const value of ["", "abc", "4 2", "0", "-1", "1.5", "1e3", "0x2a", null, undefined]) {
-      expect(pullRequestNumberFrom(value), String(value)).toBeUndefined();
-    }
-  });
-
-  it("安全に扱えない大きさは通さない", () => {
-    // **`Number` にすると丸まる**——**違う PR をマージすることになる**
-    expect(pullRequestNumberFrom("9007199254740993")).toBeUndefined();
-  });
 });
 
 describe("結果を、押した人へ返す形にする", () => {
