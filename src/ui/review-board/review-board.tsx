@@ -27,6 +27,7 @@ import { classifyRiskTier } from "../../domain/triage/risk-tier";
 import { titleOverlapsFor } from "../../domain/triage/title-overlap";
 import { assignmentNote } from "../assignment/assignment-note";
 import type { BallFilter } from "../ball/ball-filter";
+import { BALL_FILTERS } from "../ball/ball-filter";
 import { BallFilterView } from "../ball/ball-filter-view";
 import { ballNote } from "../ball/ball-note";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
@@ -273,7 +274,25 @@ export function ReviewBoard({
       {/* **絞る口は、一覧の手前に置く**——**何が出ているかの断りでもある** */}
       <BallFilterView
         current={ballFilter}
-        counts={{ shown: filtered.shown.length, hidden: filtered.hidden }}
+        counts={{
+          shown: filtered.shown.length,
+          hidden: filtered.hidden,
+          // **判定できなかった PR を数える**（#694 のレビュー）。**2 つある。**
+          //
+          // **1. 一覧に並んでいないもの**（#107 の `invalid`）。
+          // **2. 並んでいるが「分からない」に倒れたもの**（**レビュー 2 周目**）
+          // ——**`opinion` か `assignment` を読めなかった行**は `unknown` になる
+          // （`ballOf`）。**本当はその番だったかもしれない。**
+          //
+          // **横断の盤面と同じ穴**である——**片方だけ直さない**（§5）
+          undecided:
+            invalid.length +
+            // **「分からない」は選択肢に無い**（`BALL_FILTERS`）ので、**`unknown` の行は
+            // 必ず隠れる側**である——**型がそれを言っている**（**`BallFilter` に
+            // `unknown` は入らない**）
+            balls.filter((one) => one.ball === "unknown").length,
+        }}
+        options={BALL_FILTERS}
       />
       <DependencyGraphView
         pullRequests={pullRequests}

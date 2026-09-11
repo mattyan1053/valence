@@ -24,7 +24,7 @@
 
 import { NextResponse } from "next/server";
 import type { BallFilter } from "../../../../ui/ball/ball-filter";
-import { ballFilterOf } from "../../../../ui/ball/ball-filter";
+import { BALL_FILTERS, ballFilterOf } from "../../../../ui/ball/ball-filter";
 import { openedOrigin } from "../../../auth/urls";
 
 /**
@@ -62,7 +62,7 @@ export function submittedBallFilter(form: FormData | undefined): BallFilter | un
   const values = (form?.getAll("ball") ?? []).filter(
     (value): value is string => typeof value === "string",
   );
-  return values.length === 1 ? ballFilterOf(values[0]) : undefined;
+  return values.length === 1 ? ballFilterOf(values[0], BALL_FILTERS) : undefined;
 }
 
 export function boardRedirect(
