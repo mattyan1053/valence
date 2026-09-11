@@ -9,32 +9,36 @@
  * 作るところまで**である。**当否を言うのは人**であって、この試験ではない。
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { renderBoardSample } from "./render";
+import { classesIn, outputPath, renderBoardSample, selectorFor } from "./render";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
-/** **書き出す先。** **`tmp/` は git が見ない**（`.gitignore`）。 */
-const OUT = join(REPO_ROOT, "tmp/board-sample.html");
+
+/**
+ * **書き出す先。** **頼まれたときだけ書く**（`./task board:sample` が渡す）。
+ *
+ * **黙って作業ツリーへ置かない** (#688 の実装で踏んだ)。**`./task check` が
+ * 毎回ここを走る**ので、**置くと木が dirty になり**、**次の周回の冒頭が
+ * `bin/loop-stall dirty` で止まる**——**3 周で `loop/STOP` が配られ、
+ * 全ループが止まる。** **`.gitignore` は枝にしか無い**（**入るまで効かない**）
+ * ので、**「無視されるから大丈夫」は、マージされるまで嘘**である（`AGENTS.md` §5）。
+ *
+ * **確かめるほうは、頼まれなくても毎回走る**——**材料が壊れたことには気づける。**
+ */
+const OUT = outputPath(process.env);
 
 let html = "";
 
 beforeAll(async () => {
   html = await renderBoardSample();
-  mkdirSync(dirname(OUT), { recursive: true });
-  writeFileSync(OUT, html, "utf8");
+  if (OUT !== undefined) {
+    mkdirSync(dirname(OUT), { recursive: true });
+    writeFileSync(OUT, html, "utf8");
+  }
 }, 60_000);
-
-/** **依存の一覧の中だけ**（**先頭の `<ol>` は推奨レビュー順**。`AGENTS.md` §4）。 */
-function dependencyList(markup: string): string {
-  const heading = markup.indexOf("PR の依存");
-  expect(heading, "依存の見出しが出ていない").toBeGreaterThanOrEqual(0);
-  const from = markup.indexOf("<ol", heading);
-  expect(from, "依存の一覧が出ていない").toBeGreaterThanOrEqual(0);
-  return markup.slice(from, markup.indexOf("</ol>", from));
-}
 
 describe("判定用の盤面", () => {
   it("10 本以上が並んでいる", () => {
@@ -53,8 +57,19 @@ describe("判定用の盤面", () => {
     // **fixture が本物より狭くならないようにする**（#673 で踏んだ形）。
     // **揃っているものだけを並べると、いちばん読みにくい画面が出てこない**
     // ——**判定したいのは、まさにそこ**である。
-    expect(html, "読めなかった PR が出ていない").toContain("読めなかった");
-    expect(html, "時間内に返らなかった変更が出ていない").toContain("時間内に返りませんでした");
+    //
+    // **「読めなかった」で見ない** (#688 のレビュー 2 周目)。**その語を持つ行は 5 つある**
+    // （**読めなかった PR / 図に出ていないもの / 読めなかった issue / 振り先を読めなかった
+    // issue / 振り先を読めなかった PR**）——**どれも別のもの**で、**材料の行を消しても
+    // 別の行に当たって緑のまま**だった。**出る文言そのもの**（`changeUnavailableNote`）
+    // **で見る**（**数えた。どれも 1 行ずつ**）。
+    expect(html, "切れた材料の行が出ていない").toContain(
+      "リスク判定の材料が、時間内に返りませんでした",
+    );
+    expect(html, "読めなかった材料の行が出ていない").toContain(
+      "リスク判定の材料を読めませんでした",
+    );
+    expect(html, "読めなかった PR の断りが出ていない").toContain("読めなかった PR が");
     // **理由そのものは画面へ出さない**（`approvalDisplay` の但し書き。**値が入りうる**）
     // ——**出るのは札のほう**である
     expect(html, "承認の有無を読めなかった PR が出ていない").toContain(
@@ -71,18 +86,36 @@ describe("判定用の盤面", () => {
     expect(html, "作りものの置き場所が出ていない").toContain("sample-org/sample-repo");
   });
 
-  it("CSS が焼き込まれていて、描いた class に当たっている", () => {
-    // **開けば見られる**こと。**サーバもログインも要らない**のが、この材料の要点である。
-    // **描いていない class の有無では見ない**——**`<style>` が在るだけなら空でも通る。**
+  it("描いた class が、1 つ残らず CSS に入っている", () => {
+    // **1 つ目だけを見ない** (#688 のレビュー 2 周目)。**先頭は `flex` のような
+    // 素直な class** なので、**`[&_button]:min-w-24` や `bg-[var(--node-fill)]` が
+    // 落ちても緑**だった——**実際に落ちていた**（**React が属性値を escape するので
+    // `&amp;` のまま Tailwind へ渡り、規則が 1 つも出なかった**）。
+    //
+    // **見た目を目で判定するための材料**なので、**一部だけ素のままでも気づけないなら、
+    // 材料として足りていない。**
     const style = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
-    const used =
-      dependencyList(html)
-        .match(/class="([^"]*)"/)?.[1]
-        ?.split(/\s+/) ?? [];
-    const first = used.find((one) => /^[a-z-]+$/.test(one));
+    const used = classesIn(html);
+    const missing = used.filter((one) => !style.includes(selectorFor(one)));
 
-    expect(first, "一覧に class が付いていない").toBeDefined();
-    expect(style, `描いた class の規則が入っていない: ${first}`).toContain(`.${first}`);
+    expect(used.length, "class が集まっていない").toBeGreaterThan(20);
+    expect(missing, `規則の無い class がある: ${missing.join(" ")}`).toEqual([]);
+  });
+
+  it("頼まれていなければ、作業ツリーへ置かない", () => {
+    // **これを落とすと、ループが止まる** (#688 の実装で踏んだ)。**`./task check` が
+    // 毎回この試験を走らせる**ので、**既定で書くと木が dirty になり**、**次の周回の
+    // 冒頭が `bin/loop-stall dirty` で止まる**——**3 周で `loop/STOP`** である。
+    expect(outputPath({}), "頼まれていないのに書き出す先がある").toBeUndefined();
+    expect(outputPath({ BOARD_SAMPLE_OUT: "" }), "空の指定で書きに行く").toBeUndefined();
+    expect(outputPath({ BOARD_SAMPLE_OUT: "tmp/x.html" })).toBe("tmp/x.html");
+  });
+
+  it("`./task board:sample` が、書き出す先を渡している", () => {
+    // **渡す側が消えると、コマンドが何も出さなくなる**——**試験は緑のまま**である
+    // （**書かない側が既定**なので）。**渡している行を名指しで見る**
+    // （`AGENTS.md` §4。**この語を持つ行は `task` に 1 行しか無い**）。
+    expect(readFileSync(join(REPO_ROOT, "task"), "utf8")).toContain("BOARD_SAMPLE_OUT=");
   });
 
   it("盤面の色が、明と暗の両方で定義されている", () => {

@@ -645,7 +645,18 @@ cmd_test() { ensure_up; exec_app pnpm test "$@"; }
 #
 # **説明は関数の直前の 1 行が拾われる**（`cmd_help` の awk）——**上の理由は出ない。**
 # 判定用の盤面を、作った材料で 1 枚の HTML に書き出す 例: ./task board:sample
-cmd_board_sample() { ensure_up; exec_app pnpm test test/board-sample; }
+cmd_board_sample() {
+  ensure_up
+  # **書き出す先は、ここで渡す** (#688 の実装で踏んだ)。**渡さなければ書かない**
+  # ——**`./task check` も同じ試験を走らせる**ので、**既定で書くと毎回木が dirty になり**、
+  # **次の周回の冒頭が `bin/loop-stall dirty` で止まる**（**3 周で `loop/STOP`**）。
+  #
+  # **置き先を変えられるようにしておく**——**`.gitignore` が効くのは `tmp/` だけ**なので、
+  # **別の場所へ出したいときは、木の外を渡す。**
+  local out="${1:-tmp/board-sample.html}"
+  exec_app_env "BOARD_SAMPLE_OUT=$out" -- pnpm test test/board-sample
+  echo "書き出しました: $out"
+}
 
 # テストを watch モードで実行する
 cmd_test_watch() { ensure_up; exec_app_it pnpm test:watch; }

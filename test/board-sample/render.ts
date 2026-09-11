@@ -41,11 +41,18 @@ async function loadStylesheet(id: string, base: string) {
   return { base: dirname(path), content: await readFile(path, "utf8"), path };
 }
 
-/** **markup に出てくる class を、全部集める。** */
-function classesIn(markup: string): string[] {
+/**
+ * **markup に出てくる class を、全部集める。**
+ *
+ * **実体参照を戻す** (#688 のレビュー 2 周目)。**React は属性値を escape する**ので、
+ * **`[&_button]:min-w-24` は `[&amp;_button]:min-w-24` として出てくる**——
+ * **そのまま渡すと Tailwind が読めず、規則が 1 つも出ない。** **実際に落ちていた**
+ * （**この class だけ素のまま描かれていた**）。
+ */
+export function classesIn(markup: string): string[] {
   const found = new Set<string>();
   for (const [, value] of markup.matchAll(/class="([^"]*)"/g)) {
-    for (const one of (value ?? "").split(/\s+/)) {
+    for (const one of decode(value ?? "").split(/\s+/)) {
       if (one !== "") {
         found.add(one);
       }
@@ -54,13 +61,54 @@ function classesIn(markup: string): string[] {
   return [...found];
 }
 
+/** **属性値の実体参照を戻す。** **`&amp;` は最後に戻す**——**先に戻すと二重に解ける。** */
+function decode(value: string): string {
+  return value
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#x27;", "'")
+    .replaceAll("&amp;", "&");
+}
+
+/**
+ * **その class の規則を指す selector。**
+ *
+ * **英数字と `-` `_` 以外は、backslash で逃がす**（Tailwind が出す形）。
+ * 例: `bg-[var(--node-fill)]` → `.bg-\[var\(--node-fill\)\]`
+ */
+export function selectorFor(className: string): string {
+  return `.${className.replaceAll(/[^A-Za-z0-9_-]/g, (one) => `\\${one}`)}`;
+}
+
 async function styleFor(markup: string): Promise<string> {
   const source = await readFile(resolve(REPO_ROOT, "src/app/globals.css"), "utf8");
   const compiled = await compile(source, { base: resolve(REPO_ROOT, "src/app"), loadStylesheet });
   return compiled.build(classesIn(markup));
 }
 
-/** **判定用の 1 枚。** **開けば見られる**——**サーバもログインも要らない。** */
+/**
+ * **書き出す先。** **頼まれていなければ書かない**——**`undefined` を返す。**
+ *
+ * **黙って作業ツリーへ置かない** (#688 の実装で踏んだ)。**`./task check` も
+ * 同じ試験を走らせる**ので、**既定で書くと毎回木が dirty になり**、**次の周回の
+ * 冒頭が `bin/loop-stall dirty` で止まる**（**3 周で `loop/STOP` が配られ、
+ * 全ループが止まる**）。**`.gitignore` は枝にしか無い**ので、**「無視されるから
+ * 大丈夫」は、マージされるまで嘘**である（`AGENTS.md` §5）。
+ */
+export function outputPath(env: Record<string, string | undefined>): string | undefined {
+  const out = env.BOARD_SAMPLE_OUT;
+  return out === undefined || out === "" ? undefined : out;
+}
+
+/**
+ * **判定用の 1 枚。** **開けば見られる**——**サーバもログインも要らない。**
+ *
+ * **CSS は、組み上がった 1 枚を材料に組む** (#688 のレビュー 2 周目)。**盤面の
+ * markup だけを見ない**——**器（`<body>`）に付けた class が材料に入らず、
+ * **規則の無いまま出ていた**（**`bg-background` / `text-foreground`**）。
+ * **出すものと数えるものを、同じにする。**
+ */
 export async function renderBoardSample(): Promise<string> {
   const markup = renderToStaticMarkup(
     await renderRepositoryBoard(
@@ -73,20 +121,21 @@ export async function renderBoardSample(): Promise<string> {
       },
     ),
   );
-  const style = await styleFor(markup);
-  return [
-    "<!doctype html>",
-    '<html lang="ja">',
-    "<head>",
-    '<meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    "<title>盤面の見本（作った材料・#687）</title>",
-    `<style>${style}</style>`,
-    "</head>",
-    '<body class="bg-background text-foreground">',
-    markup,
-    "</body>",
-    "</html>",
-    "",
-  ].join("\n");
+  const page = (style: string) =>
+    [
+      "<!doctype html>",
+      '<html lang="ja">',
+      "<head>",
+      '<meta charset="utf-8">',
+      '<meta name="viewport" content="width=device-width, initial-scale=1">',
+      "<title>盤面の見本（作った材料・#687）</title>",
+      `<style>${style}</style>`,
+      "</head>",
+      '<body class="bg-background text-foreground">',
+      markup,
+      "</body>",
+      "</html>",
+      "",
+    ].join("\n");
+  return page(await styleFor(page("")));
 }
