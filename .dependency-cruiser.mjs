@@ -104,7 +104,11 @@ export default {
         "塞いでいるのは入口 (page/route) の import だけである。ルート同士で入口以外の " +
         "モジュールを共有する形は、この規則では落ちない——まだ踏んでいない (§5)。",
       from: { path: "^src/", pathNot: TEST_FILE },
-      to: { path: "^src/app/[^?]*(page|route)\\.tsx?$" },
+      // **basename を完全一致で見る** (#691 のレビュー)。**`[^?]*(page|route)` だと
+      // `candidate-route.ts` のような普通のモジュールにも当たる**——**規則の文言と、
+      // 実際に落ちるものが食い違う。** **`/` を挟む形と、ルート直下の形を並べる**
+      // （**`(.*/)?` と書くと dependency-cruiser が「unsafe」で止める**）
+      to: { path: "^src/app/[^?]*/(page|route)\\.tsx?$|^src/app/(page|route)\\.tsx?$" },
     },
     {
       name: "adapters-are-wired-only-in-composition",
