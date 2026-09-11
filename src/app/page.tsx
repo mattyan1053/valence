@@ -9,12 +9,17 @@
 
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
 import type { CrossRepositoryBoardResult } from "../application/review-order/view-cross-repository-board";
-import { homeForCurrentUser, pullRequestPageUrl } from "../composition/auth";
+import {
+  homeForCurrentUser,
+  pullRequestPageUrl,
+  reportBoardActionUnavailable,
+} from "../composition/auth";
 import { SignOutButton, showsSignOut } from "../ui/auth/sign-out-button";
 import { BoardFreshness } from "../ui/board/board-freshness";
 import type { CrossRepositoryRow } from "../ui/cross-repository/cross-repository-board";
 import { CrossRepositoryBoard } from "../ui/cross-repository/cross-repository-board";
 import { RepositoryList } from "../ui/repository-list/repository-list";
+import { boardUnavailableReason } from "./repos/[owner]/[name]/page";
 
 /**
  * **要求ごとに描く。静的に生成させない** (#213 のレビュー)。
@@ -98,6 +103,17 @@ export function crossRepositoryUnavailable(result: CrossRepositoryBoardResult) {
  * **渡されなければ、これまでどおりの画面である**——**足すだけ**にしてある。
  * **引けなかったときは、黙って空を出さない**（**故障が「open PR が 0 本」に化ける**）。
  */
+/**
+ * **落ちどころを、サーバ側に残す口**（#686 のレビュー）。
+ *
+ * **受け口を引数で渡す**——**画面から直に呼ぶと composition が本物を掴む**ので、
+ * **「記録の口を呼んでいること」を試験から見られない**（**リポジトリ別の盤面と
+ * 同じ形**。#513 のレビュー）。
+ */
+export type HomeDeps = {
+  readonly report: (action: "home", kind: string) => void;
+};
+
 function CrossRepositorySection({
   result,
   at,
@@ -131,7 +147,16 @@ export function renderHome(
   result: VisibleRepositoriesResult,
   cross?: CrossRepositoryBoardResult,
   at?: Date,
+  deps?: HomeDeps,
 ) {
+  // **落ちどころを、サーバ側に残す**（#686 のレビュー）——**例外は既に catch 済み**で、
+  // **通常のサーバログにも残らない。** **画面には出さない**（§6。**応答の中身が混ざりうる**）。
+  // **判定は `boardUnavailableReason` のまま 1 箇所**である（§5）
+  const unavailable = cross === undefined ? undefined : boardUnavailableReason(cross);
+  if (unavailable !== undefined) {
+    deps?.report("home", unavailable);
+  }
+
   return (
     <main className="mx-auto flex max-w-2xl flex-1 flex-col justify-center gap-4 px-6 py-16">
       <div className="flex items-center justify-between gap-4">
@@ -179,5 +204,5 @@ export default async function Home() {
   // **見えるリポジトリは 1 度だけ引く**（#686 のレビュー）——**2 つを別々に呼ぶと、
   // 同じ `/user/repos` が二重になる**
   const { repositories, cross } = await homeForCurrentUser();
-  return renderHome(repositories, cross, at);
+  return renderHome(repositories, cross, at, { report: reportBoardActionUnavailable });
 }

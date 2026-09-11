@@ -195,6 +195,48 @@ describe("入口の画面に、横断の一覧が出る", () => {
     expect(html).toContain("2026-09-11T01:02:03Z");
   });
 
+  it("引けなかった理由を、記録の側へ残す", () => {
+    // **例外は既に catch 済み**なので、**通常のサーバログにも残らない**（#686 のレビュー）
+    // ——**`store` / `token` / `pull-requests/timedout` のどこで落ちたかが分からない。**
+    // **リポジトリ別の盤面と同じ形**（#506 の 2）
+    const recorded: string[] = [];
+
+    renderToStaticMarkup(
+      renderHome(LISTED, { kind: "unavailable", reason: "pull-requests/timedout" }, undefined, {
+        report: (action, kind) => recorded.push(`${action}=${kind}`),
+      }),
+    );
+
+    expect(recorded).toEqual(["home=unavailable/pull-requests/timedout"]);
+  });
+
+  it("落ちどころを、画面には出さない", () => {
+    // **応答の中身が混ざりうる**（§6）——**記録の側にだけ残す**
+    const html = markup({ kind: "unavailable", reason: "pull-requests/timedout" });
+
+    expect(html).not.toContain("timedout");
+  });
+
+  it("引けたときは、何も残さない", () => {
+    // **毎回鳴る記録は、そのうち読まれなくなる**（#248）
+    const recorded: string[] = [];
+
+    renderToStaticMarkup(
+      renderHome(
+        LISTED,
+        {
+          kind: "board",
+          listing: { pullRequests: [], unavailable: [], invalid: [] },
+          unreadableRepositories: 0,
+        },
+        undefined,
+        { report: (action, kind) => recorded.push(`${action}=${kind}`) },
+      ),
+    );
+
+    expect(recorded).toEqual([]);
+  });
+
   it("引けなかったことを、「1 本も無い」にしない", () => {
     // **黙って空を出すと、故障が「open PR が 0 本」に化ける**
     const html = markup({ kind: "unavailable", reason: "pull-requests/Error" });

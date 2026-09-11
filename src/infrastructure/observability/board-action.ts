@@ -23,8 +23,12 @@
  *
  * **`merge-plan` は `merge` と分ける**（#661）——**1 本ずつ押した失敗と、
  * まとめて流して止まった失敗は、読む側が次にすることが違う。**
+ *
+ * **`home` は `view` と分ける**（#686 のレビュー）——**あちらは「どのリポジトリの
+ * 盤面で落ちたか」**で、**こちらは「横断の一覧が引けなかった」**である。
+ * **読む側が次に見に行く先が違う。**
  */
-export type BoardAction = "approve" | "merge" | "merge-plan" | "view";
+export type BoardAction = "approve" | "home" | "merge" | "merge-plan" | "view";
 
 /**
  * 押せなかった理由を 1 行残す。
