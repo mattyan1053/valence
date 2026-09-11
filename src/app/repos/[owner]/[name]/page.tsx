@@ -9,6 +9,7 @@
  */
 
 import { notFound } from "next/navigation";
+import { unavailableReason } from "../../../../application/observability/unavailable-reason";
 import type { IssueListing } from "../../../../application/ports/issue-source";
 import type { PullRequestApprovalListing } from "../../../../application/ports/pull-request-approvals";
 import type {
@@ -158,25 +159,6 @@ export function mergeButtonBlock(block: MergeBlock): {
 }
 
 /**
- * **盤面を出せなかった理由** (#513 のレビュー)。
- *
- * **押した経路と同じものが、見に来た経路にもある**——**`store` / `list` /
- * `token` / `board` で落ちると、画面には「いま見られません」しか出ない**（§6）
- * ので、**サーバ側に残さないと、どこで落ちたかが消える。**
- *
- * **画面に出す語（`notice`）は変えない。** **残すのは記録だけ**である。
- */
-export function boardUnavailableReason(result: {
-  readonly kind: string;
-  readonly reason?: string;
-}): string | undefined {
-  if (result.kind !== "unavailable") {
-    return undefined;
-  }
-  return result.reason === undefined ? result.kind : `${result.kind}/${result.reason}`;
-}
-
-/**
  * **盤面を組み立てるまで** (#519)。
  *
  * **受け口を引数で渡す**——**画面から呼ぶと composition が本物を掴む**ので、
@@ -184,7 +166,7 @@ export function boardUnavailableReason(result: {
  * 1 度戻し、そのときは見送った穴**——**呼び出しを消しても部品の試験は緑だった**）。
  * **モックは使わない**（`AGENTS.md` §4）——**インメモリの実装を渡す形にする。**
  *
- * **判定は `boardUnavailableReason` のまま 1 箇所である**（§5）。
+ * **判定は `unavailableReason` のまま 1 箇所である**（§5。#690 で `application` へ移した）。
  */
 /**
  * issue の一覧を、画面へ渡せる形にする（#633）。
@@ -334,7 +316,7 @@ export async function renderRepositoryBoard(
   const at = now();
   const result = await deps.board({ owner, name });
   // **落ちどころを、サーバ側に残す** (#513 のレビュー)——**押した経路と同じ**
-  const unavailable = boardUnavailableReason(result);
+  const unavailable = unavailableReason(result);
   if (unavailable !== undefined) {
     deps.report("view", unavailable);
   }

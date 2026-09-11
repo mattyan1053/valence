@@ -24,7 +24,6 @@ import {
   approvalDisplay,
   approveNoticeKind,
   boardNotices,
-  boardUnavailableReason,
   dynamic,
   issueBoardProps,
   mergeButtonBlock,
@@ -181,40 +180,14 @@ describe("依存の判定を、ボタンへ詰め替える", () => {
   });
 });
 
-describe("盤面を出せなかった理由を、サーバ側へ残す（#513 のレビュー）", () => {
-  // **押した経路と同じものが、見に来た経路にもある**——**GET で落ちても、
-  // 画面には「いま見られません」しか出ない**（§6）ので、**記録が要る。**
-
-  it("落ちどころまで残す", () => {
-    expect(boardUnavailableReason({ kind: "unavailable", reason: "store/Error" })).toBe(
-      "unavailable/store/Error",
-    );
-  });
-
-  it("落ちどころが無ければ、まとめた語だけ残す", () => {
-    expect(boardUnavailableReason({ kind: "unavailable" })).toBe("unavailable");
-  });
-
-  it("見られたときは、残さない", () => {
-    // **毎回鳴る記録は、そのうち読まれなくなる**（#248）
-    expect(boardUnavailableReason({ kind: "board" })).toBeUndefined();
-  });
-
-  it("ログインの状態は、この口では残さない", () => {
-    // **`signed-out` / `needs-login` は画面に出ている**（ログインへの導線がある）
-    expect(boardUnavailableReason({ kind: "signed-out" })).toBeUndefined();
-    expect(boardUnavailableReason({ kind: "needs-login" })).toBeUndefined();
-  });
-});
-
 /**
  * **記録の口を呼んでいること**（#519）。
  *
- * **`boardUnavailableReason`（何を残すか）は上で測れている**が、**それが GET の
- * 経路から呼ばれること**は測れていなかった——**呼び出しの 1 行を消しても緑**だった。
+ * **`unavailableReason`（何を残すか）は `application` 側で測れている**（#690）が、
+ * **それが GET の経路から呼ばれること**は測れていなかった——**呼び出しの 1 行を消しても緑**だった。
  *
  * **受け口を引数で渡す**（#510 で POST を割ったのと同じ形）——**モックは使わない**
- * （`AGENTS.md` §4）。**判定は `boardUnavailableReason` のまま 1 箇所**である（§5）。
+ * （`AGENTS.md` §4）。**判定は `unavailableReason` のまま 1 箇所**である（§5）。
  */
 describe("盤面（GET）で落ちたことを、記録の口へ渡す", () => {
   const recorder = () => {
