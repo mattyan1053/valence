@@ -55,12 +55,31 @@ export function allowedValueFrom<Value extends string>(
  */
 const pullRequestNumberSchema = z
   .string()
-  .trim()
   .regex(/^[0-9]+$/)
   .transform(Number)
   .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER));
 
+/**
+ * **URL から来た番号。** **前後の空白も受けない。**
+ *
+ * **口によって受ける書式が違う** (#698 のレビュー)——**`?plan-at=` は、こちらが
+ * 組み立てた URL から来る。** **空白が付いていたら、こちらが組んだものではない。**
+ *
+ * **共通化したときに、フォーム側の `trim` がここにも効いていた**
+ * ——**`?plan-at=%2042%20` が「#42 で止まった」と出るようになっていた**（#696 で踏んだ）。
+ * **判定を 1 つにするのと、正規化まで 1 つにするのは別のこと**である。
+ */
 export function pullRequestNumberFrom(value: unknown): number | undefined {
   const parsed = pullRequestNumberSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * **フォームから来た番号。** **前後の空白は落としてから見る。**
+ *
+ * **人が打ち込む欄である**——**前後の空白は打ち間違いであって、別の PR ではない。**
+ * **間の空白は落とさない**（`"4 2"` は通らない）——**そちらは別の番号を打った跡**である。
+ */
+export function submittedPullRequestNumberFrom(value: unknown): number | undefined {
+  return pullRequestNumberFrom(typeof value === "string" ? value.trim() : value);
 }

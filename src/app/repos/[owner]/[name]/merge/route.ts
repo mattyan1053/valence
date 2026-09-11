@@ -17,7 +17,7 @@ import {
   reportBoardActionUnavailable,
 } from "../../../../../composition/auth";
 import type { MergeNoticeKind } from "../../../../../ui/merge/merge-button";
-import { pullRequestNumberFrom } from "../../../../query-input";
+import { submittedPullRequestNumberFrom } from "../../../../query-input";
 import { boardRedirect, submittedBallFilter } from "../board-redirect";
 
 /**
@@ -118,7 +118,7 @@ export async function respondToMerge(
   deps: MergeDeps,
 ): Promise<Response> {
   const form = await request.formData().catch(() => undefined);
-  const number = pullRequestNumberFrom(form?.get("number"));
+  const number = submittedPullRequestNumberFrom(form?.get("number"));
   const headSha = headShaFrom(form?.get("sha"));
   // **絞ったまま押せるようにする**（#667）
   const ball = submittedBallFilter(form);

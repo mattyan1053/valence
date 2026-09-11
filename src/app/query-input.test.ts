@@ -6,7 +6,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { allowedValueFrom, pullRequestNumberFrom } from "./query-input";
+import {
+  allowedValueFrom,
+  pullRequestNumberFrom,
+  submittedPullRequestNumberFrom,
+} from "./query-input";
 
 describe("並べたものだけを通す", () => {
   const OPTIONS = ["forbidden", "unavailable"] as const;
@@ -35,7 +39,22 @@ describe("並べたものだけを通す", () => {
 describe("PR の番号だけを通す", () => {
   it("形で絞ってから数にする", () => {
     expect(pullRequestNumberFrom("42")).toBe(42);
-    expect(pullRequestNumberFrom(" 42 ")).toBe(42);
+  });
+
+  it("URL からのものは、前後の空白を受けない", () => {
+    // **口によって受ける書式が違う** (#698 のレビュー)。**`?plan-at=` は、こちらが
+    // 組んだ URL から来る**——**空白が付いていたら、組んだものではない。**
+    // **共通化したときに、フォーム側の `trim` が URL 側にも効いていた**
+    // （**`?plan-at=%2042%20` が「#42 で止まった」と出る**）
+    expect(pullRequestNumberFrom(" 42 "), "URL で前後の空白を受けている").toBeUndefined();
+    expect(pullRequestNumberFrom("42 "), "URL で後ろの空白を受けている").toBeUndefined();
+  });
+
+  it("フォームからのものは、前後の空白を落としてから見る", () => {
+    // **人が打ち込む欄である**——**前後の空白は、打ち間違いであって別の PR ではない**
+    expect(submittedPullRequestNumberFrom(" 42 ")).toBe(42);
+    expect(submittedPullRequestNumberFrom("42")).toBe(42);
+    expect(submittedPullRequestNumberFrom("4 2"), "間の空白まで落としている").toBeUndefined();
   });
 
   it("`Number()` が受けるだけの形は通さない", () => {

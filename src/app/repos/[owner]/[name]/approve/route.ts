@@ -17,7 +17,7 @@ import {
   reportBoardActionUnavailable,
 } from "../../../../../composition/auth";
 import type { ApproveNoticeKind } from "../../../../../ui/approve/approve-button";
-import { pullRequestNumberFrom } from "../../../../query-input";
+import { submittedPullRequestNumberFrom } from "../../../../query-input";
 import { boardRedirect, submittedBallFilter } from "../board-redirect";
 
 /**
@@ -100,7 +100,7 @@ export async function respondToApprove(
   deps: ApproveDeps,
 ): Promise<Response> {
   const form = await request.formData().catch(() => undefined);
-  const number = pullRequestNumberFrom(form?.get("number"));
+  const number = submittedPullRequestNumberFrom(form?.get("number"));
   // **絞ったまま押せるようにする**（#667）——**押した人は絞った一覧に居る**ので、
   // **理由を出す先も、次に押す先も、そこである**
   const ball = submittedBallFilter(form);
