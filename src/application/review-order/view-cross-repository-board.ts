@@ -14,15 +14,12 @@
  * ——**捨てると、盤面は静かに不完全になる。**
  */
 
-import type { UsableToken } from "../auth/ensure-usable-token";
-import { resolveVisibleRepositories } from "../auth/resolve-visible-repositories";
+import type { ResolvedVisibleRepositories } from "../auth/resolve-visible-repositories";
 import { errorKind } from "../observability/error-kind";
 import type {
   CrossRepositoryListing,
   CrossRepositoryPullRequests,
 } from "../ports/cross-repository-pull-requests";
-import type { UserTokenStore } from "../ports/user-token-store";
-import type { VisibleRepositories } from "../ports/visible-repositories";
 
 export type CrossRepositoryBoardResult =
   /** ログインしていない。**誰の権限も無いので、データを出さない**（§6）。 */
@@ -49,10 +46,14 @@ export type CrossRepositoryBoardResult =
     };
 
 export type ViewCrossRepositoryBoardInput = {
-  /** **開く手続きごと受ける**（`viewRepositoryBoard` と同じ形）。 */
-  readonly openStore: () => Promise<UserTokenStore | undefined>;
-  readonly ensure: (store: UserTokenStore) => Promise<UsableToken>;
-  readonly repositories: VisibleRepositories;
+  /**
+   * **解決済みのもの**を受ける（#686 のレビュー）——**ここでは引かない。**
+   *
+   * **`/` は見えるリポジトリの一覧も出す**ので、**それぞれが引くと
+   * `/user/repos` が二重**になる（**100 件を超えると全ページが二重**）。
+   * **1 度引いて渡すのは `viewHome`** である。
+   */
+  readonly resolved: ResolvedVisibleRepositories;
   readonly pullRequests: CrossRepositoryPullRequests;
   /**
    * 打ち切りの合図を作る（`approvalsDeadline` と同じ形）。
@@ -63,14 +64,10 @@ export type ViewCrossRepositoryBoardInput = {
 };
 
 export async function viewCrossRepositoryBoard({
-  openStore,
-  ensure,
-  repositories,
+  resolved,
   pullRequests,
   deadline,
 }: ViewCrossRepositoryBoardInput): Promise<CrossRepositoryBoardResult> {
-  // **見えるリポジトリを、トークンごと解決する**——**倒し分けは共有の判断が持つ**
-  const resolved = await resolveVisibleRepositories({ openStore, ensure, repositories });
   if (resolved.kind !== "resolved") {
     return resolved;
   }

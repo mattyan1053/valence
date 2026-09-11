@@ -9,12 +9,12 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { ResolvedVisibleRepositories } from "../auth/resolve-visible-repositories";
 import type {
   CrossRepositoryListing,
   CrossRepositoryPullRequests,
 } from "../ports/cross-repository-pull-requests";
-import type { UserTokenStore } from "../ports/user-token-store";
-import type { VisibleRepositories, VisibleRepositoryListing } from "../ports/visible-repositories";
+import type { VisibleRepositoryListing } from "../ports/visible-repositories";
 import type { ViewCrossRepositoryBoardInput } from "./view-cross-repository-board";
 import { viewCrossRepositoryBoard } from "./view-cross-repository-board";
 
@@ -41,16 +41,16 @@ function source(
   };
 }
 
+const RESOLVED: ResolvedVisibleRepositories = {
+  kind: "resolved",
+  userAccessToken: "user-token",
+  listing: VISIBLE,
+};
+
 function input(
   overrides: Partial<ViewCrossRepositoryBoardInput> = {},
 ): ViewCrossRepositoryBoardInput {
-  return {
-    openStore: async () => ({}) as unknown as UserTokenStore,
-    ensure: async () => ({ kind: "usable", accessToken: "user-token" }),
-    repositories: { list: async () => VISIBLE } satisfies VisibleRepositories,
-    pullRequests: source(),
-    ...overrides,
-  };
+  return { resolved: RESOLVED, pullRequests: source(), ...overrides };
 }
 
 describe("viewCrossRepositoryBoard", () => {
@@ -90,11 +90,12 @@ describe("viewCrossRepositoryBoard", () => {
     // 横断の一覧にも出てこない**
     const result = await viewCrossRepositoryBoard(
       input({
-        repositories: {
-          list: async () => ({
+        resolved: {
+          ...RESOLVED,
+          listing: {
             repositories: VISIBLE.repositories,
             invalid: [{ index: 2, reason: "形が違う" }],
-          }),
+          },
         },
       }),
     );
@@ -106,7 +107,7 @@ describe("viewCrossRepositoryBoard", () => {
     const asked = source();
 
     const result = await viewCrossRepositoryBoard(
-      input({ openStore: async () => undefined, pullRequests: asked }),
+      input({ resolved: { kind: "signed-out" }, pullRequests: asked }),
     );
 
     expect(result.kind).toBe("signed-out");
@@ -114,9 +115,7 @@ describe("viewCrossRepositoryBoard", () => {
   });
 
   it("期限切れは、入り直してもらう", async () => {
-    const result = await viewCrossRepositoryBoard(
-      input({ ensure: async () => ({ kind: "needs-login" }) }),
-    );
+    const result = await viewCrossRepositoryBoard(input({ resolved: { kind: "needs-login" } }));
 
     expect(result.kind).toBe("needs-login");
   });
@@ -143,7 +142,7 @@ describe("viewCrossRepositoryBoard", () => {
 
     const result = await viewCrossRepositoryBoard(
       input({
-        repositories: { list: async () => ({ repositories: [], invalid: [] }) },
+        resolved: { ...RESOLVED, listing: { repositories: [], invalid: [] } },
         pullRequests: asked,
       }),
     );

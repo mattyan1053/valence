@@ -10,6 +10,8 @@
  */
 
 import type { UsableToken } from "../auth/ensure-usable-token";
+import type { ResolvedVisibleRepositories } from "../auth/resolve-visible-repositories";
+import { resolveVisibleRepositories } from "../auth/resolve-visible-repositories";
 import type { UserTokenStore } from "../ports/user-token-store";
 import type { VisibleRepositories, VisibleRepositoryListing } from "../ports/visible-repositories";
 
@@ -35,35 +37,34 @@ export type ListVisibleRepositoriesInput = {
   readonly repositories: VisibleRepositories;
 };
 
-export async function listVisibleRepositories({
-  openStore,
-  ensure,
-  repositories,
-}: ListVisibleRepositoriesInput): Promise<VisibleRepositoriesResult> {
-  let store: UserTokenStore | undefined;
-  try {
-    store = await openStore();
-  } catch {
-    // **開けなかったことを「見えない」にも「期限切れ」にも化けさせない。**
-    // **入り直しても直らない**ので、**そう案内しない**
-    return { kind: "unavailable" };
-  }
-  if (store === undefined) {
-    return { kind: "signed-out" };
-  }
-
-  const usable = await ensure(store);
-  switch (usable.kind) {
+/**
+ * **解決した結果を、画面の語彙へ落とす**（#686 のレビュー）。
+ *
+ * **解決そのものは `resolveVisibleRepositories` が持つ**——**`/` は 2 つのものを
+ * 出すが、見えるリポジトリを引くのは 1 度だけ**である（**2 度引くと、
+ * 100 件を超えるアカウントでは全ページが二重になる**）。
+ *
+ * **倒し分けはここ 1 箇所**である。
+ */
+export function toVisibleRepositoriesResult(
+  resolved: ResolvedVisibleRepositories,
+): VisibleRepositoriesResult {
+  switch (resolved.kind) {
+    case "signed-out":
+      return { kind: "signed-out" };
     case "needs-login":
-      // **使えないトークンで叩きに行かない。** **症状が「権限が無い」と混ざる**
       return { kind: "needs-login" };
     case "unavailable":
-      // **開けたあとに落ちる経路も、開ける前と同じ行き先へ倒す** (#214)。
-      // **`kind` を並べて書くのは、次に増えたときここで型が落ちるため**
-      // ——**`if` 1 本だと、増えた `kind` が「使える」側へ流れる**
-      // （**トークンを持たないまま `list` を呼ぶ**）
+      // **開けなかった / 期限切れ / 引けなかった**——**どれも入り直しても直らない**
+      // ので、**そう案内しない**（**落ちどころは記録の側に残る**）
       return { kind: "unavailable" };
-    case "usable":
-      return { kind: "listed", listing: await repositories.list(usable.accessToken) };
+    case "resolved":
+      return { kind: "listed", listing: resolved.listing };
   }
+}
+
+export async function listVisibleRepositories(
+  input: ListVisibleRepositoriesInput,
+): Promise<VisibleRepositoriesResult> {
+  return toVisibleRepositoriesResult(await resolveVisibleRepositories(input));
 }

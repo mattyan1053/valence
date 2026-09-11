@@ -9,11 +9,7 @@
 
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
 import type { CrossRepositoryBoardResult } from "../application/review-order/view-cross-repository-board";
-import {
-  crossRepositoryBoardForCurrentUser,
-  pullRequestPageUrl,
-  visibleRepositoriesForCurrentUser,
-} from "../composition/auth";
+import { homeForCurrentUser, pullRequestPageUrl } from "../composition/auth";
 import { SignOutButton, showsSignOut } from "../ui/auth/sign-out-button";
 import { BoardFreshness } from "../ui/board/board-freshness";
 import type { CrossRepositoryRow } from "../ui/cross-repository/cross-repository-board";
@@ -180,9 +176,8 @@ export function renderHome(
 export default async function Home() {
   // **取りに行く前に読む**（#664）——**遅い日に、実際より新しく見えることが無い**
   const at = new Date();
-  const [repositories, cross] = await Promise.all([
-    visibleRepositoriesForCurrentUser(),
-    crossRepositoryBoardForCurrentUser(),
-  ]);
+  // **見えるリポジトリは 1 度だけ引く**（#686 のレビュー）——**2 つを別々に呼ぶと、
+  // 同じ `/user/repos` が二重になる**
+  const { repositories, cross } = await homeForCurrentUser();
   return renderHome(repositories, cross, at);
 }

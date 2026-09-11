@@ -14,6 +14,7 @@ import { cookies } from "next/headers";
 import type { LoginResult } from "../application/auth/complete-login";
 import { completeLogin } from "../application/auth/complete-login";
 import { ensureUsableToken } from "../application/auth/ensure-usable-token";
+import { resolveVisibleRepositories } from "../application/auth/resolve-visible-repositories";
 import { signOut } from "../application/auth/sign-out";
 import type { UserTokenStore } from "../application/ports/user-token-store";
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
@@ -25,8 +26,8 @@ import { mergePlan } from "../application/review-order/merge-plan";
 import type { MergePullRequestResult } from "../application/review-order/merge-pull-request";
 import { mergePullRequest } from "../application/review-order/merge-pull-request";
 import { planReviewOrder } from "../application/review-order/plan-review-order";
-import type { CrossRepositoryBoardResult } from "../application/review-order/view-cross-repository-board";
-import { viewCrossRepositoryBoard } from "../application/review-order/view-cross-repository-board";
+import type { HomeView } from "../application/review-order/view-home";
+import { viewHome } from "../application/review-order/view-home";
 import type { RepositoryBoardResult } from "../application/review-order/view-repository-board";
 import { viewRepositoryBoard } from "../application/review-order/view-repository-board";
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
@@ -265,21 +266,29 @@ export async function visibleRepositoriesForCurrentUser(): Promise<VisibleReposi
  * **往復はリポジトリ数に依らない**（#681）——**25 件ずつ並べて投げる**ので、
  * **50 リポジトリで 4.0〜4.4 秒**（実測 2026-09-11）。
  */
-export async function crossRepositoryBoardForCurrentUser(): Promise<CrossRepositoryBoardResult> {
+export async function homeForCurrentUser(): Promise<HomeView> {
   const { connection, key, credentials } = settings();
   const client = await sessionClient(connection);
   const budget = createWinnersSaveBudget();
-  return viewCrossRepositoryBoard({
-    openStore: () => storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
-    ensure: (store) =>
-      ensureUsableToken({
-        store,
-        refresh: (refreshToken) =>
-          refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
-        now: new Date(),
-        waitForWinnersSave: createWaitForWinnersSave({ budget }),
+  // **見えるリポジトリは 1 度だけ引く**（#686 のレビュー）——**`/` は 2 つのものを
+  // 出すが、どちらも同じ `/user/repos` を要る。** **別々に呼ぶと、100 件を超える
+  // アカウントでは全ページが二重**になる
+  return viewHome({
+    resolve: () =>
+      resolveVisibleRepositories({
+        openStore: () =>
+          storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
+        ensure: (store) =>
+          ensureUsableToken({
+            store,
+            refresh: (refreshToken) =>
+              refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+            now: new Date(),
+            waitForWinnersSave: createWaitForWinnersSave({ budget }),
+          }),
+        // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない**
+        repositories: createUserVisibleRepositories(),
       }),
-    repositories: createUserVisibleRepositories(),
     pullRequests: createGitHubCrossRepositoryPullRequests(),
     deadline: () => AbortSignal.timeout(CROSS_REPOSITORY_DEADLINE_MS),
   });
