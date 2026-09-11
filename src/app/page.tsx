@@ -83,13 +83,16 @@ export function crossRepositoryRows(
 /** **読めなかったリポジトリの数**（#681 が分けて返したものを、そのまま数える）。 */
 export function crossRepositoryUnavailable(result: CrossRepositoryBoardResult) {
   if (result.kind !== "board") {
-    return { unreadable: 0, truncated: 0, repositories: 0 };
+    return { unreadable: 0, truncated: 0, repositories: 0, pullRequests: 0 };
   }
   const kinds = result.listing.unavailable;
   return {
     unreadable: kinds.filter((one) => one.kind === "unreadable").length,
     truncated: kinds.filter((one) => one.kind === "truncated").length,
     repositories: result.unreadableRepositories,
+    // **形を読み取れなかった PR も運ぶ**（#686 のレビュー）——**画面の手前で消すと、
+    // 全部が検証で落ちた盤面が「open な PR はありません」になる**
+    pullRequests: result.listing.invalid.length,
   };
 }
 

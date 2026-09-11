@@ -150,6 +150,26 @@ describe("入口の画面に、横断の一覧が出る", () => {
     expect(html).toContain("誰に振られているかを読めませんでした");
   });
 
+  it("形の読めなかった PR の数も、画面まで運ぶ", () => {
+    // **adapter が `invalid` に入れたものが、画面の手前で消えていた**（#686 のレビュー）
+    // ——**全部が検証で落ちると「open な PR はありません」と出る**
+    const html = markup({
+      kind: "board",
+      listing: {
+        pullRequests: [],
+        unavailable: [],
+        invalid: [{ repository: { owner: "acme", name: "web" }, index: 0, reason: "形が違う" }],
+      },
+      unreadableRepositories: 0,
+    });
+
+    expect(html, "読めなかった PR が黙って消えている").toContain(
+      "1 本は、PR の形を読み取れませんでした",
+    );
+    // **断定していない側の文には当たらないようにする**（`読めたぶんに、…`）
+    expect(html).not.toContain(">open な PR はありません。</p>");
+  });
+
   it("現物への行き先を、こちらで組む", () => {
     // **経路は `app` の話**（§3 の表）——**表示の部品は `app` を import できない**
     expect(

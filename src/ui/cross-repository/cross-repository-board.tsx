@@ -44,6 +44,12 @@ export type CrossRepositoryUnavailable = {
   readonly truncated: number;
   /** **リポジトリの一覧の側で読めなかった行**（**横断の一覧にも出てこない**）。 */
   readonly repositories: number;
+  /**
+   * **形を読み取れなかった PR の本数**（#686 のレビュー）。
+   *
+   * **黙って消すと、全部が検証で落ちた盤面が「open な PR はありません」になる。**
+   */
+  readonly pullRequests: number;
 };
 
 export type CrossRepositoryBoardProps = {
@@ -66,6 +72,9 @@ export function unavailableNote(unavailable: CrossRepositoryUnavailable): string
     unavailable.repositories === 0
       ? undefined
       : `${unavailable.repositories} 件はリポジトリの一覧の時点で読めませんでした`,
+    unavailable.pullRequests === 0
+      ? undefined
+      : `${unavailable.pullRequests} 本は、PR の形を読み取れませんでした`,
   ].filter((part): part is string => part !== undefined);
   return parts.length === 0 ? undefined : `${parts.join("。")}。`;
 }
@@ -94,7 +103,14 @@ export function CrossRepositoryBoard({ rows, unavailable }: CrossRepositoryBoard
       {/* **読めなかったことを残す**——**黙ると、盤面は静かに不完全になる** */}
       {note === undefined ? undefined : <p className="text-sm opacity-70">{note}</p>}
       {rows.length === 0 ? (
-        <p className="text-sm">open な PR はありません。</p>
+        // **読めていない範囲が残るなら、0 件と断定しない**（#686 のレビュー）
+        // ——**「読めませんでした」と言った直後に「ありません」と言うと、
+        // 同じ画面が逆のことを言う**
+        <p className="text-sm">
+          {note === undefined
+            ? "open な PR はありません。"
+            : "読めたぶんに、open な PR はありません。"}
+        </p>
       ) : (
         <ul className="flex flex-col gap-2">
           {rows.map((row) => {

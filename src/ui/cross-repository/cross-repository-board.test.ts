@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import type { CrossRepositoryBoardProps, CrossRepositoryRow } from "./cross-repository-board";
 import { CrossRepositoryBoard, unavailableNote } from "./cross-repository-board";
 
-const NONE = { unreadable: 0, truncated: 0, repositories: 0 } as const;
+const NONE = { unreadable: 0, truncated: 0, repositories: 0, pullRequests: 0 } as const;
 
 function row(overrides: Partial<CrossRepositoryRow> = {}): CrossRepositoryRow {
   return {
@@ -60,12 +60,17 @@ describe("CrossRepositoryBoard", () => {
   });
 
   it("読めたぶんを出したうえで、読めなかった数も出す", () => {
-    const html = render({ unavailable: { unreadable: 2, truncated: 1, repositories: 3 } });
+    const html = render({
+      unavailable: { unreadable: 2, truncated: 1, repositories: 3, pullRequests: 4 },
+    });
 
     expect(html, "読めたぶんまで消している").toContain("#7");
     expect(html).toContain("2 件は読めませんでした");
     expect(html).toContain("1 件は多すぎて読み切れませんでした");
     expect(html).toContain("3 件はリポジトリの一覧の時点で読めませんでした");
+    expect(html, "形の読めなかった PR が消えている").toContain(
+      "4 本は、PR の形を読み取れませんでした",
+    );
   });
 
   it("読めなかったものが無ければ、その行は出ない", () => {
@@ -112,6 +117,32 @@ describe("CrossRepositoryBoard", () => {
 
   it("1 本も無ければ、そう言う", () => {
     // **空の一覧を、黙って出さない**（#410 の線）
-    expect(render({ rows: [] })).toContain("open な PR はありません");
+    // **`toContain` は、断定していない側の文にも当たる**
+    // （`読めたぶんに、open な PR はありません。`）——**段落ごと見る**
+    expect(render({ rows: [] })).toContain(">open な PR はありません。</p>");
+  });
+
+  it("読めていない範囲が残るなら、0 件と断定しない", () => {
+    // **読めなかったリポジトリに open PR がある可能性が残る**（#686 のレビュー）
+    // ——**「読めませんでした」と言った直後に「ありません」と断定すると、
+    // 同じ画面が逆のことを言う**
+    const html = render({
+      rows: [],
+      unavailable: { unreadable: 1, truncated: 0, repositories: 0, pullRequests: 0 },
+    });
+
+    expect(html, "読めていないのに 0 件と断定している").not.toContain(
+      ">open な PR はありません。</p>",
+    );
+    expect(html).toContain("読めたぶんに、open な PR はありません。");
+  });
+
+  it("形の読めなかった PR だけが残るときも、0 件と断定しない", () => {
+    const html = render({
+      rows: [],
+      unavailable: { unreadable: 0, truncated: 0, repositories: 0, pullRequests: 2 },
+    });
+
+    expect(html).not.toContain(">open な PR はありません。</p>");
   });
 });
