@@ -106,7 +106,7 @@ describe("依存が残っているときは押させない", () => {
   });
 
   it("順序を判定できないときは押せず、そう伝える", () => {
-    const html = render({ number: 9, action: ACTION, headSha: HEAD_SHA, notOrderable: true });
+    const html = render({ number: 9, action: ACTION, headSha: HEAD_SHA, notOrderable: "cyclic" });
 
     expect(isDisabled(html)).toBe(true);
     expect(html).toContain("順序");
@@ -115,7 +115,7 @@ describe("依存が残っているときは押させない", () => {
   it("循環だと断定しない", () => {
     // **`not-orderable` は循環以外でも立つ**（一覧に無い番号・読めなかった PR）
     // ——**断定すると、循環していない場合に嘘の理由が伝わる**（#348 のレビュー）
-    const html = render({ number: 9, action: ACTION, headSha: HEAD_SHA, notOrderable: true });
+    const html = render({ number: 9, action: ACTION, headSha: HEAD_SHA, notOrderable: "cyclic" });
 
     expect(html, "循環と断定している").not.toContain("循環");
   });
@@ -145,5 +145,38 @@ describe("土台が張り替えられたことを伝える", () => {
 
   it("もう一度押せばよいと分かる文面になっている", () => {
     expect(mergeNotice("base-changed")).toContain("もう一度");
+  });
+});
+
+describe("並べられない理由が、盤面ぜんたいのとき（#702）", () => {
+  it("押せないのは変わらない", () => {
+    // **断りを盤面へ寄せても、押せるようにはしない**（完了条件）
+    const html = render({
+      number: 9,
+      action: ACTION,
+      headSha: HEAD_SHA,
+      notOrderable: "graph-unreadable",
+    });
+
+    expect(html).toContain("disabled");
+  });
+
+  it("行では言わない", () => {
+    // **全行が同じ理由でここへ来る**——**12 行の盤面で、同じ 1 文が 12 回出ていた**
+    const html = render({
+      number: 9,
+      action: ACTION,
+      headSha: HEAD_SHA,
+      notOrderable: "graph-unreadable",
+    });
+
+    expect(html, "盤面の事実を行が言っている").not.toContain("依存の順序を判定できません");
+  });
+
+  it("行ごとの理由なら、行で言う", () => {
+    // **循環はその行の事実**である——**盤面へ寄せると、どの行のことか分からなくなる**
+    const html = render({ number: 9, action: ACTION, headSha: HEAD_SHA, notOrderable: "cyclic" });
+
+    expect(html).toContain("依存の順序を判定できません");
   });
 });

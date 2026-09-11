@@ -47,10 +47,37 @@ export type MergeBlock =
    *
    * **`cyclic` と名付けない。** **循環していない場合に「循環しています」と言うと、
    * 嘘の理由が伝わる**——**押させないことは同じでも、理由は違う。**
-   * **原因を画面で言い分けない**——**言い分けるには理由を運ぶ必要があり、
-   * それはこの判定の関心事ではない。**
+   * **原因を画面で言い分けない**のは変わらない（#348 のレビュー）——**出す文は
+   * どの場合でも同じ**である。
+   *
+   * **どの場合かは運ぶ**（#702）——**言い分けるためではなく、その断りを
+   * 「行に出すか、盤面に 1 回出すか」を決めるため**である。**3 は盤面ぜんたいの
+   * 事実**（**全行が同じ理由でここへ来る**）で、**12 行の盤面では同じ 1 文が
+   * 12 回出ていた。** **判定そのものは変えていない。**
    */
-  | { readonly kind: "not-orderable" };
+  | { readonly kind: "not-orderable"; readonly reason: NotOrderableReason };
+
+/**
+ * **並べられなかった場合。** **画面で言い分けない**（上）——**置き場所を決めるだけ。**
+ */
+export type NotOrderableReason =
+  /** **循環している**（その先に積まれたものも含む）。**行ごとに違う。** */
+  | "cyclic"
+  /** **その番号が一覧に出てこない。** **行ごとに違う。** */
+  | "not-listed"
+  /** **一覧に読めなかった PR がある。** **盤面ぜんたいで同じ。** */
+  | "graph-unreadable";
+
+/**
+ * **その理由が、盤面ぜんたいの事実か**（#702）。
+ *
+ * **判定はここ 1 箇所が持つ**（§5）——**「読めなかった PR があれば全行が
+ * 並べられない」という規則は `blockFrom` に在る**ので、**画面がそれを書き直すと
+ * 同じ規則が 2 箇所になる。**
+ */
+export function isBoardWide(reason: NotOrderableReason): boolean {
+  return reason === "graph-unreadable";
+}
 
 /**
  * **その番号がマージしてよいか。**
@@ -135,11 +162,11 @@ function blockFrom(number: number, index: OrderIndex, unreadableCount: number): 
   // **既定値を置かない。** **書き忘れが「抜けは無い」へ倒れると、
   // この判定がまるごと素通りする**（#317 の `require` と同じ理由）。
   if (unreadableCount > 0) {
-    return { kind: "not-orderable" };
+    return { kind: "not-orderable", reason: "graph-unreadable" };
   }
 
   if (index.cyclic.has(number)) {
-    return { kind: "not-orderable" };
+    return { kind: "not-orderable", reason: "cyclic" };
   }
 
   const numbers = index.dependsOn.get(number);
@@ -149,5 +176,7 @@ function blockFrom(number: number, index: OrderIndex, unreadableCount: number): 
 
   // **一覧に無い番号を「マージしてよい」と言わない。** **盤面を出してから押すまでに
   // 一覧は変わる**ので、**知らない番号は「並べられなかった」側と同じ扱いにする。**
-  return index.ordered.has(number) ? { kind: "ready" } : { kind: "not-orderable" };
+  return index.ordered.has(number)
+    ? { kind: "ready" }
+    : { kind: "not-orderable", reason: "not-listed" };
 }

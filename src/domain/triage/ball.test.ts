@@ -165,7 +165,7 @@ describe("依存とアサインの扱い（#652 のレビュー）", () => {
       ballOf({
         opinion: { ...QUIET, approvesHead: true, reviewed: true },
         readiness: MERGEABLE,
-        block: { kind: "not-orderable" },
+        block: { kind: "not-orderable", reason: "cyclic" },
         assignment: NOBODY,
       }),
     ).not.toBe("merger");

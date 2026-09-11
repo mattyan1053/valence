@@ -14,7 +14,7 @@
 import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
-import type { MergeBlock } from "../../domain/graph/merge-block";
+import { isBoardWide, type MergeBlock } from "../../domain/graph/merge-block";
 import type { MergeStatusReport } from "../../domain/graph/merge-readiness";
 import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { Assignment } from "../../domain/triage/assignment";
@@ -32,10 +32,14 @@ import { BallFilterView } from "../ball/ball-filter-view";
 import { ballNote } from "../ball/ball-note";
 import type { UnreadablePullRequest } from "../dependency-graph/dependency-graph-view";
 import { DependencyGraphView } from "../dependency-graph/dependency-graph-view";
-import { fileOverlapNote } from "../file-overlap/file-overlap-note";
+import { fileOverlapLimitNote, fileOverlapNote } from "../file-overlap/file-overlap-note";
 import { baseLagNote, mergeReadinessNote } from "../merge/merge-readiness-note";
 import { RiskTierView } from "../risk-tier/risk-tier-view";
-import { SHARED_TITLE_FLOOR, titleOverlapNote } from "../title-overlap/title-overlap-note";
+import {
+  SHARED_TITLE_FLOOR,
+  titleOverlapLimitNote,
+  titleOverlapNote,
+} from "../title-overlap/title-overlap-note";
 
 /**
  * **材料が無い理由を、画面の語彙にする**（#573）。
@@ -88,6 +92,25 @@ export function changeUnavailableNote(kind: string): string {
  */
 function Note({ text }: { readonly text: string | undefined }) {
   return text === undefined ? undefined : <span className="text-sm">{text}</span>;
+}
+
+/**
+ * **盤面ぜんたいの断り**（#702）。**言うことが無ければ、何も出ない。**
+ *
+ * **一覧の手前に置く**——**行を読む前に、その盤面がどこまで測れているかが分かる。**
+ */
+function BoardNotes({ notes }: { readonly notes: readonly (string | undefined)[] }) {
+  const shown = notes.filter((note) => note !== undefined);
+  if (shown.length === 0) {
+    return undefined;
+  }
+  return (
+    <ul className="text-sm opacity-70">
+      {shown.map((note) => (
+        <li key={note}>{note}</li>
+      ))}
+    </ul>
+  );
 }
 
 function ActionRow({ children }: { readonly children: ReactNode }) {
@@ -266,6 +289,13 @@ export function ReviewBoard({
     }),
   }));
   const ballOfNumber = new Map(balls.map((row) => [row.number, row.ball]));
+  // **盤面ぜんたいで並べられないか**（#702）——**材料が言っていることを読むだけ**で、
+  // **「読めなかった PR があれば全行が並べられない」という規則は書き直さない**
+  // （§5。**規則は `mergeBlockFor` に在る**）
+  const orderUnavailable = pullRequests.some((pullRequest) => {
+    const block = mergeBlockOf(pullRequest.number);
+    return block?.kind === "not-orderable" && isBoardWide(block.reason);
+  });
   const filtered = filterByBall(balls, ballFilter);
   const shown = new Set(filtered.shown);
 
@@ -293,6 +323,18 @@ export function ReviewBoard({
             balls.filter((one) => one.ball === "unknown").length,
         }}
         options={BALL_FILTERS}
+      />
+      {/* **行を区別しない断りは、盤面に 1 回だけ出す**（#702）——**全行に同じ理由で
+          出るなら、それは行の属性ではない**（**12 行の盤面で 34 回出ていた**）。
+          **消してはいない**（§5。**「読めなかった」を「無かった」にしない**）。
+          **どれも材料の側が「盤面の事実」として持っている**ので、
+          **ここで数え直さない**（§5） */}
+      <BoardNotes
+        notes={[
+          titleOverlapLimitNote(titleOverlaps.partial),
+          fileOverlapLimitNote(overlaps.partial),
+          orderUnavailable ? "依存の順序を判定できません（読めなかった PR があります）" : undefined,
+        ]}
       />
       <DependencyGraphView
         pullRequests={pullRequests}
@@ -341,13 +383,13 @@ export function ReviewBoard({
           // **base の遅れは合流の状況の側**なので、**`readiness` に並ぶ。**
           // **ファイルの重なりは、その間に入る**（#637）——**押せるかの話ではなく、
           // 持ち主の話でもない。** **依存の順序とは別の目安**である
-          const overlap = fileOverlapNote(overlaps.get(number));
+          const overlap = fileOverlapNote(overlaps.rows.get(number));
           // **重複しているかもしれない相手**（#630）——**「似ています」とは言わない。**
           // **言うことが無ければ出ない**（#248 / #597）。
           //
           // **ファイルの重なり（上）と同じ「順序の目安」の族**である
           // ——**#630 が「似ている」と「同じ」を分けた、その両側**（#653 の取り込み直し）
-          const duplicate = titleOverlapNote(titleOverlaps.get(number));
+          const duplicate = titleOverlapNote(titleOverlaps.rows.get(number));
           // **誰の番か**（#636）——**「誰の持ち物か」（下）とは別の軸**である。
           // **判定は domain が持つ**（`ballOf`）ので、**ここは詰め替えるだけ**である。
           //

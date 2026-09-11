@@ -161,7 +161,9 @@ describe("依存の判定を、ボタンへ詰め替える", () => {
   });
 
   it("順序が決められなければ、そう渡す", () => {
-    expect(mergeButtonBlock({ kind: "not-orderable" })).toEqual({ notOrderable: true });
+    expect(mergeButtonBlock({ kind: "not-orderable", reason: "cyclic" })).toEqual({
+      notOrderable: "cyclic",
+    });
   });
 
   it("依存が無ければ、何も渡さない", () => {
@@ -176,7 +178,9 @@ describe("依存の判定を、ボタンへ詰め替える", () => {
     const order = { ordered: [8, 9], cyclic: [] };
 
     expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 0))).toEqual({});
-    expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 1))).toEqual({ notOrderable: true });
+    expect(mergeButtonBlock(mergeBlockFor(8, edges, order, 1))).toEqual({
+      notOrderable: "graph-unreadable",
+    });
   });
 });
 

@@ -47,24 +47,25 @@ export type FileOverlap = {
   readonly count: number;
 };
 
-export type OverlapReport = {
-  /** **重なっている相手。** **多い順、同じなら番号の小さい順。** */
-  readonly overlaps: readonly FileOverlap[];
+export type OverlapReports = {
   /**
-   * **この数が下限か。**
+   * **この盤面の数が、どれも下限か。**
    *
-   * **どれか 1 本でも測り切れていなければ立つ**（自分の側でも、相手の側でも）
-   * ——**一覧が見切れている**か、**材料そのものが取れていない**か、
-   * **一覧から読めなかった**か。**どれも「見えていないパスが重なっているかもしれない」**
-   * である。**盤面は既に「N 件の PR は読めませんでした」と出している**ので、
-   * **重なりだけが「抜けは無い」と言うと、同じ画面の中で食い違う。**
-   * **「測れなかった」を「重なっていない」にしない**（#637。**このリポジトリが
-   * 繰り返し塞いでいる形**）。
+   * **盤面ぜんたいの事実である**（#702）——**どれか 1 本でも測り切れていなければ立つ**
+   * （自分の側でも、相手の側でも）。**一覧が見切れている**か、**材料そのものが
+   * 取れていない**か、**一覧から読めなかった**か。**どれも「見えていないパスが
+   * 重なっているかもしれない」**である。**「測れなかった」を「重なっていない」に
+   * しない**（#637。**このリポジトリが繰り返し塞いでいる形**）。
    *
-   * **相手ごとに分けない。** **見切れた PR とは、そもそも比べ切れていない**ので、
+   * **行に持たせない**（#702）——**行ごとに違わない値を行が持つと、**
+   * **画面がそれを行ごとに言う**（**12 行の盤面で、同じ 1 文が 12 回出ていた**）。
+   *
+   * **相手ごとにも分けない。** **見切れた PR とは、そもそも比べ切れていない**ので、
    * **「この相手とは正確」と言える範囲が、行の側からは決められない。**
    */
   readonly partial: boolean;
+  /** **行ごとの事実。** **重なっている相手**——**多い順、同じなら番号の小さい順。** */
+  readonly rows: ReadonlyMap<number, readonly FileOverlap[]>;
 };
 
 /**
@@ -119,7 +120,7 @@ export function fileOverlapsFor(
    */
   unreadableCount: number,
   candidates: readonly OverlapCandidate[],
-): ReadonlyMap<number, OverlapReport> {
+): OverlapReports {
   // **先に集合へ落とす**（#651 のレビュー）——**`ChangedPaths.paths` は一意ではない。**
   // **`toChangeSummary` は `filename` と `previous_filename` を並べる**ので、
   // **`A → B` と `B → C` を 1 本でやると `[B, A, C, B]` になる**（**ディレクトリを
@@ -150,7 +151,7 @@ export function fileOverlapsFor(
     ]),
   );
 
-  // **1 本でも測り切れていなければ、どの行の数も下限である**（`OverlapReport.partial`）
+  // **1 本でも測り切れていなければ、どの行の数も下限である**（`OverlapReports.partial`）
   const partial =
     // **読めなかった PR は、そもそも一覧に出てこない**——**触ったパスも分からない**
     unreadableCount > 0 ||
@@ -159,12 +160,12 @@ export function fileOverlapsFor(
     ) ||
     budget.spent;
 
-  return new Map(
-    candidates.map((candidate) => [
-      candidate.number,
-      { overlaps: overlaps.get(candidate.number) ?? [], partial },
-    ]),
-  );
+  return {
+    partial,
+    rows: new Map(
+      candidates.map((candidate) => [candidate.number, overlaps.get(candidate.number) ?? []]),
+    ),
+  };
 }
 
 function overlapsOf(

@@ -158,6 +158,15 @@ function PullRequestRow({
 }
 
 /**
+ * **その番号の判定が地図に無いとき**（#702）。
+ *
+ * **一覧に出てこないのと同じ扱い**である——**知らない番号を「マージしてよい」と
+ * 言わない**（`blockFrom` の最後の行と同じ判断）。**行ごとの事実**なので、
+ * **断りはその行に出る。**
+ */
+const MISSING_BLOCK = { kind: "not-orderable", reason: "not-listed" } as const;
+
+/**
  * 1 件も並ばないときの断り（#410）。
  *
  * **空の `<ol>` で終わらせない。** **見出しだけの画面は、壊れているのか、
@@ -248,7 +257,7 @@ export function DependencyGraphView({
             markOf={(number) => ({
               tier: tierOf?.(number),
               // **知らない番号を「押せる」へ倒さない**（`mergeBlockFor` と同じ判断）
-              block: blocks.get(number) ?? { kind: "not-orderable" },
+              block: blocks.get(number) ?? MISSING_BLOCK,
               // **札の広さを、判定に合わせる**（#541 のレビュー）——**`MergeBlock` は
               // 依存の順序しか知らない**ので、**押せるかどうかはここで足す。**
               headKnown: headKnown(number),

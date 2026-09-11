@@ -509,7 +509,9 @@ describe("箱の中で決められる", () => {
 
   it("順序が決まらないものを、押せるに倒さない", () => {
     // **循環・一覧に無い番号・読めなかった PR**——**どれも押させない**（#345 / #348）
-    const rendered = markup(new Map([[1, mark("needs-review", { kind: "not-orderable" })]]));
+    const rendered = markup(
+      new Map([[1, mark("needs-review", { kind: "not-orderable", reason: "cyclic" })]]),
+    );
 
     expect(boxOf(rendered, 1)).toContain("順序不明");
     expect(boxOf(rendered, 1), "順序が決まらないのに押せると言っている").not.toContain("押せる");
