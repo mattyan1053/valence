@@ -20,20 +20,24 @@ import { type LoopRole, procedureText } from "./procedure-doc";
 const ROLES: readonly LoopRole[] = ["master", "worker"];
 
 /**
- * **裸の `main`。**
+ * **ローカルの `main` を指す書き方。**
  *
- * **`origin/main` も `bin/loop-sync-main` も別の語**である（`/` と `-` で切る）。
+ * **完全修飾も同じ印を読む**（#699 のレビュー 2 周目）——**`/` の前を一律に外すと、
+ * `git log refs/heads/main` が素通しする。** **外すのは上流の枝だけ**である
+ * （`origin/main` / `refs/remotes/origin/main`）。
  */
-const BARE_MAIN = /(?<![\w/-])main(?![\w/-])/;
+const LOCAL_MAIN_REFS: ReadonlySet<string> = new Set(["main", "heads/main", "refs/heads/main"]);
 
 /**
- * **名前として扱っている使い方を消す。** **残った裸の `main` が版**である。
+ * **名前として扱っている使い方を消す。** **残った `main` が版**である。
  *
  * **動詞の許可リストにしない**（#699 のレビュー）——**`git cherry main HEAD` のように、
  * 履歴を読む名前は列挙しきれない**。**列挙から漏れたコマンドは黙って通る**ので、
  * **向きを逆にして、名前として使っている形だけを除く。**
  */
 function withoutNameUses(line: string): string {
+  // **注釈を落としていない**——**落とさなくても本物の手順は緑**（変異で確かめた）で、
+  // **拾う側は広いほうが安い**（#699 のレビュー）。**踏んだら足す。**
   return line
     .replace(/\b(fetch|push)\s+(origin|upstream)\s+main\b/g, "$1 $2") // 取りに行く先・送る先
     .replace(/(['"])(\^?)main\$?\1/g, "$1$2$1") // 一覧から名前で除く（`grep -v '^main$'`）
@@ -41,17 +45,27 @@ function withoutNameUses(line: string): string {
 }
 
 /**
- * **版として `main` を渡している行。**
+ * **版として書かれた語**（範囲指定は両端に割り、`~` や引用符は落とす）。
+ */
+function revisions(line: string): readonly string[] {
+  return line
+    .split(/[\s;|&()'"`$]+/)
+    .flatMap((word) => word.split(/\.{2,3}/))
+    .map((word) => word.replace(/^[-^+@]+/, "").replace(/[~^@{}]\w*$/, ""));
+}
+
+/**
+ * **版としてローカルの `main` を渡している行。**
  *
- * **`git` のコマンド行**か、**範囲指定**（`main..`）だけを見る。
+ * **`git` のコマンド行**か、**範囲指定**だけを見る。
  */
 function staleRefLines(text: string): readonly string[] {
   return text.split("\n").filter((line) => {
     const rest = withoutNameUses(line);
-    if (!BARE_MAIN.test(rest)) {
+    if (!revisions(rest).some((revision) => LOCAL_MAIN_REFS.has(revision))) {
       return false;
     }
-    return /\bgit\s/.test(rest) || /main\.\.\.?/.test(rest);
+    return /\bgit\s/.test(rest) || /\.\./.test(rest);
   });
 }
 
@@ -111,6 +125,17 @@ describe("数える手そのもの", () => {
     // **`-` で切る**——**手順書のほぼ全行に出てくる**
     expect(staleRefLines('if ! after="$(bin/loop-sync-main)"; then')).toEqual([]);
     expect(staleRefLines("bin/loop-return-main # 枝の上で終えない")).toEqual([]);
+  });
+
+  it("完全修飾したローカルの印も数える", () => {
+    // **`/` の前を一律に外すと、ここが素通しする**（#699 のレビュー 2 周目）
+    expect(staleRefLines("git log refs/heads/main")).toHaveLength(1);
+    expect(staleRefLines("git log heads/main..HEAD")).toHaveLength(1);
+  });
+
+  it("上流の枝は、完全修飾でも数えない", () => {
+    expect(staleRefLines("git log refs/remotes/origin/main..HEAD")).toEqual([]);
+    expect(staleRefLines("git log upstream/main")).toEqual([]);
   });
 
   it("`origin/main` は数えない", () => {
