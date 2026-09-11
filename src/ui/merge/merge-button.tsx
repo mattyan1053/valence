@@ -8,6 +8,7 @@
  * **いまは 2 つ目**で、**まとめるとどちらの文面も直しにくくなる。**
  */
 
+import { isBoardWide, type NotOrderableReason } from "../../domain/graph/merge-block";
 import type { BallFilter } from "../ball/ball-filter";
 import { BallFilterField } from "../ball/ball-filter-field";
 
@@ -55,7 +56,14 @@ export type MergeButtonProps = {
    * **循環・一覧に無い番号・読めなかった PR がある**のどれでも立つ——
    * **原因は言い分けない**（**言い分けるには理由を運ぶ必要がある**）。
    */
-  readonly notOrderable?: boolean;
+  /**
+   * **並べられなかった理由**（#702）。**渡されていれば押せない。**
+   *
+   * **真偽値ではなく理由を受ける**——**盤面ぜんたいの事実なら、断りは盤面が
+   * 1 回だけ言う**（**12 行の盤面で、同じ 1 文が 12 回出ていた**）。
+   * **どちらかの判定は `isBoardWide` が持つ**（§5）。
+   */
+  readonly notOrderable?: NotOrderableReason;
   /**
    * **いま絞っているもの**（#667）。**押したあとも同じ絞りへ戻すために運ぶ。**
    */
@@ -120,7 +128,9 @@ export function MergeButton({
         className="rounded border px-2 py-1 text-sm disabled:opacity-50"
         // **commit が分からなければ押せない**——**確かめられない対象をマージさせない**
         // **依存が残っていても押せない**（#345）
-        disabled={disabled === true || headSha === undefined || waiting || notOrderable === true}
+        disabled={
+          disabled === true || headSha === undefined || waiting || notOrderable !== undefined
+        }
         type="submit"
       >
         Merge
@@ -131,7 +141,8 @@ export function MergeButton({
           先に {blockedBy.map((blocker) => `#${blocker}`).join(", ")} をマージ
         </span>
       ) : undefined}
-      {notOrderable === true ? (
+      {/* **盤面ぜんたいの事実は、行では言わない**（#702）——**押せないことは変わらない** */}
+      {notOrderable !== undefined && !isBoardWide(notOrderable) ? (
         <span className="text-sm opacity-70">依存の順序を判定できません</span>
       ) : undefined}
     </form>

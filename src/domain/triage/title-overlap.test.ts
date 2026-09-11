@@ -21,7 +21,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match).toEqual({ number: 2, shared: "リポジトリ一覧に上限を置く" });
+    expect(reports.rows.get(1)).toEqual({ number: 2, shared: "リポジトリ一覧に上限を置く" });
   });
 
   it("いちばん近い 1 本を選ぶ", () => {
@@ -36,7 +36,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match?.number).toBe(2);
+    expect(reports.rows.get(1)?.number).toBe(2);
   });
 
   it("同じくらい近いなら、番号の小さいほうを選ぶ", () => {
@@ -46,7 +46,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match?.number).toBe(2);
+    expect(reports.rows.get(1)?.number).toBe(2);
   });
 
   it("落とした相手の側からは、こちらが出る", () => {
@@ -61,12 +61,12 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(3)?.match?.number, "#3 の側からも組が見えない").toBe(1);
+    expect(reports.rows.get(3)?.number, "#3 の側からも組が見えない").toBe(1);
   });
 
   it("自分自身とは比べない", () => {
     expect(
-      titleOverlapsFor([titled(1, "ひとつだけ")], AT_LEAST, NOTHING_UNREADABLE).get(1)?.match,
+      titleOverlapsFor([titled(1, "ひとつだけ")], AT_LEAST, NOTHING_UNREADABLE).rows.get(1),
     ).toBeUndefined();
   });
 
@@ -77,7 +77,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match).toBeUndefined();
+    expect(reports.rows.get(1)).toBeUndefined();
   });
 
   it("番号の飾りは、同じ並びとして数えない", () => {
@@ -89,7 +89,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match).toBeUndefined();
+    expect(reports.rows.get(1)).toBeUndefined();
   });
 
   it("タイトルが読めていない PR は、似ていない側へ倒さない", () => {
@@ -100,8 +100,8 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match, "見えた範囲では同じ並びが無い").toBeUndefined();
-    expect(reports.get(1)?.partial, "読めていない PR が居るのに下限と言っていない").toBe(true);
+    expect(reports.rows.get(1), "見えた範囲では同じ並びが無い").toBeUndefined();
+    expect(reports.partial, "読めていない PR が居るのに下限と言っていない").toBe(true);
   });
 
   it("一覧から読めなかった PR が居れば、測り切れていないと言う", () => {
@@ -112,7 +112,7 @@ describe("タイトルが同じ PR を並べる", () => {
       1,
     );
 
-    expect(reports.get(1)?.partial).toBe(true);
+    expect(reports.partial).toBe(true);
   });
 
   it("全部読めていれば、下限だとは言わない", () => {
@@ -123,7 +123,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.partial).toBe(false);
+    expect(reports.partial).toBe(false);
   });
 
   it("同じ題の 2 本は、互いを選ぶ", () => {
@@ -137,9 +137,9 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(2)?.match?.number, "#2 が #3 を選んでいない").toBe(3);
-    expect(reports.get(3)?.match?.number, "#3 が #2 を選んでいない").toBe(2);
-    expect(reports.get(2)?.match?.shared).toBe("abcabcabcabc");
+    expect(reports.rows.get(2)?.number, "#2 が #3 を選んでいない").toBe(3);
+    expect(reports.rows.get(3)?.number, "#3 が #2 を選んでいない").toBe(2);
+    expect(reports.rows.get(2)?.shared).toBe("abcabcabcabc");
   });
 
   it("同じ文字が並ぶ題でも、取りこぼさない", () => {
@@ -152,7 +152,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match?.number, "種類で絞ると、ここで落ちる").toBe(2);
+    expect(reports.rows.get(1)?.number, "種類で絞ると、ここで落ちる").toBe(2);
   });
 
   it("求めた長さに満たない一致は、組にしない", () => {
@@ -163,7 +163,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match).toBeUndefined();
+    expect(reports.rows.get(1)).toBeUndefined();
   });
 
   it("求めた長さちょうどの一致は、組にする", () => {
@@ -174,7 +174,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match?.shared).toBe("ABC");
+    expect(reports.rows.get(1)?.shared).toBe("ABC");
   });
 
   it("絵文字は 1 文字として数える", () => {
@@ -187,7 +187,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match, "3 文字なのに 4 文字ぶんとして通っている").toBeUndefined();
+    expect(reports.rows.get(1), "3 文字なのに 4 文字ぶんとして通っている").toBeUndefined();
   });
 
   it("訊いた PR は、組が無くても全部返る", () => {
@@ -197,7 +197,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect([...reports.keys()].sort()).toEqual([1, 2]);
+    expect([...reports.rows.keys()].sort()).toEqual([1, 2]);
   });
 
   /** **実物と同じくらい題がばらける 100 本**（**このリポジトリの分布**）。 */
@@ -238,8 +238,8 @@ describe("タイトルが同じ PR を並べる", () => {
     const reports = titleOverlapsFor(withDuplicate, 10, NOTHING_UNREADABLE);
     const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
-    expect(reports.get(101)?.match?.number, `101 本で ${elapsed} ms`).toBe(1);
-    expect(reports.get(101)?.partial, "測り切れているのに下限と言っている").toBe(false);
+    expect(reports.rows.get(101)?.number, `101 本で ${elapsed} ms`).toBe(1);
+    expect(reports.partial, "測り切れているのに下限と言っている").toBe(false);
   });
 
   it("同じ題が並んでいても、返ってくる", () => {
@@ -253,8 +253,8 @@ describe("タイトルが同じ PR を並べる", () => {
     const reports = titleOverlapsFor(many, 10, NOTHING_UNREADABLE);
     const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
-    expect(reports.size, `100 本で ${elapsed} ms`).toBe(100);
-    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+    expect(reports.rows.size, `100 本で ${elapsed} ms`).toBe(100);
+    expect(reports.partial, "区切ったのに下限だと言っていない").toBe(true);
   });
 
   it("長すぎるタイトルは、先頭までしか比べない", () => {
@@ -262,7 +262,7 @@ describe("タイトルが同じ PR を並べる", () => {
     const long = "あ".repeat(200);
     const reports = titleOverlapsFor([titled(1, long), titled(2, long)], 10, NOTHING_UNREADABLE);
 
-    expect(reports.get(1)?.partial, "切ったのに下限だと言っていない").toBe(true);
+    expect(reports.partial, "切ったのに下限だと言っていない").toBe(true);
   });
 
   it("符号単位ではなく、書記素の長さで選ぶ", () => {
@@ -276,7 +276,7 @@ describe("タイトルが同じ PR を並べる", () => {
       NOTHING_UNREADABLE,
     );
 
-    expect(reports.get(1)?.match?.shared).toBe("ABCDEFGHIJ");
+    expect(reports.rows.get(1)?.shared).toBe("ABCDEFGHIJ");
   });
 
   it("壊れた文字列を返さない", () => {
@@ -287,7 +287,7 @@ describe("タイトルが同じ PR を並べる", () => {
       10,
       NOTHING_UNREADABLE,
     );
-    const shared = reports.get(1)?.match?.shared ?? "";
+    const shared = reports.rows.get(1)?.shared ?? "";
 
     expect(shared).toBe("同じ前置きがある題です");
     expect(
@@ -327,8 +327,8 @@ describe("タイトルが同じ PR を並べる", () => {
     const reports = titleOverlapsFor(many, 500, NOTHING_UNREADABLE);
     const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
-    expect(reports.size, `200 本で ${elapsed} ms`).toBe(200);
-    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+    expect(reports.rows.size, `200 本で ${elapsed} ms`).toBe(200);
+    expect(reports.partial, "区切ったのに下限だと言っていない").toBe(true);
   });
 
   it("実物と同じ形の 100 本では、絞り込みを区切らない", () => {
@@ -339,7 +339,7 @@ describe("タイトルが同じ PR を並べる", () => {
     // **同じ形なら 1000 本でも 955,400 手で、上限に届かない。**
     const reports = titleOverlapsFor(realistic(), 10, NOTHING_UNREADABLE);
 
-    expect(reports.get(1)?.partial, "測り切れているのに下限と言っている").toBe(false);
+    expect(reports.partial, "測り切れているのに下限と言っている").toBe(false);
   });
   it("求める長さが 1 なら、並びを 1 つも共有しない相手も落とさない", () => {
     // **索引は「2 文字の並びを共有する相手」しか出さない**（#656）——**求める長さが
@@ -347,6 +347,6 @@ describe("タイトルが同じ PR を並べる", () => {
     // **落としてよいのは、求めた長さに届かない相手だけ**である（#653 のレビュー 2 周目）
     const reports = titleOverlapsFor([titled(1, "あい"), titled(2, "いう")], 1, NOTHING_UNREADABLE);
 
-    expect(reports.get(1)?.match?.shared, "共有する並びが無い相手を落としている").toBe("い");
+    expect(reports.rows.get(1)?.shared, "共有する並びが無い相手を落としている").toBe("い");
   });
 });

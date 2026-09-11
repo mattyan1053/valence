@@ -38,9 +38,22 @@ export type TitleMatch = {
   readonly shared: string;
 };
 
-export type TitleOverlapReport = {
+export type TitleOverlapReports = {
   /**
-   * **いちばん長く同じだった 1 本。** **求めた長さに満たなければ `undefined`。**
+   * **この盤面の結果が、どれも下限か。**
+   *
+   * **盤面ぜんたいの事実である**（#702。`OverlapReports.partial` と同じ）——
+   * **タイトルを読めなかった PR**（#542。**空文字は `undefined` で来る**）と、
+   * **一覧から読めなかった PR** が入る。**どちらも「同じ並びがあるかもしれない」**
+   * ——**「読めなかった」を「似ていない」にしない。**
+   *
+   * **行に持たせない**（#702）——**行ごとに違わない値を行が持つと、画面が
+   * それを行ごとに言う。**
+   */
+  readonly partial: boolean;
+  /**
+   * **行ごとの事実。** **いちばん長く同じだった 1 本**——**求めた長さに満たなければ
+   * この行は入らない。**
    *
    * **絞り込みで落としてよいのは、その長さに届かない相手だけ**である
    * （#653 のレビュー 2 周目）。**「いちばん近い 1 本」を先に選ばない**
@@ -50,15 +63,7 @@ export type TitleOverlapReport = {
    * **同じ長さなら番号の小さいほう。** **出すのは 1 本だけ**だが、
    * **落としたぶんは黙って消えない**——**相手の側からは、こちらが選ばれうる。**
    */
-  readonly match: TitleMatch | undefined;
-  /**
-   * **測り切れていないか**（#637 の `OverlapReport.partial` と同じ）。
-   *
-   * **タイトルを読めなかった PR**（#542。**空文字は `undefined` で来る**）と、
-   * **一覧から読めなかった PR** が入る。**どちらも「同じ並びがあるかもしれない」**
-   * ——**「読めなかった」を「似ていない」にしない。**
-   */
-  readonly partial: boolean;
+  readonly rows: ReadonlyMap<number, TitleMatch | undefined>;
 };
 
 /**
@@ -146,7 +151,7 @@ export function titleOverlapsFor(
    * まるごと素通りする。**
    */
   unreadableCount: number,
-): ReadonlyMap<number, TitleOverlapReport> {
+): TitleOverlapReports {
   const titles = new Map(
     candidates.map((candidate) => [candidate.number, candidate.title?.replace(DECORATION, "")]),
   );
@@ -180,12 +185,12 @@ export function titleOverlapsFor(
     budget.spent ||
     screening.spent;
 
-  return new Map(
-    candidates.map((candidate) => [
-      candidate.number,
-      { match: matches.get(candidate.number), partial },
-    ]),
-  );
+  return {
+    partial,
+    // **訊いた PR は、一致が無くても全部返る**——**行が消えると、測ったのかどうかが
+    // 分からない**（`fileOverlapsFor` と同じ）
+    rows: matches,
+  };
 }
 
 /**

@@ -21,7 +21,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["b.ts", "c.ts"]),
     ]);
 
-    expect(reports.get(1)?.overlaps).toEqual([{ number: 2, count: 1 }]);
+    expect(reports.rows.get(1)).toEqual([{ number: 2, count: 1 }]);
   });
 
   it("重なっていなければ、何も出ない", () => {
@@ -30,7 +30,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["b.ts"]),
     ]);
 
-    expect(reports.get(1)?.overlaps).toEqual([]);
+    expect(reports.rows.get(1)).toEqual([]);
   });
 
   it("多く重なっている相手から並べる", () => {
@@ -41,7 +41,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(3, ["a.ts", "b.ts"]),
     ]);
 
-    expect(reports.get(1)?.overlaps).toEqual([
+    expect(reports.rows.get(1)).toEqual([
       { number: 3, count: 2 },
       { number: 2, count: 1 },
     ]);
@@ -54,7 +54,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["a.ts"]),
     ]);
 
-    expect(reports.get(1)?.overlaps.map((overlap) => overlap.number)).toEqual([2, 3]);
+    expect(reports.rows.get(1)?.map((overlap) => overlap.number)).toEqual([2, 3]);
   });
 
   it("同じパスが 2 回あっても、1 個として数える", () => {
@@ -66,7 +66,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["a.ts"]),
     ]);
 
-    expect(reports.get(1)?.overlaps).toEqual([{ number: 2, count: 1 }]);
+    expect(reports.rows.get(1)).toEqual([{ number: 2, count: 1 }]);
   });
 
   it("相手のパスが 2 回あっても、1 個として数える", () => {
@@ -77,7 +77,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["a.ts", "a.ts"]),
     ]);
 
-    expect(reports.get(1)?.overlaps).toEqual([{ number: 2, count: 1 }]);
+    expect(reports.rows.get(1)).toEqual([{ number: 2, count: 1 }]);
   });
 
   it("重複が並びを変えない", () => {
@@ -88,13 +88,13 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(3, ["b.ts", "c.ts"]),
     ]);
 
-    expect(reports.get(1)?.overlaps.map((overlap) => overlap.number)).toEqual([3, 2]);
+    expect(reports.rows.get(1)?.map((overlap) => overlap.number)).toEqual([3, 2]);
   });
 
   it("自分自身とは重ねない", () => {
     const reports = fileOverlapsFor(NOTHING_UNREADABLE, [candidate(1, ["a.ts"])]);
 
-    expect(reports.get(1)?.overlaps).toEqual([]);
+    expect(reports.rows.get(1)).toEqual([]);
   });
 
   it("見切れた一覧で測った数は、下限だと言う", () => {
@@ -104,7 +104,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["a.ts", "b.ts"]),
     ]);
 
-    expect(reports.get(1)?.partial, "自分の一覧が見切れている").toBe(true);
+    expect(reports.partial, "自分の一覧が見切れている").toBe(true);
   });
 
   it("相手の一覧が見切れていても、下限だと言う", () => {
@@ -114,8 +114,8 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["b.ts"], true),
     ]);
 
-    expect(reports.get(1)?.partial, "相手の一覧が見切れている").toBe(true);
-    expect(reports.get(1)?.overlaps, "見えた範囲では重なっていない").toEqual([]);
+    expect(reports.partial, "相手の一覧が見切れている").toBe(true);
+    expect(reports.rows.get(1), "見えた範囲では重なっていない").toEqual([]);
   });
 
   it("どの一覧も見切れていなければ、下限だとは言わない", () => {
@@ -125,7 +125,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["a.ts"]),
     ]);
 
-    expect(reports.get(1)?.partial).toBe(false);
+    expect(reports.partial).toBe(false);
   });
 
   it("読めなかった PR が居れば、重なりがゼロでも下限だと言う", () => {
@@ -135,8 +135,8 @@ describe("同じファイルを触る PR を並べる", () => {
     // **その画面で、重なりだけが「抜けは無い」と言うことになる**
     const reports = fileOverlapsFor(1, [candidate(1, ["a.ts"]), candidate(2, ["b.ts"])]);
 
-    expect(reports.get(1)?.overlaps, "見えた範囲では重なっていない").toEqual([]);
-    expect(reports.get(1)?.partial, "読めなかった PR が居るのに下限と言っていない").toBe(true);
+    expect(reports.rows.get(1), "見えた範囲では重なっていない").toEqual([]);
+    expect(reports.partial, "読めなかった PR が居るのに下限と言っていない").toBe(true);
   });
 
   it("材料が取れていない PR が居れば、下限だと言う", () => {
@@ -144,14 +144,14 @@ describe("同じファイルを触る PR を並べる", () => {
     // しれない。** **見切れているのと同じ扱い**である
     const reports = fileOverlapsFor(NOTHING_UNREADABLE, [candidate(1, ["a.ts"]), unmeasured(2)]);
 
-    expect(reports.get(1)?.partial, "測れていない PR が居るのに下限と言っていない").toBe(true);
+    expect(reports.partial, "測れていない PR が居るのに下限と言っていない").toBe(true);
   });
 
   it("材料が取れていない PR も、行としては返る", () => {
     // **黙って落とさない**
     const reports = fileOverlapsFor(NOTHING_UNREADABLE, [candidate(1, ["a.ts"]), unmeasured(2)]);
 
-    expect(reports.get(2)?.overlaps).toEqual([]);
+    expect(reports.rows.get(2)).toEqual([]);
   });
 
   it("訊いた PR は、重なりが無くても全部返る", () => {
@@ -161,7 +161,7 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(2, ["b.ts"]),
     ]);
 
-    expect([...reports.keys()].sort()).toEqual([1, 2]);
+    expect([...reports.rows.keys()].sort()).toEqual([1, 2]);
   });
 
   it("同じファイルを 2 本が触っていれば、どちらの行にも出る", () => {
@@ -170,8 +170,8 @@ describe("同じファイルを触る PR を並べる", () => {
       candidate(9, ["a.ts"]),
     ]);
 
-    expect(reports.get(8)?.overlaps).toEqual([{ number: 9, count: 1 }]);
-    expect(reports.get(9)?.overlaps).toEqual([{ number: 8, count: 1 }]);
+    expect(reports.rows.get(8)).toEqual([{ number: 9, count: 1 }]);
+    expect(reports.rows.get(9)).toEqual([{ number: 8, count: 1 }]);
   });
 
   it("全部が同じファイルを触っていても、組が消えない", () => {
@@ -190,7 +190,7 @@ describe("同じファイルを触る PR を並べる", () => {
     const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
     // **1 本が残り 399 本と重なる**
-    expect(reports.get(1)?.overlaps, `400 本で ${elapsed} ms`).toHaveLength(399);
+    expect(reports.rows.get(1), `400 本で ${elapsed} ms`).toHaveLength(399);
   });
   it("組が多すぎるときは区切って、下限だと言う", () => {
     // **上限を入れた**（#656。**測ってから決めた**）——**素のままだと
@@ -208,8 +208,8 @@ describe("同じファイルを触る PR を並べる", () => {
     const reports = fileOverlapsFor(NOTHING_UNREADABLE, many);
     const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
-    expect(reports.size, `250 本で ${elapsed} ms`).toBe(250);
-    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+    expect(reports.rows.size, `250 本で ${elapsed} ms`).toBe(250);
+    expect(reports.partial, "区切ったのに下限だと言っていない").toBe(true);
   });
 
   it("実物と同じ形の 100 本では、区切らない", () => {
@@ -229,8 +229,8 @@ describe("同じファイルを触る PR を並べる", () => {
 
     const reports = fileOverlapsFor(NOTHING_UNREADABLE, many);
 
-    expect(reports.get(1)?.overlaps, "実物の形なのに組が消えている").toHaveLength(3);
-    expect(reports.get(1)?.partial, "測り切れているのに下限と言っている").toBe(false);
+    expect(reports.rows.get(1), "実物の形なのに組が消えている").toHaveLength(3);
+    expect(reports.partial, "測り切れているのに下限と言っている").toBe(false);
   });
   /**
    * **予算をちょうど使い切る盤面**（#660 のレビュー）。
@@ -266,8 +266,8 @@ describe("同じファイルを触る PR を並べる", () => {
     // 予算を見ると、1 件も落としていないのに全行が「下限です」になる。**
     const reports = fileOverlapsFor(NOTHING_UNREADABLE, onBudget(false));
 
-    expect(reports.get(1000)?.overlaps, "最後の行が数え切れていない").toHaveLength(999);
-    expect(reports.get(1)?.partial, "全部数えたのに下限だと言っている").toBe(false);
+    expect(reports.rows.get(1000), "最後の行が数え切れていない").toHaveLength(999);
+    expect(reports.partial, "全部数えたのに下限だと言っている").toBe(false);
   });
 
   it("上限ちょうどで、まだ相手が残っているなら、下限だと言う", () => {
@@ -275,6 +275,6 @@ describe("同じファイルを触る PR を並べる", () => {
     // 届く前に尽きる。** **こちらは区切っているので、下限で正しい。**
     const reports = fileOverlapsFor(NOTHING_UNREADABLE, onBudget(true));
 
-    expect(reports.get(1)?.partial, "区切ったのに下限だと言っていない").toBe(true);
+    expect(reports.partial, "区切ったのに下限だと言っていない").toBe(true);
   });
 });

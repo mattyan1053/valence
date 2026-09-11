@@ -17,7 +17,7 @@
  */
 
 import { graphemeCount } from "../../domain/text/graphemes";
-import type { TitleOverlapReport } from "../../domain/triage/title-overlap";
+import type { TitleMatch } from "../../domain/triage/title-overlap";
 
 /**
  * **ここから上を出す。**
@@ -46,21 +46,28 @@ export const SHARED_TITLE_FLOOR = 10;
 /**
  * その行に出す 1 文。**言うことが無ければ `undefined`。**
  *
- * **理由は名指さない**（#656）——**`TitleOverlapReport.partial` は真偽値 1 つ**で、
- * **タイトルが読めなかったのか、一覧から読めなかったのか、長すぎて先頭までしか
- * 比べていないのか（`COMPARED_PREFIX`）、組が多すぎて区切ったのか
- * （`COMPARISON_BUDGET`）を持っていない。** **名指すと、当たっていないほうを言う。**
+ * **測り切れていないことは、盤面が 1 回だけ言う**（#702。`titleOverlapLimitNote`）
+ * ——**`partial` は盤面ぜんたいの事実**で、**行ごとに違わない**
+ * （**12 行の盤面で、同じ 1 文が 12 回出ていた**）。
  */
-export function titleOverlapNote(report: TitleOverlapReport | undefined): string | undefined {
-  const match = report?.match;
+export function titleOverlapNote(match: TitleMatch | undefined): string | undefined {
   if (match === undefined) {
-    // **測り切れていないなら、組が無くても黙らない**——**「読めなかった」を
-    // 「似ていない」にしない**（#637 と同じ）
-    return report?.partial === true ? "同じ題の PR を測り切れていません" : undefined;
+    return undefined;
   }
 
   // **書記素で数える**（#653 のレビュー 2 周目）——**`String.length` は UTF-16 の数**で、
   // **gitmoji 1 個が 2 になる。** **境界に使ったのと同じ数え方**である
-  const found = `タイトルが ${graphemeCount(match.shared)} 文字ぶん同じ PR: #${match.number}（「${match.shared}」）`;
-  return report?.partial === true ? `${found}（測り切れていないので、下限です）` : found;
+  return `タイトルが ${graphemeCount(match.shared)} 文字ぶん同じ PR: #${match.number}（「${match.shared}」）`;
+}
+
+/**
+ * **盤面に 1 回だけ出す断り**（#702）。
+ *
+ * **理由は名指さない**（#656）——**`TitleOverlapReports.partial` は真偽値 1 つ**で、
+ * **タイトルが読めなかったのか、一覧から読めなかったのか、長すぎて先頭までしか
+ * 比べていないのか（`COMPARED_PREFIX`）、組が多すぎて区切ったのか
+ * （`COMPARISON_BUDGET`）を持っていない。** **名指すと、当たっていないほうを言う。**
+ */
+export function titleOverlapLimitNote(partial: boolean): string | undefined {
+  return partial ? "同じ題の PR を測り切れていません" : undefined;
 }

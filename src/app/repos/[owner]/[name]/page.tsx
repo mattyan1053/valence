@@ -22,7 +22,7 @@ import {
   reportBoardActionUnavailable,
   repositoryBoardForCurrentUser,
 } from "../../../../composition/auth";
-import type { MergeBlock } from "../../../../domain/graph/merge-block";
+import type { MergeBlock, NotOrderableReason } from "../../../../domain/graph/merge-block";
 import { mergeBlocksFor } from "../../../../domain/graph/merge-block";
 import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge";
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
@@ -142,6 +142,15 @@ export function approvalDisplay(
 }
 
 /**
+ * **その番号の判定が地図に無いとき**（#702）。
+ *
+ * **一覧に出てこないのと同じ扱い**である——**知らない番号を「マージしてよい」と
+ * 言わない**（`blockFrom` の最後の行と同じ判断）。**行ごとの事実**なので、
+ * **断りはその行に出る。**
+ */
+const MISSING_BLOCK = { kind: "not-orderable", reason: "not-listed" } as const;
+
+/**
  * 依存の判定を、ボタンが受け取る形へ直す（#345）。
  *
  * **判定そのものは `mergeBlockFor` が持つ**——**ここは詰め替えるだけ**である
@@ -149,13 +158,16 @@ export function approvalDisplay(
  */
 export function mergeButtonBlock(block: MergeBlock): {
   readonly blockedBy?: readonly number[];
-  readonly notOrderable?: boolean;
+  readonly notOrderable?: NotOrderableReason;
 } {
   switch (block.kind) {
     case "depends-on":
       return { blockedBy: block.numbers };
     case "not-orderable":
-      return { notOrderable: true };
+      // **理由をそのまま運ぶ**（#702）——**どこに断りを出すかは、受け取った側が
+      // `isBoardWide` で決める**（**ここで真偽値に潰すと、盤面の事実か行の事実かが
+      // 消える**）
+      return { notOrderable: block.reason };
     case "ready":
       return {};
   }
@@ -466,7 +478,7 @@ export async function renderRepositoryBoard(
                   // **画面でも止める**（POST でも止まるが、**押しても断られると
                   // 分かっているものを押させるのは、理由が伝わる形ではない**）
                   // **知らない番号を「押せる」へ倒さない**（`mergeBlockFor` と同じ判断）
-                  {...mergeButtonBlock(blocks?.get(number) ?? { kind: "not-orderable" })}
+                  {...mergeButtonBlock(blocks?.get(number) ?? MISSING_BLOCK)}
                 />
               </>
             )}

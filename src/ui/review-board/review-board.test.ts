@@ -326,18 +326,20 @@ describe("ReviewBoard", () => {
     it("読めなかった PR が居れば、重なりがゼロでも測り切れていないと言う", () => {
       // **盤面は既に「N 件の PR は読めませんでした」と出している**（#651 のレビュー 3 周目）
       // ——**その画面で、重なりだけが「抜けは無い」と言うことになる**
-      const rows = list(
-        render(props({ invalid: [{ index: 4, reason: "番号が数値ではありません" }] })),
-      );
+      //
+      // **言うのは盤面である**（#702）——**行ごとに違わない事実**なので、
+      // **行に出すと、行数だけ同じ文が並ぶ**
+      const markup = render(props({ invalid: [{ index: 4, reason: "番号が数値ではありません" }] }));
 
-      expect(rows).toMatch(/測り切れていません/);
+      expect(markup).toMatch(/同じファイルを触る PR を測り切れていません/);
+      expect(list(markup), "行が盤面の事実を言っている").not.toMatch(/測り切れていません/);
     });
 
     it("材料が取れていない PR が居れば、測り切れていないと言う", () => {
       // **「測れなかった」を「重なっていない」にしない**（#637）
-      const rows = list(render(props({ changes: new Map([[1, change()]]) })));
+      const markup = render(props({ changes: new Map([[1, change()]]) }));
 
-      expect(rows).toMatch(/測り切れていません/);
+      expect(markup).toMatch(/同じファイルを触る PR を測り切れていません/);
     });
   });
 
@@ -374,12 +376,14 @@ describe("ReviewBoard", () => {
     });
 
     it("タイトルが取れていない PR が居れば、測り切れていないと言う", () => {
-      // **「読めなかった」を「似ていない」にしない**（#637 と同じ）
-      const rows = list(
-        render(props({ titleOf: (number: number) => (number === 1 ? "あいうえお" : undefined) })),
+      // **「読めなかった」を「似ていない」にしない**（#637 と同じ）——**言うのは
+      // 盤面である**（#702）
+      const markup = render(
+        props({ titleOf: (number: number) => (number === 1 ? "あいうえお" : undefined) }),
       );
 
-      expect(rows).toMatch(/測り切れていません/);
+      expect(markup).toMatch(/同じ題の PR を測り切れていません/);
+      expect(list(markup), "行が盤面の事実を言っている").not.toMatch(/測り切れていません/);
     });
   });
 
@@ -511,6 +515,67 @@ describe("ReviewBoard", () => {
  * **人が開くのは盤面**である——**部品が出していても、盤面が別の並べ方をしていれば
  * 届かない**（`AGENTS.md` §5: **入れたが、実行される場所に届いていない**）。
  */
+/**
+ * **行を区別しない断りは、盤面に 1 回だけ出す**（#702）。
+ *
+ * **数えた**（`./task board:sample` の 12 行の盤面）——**「同じ題の PR を
+ * 測り切れていません」12 / 12 行**、**「依存の順序を判定できません」12 / 12 行**、
+ * **「同じファイルを触る PR を測り切れていません」10 / 12 行**。**12 本で 34 回**で、
+ * **30 本なら 85 回**である。
+ *
+ * **全行に同じ理由で出るなら、それは行の属性ではない。**
+ * **消す話ではない**（§5。**「読めなかった」を「無かった」にしない**）——
+ * **置く場所の話**である。
+ */
+describe("行を区別しない断りは、盤面に 1 回だけ出す（#702）", () => {
+  /** **10 本**（**1 本では、同じ文が何度も出ることそのものが起きない**）。 */
+  const MANY: readonly PullRequestRef[] = Array.from({ length: 10 }, (_, index) =>
+    pullRequest(index + 1, "main", `feat/${index + 1}`),
+  );
+
+  /** **測り切れていない盤面**——**読めなかった PR が 1 件居る**（#651 のレビュー 3 周目）。 */
+  function partialProps(rows: readonly PullRequestRef[]): ReviewBoardProps {
+    return props({
+      pullRequests: rows,
+      edges: [],
+      order: { ordered: rows.map((each) => each.number), cyclic: [] },
+      invalid: [{ index: 4, reason: "番号が数値ではありません" }],
+      changes: new Map(rows.map((each) => [each.number, change()])),
+      // **読めなかった PR が居るので、どの行も並べられない**（`merge-block.ts:137`）
+      mergeBlockOf: () => ({ kind: "not-orderable", reason: "graph-unreadable" }),
+    });
+  }
+
+  function countOf(markup: string, sentence: string): number {
+    return markup.split(sentence).length - 1;
+  }
+
+  const LIMIT_NOTES = [
+    "同じ題の PR を測り切れていません",
+    "同じファイルを触る PR を測り切れていません",
+  ] as const;
+
+  it.each(LIMIT_NOTES)("行が増えても、%s は 1 回だけ", (sentence) => {
+    // **行数を変えても回数が増えない**（完了条件）
+    expect(countOf(render(partialProps(STACK)), sentence), "2 行の盤面").toBe(1);
+    expect(countOf(render(partialProps(MANY)), sentence), "10 行の盤面").toBe(1);
+  });
+
+  it.each(LIMIT_NOTES)("%s は、行の中に出ない", (sentence) => {
+    expect(countOf(list(render(partialProps(MANY))), sentence), "一覧の中に出ている").toBe(0);
+  });
+
+  it("依存の順序を判定できない理由も、盤面に 1 回だけ", () => {
+    // **盤面ぜんたいの事実**である——**図に抜けがあるなら、どの行も並べられない**
+    const markup = render(partialProps(MANY));
+
+    expect(countOf(markup, "依存の順序を判定できません"), "行ごとに出ている").toBe(1);
+  });
+
+  // **押せる／押せないが変わっていないこと**（完了条件）は、**ボタンの試験で見ている**
+  // （`merge-button.test.ts`）——**押せるかどうかを決めているのはそちら**である。
+});
+
 describe("1 件も無いとき", () => {
   it("盤面にも、何が無いのかが出る", () => {
     const markup = render(

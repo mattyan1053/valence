@@ -3,7 +3,7 @@ import type { DependencyEdge, PullRequestRef } from "./dependency-graph";
 import { buildDependencyEdges } from "./dependency-graph";
 import type { DependencyOrder } from "./dependency-order";
 import { orderByDependency } from "./dependency-order";
-import { mergeBlockFor, mergeBlocksFor } from "./merge-block";
+import { isBoardWide, mergeBlockFor, mergeBlocksFor } from "./merge-block";
 
 function pr(number: number, base: string, head: string): PullRequestRef {
   return {
@@ -49,8 +49,9 @@ describe("依存が残っているかを決める", () => {
     // **順序が付かない**ので、**「何を先に」も言えない**——**押させない**
     const cycle = [pr(1, "feat/b", "feat/a"), pr(2, "feat/a", "feat/b")];
 
-    expect(blockFor(cycle, 1)).toEqual({ kind: "not-orderable" });
-    expect(blockFor(cycle, 2)).toEqual({ kind: "not-orderable" });
+    // **理由も見る**（#702）——**循環はその行の事実**なので、**断りは行に出る**
+    expect(blockFor(cycle, 1)).toEqual({ kind: "not-orderable", reason: "cyclic" });
+    expect(blockFor(cycle, 2)).toEqual({ kind: "not-orderable", reason: "cyclic" });
   });
 
   it("循環の上に積まれたものもマージできない", () => {
@@ -72,7 +73,7 @@ describe("順序と辺が食い違っていても、緩い側へ倒さない", (
     const edges: readonly DependencyEdge[] = [];
     const order: DependencyOrder = { ordered: [], cyclic: [7] };
 
-    expect(mergeBlockFor(7, edges, order, 0)).toEqual({ kind: "not-orderable" });
+    expect(mergeBlockFor(7, edges, order, 0)).toEqual({ kind: "not-orderable", reason: "cyclic" });
   });
 });
 
@@ -87,7 +88,12 @@ describe("読めなかった PR があれば、順序を判定できたと言わ
     // 分けるため**（master の指示）
     expect(blockFor([pr(8, "main", "feat/a")], 8, 0)).toEqual({ kind: "ready" });
 
-    expect(blockFor([pr(8, "main", "feat/a")], 8, 1)).toEqual({ kind: "not-orderable" });
+    // **盤面ぜんたいの事実である**（#702）——**全行が同じ理由でここへ来る**ので、
+    // **断りは盤面に 1 回だけ出す**（**押させないことは変わらない**）
+    expect(blockFor([pr(8, "main", "feat/a")], 8, 1)).toEqual({
+      kind: "not-orderable",
+      reason: "graph-unreadable",
+    });
   });
 
   it("土台が残っているときも、読めなかった側を優先して伝えない", () => {
@@ -181,5 +187,23 @@ describe("何を先に入れるかの並び", () => {
     expect(mergeBlocksFor([9], edges, order, 0).get(9)).toEqual(expected);
     // **1 件ずつ訊いても同じ並び**である（**索引を作ったことで変わっていない**）
     expect(mergeBlockFor(9, edges, order, 0)).toEqual(expected);
+  });
+});
+
+describe("並べられなかった理由は、置き場所を決めるためにある（#702）", () => {
+  it("読めなかった PR があるのは、盤面ぜんたいの事実", () => {
+    // **全行が同じ理由でここへ来る**——**行ごとに言うと、12 行で 12 回出る**
+    expect(isBoardWide("graph-unreadable"), "盤面の事実だと言っていない").toBe(true);
+  });
+
+  it("循環と、一覧に無い番号は、行ごとの事実", () => {
+    // **どの行のことかが違う**——**盤面へ寄せると、どれが循環なのか分からなくなる**
+    expect(isBoardWide("cyclic"), "行の事実を盤面へ寄せている").toBe(false);
+    expect(isBoardWide("not-listed"), "行の事実を盤面へ寄せている").toBe(false);
+  });
+
+  it("一覧に無い番号は、そう名乗る", () => {
+    // **「知らない番号」と「循環」は、同じ `not-orderable` でも出どころが違う**
+    expect(blockFor(STACK, 999)).toEqual({ kind: "not-orderable", reason: "not-listed" });
   });
 });
