@@ -125,7 +125,19 @@ export function CrossRepositoryBoard({ rows, unavailable, ballFilter }: CrossRep
       {/* **絞る口は、絞っていなくても出す**——**無ければ、絞れることに気づけない** */}
       <BallFilterView
         current={ballFilter}
-        counts={{ shown: shown.length, hidden: filtered.hidden }}
+        counts={{
+          shown: shown.length,
+          hidden: filtered.hidden,
+          // **盤面に出ていない PR を数える**（#694 のレビュー）——**4 つとも
+          // 「行がここに無い」側**である（**読めなかった／読み切れなかった／
+          // 一覧の時点で読めなかった／形を読み取れなかった**）。
+          // **その番のものだったかもしれない**ので、**0 件と言い切らせない**
+          unread:
+            unavailable.unreadable +
+            unavailable.truncated +
+            unavailable.repositories +
+            unavailable.pullRequests,
+        }}
       />
       {shown.length === 0 ? (
         // **読めていない範囲が残るなら、0 件と断定しない**（#686 のレビュー）

@@ -72,17 +72,34 @@ export function ballFilterOf(
  * **通ったものが 0 件なら、そう言う**（#410 が `EmptyNotice` で塞いだ形）
  * ——**一覧が空のまま隠した件数だけ言っても、当てはまるものが無いのか、
  * 読み落としたのかが分からない。**
+ *
+ * **ただし、読めていない範囲が残るなら言い切らない**（#694 のレビュー）
+ * ——**#686 のレビューが盤面の空表示で塞いだのと同じ形**である。
+ * **「読めませんでした」と言った直後に「ありません」と言うと、同じ画面が逆のことを言う**
+ * ——**読めなかった PR が、その番のものだったかもしれない。**
+ *
+ * **`unread` に既定を置かない**（#669 のレビューと同じ判断）——**置くと、
+ * 渡し忘れても動く**ので、**読めない範囲を持つ画面が増えたときに片方だけが直る。**
  */
 export function ballFilterNote(
   ball: BallFilter | undefined,
-  counts: { readonly shown: number; readonly hidden: number },
+  counts: {
+    readonly shown: number;
+    readonly hidden: number;
+    /** **盤面に出ていない PR の数**（読めなかった・読み切れなかった）。 */
+    readonly unread: number;
+  },
 ): string | undefined {
   if (ball === undefined) {
     return undefined;
   }
   const label = ballFilterLabel(ball);
   const hidden = `${counts.hidden} 件を隠しています`;
-  return counts.shown === 0
+  if (counts.shown > 0) {
+    return `「${label}」だけを出しています（${hidden}）`;
+  }
+  // **限定が要るのは「無い」と言うときだけ**——**平常時に断りを足すと読まれなくなる**（#248）
+  return counts.unread === 0
     ? `「${label}」の PR はありません（${hidden}）`
-    : `「${label}」だけを出しています（${hidden}）`;
+    : `読めた範囲に「${label}」の PR はありません（${hidden}）`;
 }

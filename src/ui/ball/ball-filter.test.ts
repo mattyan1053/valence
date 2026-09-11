@@ -23,12 +23,12 @@ describe("誰の番かで絞る口", () => {
 
   it("絞っていなければ、何も言わない", () => {
     // **平常時に鳴るものは読まれなくなる**（#248）
-    expect(ballFilterNote(undefined, { shown: 5, hidden: 0 })).toBeUndefined();
+    expect(ballFilterNote(undefined, { shown: 5, hidden: 0, unread: 0 })).toBeUndefined();
   });
 
   it("絞っているときは、隠した件数を言う", () => {
     // **絞られていることに気づけるようにする**（#663）
-    const note = ballFilterNote("author", { shown: 2, hidden: 3 });
+    const note = ballFilterNote("author", { shown: 2, hidden: 3, unread: 0 });
 
     expect(note).toContain("3 件");
     expect(note).toContain(ballFilterLabel("author"));
@@ -36,14 +36,16 @@ describe("誰の番かで絞る口", () => {
 
   it("隠した件数が 0 でも、絞っていることは言う", () => {
     // **「全部が当てはまった」と「絞っていない」は違う**
-    expect(ballFilterNote("author", { shown: 2, hidden: 0 })).toContain(ballFilterLabel("author"));
+    expect(ballFilterNote("author", { shown: 2, hidden: 0, unread: 0 })).toContain(
+      ballFilterLabel("author"),
+    );
   });
 
   it("絞って 0 件になったら、0 件だと言う", () => {
     // **「絞って 0 件」と「1 件も無い」は違う**（#410 が `EmptyNotice` で塞いだ形）
     // ——**一覧が空のまま隠した件数だけ言っても、当てはまるものが無いのか
     // 読み落としたのか分からない**
-    const note = ballFilterNote("author", { shown: 0, hidden: 4 });
+    const note = ballFilterNote("author", { shown: 0, hidden: 4, unread: 0 });
 
     expect(note, "0 件になったことを言っていない").toContain("ありません");
     expect(note, "隠した件数が消えている").toContain("4 件");
@@ -53,5 +55,35 @@ describe("誰の番かで絞る口", () => {
     for (const ball of BALL_FILTERS) {
       expect(ballFilterLabel(ball), `${ball} の名前が無い`).not.toBe("");
     }
+  });
+});
+
+/**
+ * **読めていない範囲が残るなら、0 件と断定しない**（#694 のレビュー）。
+ *
+ * **#686 のレビューが盤面の空表示で塞いだのと同じ形**である——**「読めませんでした」
+ * と言った直後に「ありません」と言うと、同じ画面が逆のことを言う。**
+ * **読めなかった PR が、その番のものだったかもしれない。**
+ */
+describe("読めなかったものが残るとき", () => {
+  it("絞って 0 件でも、無いとは言い切らない", () => {
+    const note = ballFilterNote("author", { shown: 0, hidden: 4, unread: 2 });
+
+    expect(note, "読めていない範囲があるのに言い切っている").toContain("読めた範囲");
+    expect(note, "隠した件数が消えている").toContain("4 件を隠しています");
+  });
+
+  it("読めなかったものが無ければ、これまでどおり言い切る", () => {
+    // **平常時に断りを足すと読まれなくなる**（#248）——**言い切れるときは言い切る**
+    const note = ballFilterNote("author", { shown: 0, hidden: 4, unread: 0 });
+
+    expect(note, "読めているのに限定している").not.toContain("読めた範囲");
+  });
+
+  it("通ったものがあるなら、限定しない", () => {
+    // **限定が要るのは「無い」と言うときだけ**である
+    const note = ballFilterNote("author", { shown: 2, hidden: 1, unread: 3 });
+
+    expect(note).not.toContain("読めた範囲");
   });
 });

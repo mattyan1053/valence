@@ -45,7 +45,18 @@ export function BallFilterView({
   /** いま選ばれている絞り込み。**絞っていなければ `undefined`。** */
   readonly current: BallFilter | undefined;
   /** 通った件数と、絞りで隠れた件数。 */
-  readonly counts: { readonly shown: number; readonly hidden: number };
+  /**
+   * 通った件数と、絞りで隠れた件数と、**盤面に出ていない件数**（#694 のレビュー）。
+   *
+   * **`unread` は絞りの外**である——**読めなかったものは絞りに関係なく数える**
+   * （**混ぜると、抜けが絞りのせいに見える**）。**言い切ってよいかの判定は
+   * `ballFilterNote` が持つ**（2 箇所に置かない）。
+   */
+  readonly counts: {
+    readonly shown: number;
+    readonly hidden: number;
+    readonly unread: number;
+  };
 }) {
   const note = ballFilterNote(current, counts);
   return (

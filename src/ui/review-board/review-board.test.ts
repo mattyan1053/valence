@@ -1023,3 +1023,29 @@ describe("誰の番かで絞る（#663）", () => {
     expect(render(byBall())).toContain("誰の番かで絞る");
   });
 });
+
+/**
+ * **読めていない範囲が残るなら、絞り結果を断定しない**（#694 のレビュー）。
+ *
+ * **横断の盤面と同じ穴**である——**片方だけ直さない。**
+ */
+describe("絞って 0 件のとき、読めなかったものが残る", () => {
+  it("無いとは言い切らない", () => {
+    // **読めなかった PR は一覧に並んでいない**（#107 の `invalid`）
+    // ——**その番のものだったかもしれない**
+    const html = render(
+      props({
+        ballFilter: "merger",
+        invalid: [{ index: 4, reason: "番号が数値ではありません" }],
+      }),
+    );
+
+    expect(html, "読めていない範囲があるのに言い切っている").toContain("読めた範囲");
+  });
+
+  it("読めなかったものが無ければ、これまでどおり言い切る", () => {
+    const html = render(props({ ballFilter: "merger", invalid: [] }));
+
+    expect(html, "読めているのに限定している").not.toContain("読めた範囲");
+  });
+});

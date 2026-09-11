@@ -273,7 +273,14 @@ export function ReviewBoard({
       {/* **絞る口は、一覧の手前に置く**——**何が出ているかの断りでもある** */}
       <BallFilterView
         current={ballFilter}
-        counts={{ shown: filtered.shown.length, hidden: filtered.hidden }}
+        counts={{
+          shown: filtered.shown.length,
+          hidden: filtered.hidden,
+          // **読めなかった PR は一覧に並んでいない**（#107 の `invalid`）
+          // ——**その番のものだったかもしれない**ので、**0 件と言い切らせない**
+          // （#694 のレビュー。**横断の盤面と同じ穴**で、**片方だけ直さない**）
+          unread: invalid.length,
+        }}
       />
       <DependencyGraphView
         pullRequests={pullRequests}

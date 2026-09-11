@@ -244,3 +244,32 @@ describe("横断の一覧の並び", () => {
     expect(html.indexOf("b/new"), "動いたものが下にある").toBeLessThan(html.indexOf("a/old"));
   });
 });
+
+/**
+ * **読めていない範囲が残るなら、絞り結果を断定しない**（#694 のレビュー）。
+ *
+ * **#686 のレビューが空表示で塞いだのと同じ形**である——**「読めませんでした」と
+ * 言った直後に「ありません」と言うと、同じ画面が逆のことを言う。**
+ */
+describe("絞って 0 件のとき、読めなかったものが残る", () => {
+  const ROW = row({
+    opinion: { approvesHead: false, changesRequestedOnHead: true, reviewed: true },
+    assignment: { assignees: [], reviewers: [], authoredByBot: false },
+  });
+
+  it("無いとは言い切らない", () => {
+    const html = render({
+      rows: [ROW],
+      ballFilter: "merger",
+      unavailable: { ...NONE, truncated: 1 },
+    });
+
+    expect(html, "読めていない範囲があるのに言い切っている").toContain("読めた範囲");
+  });
+
+  it("読めなかったものが無ければ、これまでどおり言い切る", () => {
+    const html = render({ rows: [ROW], ballFilter: "merger", unavailable: NONE });
+
+    expect(html, "読めているのに限定している").not.toContain("読めた範囲");
+  });
+});
