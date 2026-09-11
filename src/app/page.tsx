@@ -8,9 +8,18 @@
  */
 
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
-import { visibleRepositoriesForCurrentUser } from "../composition/auth";
+import type { CrossRepositoryBoardResult } from "../application/review-order/view-cross-repository-board";
+import {
+  homeForCurrentUser,
+  pullRequestPageUrl,
+  reportBoardActionUnavailable,
+} from "../composition/auth";
 import { SignOutButton, showsSignOut } from "../ui/auth/sign-out-button";
+import { BoardFreshness } from "../ui/board/board-freshness";
+import type { CrossRepositoryRow } from "../ui/cross-repository/cross-repository-board";
+import { CrossRepositoryBoard } from "../ui/cross-repository/cross-repository-board";
 import { RepositoryList } from "../ui/repository-list/repository-list";
+import { boardUnavailableReason } from "./repos/[owner]/[name]/page";
 
 /**
  * **要求ごとに描く。静的に生成させない** (#213 のレビュー)。
@@ -45,7 +54,109 @@ export function boardPath(repository: { readonly owner: string; readonly name: s
  * **「ログアウトを出していること」を試験から見られない**（**盤面が #519 で
  * 同じ形にしている**）。**判断はここに無い**——**受けた結果を出すだけ**である。
  */
-export function renderHome(result: VisibleRepositoriesResult) {
+/**
+ * **横断の一覧を、画面の行へ**（#682）。
+ *
+ * **行き先はここで組む**（#417 のレビュー）——**経路は `app` の話**で、
+ * **表示の部品は `app` を import できない**（§3 の表）。
+ *
+ * **読めなかった材料は、`undefined` のまま渡す**（#681）——**既定値を埋めると、
+ * 「分からない」が「依頼なし」「マージできる」に化ける。**
+ */
+export function crossRepositoryRows(
+  result: CrossRepositoryBoardResult,
+): readonly CrossRepositoryRow[] {
+  if (result.kind !== "board") {
+    return [];
+  }
+  return result.listing.pullRequests.map((pullRequest) => ({
+    repository: pullRequest.repository,
+    number: pullRequest.number,
+    title: pullRequest.title,
+    updatedAt: pullRequest.updatedAt,
+    href: pullRequestPageUrl(pullRequest.repository, pullRequest.number),
+    ...(pullRequest.opinion === undefined ? {} : { opinion: pullRequest.opinion }),
+    ...(pullRequest.assignment === undefined ? {} : { assignment: pullRequest.assignment }),
+    ...(pullRequest.mergeStatus === undefined ? {} : { mergeStatus: pullRequest.mergeStatus }),
+  }));
+}
+
+/** **読めなかったリポジトリの数**（#681 が分けて返したものを、そのまま数える）。 */
+export function crossRepositoryUnavailable(result: CrossRepositoryBoardResult) {
+  if (result.kind !== "board") {
+    return { unreadable: 0, truncated: 0, repositories: 0, pullRequests: 0 };
+  }
+  const kinds = result.listing.unavailable;
+  return {
+    unreadable: kinds.filter((one) => one.kind === "unreadable").length,
+    truncated: kinds.filter((one) => one.kind === "truncated").length,
+    repositories: result.unreadableRepositories,
+    // **形を読み取れなかった PR も運ぶ**（#686 のレビュー）——**画面の手前で消すと、
+    // 全部が検証で落ちた盤面が「open な PR はありません」になる**
+    pullRequests: result.listing.invalid.length,
+  };
+}
+
+/**
+ * **横断の一覧の節**（#682）。
+ *
+ * **渡されなければ、これまでどおりの画面である**——**足すだけ**にしてある。
+ * **引けなかったときは、黙って空を出さない**（**故障が「open PR が 0 本」に化ける**）。
+ */
+/**
+ * **落ちどころを、サーバ側に残す口**（#686 のレビュー）。
+ *
+ * **受け口を引数で渡す**——**画面から直に呼ぶと composition が本物を掴む**ので、
+ * **「記録の口を呼んでいること」を試験から見られない**（**リポジトリ別の盤面と
+ * 同じ形**。#513 のレビュー）。
+ */
+export type HomeDeps = {
+  readonly report: (action: "home", kind: string) => void;
+};
+
+function CrossRepositorySection({
+  result,
+  at,
+}: {
+  readonly result?: CrossRepositoryBoardResult;
+  readonly at?: Date;
+}) {
+  if (result === undefined) {
+    return null;
+  }
+  if (result.kind === "unavailable") {
+    return <p className="text-sm">横断の一覧は、いま取得できませんでした。</p>;
+  }
+  if (result.kind !== "board") {
+    // **ログインしていない / 入り直す**は、上の案内と重ねない
+    return null;
+  }
+  return (
+    <>
+      {/* **「新しい」とは言わない**（#664）——**取りに行った時刻を出す** */}
+      {at === undefined ? undefined : <BoardFreshness at={at} reloadHref="/" />}
+      <CrossRepositoryBoard
+        rows={crossRepositoryRows(result)}
+        unavailable={crossRepositoryUnavailable(result)}
+      />
+    </>
+  );
+}
+
+export function renderHome(
+  result: VisibleRepositoriesResult,
+  cross?: CrossRepositoryBoardResult,
+  at?: Date,
+  deps?: HomeDeps,
+) {
+  // **落ちどころを、サーバ側に残す**（#686 のレビュー）——**例外は既に catch 済み**で、
+  // **通常のサーバログにも残らない。** **画面には出さない**（§6。**応答の中身が混ざりうる**）。
+  // **判定は `boardUnavailableReason` のまま 1 箇所**である（§5）
+  const unavailable = cross === undefined ? undefined : boardUnavailableReason(cross);
+  if (unavailable !== undefined) {
+    deps?.report("home", unavailable);
+  }
+
   return (
     <main className="mx-auto flex max-w-2xl flex-1 flex-col justify-center gap-4 px-6 py-16">
       <div className="flex items-center justify-between gap-4">
@@ -80,10 +191,18 @@ export function renderHome(result: VisibleRepositoriesResult) {
           )}
         </p>
       )}
+      {/* **横断の一覧**（#682）。**1 つが読めなくても、他を出す**
+          ——**「読めなかった」は数と一緒に残る**（#681 が分けて返している） */}
+      <CrossRepositorySection at={at} result={cross} />
     </main>
   );
 }
 
 export default async function Home() {
-  return renderHome(await visibleRepositoriesForCurrentUser());
+  // **取りに行く前に読む**（#664）——**遅い日に、実際より新しく見えることが無い**
+  const at = new Date();
+  // **見えるリポジトリは 1 度だけ引く**（#686 のレビュー）——**2 つを別々に呼ぶと、
+  // 同じ `/user/repos` が二重になる**
+  const { repositories, cross } = await homeForCurrentUser();
+  return renderHome(repositories, cross, at, { report: reportBoardActionUnavailable });
 }

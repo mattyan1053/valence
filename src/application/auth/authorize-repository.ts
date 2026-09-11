@@ -22,6 +22,7 @@ import type {
   VisibleRepositoryListing,
 } from "../ports/visible-repositories";
 import type { UsableToken } from "./ensure-usable-token";
+import { resolveVisibleRepositories } from "./resolve-visible-repositories";
 
 export type RepositoryAuthorization =
   /** ログインしていない。**誰の権限も無いので、何もしない**（§6）。 */
@@ -106,40 +107,14 @@ export async function authorizeRepository({
   permissions,
   require,
 }: AuthorizeRepositoryInput): Promise<RepositoryAuthorization> {
-  let store: UserTokenStore | undefined;
-  try {
-    store = await openStore();
-  } catch (error) {
-    // **開けなかったことを「見えない」にも「期限切れ」にも化けさせない**
-    return { kind: "unavailable", reason: `store/${errorKind(error)}` };
+  const resolved = await resolveVisibleRepositories({ openStore, ensure, repositories });
+  if (resolved.kind !== "resolved") {
+    return resolved;
   }
-  if (store === undefined) {
-    return { kind: "signed-out" };
-  }
-
-  const usable = await ensure(store);
-  switch (usable.kind) {
-    case "needs-login":
-      // **使えないトークンで叩きに行かない。** **症状が「権限が無い」と混ざる**
-      return { kind: "needs-login" };
-    case "unavailable":
-      // **`kind` を並べて書くのは、次に増えたときここで型が落ちるため**
-      return { kind: "unavailable", reason: "token" };
-    case "usable":
-      break;
-  }
-
-  let listing: VisibleRepositoryListing;
-  try {
-    listing = await repositories.list(usable.accessToken);
-  } catch (error) {
-    // **投げたものを `not-found` へ倒さない。** **故障が
-    // 「そんなリポジトリはありません」に化ける**
-    return { kind: "unavailable", reason: `list/${errorKind(error)}` };
-  }
+  const { listing, userAccessToken } = resolved;
 
   if (isVisible(listing, repository)) {
-    return await grantFor(usable.accessToken);
+    return await grantFor(userAccessToken);
   }
   // **判定不能を「無い」に倒さない**（§5）。**読めなかった行があるなら、
   // その中に居たかどうかを言えない**——**漏れはしない**（**`unavailable` は

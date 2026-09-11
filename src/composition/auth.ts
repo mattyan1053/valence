@@ -14,6 +14,7 @@ import { cookies } from "next/headers";
 import type { LoginResult } from "../application/auth/complete-login";
 import { completeLogin } from "../application/auth/complete-login";
 import { ensureUsableToken } from "../application/auth/ensure-usable-token";
+import { resolveVisibleRepositories } from "../application/auth/resolve-visible-repositories";
 import { signOut } from "../application/auth/sign-out";
 import type { UserTokenStore } from "../application/ports/user-token-store";
 import type { VisibleRepositoriesResult } from "../application/repositories/list-visible-repositories";
@@ -25,11 +26,14 @@ import { mergePlan } from "../application/review-order/merge-plan";
 import type { MergePullRequestResult } from "../application/review-order/merge-pull-request";
 import { mergePullRequest } from "../application/review-order/merge-pull-request";
 import { planReviewOrder } from "../application/review-order/plan-review-order";
+import type { HomeView } from "../application/review-order/view-home";
+import { viewHome } from "../application/review-order/view-home";
 import type { RepositoryBoardResult } from "../application/review-order/view-repository-board";
 import { viewRepositoryBoard } from "../application/review-order/view-repository-board";
 import { type EncryptionKey, readEncryptionKey } from "../infrastructure/crypto/token-cipher";
 import { readAppCredentials, readOAuthCredentials } from "../infrastructure/github/app-credentials";
 import { createGitHubChangeSummarySource } from "../infrastructure/github/github-change-summary-source";
+import { createGitHubCrossRepositoryPullRequests } from "../infrastructure/github/github-cross-repository-pull-requests";
 import { createGitHubIssueSource } from "../infrastructure/github/github-issue-source";
 import { createGitHubPullRequestApprovals } from "../infrastructure/github/github-pull-request-approvals";
 import { createGitHubPullRequestMerges } from "../infrastructure/github/github-pull-request-merge";
@@ -253,6 +257,55 @@ export async function visibleRepositoriesForCurrentUser(): Promise<VisibleReposi
     repositories: createUserVisibleRepositories(),
   });
 }
+
+/**
+ * **いまログインしている人の目で、見えるリポジトリを跨いだ open PR を返す**（#682）。
+ *
+ * **ユーザートークンで引く**（§6）——**installation トークンで代用しない。**
+ *
+ * **往復はリポジトリ数に依らない**（#681）——**25 件ずつ並べて投げる**ので、
+ * **50 リポジトリで 4.0〜4.4 秒**（実測 2026-09-11）。
+ */
+export async function homeForCurrentUser(): Promise<HomeView> {
+  const { connection, key, credentials } = settings();
+  const client = await sessionClient(connection);
+  const budget = createWinnersSaveBudget();
+  // **見えるリポジトリは 1 度だけ引く**（#686 のレビュー）——**`/` は 2 つのものを
+  // 出すが、どちらも同じ `/user/repos` を要る。** **別々に呼ぶと、100 件を超える
+  // アカウントでは全ページが二重**になる
+  return viewHome({
+    resolve: () =>
+      resolveVisibleRepositories({
+        openStore: () =>
+          storeForCurrentUser(client, connection, key, () => budget.peekRemainingMs()),
+        ensure: (store) =>
+          ensureUsableToken({
+            store,
+            refresh: (refreshToken) =>
+              refreshUserTokens({ credentials, refreshToken, fetcher: fetch, now: new Date() }),
+            now: new Date(),
+            waitForWinnersSave: createWaitForWinnersSave({ budget }),
+          }),
+        // **ユーザートークンで解決する**（§6）——**installation トークンで代用しない**
+        repositories: createUserVisibleRepositories(),
+      }),
+    pullRequests: createGitHubCrossRepositoryPullRequests(),
+    deadline: () => AbortSignal.timeout(CROSS_REPOSITORY_DEADLINE_MS),
+  });
+}
+
+/**
+ * 横断の一覧を打ち切るまで（#682）。
+ *
+ * **実測（2026-09-11、50 リポジトリ）**: **25 件ずつ 2 要求を並べて 4.0〜4.4 秒**
+ * （**順に投げると 6.4〜7.2 秒**）。**盤面の材料（20 秒）より短く、承認の状態（5 秒）
+ * より長い**——**この口は往復がリポジトリ数に依る**（**25 件ごとに 1 回**）ので、
+ * **見えるリポジトリが増えるほど伸びる。**
+ *
+ * **正確な値ではない。** **足りなくなったら分かる形にしてある**——**打ち切ったことは
+ * 画面に「いま取得できませんでした」として出る**（**黙って消えない**）。
+ */
+const CROSS_REPOSITORY_DEADLINE_MS = 15_000;
 
 /**
  * 材料の取得を打ち切るまで。
