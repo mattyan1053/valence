@@ -36,9 +36,26 @@ function ruleSection(role: LoopRole): string {
   return text.slice(text.lastIndexOf("\n", at) + 1).split("\n\n")[0] ?? "";
 }
 
-/** **「パイプ」を語る行**（規則の中も外も、まとめて数える）。 */
-function pipeLines(text: string): readonly string[] {
-  return text.split("\n").filter((line) => line.includes("パイプ"));
+/**
+ * **規則を言い直している行**（規則の中も外も、まとめて数える）。
+ *
+ * **語を 1 つに絞らない**（#701 のレビュー）——**「パイプ」だけを見ていたら、
+ * 「後ろに別のコマンドを置くと `$?` が上書きされる」が 5 件目として残っていた。**
+ *
+ * **散文は `$?` をバッククォートで書く**（**打つ行は `case "$?" in` のように裸**）
+ * ——**数えたら、バッククォート付きは規則の語彙にしか出てこない。**
+ */
+function restatementLines(text: string): readonly string[] {
+  return text
+    .split("\n")
+    .filter(
+      (line) => line.includes("`$?`") || line.includes("PIPESTATUS") || line.includes("パイプ"),
+    );
+}
+
+/** **バッククォートで囲まれた語**（道具の例は、必ずこの形で書かれる）。 */
+function quoted(text: string): readonly string[] {
+  return [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1] ?? "");
 }
 
 describe.each(ROLES)("%s は、終了コードの規則を 1 箇所で読む", (role) => {
@@ -49,10 +66,12 @@ describe.each(ROLES)("%s は、終了コードの規則を 1 箇所で読む", (
 
   it("道具の例を持たない", () => {
     // **例に結びつけると、読む側はその道具の話として畳む**（#700 の観測そのもの）
-    const examples = ruleSection(role)
-      .split("\n")
-      .filter((line) => /\.\/task|gh |bin\//.test(line));
-    expect(examples, "規則の節に道具の例が居る").toEqual([]);
+    // **並べて比べる**（#701 のレビュー）——**道具の名前を並べると、並べ損ねたものが通る**
+    expect([...quoted(ruleSection(role))].sort(), "規則の段落に居る語").toEqual([
+      "$?",
+      "${PIPESTATUS[0]}",
+      "0",
+    ]);
   });
 
   it("繋ぎたいときの逃げ道が残っている", () => {
@@ -62,8 +81,8 @@ describe.each(ROLES)("%s は、終了コードの規則を 1 箇所で読む", (
 
   it("言い直しが、規則の外に無い", () => {
     // **足すほど畳まれる**ので、**例つきの言い直しを 4 箇所に残さない**
-    const outside = pipeLines(procedureText(role)).filter(
-      (line) => !pipeLines(ruleSection(role)).includes(line),
+    const outside = restatementLines(procedureText(role)).filter(
+      (line) => !restatementLines(ruleSection(role)).includes(line),
     );
     expect(outside, "規則の外で言い直している").toEqual([]);
   });
@@ -77,7 +96,21 @@ describe("役をまたいで同じ文面である", () => {
 });
 
 describe("数える手そのもの", () => {
-  it("「パイプ」を語る行だけを拾う", () => {
-    expect(pipeLines("パイプで繋ぐと\n先に変数へ受ける\n| tail -1")).toEqual(["パイプで繋ぐと"]);
+  it("言い直しを、語を変えられても拾う", () => {
+    // **当たる入力と当たらない入力を隣どうしに置く**（`AGENTS.md` §4）
+    expect(restatementLines("**後ろに別のコマンドを置くと `$?` が上書きされる**")).toHaveLength(1);
+    expect(restatementLines("繋ぐなら `${PIPESTATUS[0]}` を見る")).toHaveLength(1);
+    expect(restatementLines("パイプで繋ぐと")).toHaveLength(1);
+  });
+
+  it("打つ行は拾わない", () => {
+    // **裸の `$?` は、正しく受けている行**である
+    expect(restatementLines('case "$?" in')).toEqual([]);
+    expect(restatementLines('./task check >"$log" 2>&1; status=$?')).toEqual([]);
+  });
+
+  it("道具の名前は、バッククォートごと拾う", () => {
+    expect(quoted("**`cut` の値になる**")).toEqual(["cut"]);
+    expect(quoted("例を持たない")).toEqual([]);
   });
 });
