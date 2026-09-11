@@ -165,4 +165,74 @@ describe("./task の心拍", () => {
     const written = existsSync(beats) ? readFileSync(beats, "utf8").trimEnd().split("\n") : [];
     expect(written.length, "自分で exit するコマンドに、終わりの心拍が届いていない").toBe(2);
   });
+
+  /**
+   * **心拍が打てないときの経路** (#684 のレビュー 2 周目)。
+   *
+   * **成功するスタブしか置かないと、この経路を 1 度も通らない。**
+   */
+  describe("心拍が打てないとき", () => {
+    /** **打てずに警告を出すスタブ**。**`beat_activity` が書けなかったときの形。** */
+    function sandboxWithFailingBeat(): { readonly dir: string; readonly out: string } {
+      const dir = mkdtempSync(join(tmpdir(), "task-heartbeat-warn-"));
+      mkdirSync(join(dir, "bin"), { recursive: true });
+      copyFileSync(join(REPO_ROOT, "task"), join(dir, "task"));
+      const stub = join(dir, "bin/loop-lease");
+      writeFileSync(
+        stub,
+        '#!/usr/bin/env bash\necho "[WARN] の活動を記録できません" >&2\nexit 1\n',
+      );
+      chmodSync(stub, 0o755);
+      return { dir, out: join(dir, "out") };
+    }
+
+    /**
+     * **`./task check >"$log" 2>&1` と同じ捕まえ方をする。**
+     *
+     * **`main` の出力だけをリダイレクトしない**——**`trap` はシェルの終了時、
+     * つまり `main` が返ったあとに走る**ので、**`main ... 2>&1` では覆えない。**
+     * **手順書が打つのは `./task` そのもの**なので、**シェル全体を向ける。**
+     */
+    function runWithMark(dir: string, out: string): void {
+      spawnSync(
+        "bash",
+        [
+          "-c",
+          [
+            `exec >${JSON.stringify(out)} 2>&1`,
+            "source ./task",
+            "ensure_commit_guard() { :; }",
+            "warn_stale_containers() { :; }",
+            'cmd_mark() { echo "check-exit=0"; }',
+            "main mark",
+          ].join("\n"),
+        ],
+        { cwd: dir, encoding: "utf8" },
+      );
+    }
+
+    it("完了印のあとに、心拍の警告を足さない", () => {
+      // **手順書は `tail -1` が厳密に `check-exit=$status` であることを要求する**
+      // （`AGENTS.md` §4。**文字列で見る検査は、判定の範囲を本文より狭くする**）
+      // ——**後ろから 1 行足すと、check が緑でも `local-ci-unknown` へ倒れ、
+      // push できない。**
+      const { dir, out } = sandboxWithFailingBeat();
+      runWithMark(dir, out);
+
+      const lines = readFileSync(out, "utf8").trimEnd().split("\n");
+      expect(lines[lines.length - 1], "完了印の後ろに 1 行足されている").toBe("check-exit=0");
+    });
+
+    it("打てないことは、黙って捨てない", () => {
+      // **静かにするのは終わりの 1 拍だけ**——**始まりの 1 拍はこれまでどおり出す。**
+      // **両方を黙らせると、lease の異常がどこにも出なくなる**（`task` の
+      // `heartbeat()` の但し書き。**書けない状態は「安全な側」ではない**）。
+      const { dir, out } = sandboxWithFailingBeat();
+      runWithMark(dir, out);
+
+      expect(readFileSync(out, "utf8"), "心拍が打てないことが、どこにも出ていない").toContain(
+        "の活動を記録できません",
+      );
+    });
+  });
 });
