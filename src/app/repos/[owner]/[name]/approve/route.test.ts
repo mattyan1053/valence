@@ -12,12 +12,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { boardRedirect } from "../board-redirect";
-import {
-  approveOutcomeParam,
-  approveUnavailableReason,
-  pullRequestNumberFrom,
-  respondToApprove,
-} from "./route";
+import { approveOutcomeParam, approveUnavailableReason, respondToApprove } from "./route";
 
 /**
  * **戻り先は、開いたオリジンから組む** (#506)——**`Host` が許可一覧に載っている
@@ -37,35 +32,6 @@ afterAll(() => {
   } else {
     process.env[SUPPLIED] = suppliedBefore;
   }
-});
-
-describe("送られてきた PR 番号を読む", () => {
-  it("数として読めるものだけを通す", () => {
-    expect(pullRequestNumberFrom("42")).toBe(42);
-  });
-
-  it("数でないものは通さない", () => {
-    // **黙って `NaN` を渡さない**——**どの PR とも違う相手へ要求が出る**
-    for (const value of ["", "abc", "4 2", null, undefined]) {
-      expect(pullRequestNumberFrom(value), String(value)).toBeUndefined();
-    }
-  });
-
-  it("整数でないもの・負のものを通さない", () => {
-    // **PR 番号は 1 以上の整数である**
-    for (const value of ["0", "-1", "1.5", "1e3"]) {
-      expect(pullRequestNumberFrom(value), value).toBeUndefined();
-    }
-  });
-
-  it("前後に空白があっても、番号として読む", () => {
-    expect(pullRequestNumberFrom(" 42 ")).toBe(42);
-  });
-
-  it("安全に扱えない大きさは通さない", () => {
-    // **`Number` にすると丸まる大きさ**——**別の PR 番号に化ける**
-    expect(pullRequestNumberFrom("9007199254740993")).toBeUndefined();
-  });
 });
 
 describe("結果を、押した人へ返す形にする", () => {

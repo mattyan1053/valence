@@ -30,7 +30,7 @@ import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
 import { ApproveButton, approveNotice } from "../../../../ui/approve/approve-button";
 import { AssignmentSummaryView } from "../../../../ui/assignment/assignment-summary-view";
 import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button";
-import { BALL_FILTERS, ballFilterOf } from "../../../../ui/ball/ball-filter";
+import { BALL_FILTERS } from "../../../../ui/ball/ball-filter";
 import { BoardFreshness } from "../../../../ui/board/board-freshness";
 import { boardReloadHref } from "../../../../ui/board/board-reload-href";
 import type { IssueBoardProps } from "../../../../ui/issue-board/issue-board";
@@ -45,6 +45,7 @@ import {
 } from "../../../../ui/merge/merge-plan-button";
 import { ReviewBoard } from "../../../../ui/review-board/review-board";
 import { SuggestedReviewOrder } from "../../../../ui/review-order/suggested-review-order";
+import { allowedValueFrom, pullRequestNumberFrom } from "../../../query-input";
 
 /**
  * **要求ごとに描く。静的に生成させない**（入口の画面と同じ理由）。
@@ -88,10 +89,10 @@ function notice(kind: "signed-out" | "needs-login" | "unavailable"): string {
  * 開くだけで「承認しました」と出てはならない。** **承認できたかどうかは、
  * 利用者が任意に作れない場所（GitHub 側の状態）で確かめる。**
  */
+const APPROVE_NOTICE_KINDS = ["forbidden", "self-approval", "unavailable"] as const;
+
 export function approveNoticeKind(value: unknown): ApproveNoticeKind | undefined {
-  return value === "forbidden" || value === "self-approval" || value === "unavailable"
-    ? value
-    : undefined;
+  return allowedValueFrom(value, APPROVE_NOTICE_KINDS);
 }
 
 /**
@@ -100,15 +101,17 @@ export function approveNoticeKind(value: unknown): ApproveNoticeKind | undefined
  * **成功はここから出さない**（#342 のレビューと同じ）——**`?merge=merged` を
  * 開くだけで「マージしました」と出てはならない。**
  */
+const MERGE_NOTICE_KINDS = [
+  "forbidden",
+  "not-mergeable",
+  "dependency-pending",
+  "not-orderable",
+  "base-changed",
+  "unavailable",
+] as const;
+
 export function mergeNoticeKind(value: unknown): MergeNoticeKind | undefined {
-  return value === "forbidden" ||
-    value === "not-mergeable" ||
-    value === "dependency-pending" ||
-    value === "not-orderable" ||
-    value === "base-changed" ||
-    value === "unavailable"
-    ? value
-    : undefined;
+  return allowedValueFrom(value, MERGE_NOTICE_KINDS);
 }
 
 /**
@@ -205,7 +208,7 @@ const PLAN_NOTICE_KINDS: readonly MergePlanNoticeKind[] = [
 ];
 
 export function planNoticeKind(value: unknown): MergePlanNoticeKind | undefined {
-  return PLAN_NOTICE_KINDS.find((kind) => kind === value);
+  return allowedValueFrom(value, PLAN_NOTICE_KINDS);
 }
 
 /**
@@ -215,11 +218,9 @@ export function planNoticeKind(value: unknown): MergePlanNoticeKind | undefined 
  * （**流していない人が「N 本入りました」と出せる**。#342 のレビュー）。
  */
 export function planStoppedAt(value: unknown): number | undefined {
-  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
-    return undefined;
-  }
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+  // **同じ判定を 3 つ目に書かない**（§5）——**`approve` / `merge` の受け口が
+  // 同じものを持っていた**ので、**受け口ごと 1 箇所へ寄せた**（#696）
+  return pullRequestNumberFrom(value);
 }
 
 /**
@@ -308,7 +309,7 @@ export async function renderRepositoryBoard(
   // **絞ったまま操作を続けられるようにする**（#667）——**押す本文へ載せて運ぶ**ので、
   // **戻り先でも同じ絞りが効く。** **知らない値は「絞らない」へ落ちる**
   // （**絞ること自体は #663 が持つ**——**どちらが先に入っても壊れない**）
-  const ball = ballFilterOf(query.ball, BALL_FILTERS);
+  const ball = allowedValueFrom(query.ball, BALL_FILTERS);
   // **取りに行く前に読む**（#664）——**取れた時刻ではなく、取りに行った時刻**である。
   // **どちらでも「この時刻より前のもの」**で、**先に読むほうが、遅い日に
   // 実際より新しく見えることが無い**
