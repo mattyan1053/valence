@@ -44,6 +44,33 @@ function expectOnlyInGuidance(phrase: string): void {
   expect(guidanceItem(), `「${phrase}」が §4 の項に無い`).toContain(phrase);
 }
 
+/**
+ * **折り返しを畳む。** **`AGENTS.md` は 1 行が折り返されている**ので、
+ * **組（手と場面）が改行をまたぐ**——**そのままだと、正しい組でも当たらない。**
+ */
+function squeeze(text: string): string {
+  return text.replace(/\s+/g, "");
+}
+
+/** **手と場面が、その組で並んでいるか。** */
+function hasPair(scenes: string, way: string, scene: string): boolean {
+  return squeeze(scenes).includes(squeeze(`**${way}**（${scene}）`));
+}
+
+/** **並べた 1 行**（§4 の項の末尾）。 */
+function sceneLine(): string {
+  const item = guidanceItem();
+  return item.slice(item.indexOf("4 つは場面が違う"));
+}
+
+/** 4 つの組。**本文と、この一覧が食い違ったら赤くなる。** */
+const WAYS: readonly (readonly [string, string])[] = [
+  ["書く前に数える", "当たる相手が居るか"],
+  ["書き終えたら数え直す", "書いている間に増えていないか"],
+  ["変異で測る", "守りたい 1 行を消して赤くなるか"],
+  ["判定だけを取り出す", "変異が黙ったとき"],
+];
+
 describe("AGENTS.md §4 — 文字列で見る検査", () => {
   it("書く前に、その語を持つ行を全部出すと書いてある", () => {
     // **4 回続けて踏んだのは「他にも出るか」を yes / no で見たから**である (#493)
@@ -88,16 +115,33 @@ describe("AGENTS.md §4 — 文字列で見る検査", () => {
     // **並べた 1 行を消しても、ほかの試験は緑のまま**だった（**変異で見つけた**）
     expectOnlyInGuidance("4 つは場面が違う");
     // **並べた 1 行だけを見る**——**項ごと見ると、同じ語が上の散文にも出ている**ので、
-    // **一覧から消しても緑のまま**になる（**変異で踏んだ**。§4 のこの項そのものの形）
-    const scenes = guidanceItem().slice(guidanceItem().indexOf("4 つは場面が違う"));
-    for (const scene of [
-      "当たる相手が居るか",
-      "書いている間に増えていないか",
-      "守りたい 1 行を消して赤くなるか",
-      "変異が黙ったとき",
-    ]) {
-      expect(scenes, `「${scene}」が並んでいない`).toContain(scene);
+    // **一覧から消しても緑のまま**になる（**変異で踏んだ**。§4 のこの項そのものの形）。
+    // **組で見る**（#695 のレビュー）——**語が「どこかに在る」だけだと、
+    // 手と場面を入れ替えても緑**で、**この試験が名乗っていること（どの場面の手か）は
+    // 壊れたまま**になる
+    for (const [way, scene] of WAYS) {
+      expect(hasPair(sceneLine(), way, scene), `「${way}（${scene}）」の組が無い`).toBe(true);
     }
+  });
+
+  it("組が入れ替わっていたら、そう言える", () => {
+    // **本物の材料には、対応が壊れたものが無い**（#693 の 4 つ目の場面）
+    // ——**手で 1 度入れ替えて確かめても残らない**ので、**突き合わせだけを取り出して測る。**
+    // **入れ替えた材料では `false`**、**その材料でも正しい組なら `true`**
+    const swapped =
+      "**書く前に数える**（変異が黙ったとき）／**判定だけを取り出す**（当たる相手が居るか）";
+
+    expect(hasPair(swapped, "書く前に数える", "当たる相手が居るか")).toBe(false);
+    expect(hasPair(swapped, "判定だけを取り出す", "変異が黙ったとき")).toBe(false);
+    expect(hasPair(swapped, "書く前に数える", "変異が黙ったとき")).toBe(true);
+  });
+
+  it("折り返しを動かしただけでは、赤くならない", () => {
+    // **`AGENTS.md` は 1 行が折り返されている**——**組が改行をまたぐ**ので、
+    // **畳まずに突き合わせると、正しい組でも落ちる**（**書き直すたびに赤くなる試験**）
+    const wrapped = "**書き終えたら数え直す**\n  （書いている間に増えていないか）";
+
+    expect(hasPair(wrapped, "書き終えたら数え直す", "書いている間に増えていないか")).toBe(true);
   });
 
   it("変異は、守りたい 1 行だけを消すと書いてある", () => {
