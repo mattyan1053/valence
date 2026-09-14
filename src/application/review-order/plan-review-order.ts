@@ -70,6 +70,14 @@ export type ReviewOrderPlan = {
    * **取ってきたものをそのまま通す**（`heads` / `titles` / `mergeStatuses` と同じ）。
    */
   readonly assignments: ReadonlyMap<number, Assignment>;
+  /**
+   * PR 番号から引ける、最後に動いた時刻（ISO 8601。#715）。
+   *
+   * **ここでは数えない。** **`domain` も `application` も時計を持たない**ので、
+   * **「いま」を持っている側が日数にする**——**運ぶのは時刻だけ**である
+   * （`heads` / `titles` と同じ）。**取れなかった PR は入らない。**
+   */
+  readonly updatedAt: ReadonlyMap<number, string>;
 };
 
 export type ReviewOrderSources = {
@@ -115,7 +123,7 @@ export async function planReviewOrder(
   sources: ReviewOrderSources,
   options: ReviewOrderOptions = {},
 ): Promise<ReviewOrderPlan> {
-  const { pullRequests, invalid, heads, titles, mergeStatuses, assignments, opinions } =
+  const { pullRequests, invalid, heads, titles, mergeStatuses, assignments, opinions, updatedAt } =
     await sources.pullRequests.listPullRequests();
   const edges = buildDependencyEdges(pullRequests);
   const numbers = pullRequests.map((pullRequest) => pullRequest.number);
@@ -132,6 +140,7 @@ export async function planReviewOrder(
     mergeStatuses,
     opinions,
     assignments,
+    updatedAt,
     ...changes,
   };
 }

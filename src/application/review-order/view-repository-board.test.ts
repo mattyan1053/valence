@@ -42,6 +42,7 @@ const PLAN: ReviewOrderPlan = {
   mergeStatuses: new Map(),
   assignments: new Map(),
   opinions: new Map(),
+  updatedAt: new Map(),
   changes: new Map(),
   changesUnavailable: [],
 };

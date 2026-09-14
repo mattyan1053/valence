@@ -60,6 +60,8 @@ const stacked: PullRequestListing = {
   // **誰に振られているか**（#631）。**同じ理由で置く**
   assignments: new Map([[8, { assignees: ["someone"], reviewers: [], authoredByBot: false }]]),
   opinions: new Map(),
+  // **最後に動いた時刻**（#715）。**同じ理由で置く**
+  updatedAt: new Map([[8, "2026-08-08T14:56:56Z"]]),
 };
 
 describe("レビュー順序を組み立てる", () => {
@@ -96,6 +98,7 @@ describe("レビュー順序を組み立てる", () => {
         mergeStatuses: new Map(),
         assignments: new Map(),
         opinions: new Map(),
+        updatedAt: new Map(),
       }),
     });
 
@@ -112,6 +115,7 @@ describe("レビュー順序を組み立てる", () => {
         mergeStatuses: new Map(),
         assignments: new Map(),
         opinions: new Map(),
+        updatedAt: new Map(),
       }),
       changes: NO_CHANGES,
     });
@@ -130,6 +134,8 @@ describe("レビュー順序を組み立てる", () => {
       // **誰に振られているかも同じ**（#631）
       assignments: new Map(),
       opinions: new Map(),
+      // **最後に動いた時刻も同じ**（#715）
+      updatedAt: new Map(),
       changes: new Map(),
       changesUnavailable: [],
     });
@@ -153,6 +159,17 @@ describe("レビュー順序を組み立てる", () => {
     });
 
     expect(plan.assignments).toEqual(stacked.assignments);
+  });
+
+  it("最後に動いた時刻は、取ってきたまま計画に載る", async () => {
+    // **この流れは数えない**（#715）——**`domain` も `application` も時計を持たない**ので、
+    // **日数にするのは「いま」を持っている表の側**である
+    const plan = await planReviewOrder({
+      pullRequests: sourceReturning(stacked),
+      changes: NO_CHANGES,
+    });
+
+    expect(plan.updatedAt).toEqual(stacked.updatedAt);
   });
 
   it("取得に失敗したら、0 件ではなく失敗として伝わる", async () => {

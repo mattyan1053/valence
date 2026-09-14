@@ -12,6 +12,7 @@ const stackedPullRequests = [
     number: 8,
     state: "closed",
     title: "コンテナ周りの改善",
+    updated_at: "2026-08-08T14:56:56Z",
     base: {
       label: "mattyan1053:main",
       ref: "main",
@@ -29,6 +30,7 @@ const stackedPullRequests = [
     number: 9,
     state: "closed",
     title: "エージェント設定",
+    updated_at: "2026-08-08T14:56:55Z",
     base: {
       label: "mattyan1053:chore/docker-improvements",
       ref: "chore/docker-improvements",
@@ -88,6 +90,11 @@ describe("GitHub の PR 一覧をドメイン型へ変換する", () => {
       titles: new Map([
         [8, "コンテナ周りの改善"],
         [9, "エージェント設定"],
+      ]),
+      // **最後に動いた時刻も、同じ応答が持っている**（#715）——**取りに行く往復は要らない**
+      updatedAt: new Map([
+        [8, "2026-08-08T14:56:56Z"],
+        [9, "2026-08-08T14:56:55Z"],
       ]),
       // **この見本には人の項目が無い**（#631）——**読めていないものは持たない**
       assignments: new Map(),
@@ -168,6 +175,7 @@ describe("GitHub の PR 一覧をドメイン型へ変換する", () => {
       heads: new Map(),
       titles: new Map(),
       assignments: new Map(),
+      updatedAt: new Map(),
     });
   });
 
@@ -237,6 +245,29 @@ describe("タイトルを、番号から引ける形で持つ", () => {
     const [first] = stackedPullRequests;
 
     const { pullRequests, invalid } = toPullRequestRefs([{ ...first, title: 42 }]);
+
+    expect(invalid, "型が違うのに、読めたことにしている").toHaveLength(1);
+    expect(pullRequests, "読めなかった PR を、読めたことにしている").toHaveLength(0);
+  });
+
+  it("最後に動いた時刻が読めない PR も、依存グラフからは消さない", () => {
+    // **`title` / `head.sha` と同じ判断**（#107）——**必須にすると、時刻を読めなかった
+    // PR がまるごと図から消える**
+    const [first] = stackedPullRequests;
+    const withoutUpdatedAt = { ...first, updated_at: undefined };
+
+    const { pullRequests, invalid, updatedAt } = toPullRequestRefs([withoutUpdatedAt]);
+
+    expect(pullRequests.length, "図から消えている").toBe(1);
+    expect(invalid.length).toBe(0);
+    expect(updatedAt.has(8), "読めていない時刻を持っている").toBe(false);
+  });
+
+  it("最後に動いた時刻の形が変わったら、黙って「無い」へ寄せない", () => {
+    // **「読めなかった」を「無かった」に化けさせない**（`title` と同じ。#543 のレビュー）
+    const [first] = stackedPullRequests;
+
+    const { pullRequests, invalid } = toPullRequestRefs([{ ...first, updated_at: 42 }]);
 
     expect(invalid, "型が違うのに、読めたことにしている").toHaveLength(1);
     expect(pullRequests, "読めなかった PR を、読めたことにしている").toHaveLength(0);

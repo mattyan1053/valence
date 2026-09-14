@@ -80,6 +80,7 @@ function listing(
         invalid,
         heads: new Map(),
         titles: new Map(),
+        updatedAt: new Map(),
         assignments: new Map(),
       };
     },
@@ -380,6 +381,7 @@ describe("押す経路の費用", () => {
           invalid: [],
           heads: new Map(),
           titles: new Map(),
+          updatedAt: new Map(),
           assignments: new Map(),
         };
       },

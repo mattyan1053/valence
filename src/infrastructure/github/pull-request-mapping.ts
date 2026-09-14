@@ -70,6 +70,21 @@ const pullRequestSchema = z.object({
     .string()
     .optional()
     .transform((title) => (title === "" ? undefined : title)),
+  /**
+   * **最後に動いた時刻も読む**（#715）。
+   *
+   * **一覧の応答がそのまま持っている**（`updated_at`）——**取りに行く往復は要らない。**
+   * **横断の盤面は同じものを GraphQL の `updatedAt` から取っている**
+   * （`cross-repository-pull-requests.ts`）——**こちらは REST なので名前だけが違う。**
+   *
+   * **必須にしない**——**`title` / `head.sha` と同じ理由**で、**時刻を読めなかった PR が
+   * 依存グラフからまるごと消えるのを避ける。** **飲み込むのは空文字だけ**で、
+   * **形が違うぶんは `invalid` へ行かせる**（#543 のレビューと同じ判断）。
+   */
+  updated_at: z
+    .string()
+    .optional()
+    .transform((updatedAt) => (updatedAt === "" ? undefined : updatedAt)),
 });
 
 /**
@@ -113,6 +128,8 @@ export function toPullRequestRefs(response: unknown): ListedPullRequests {
   const titles = new Map<number, string>();
   // **誰に振られているかも同じ形**（#631）——**読めなかった PR は入らない**
   const assignments = new Map<number, Assignment>();
+  // **最後に動いた時刻も同じ形**（#715）——**読めなかった PR は入らない**
+  const updatedAt = new Map<number, string>();
   for (const [index, item] of listed.data.entries()) {
     const parsed = pullRequestSchema.safeParse(item);
     if (!parsed.success) {
@@ -126,6 +143,9 @@ export function toPullRequestRefs(response: unknown): ListedPullRequests {
     if (parsed.data.title !== undefined) {
       titles.set(parsed.data.number, parsed.data.title);
     }
+    if (parsed.data.updated_at !== undefined) {
+      updatedAt.set(parsed.data.number, parsed.data.updated_at);
+    }
     // **本体とは別に検証する**（#631）——**ここが読めなくても、依存グラフは出す**
     // （**`head.sha` と同じ判断**）
     const people = assignmentSchema.safeParse(item);
@@ -133,7 +153,7 @@ export function toPullRequestRefs(response: unknown): ListedPullRequests {
       assignments.set(parsed.data.number, toAssignment(people.data));
     }
   }
-  return { pullRequests, invalid, heads, titles, assignments };
+  return { pullRequests, invalid, heads, titles, assignments, updatedAt };
 }
 
 function toAssignment(people: z.infer<typeof assignmentSchema>): Assignment {
