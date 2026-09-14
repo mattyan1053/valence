@@ -1007,9 +1007,13 @@ cmd_loop_stop_paths() {
 #
 # **「どこに居るか」を決めているのはここ**である（`loop:worker:paths` が除くのも同じ値）
 # ——**読む側（`bin/loop-cadence`）へ書き写させない** (#422)。
+#
+# **一覧を渡せる** (#738)。**渡されたらそれを見る**——**除外を決める一覧と、
+# 並べる一覧が別々だと、その間に変わったぶんだけ除外が外れる**（下記）。
 master_worktree_path() {
   local listed main
-  listed="$(git worktree list --porcelain)" || return 2
+  listed="${1-}"
+  [[ -n $listed ]] || listed="$(git worktree list --porcelain)" || return 2
   main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
   [[ -n $main ]] || return 2
   printf '%s\n' "$listed" | grep -qxF "worktree ${main}-master" || return 1
@@ -1032,18 +1036,34 @@ cmd_loop_master_path() { master_worktree_path; echo; }
 #
 # worker の作業場を 1 行ずつ出す (#378。bin/loop-cadence が読む。読むだけ)
 cmd_loop_worker_paths() {
-  local master="" preview="" status=0
+  local listed master="" preview="" status=0
+  # **一覧は 1 回だけ引き、除外を決める側と並べる側の両方へ渡す** (#738)。
+  #
+  # **前は 3 回引いていた**（`master_worktree_path` / `preview_worktree_path` /
+  # ここ）——**1 回目に master が無く、3 回目に在れば、`skip` が空のまま並ぶ。**
+  # **実測で、master の作業場が「止まっている worker」として 1 行出ている**
+  # （2026-09-15。**`読み=` は「先に起こす」**だが、**そこに worker は居ない**）。
+  #
+  # **外し損ねたときにどちらへ倒すか、は決めなくてよくなった**
+  # ——**同じ一覧を見ている限り、外し損ねた作業場はその一覧に出てこない。**
+  # **残る exit 1 は「本当に登録されていない」だけ**で、**そのときは並べる一覧にも
+  # 出ない**ので、**素通りさせてよい**（**下の `status == 2` だけが止まる側**）。
+  if ! listed="$(git worktree list --porcelain)"; then
+    echo "==> worktree の一覧を読めません" >&2
+    return 1
+  fi
   # **登録されているものが正**である（`loop_stop_paths` と同じ口）。
-  master="$(master_worktree_path)" || status=$?
+  master="$(master_worktree_path "$listed")" || status=$?
   if ((status == 2)); then
     echo "==> worktree の一覧を読めません" >&2
     return 1
   fi
   # **人が見る画面も外す** (#457)。**周回を回さない作業場**なので、**混ぜると
   # `bin/loop-cadence` が「止まっている worker」として数え続ける**——**人が呼ばれる。**
-  # **読めなければ、外さずに進む**（**worker を数えないより、1 つ多いほうが安い**）。
-  preview="$(preview_worktree_path)" || preview=""
-  git worktree list --porcelain |
+  # **読めなければ、外さずに進む**（**worker を数えないより、1 つ多いほうが安い**）
+  # ——**master も同じ倒し方だが、同じ一覧を渡している以上ここへは落ちてこない。**
+  preview="$(preview_worktree_path "$listed")" || preview=""
+  printf '%s\n' "$listed" |
     awk -v skip="$master" -v skip2="$preview" \
       '/^worktree /{ if ($2 != skip && $2 != skip2) print $2 }'
 }
@@ -1056,16 +1076,19 @@ cmd_loop_worker_paths() {
 #   exit 0 = 場所を出す / exit 2 = worktree の一覧を読めない
 preview_worktree_path() {
   local main
-  main="$(main_worktree_path)" || return 2
+  main="$(main_worktree_path "${1-}")" || return 2
   printf '%s' "${main}-preview"
 }
 
 # clone そのもの（**いちばん最初の worktree**）。**秘密の置き場でもある。**
 #
 #   exit 0 = 場所を出す / exit 2 = worktree の一覧を読めない
+#
+# **一覧を渡せる**（`master_worktree_path` と同じ理由。#738）。
 main_worktree_path() {
   local listed main
-  listed="$(git worktree list --porcelain)" || return 2
+  listed="${1-}"
+  [[ -n $listed ]] || listed="$(git worktree list --porcelain)" || return 2
   main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
   [[ -n $main ]] || return 2
   printf '%s' "$main"
