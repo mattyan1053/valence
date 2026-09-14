@@ -17,10 +17,29 @@ import type { ReactNode } from "react";
 /** **表に出せる列。** **名前と桁の揃え方は、この地図が持つ。** */
 export type BoardColumn = "pull-request" | "ci" | "size" | "active" | "depends-on" | "actions";
 
+/**
+ * **旗は、理由ごとに分ける**（#724 のレビュー）。
+ *
+ * **1 つに束ねて、片方を落とした**——**移す前は `whitespace-nowrap` と `tabular-nums` が
+ * 別々に付いていた**（**CI のマスは前者だけ**）。**「数字の列」という 1 つの旗にすると、
+ * CI が非数字の側へ落ち、折り返さない指定が消える**（`AGENTS.md` §5。
+ * **消す側を足したら、残る側の前提を見直す**）。
+ */
 type ColumnRule = {
   readonly header: string;
-  /** **数字の列は桁を揃える**（#714 の注意）——**揃わないと、比べるために読むことになる。** */
-  readonly numeric: boolean;
+  /**
+   * **桁を揃える**（#714 の注意）——**揃わないと、比べるために読むことになる。**
+   */
+  readonly digits: boolean;
+  /**
+   * **折り返さない。**
+   *
+   * **短い語のマス**である——**`読めません` が文字ごとに折り返すと、列が潰れる。**
+   * **`overflow-x-auto` は効かない**（**器は流れるが、表そのものは縮む**）。
+   *
+   * **長い語のマス**（タイトル・操作）**には当てない**——**当てると、横に伸び続ける。**
+   */
+  readonly nowrap: boolean;
 };
 
 /**
@@ -28,12 +47,12 @@ type ColumnRule = {
  * 型検査が落ちる**ので、**名前も出ないまま画面に出ることが起きない。**
  */
 const COLUMNS: Record<BoardColumn, ColumnRule> = {
-  "pull-request": { header: "PR", numeric: false },
-  ci: { header: "CI", numeric: false },
-  size: { header: "サイズ", numeric: true },
-  active: { header: "最後に動いた", numeric: true },
-  "depends-on": { header: "依存 PR 数", numeric: true },
-  actions: { header: "操作", numeric: false },
+  "pull-request": { header: "PR", digits: false, nowrap: false },
+  ci: { header: "CI", digits: false, nowrap: true },
+  size: { header: "サイズ", digits: true, nowrap: true },
+  active: { header: "最後に動いた", digits: true, nowrap: true },
+  "depends-on": { header: "依存 PR 数", digits: true, nowrap: true },
+  actions: { header: "操作", digits: false, nowrap: false },
 };
 
 /** **1 マスの器。** **線と余白を 1 箇所で決める**——**列ごとに書くと揃わない。** */
@@ -42,7 +61,13 @@ export const BOARD_CELL = "border-[var(--node-stroke)] border-t px-3 py-2 align-
 /** その列のマスに当てる class。 */
 export function boardCellClass(column: BoardColumn): string {
   const rule = COLUMNS[column];
-  return rule.numeric ? `${BOARD_CELL} whitespace-nowrap tabular-nums` : BOARD_CELL;
+  return [
+    BOARD_CELL,
+    rule.nowrap ? "whitespace-nowrap" : undefined,
+    rule.digits ? "tabular-nums" : undefined,
+  ]
+    .filter((one) => one !== undefined)
+    .join(" ");
 }
 
 export function BoardTable({

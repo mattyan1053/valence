@@ -159,12 +159,16 @@ export function SuggestedReviewOrder({
         {groupByReason(suggestions).map((group) => (
           <tbody key={`${group.reason}-${group.numbers[0]}`}>
             {/* **理由は束に 1 回**（#704）。**消さない**——**#632 が要るとしている。**
-             **段をまたがせる**ので、**列が増えても理由の置き場所は変わらない** */}
+             **段をまたがせる**ので、**列が増えても理由の置き場所は変わらない。**
+
+             **`rowgroup` である**（#724 のレビュー）——**束は `<tbody>`、つまり
+             行の束**である。**`colgroup` は列の束**なので、**後ろに続く行に
+             結び付かない**（**読み上げでは「なぜこの順か」が各 PR から辿れない**）。 */}
             <tr>
               <th
                 className={`${BOARD_CELL} text-left font-normal text-sm text-[var(--muted)]`}
                 colSpan={COLUMNS.length}
-                scope="colgroup"
+                scope="rowgroup"
               >
                 {reviewReasonNote(group.reason)}
               </th>

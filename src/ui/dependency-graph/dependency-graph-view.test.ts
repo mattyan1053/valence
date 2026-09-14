@@ -581,6 +581,17 @@ describe("一覧が表になっている（#716）", () => {
     ).toBe(3);
   });
 
+  it("CI の列は、折り返さない", () => {
+    // **`読めません` が文字ごとに折り返すと、列が潰れる**（#724 のレビュー）
+    // ——**`overflow-x-auto` は効かない**（**表そのものが縮む**）。
+    // **桁揃えとは別の理由**なので、**旗も別である。**
+    const row = summaryRow(rowsOf(render(props({ factsOf: () => FACTS })))[0] ?? "");
+    const classes = [...row.matchAll(/<td class="([^"]*)"/g)].map(([, one]) => one ?? "");
+
+    expect(classes[0], "CI のマスが出ていない").toBeDefined();
+    expect(classes[0], "CI の列が折り返す").toMatch(/\bwhitespace-nowrap\b/);
+  });
+
   it("行の中身は、表に移しても落ちない", () => {
     // **全部を列にすると、横に潰れて今より読めない**（#714 の注意）
     // ——**これまで行に出ていたものは、下の段に残る。**

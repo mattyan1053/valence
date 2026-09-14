@@ -324,6 +324,18 @@ describe("推奨レビュー順が表になっている（#717）", () => {
     ).toBeGreaterThanOrEqual(2);
   });
 
+  it("理由は、その束の行の見出しとして読まれる", () => {
+    // **`colgroup` は列の束**（#724 のレビュー）——**後ろに続く行に結び付かない。**
+    // **束は `<tbody>`（行の束）**なので、**`rowgroup` である。**
+    // **#632 の「理由を消さない」は、読み上げでも成立していないと満たせない。**
+    const group = groups(render())[0] ?? "";
+    const heading = /<th[^>]*colSpan|<th[^>]*colspan/i.exec(group);
+
+    expect(heading, "理由の段が出ていない").not.toBeNull();
+    expect(group, "理由が列の束に結び付いている").not.toContain('scope="colgroup"');
+    expect(group, "理由が行の束に結び付いていない").toContain('scope="rowgroup"');
+  });
+
   it("行を開かせない", () => {
     // **#716 と同じ判断**（**畳みが二重になると開くのに 2 回押す**）——**こちらは
     // そもそも畳む中身が無い**（**理由は束の段に出ている**）。
