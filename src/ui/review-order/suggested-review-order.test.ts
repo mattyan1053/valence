@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
+import { boardCellClass } from "../board/board-table";
 import type { SuggestedReviewOrderProps } from "./suggested-review-order";
 import { groupByReason, reviewReasonNote, SuggestedReviewOrder } from "./suggested-review-order";
 
@@ -334,6 +335,20 @@ describe("推奨レビュー順が表になっている（#717）", () => {
     expect(heading, "理由の段が出ていない").not.toBeNull();
     expect(group, "理由が列の束に結び付いている").not.toContain('scope="colgroup"');
     expect(group, "理由が行の束に結び付いていない").toContain('scope="rowgroup"');
+  });
+
+  it("行の見出しも、器の規則を通っている", () => {
+    // **#724 のレビュー 2 周目**——**`COLUMNS` に規則があるのに、行の見出しだけ
+    // 器を通っていなかった。** **2 つの表の両方で結線を見る**
+    // （**片方だけ直しても、もう片方は同じ穴のまま**）。
+    const group = groups(render())[0] ?? "";
+    // **1 つ目の `<th>` は理由の段**（束の見出し）——**行の見出しはその次**である
+    const headings = [...group.matchAll(/<th[^>]*class="([^"]*)"/g)].map(([, one]) => one ?? "");
+
+    expect(headings[1], "行の見出しが出ていない").toBeDefined();
+    for (const rule of boardCellClass("pull-request").split(" ")) {
+      expect(headings[1], `器の規則が行の見出しに届いていない: ${rule}`).toContain(rule);
+    }
   });
 
   it("行を開かせない", () => {

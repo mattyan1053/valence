@@ -26,7 +26,7 @@ import {
 } from "../board/board-cell-notes";
 import { BoardSection } from "../board/board-section";
 import type { BoardColumn } from "../board/board-table";
-import { BOARD_CELL, BoardTable, boardCellClass } from "../board/board-table";
+import { BoardTable, boardCellClass } from "../board/board-table";
 import { DependencyGraphFigure } from "./dependency-graph-figure";
 import { layoutDependencyGraph } from "./graph-layout";
 
@@ -192,7 +192,7 @@ function PullRequestRows({
     // **`<table>` は `<tbody>` を複数持てる**——**入れ子にはしない。**
     <tbody>
       <tr className="bg-[var(--node-fill)]">
-        <th className={`${BOARD_CELL} text-left font-normal`} scope="row">
+        <th className={`${boardCellClass("pull-request")} text-left font-normal`} scope="row">
           <div className="flex flex-col gap-1">
             {/* **番号とタイトルを 1 つのリンクにする**（#621）——**タイトルが取れなくても
                 飛べる**（**取れなかったぶんは `undefined` で来る**。#542）。

@@ -177,7 +177,10 @@ export function SuggestedReviewOrder({
               const change = changes.get(number);
               return (
                 <tr key={number}>
-                  <th className={`${BOARD_CELL} text-left font-normal`} scope="row">
+                  <th
+                    className={`${boardCellClass("pull-request")} text-left font-normal`}
+                    scope="row"
+                  >
                     {/* **番号とタイトルを 1 つのリンクにする**（#621 と同じ形） */}
                     <a className="font-mono font-bold underline" href={urlOf(number)}>
                       #{number}
