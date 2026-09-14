@@ -54,9 +54,9 @@ function pinnedBiome(): string {
   return JSON.parse(readFileSync(PACKAGE, "utf8")).devDependencies["@biomejs/biome"];
 }
 
-/** `biome.json` の `$schema` が指している版。 */
-function schemaVersion(): string | undefined {
-  return JSON.parse(readFileSync(BIOME, "utf8")).$schema?.match(/schemas\/([^/]+)\//)?.[1];
+/** `biome.json` の `$schema` が指している先。 */
+function schemaTarget(): string | undefined {
+  return JSON.parse(readFileSync(BIOME, "utf8")).$schema;
 }
 
 type BiomeOverride = {
@@ -89,18 +89,43 @@ describe("warning を溜めないと決める", () => {
   });
 });
 
-describe("設定の版が、入っている版とずれない", () => {
+describe("設定の版を、2 箇所に持たない", () => {
   /**
-   * **ずれると Biome が info を出す**（`The configuration schema version does not
-   * match the CLI version`）。**info は `--error-on-warnings` では落ちない**ので、
-   * **放っておくと、この Issue が消しに来た「誰も見ていない診断」に戻る。**
+   * **版を書き写さない**（#732）。**`$schema` は、入っている Biome が同梱している
+   * ファイルを指す**——**版を持つのは `package.json` の 1 箇所だけ**である。
    *
-   * **版は書き写すしかない**（`$schema` は URL である）——**書き写したものは、
-   * 上げた側の diff には出てこない**（`AGENTS.md` §5）。**だから、ここで数える。**
-   * **deps を上げる PR がこの 1 行を忘れたら、`./task check` が赤くなる。**
+   * **前は URL に版を書き写していた**（`https://biomejs.dev/schemas/<版>/schema.json`）。
+   * **書き写したものは、上げた側の diff に出てこない**（`AGENTS.md` §5）ので、
+   * **deps の bump が毎回この 1 行を落とし**、**試験が赤くして人を呼んでいた**
+   * ——**試験が入ってからの bump は 2/2 でそうなった**（#625 / #731）。
+   *
+   * **直せるのは人だけ**である。**著者が Dependabot なので worker は触らず**（#70）、
+   * **master はファイルを書き換えない**——**`parked` + `awaiting-human` が付いて止まる。**
+   *
+   * **指す先に版が無ければ、落ちるものが無い。** **info も出ない**
+   * （**確かめた**: `biome check` が exit 0、schema の診断 0 件）。
    */
-  it("$schema は package.json が固定している版を指す", () => {
-    expect(schemaVersion()).toBe(pinnedBiome());
+  it("$schema は版を書き写さない", () => {
+    const target = schemaTarget();
+
+    expect(target, "$schema が無い").toBeDefined();
+    // **版らしきものを含まない**——**含めた瞬間、また bump ごとにずれる**
+    expect(target, `$schema に版が書き写されている: ${target}`).not.toMatch(/\d+\.\d+\.\d+/);
+  });
+
+  it("$schema は、入っている Biome が同梱しているものを指す", () => {
+    // **消さずに、指す先を変えた**——**エディタの補完は残る。**
+    // **`package.json` が固定している版のファイルが、そのまま展開されている。**
+    expect(schemaTarget()).toBe("./node_modules/@biomejs/biome/configuration_schema.json");
+  });
+
+  it("版を持つのは package.json だけ", () => {
+    // **「版が 1 箇所」を、数えて言う**（#732 の完了条件）。
+    expect(pinnedBiome(), "package.json が版を固定していない").toMatch(/^\d+\.\d+\.\d+$/);
+    expect(
+      readFileSync(BIOME, "utf8").match(/\d+\.\d+\.\d+/g) ?? [],
+      "biome.json に版が書かれている",
+    ).toEqual([]);
   });
 });
 
