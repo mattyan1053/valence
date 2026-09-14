@@ -54,7 +54,9 @@ function squeeze(text: string): string {
 
 /** 4 つの組。**本文と、この一覧が食い違ったら赤くなる。** */
 const WAYS: readonly (readonly [string, string])[] = [
-  ["書く前に数える", "当たる相手が居るか"],
+  // **1 つ目は 2 つ数える** (#728)——**当たる相手だけを数えて、掴んだ範囲の端を
+  // 数えていなかった。** **走査 2 本で 4 回、ちょうど 2 回ずつ外している。**
+  ["書く前に数える", "当たる相手と、判定の端"],
   ["書き終えたら数え直す", "書いている間に増えていないか"],
   ["変異で測る", "守りたい 1 行を消して赤くなるか"],
   ["判定だけを取り出す", "変異が黙ったとき"],
@@ -90,6 +92,40 @@ function matchesWays(scenes: string): boolean {
   return squeeze(scenes) === squeeze(expected);
 }
 
+/**
+ * **向きごとの説明だけ**（#729 のレビュー 2 周目）。
+ *
+ * **項ごと見ると、例がどちらの側に書かれていても緑**になる——**2 × 2 が読めることが
+ * 中身**なので、**側で切ってから探す。**
+ *
+ * **終わりは次の向きの見出し**（**最後の側は、向きの話が終わる行**）。
+ */
+function directionPart(direction: string): string {
+  const item = guidanceItem();
+  const from = item.indexOf(direction);
+
+  expect(from, `向きの説明が無い: ${direction}`).toBeGreaterThanOrEqual(0);
+  const ends = ["適合の証拠を探す走査は逆", "偽の赤は踏んだ人が気づける"]
+    .map((end) => item.indexOf(end, from + direction.length))
+    .filter((at) => at >= 0);
+
+  expect(ends, `向きの説明が閉じていない: ${direction}`).not.toEqual([]);
+  return item.slice(from, Math.min(...ends));
+}
+
+/**
+ * **向きと、その側にしか出ない例。**
+ *
+ * **本文と、この一覧が食い違ったら赤くなる**（`WAYS` と同じ形）。
+ */
+const DIRECTION_EXAMPLES: readonly (readonly [string, readonly [string, string]])[] = [
+  ["違反を探す走査は、広いと偽の赤", ["散文にも当たる", "折り返した開きタグを外す"]],
+  [
+    "適合の証拠を探す走査は逆",
+    ["別の属性から呼んだだけで証拠が見つかる", "通しているのに見つからない"],
+  ],
+];
+
 describe("AGENTS.md §4 — 文字列で見る検査", () => {
   it("書く前に、その語を持つ行を全部出すと書いてある", () => {
     // **4 回続けて踏んだのは「他にも出るか」を yes / no で見たから**である (#493)
@@ -121,6 +157,79 @@ describe("AGENTS.md §4 — 文字列で見る検査", () => {
       item.indexOf("何で数えるかは、守りたいものから選ぶ"),
       "選び方が、数える手より後ろに居る",
     ).toBeLessThan(item.indexOf("その語を持つ行を全部出す"));
+  });
+
+  it("数えるのは 2 つだと書いてある", () => {
+    // **「本文より狭く」は、当たる相手のほうしか言っていない** (#728)
+    // ——**走査 2 本で 4 回、掴んだ範囲の端を外した**（**2 回ずつ、両方向に 1 回ずつ**）。
+    // **4 回とも「その語を持つ行を全部出す」はやっている**——**足りなかったのは、
+    // 掴んだ範囲がどこで終わるか**である。
+    expectOnlyInGuidance("掴んだ範囲がどこで終わるか");
+  });
+
+  it("向きは、端の広さだけでは決まらないと書いてある", () => {
+    // **端の広さだけで向きを決めると、外す** (#729 のレビュー)——**4 件のうち
+    // 2 件が、その読みの反例**だった。**違反を探す走査と、適合の証拠を探す走査で
+    // 逆になる**（**`<h2>` は前者、マスは後者**）。
+    expectOnlyInGuidance("違反を探しているのか、適合の証拠を探しているのか");
+  });
+
+  it("どちらの向きも、例つきで読める", () => {
+    // **片方だけ書くと、もう片方の走査を書く人に効かない**
+    // ——**逆になること自体が中身**である。
+    expectOnlyInGuidance("違反を探す走査は、広いと偽の赤");
+    expectOnlyInGuidance("適合の証拠を探す走査は逆");
+    // **名前が測っているものより広かった** (#729 のレビュー 2 周目)——**向きの語しか
+    // 当てておらず、例を 4 つとも消しても緑**だった。**守りたいのは「例が在ること」**
+    // なのに、**数えていたのは「向きの語」**である（#708 の形。**偽の緑を直す節を
+    // 守る試験が、偽の緑**だった）。
+    //
+    // **向きと組で見る**——**その向きの側にしか無い語を、その側の中で探す。**
+    // **例が消えたら、次に読む人は 2 通りを丸暗記することになる。**
+    for (const [direction, examples] of DIRECTION_EXAMPLES) {
+      const part = squeeze(directionPart(direction));
+      for (const example of examples) {
+        expect(part, `「${direction}」の側に例が無い: ${example}`).toContain(squeeze(example));
+      }
+    }
+  });
+
+  it("例が、逆の向きの側に入っていたら、そう言える", () => {
+    // **「どこかに在る」だけだと、両側を入れ替えても緑**である（#695 と同じ形）
+    // ——**2 × 2 が読めることが中身**なので、**側まで見る。**
+    for (const [direction, examples] of DIRECTION_EXAMPLES) {
+      const other = DIRECTION_EXAMPLES.find(([one]) => one !== direction);
+      const part = squeeze(directionPart(other?.[0] ?? ""));
+      for (const example of examples) {
+        expect(part, `「${direction}」の例が、逆の側に入っている: ${example}`).not.toContain(
+          squeeze(example),
+        );
+      }
+    }
+  });
+
+  it("2 つの向きが、1 つの筋から出ていると読める", () => {
+    // **2 通りを覚える形にすると、3 つ目の走査で当てられない**
+    // ——**筋が 1 つあれば、その場で引ける。**
+    expectOnlyInGuidance("範囲を広げると、探しているものが見つかりやすくなる");
+  });
+
+  it("向きは、止める判断そのものではないと書いてある", () => {
+    // **「この向きで決める」は言い過ぎだった** (#729 のレビュー)——**4 回とも、
+    // 決め手は仕組みのほう**である（**属性に比較を書くのは普通の形で、現にこの
+    // リポジトリに在る**）。**向きだけで決めていたら、偽の赤の側を通していた。**
+    expectOnlyInGuidance("向きだけで止めるかどうかを決めない");
+  });
+
+  it("端を数えるのは、5 つ目の手ではない", () => {
+    // **1 つ目を厚くしただけ**である (#708 / #728)——**並べると
+    // 「4 つは場面が違う」が読めなくなる。** **場面の一覧にも、1 つ目として入っている**
+    // （**「当たる相手と、判定の端」**）。
+    expect(matchesWays(sceneLine()), "端を数える手が、5 つ目として並んでいる").toBe(true);
+    expect(
+      guidanceItem().indexOf("掴んだ範囲がどこで終わるか"),
+      "端の話が、変異より後ろに居る",
+    ).toBeLessThan(guidanceItem().indexOf("書いたら変異させる"));
   });
 
   it("書き終えたあとに、もう 1 度数えると書いてある", () => {
