@@ -321,6 +321,16 @@ export function sampleBoard(): RepositoryBoardResult {
           row.assignment === undefined ? [] : [[row.number, row.assignment] as const],
         ),
       ),
+      // **最後に動いた時刻**（#715）。**見本は作り物**なので、**行ごとに 1 日ずつ古くする**
+      // ——**同じ数ばかりだと、日数で並べ替えたときに何も分からない。**
+      // **1 行だけ持たせない**（`heads` と同じ）——**「読めなかった」は、
+      // 地図に載っていないことで表す。**
+      updatedAt: new Map(
+        ROWS.filter((row) => row.number !== 112).map((row, index) => [
+          row.number,
+          `2026-09-${String(12 - index).padStart(2, "0")}T09:00:00Z`,
+        ]),
+      ),
     },
     approvals: {
       approved: new Set([101, 106]),

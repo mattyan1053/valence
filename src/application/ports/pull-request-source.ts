@@ -83,6 +83,20 @@ export type PullRequestListing = {
    * 倒す**ので、**「読めなかった」が「放置」に化けない**（`AGENTS.md` §5）。
    */
   readonly opinions: ReadonlyMap<number, ReviewOpinion>;
+  /**
+   * PR 番号から引ける、最後に動いた時刻（ISO 8601。#715）。
+   *
+   * **横断の盤面は既に持っている**（`CrossRepositoryPullRequest.updatedAt`）
+   * ——**1 リポジトリの側にも同じ材料を置く。**
+   *
+   * **ここでは数えない。** **`domain` も `application` も時計を持たない**ので、
+   * **「いま」は外から渡る**——**運ぶのは時刻だけ**で、**日数にするのは表の側**である。
+   *
+   * **読めなかった PR は入らない**（`titles` と同じ）——**入れないほうが安全である。**
+   * **空を「0 日」として出すと、止まっている PR と取れなかった PR が同じ顔で並ぶ**
+   * （`AGENTS.md` §5）。
+   */
+  readonly updatedAt: ReadonlyMap<number, string>;
 };
 
 /**

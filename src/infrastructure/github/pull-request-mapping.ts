@@ -73,6 +73,28 @@ const pullRequestSchema = z.object({
 });
 
 /**
+ * 最後に動いた時刻（#715）。
+ *
+ * **一覧の応答がそのまま持っている**（`updated_at`）——**取りに行く往復は要らない。**
+ * **横断の盤面は同じものを GraphQL の `updatedAt` から取っている**
+ * （`cross-repository-pull-requests.ts`）——**こちらは REST なので名前だけが違う。**
+ *
+ * **本体とは別に検証する**（`assignmentSchema` と同じ形。#631）——**ここが読めなくても、
+ * 依存グラフは出す。** **本体へ入れると、GitHub が形を変えた日に PR ごと `invalid` へ落ち、
+ * その行が図から消える**（#718 のレビュー）。
+ *
+ * **日時として見る。** **文字列であることだけを見ると、`"unknown"` や空白がそのまま
+ * 時刻の地図へ入る**——**日数にすると `NaN` になり、「動いていない」と見分けられない。**
+ * **読めなければ地図に入らない**ので、**`activeDays` を出す側は「分からない」と言える。**
+ *
+ * **`Z` を前提にする。** **GitHub の REST は常に UTC で返す**ので、
+ * **オフセット付きを許すと、来ないはずの形まで通ることになる。**
+ */
+const updatedAtSchema = z.object({
+  updated_at: z.iso.datetime(),
+});
+
+/**
  * 誰に振られているか（#631）。
  *
  * **一覧の応答がそのまま持っている**ので、**取りに行く往復は要らない。**
@@ -113,6 +135,8 @@ export function toPullRequestRefs(response: unknown): ListedPullRequests {
   const titles = new Map<number, string>();
   // **誰に振られているかも同じ形**（#631）——**読めなかった PR は入らない**
   const assignments = new Map<number, Assignment>();
+  // **最後に動いた時刻も同じ形**（#715）——**読めなかった PR は入らない**
+  const updatedAt = new Map<number, string>();
   for (const [index, item] of listed.data.entries()) {
     const parsed = pullRequestSchema.safeParse(item);
     if (!parsed.success) {
@@ -132,8 +156,14 @@ export function toPullRequestRefs(response: unknown): ListedPullRequests {
     if (people.success) {
       assignments.set(parsed.data.number, toAssignment(people.data));
     }
+    // **最後に動いた時刻も別に検証する**（#715 / #718 のレビュー）——**日時として
+    // 読めたものだけを地図へ入れる。** **読めなくても、その PR は図に残る**
+    const activity = updatedAtSchema.safeParse(item);
+    if (activity.success) {
+      updatedAt.set(parsed.data.number, activity.data.updated_at);
+    }
   }
-  return { pullRequests, invalid, heads, titles, assignments };
+  return { pullRequests, invalid, heads, titles, assignments, updatedAt };
 }
 
 function toAssignment(people: z.infer<typeof assignmentSchema>): Assignment {
