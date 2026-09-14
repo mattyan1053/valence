@@ -17,7 +17,13 @@ import type { ReactNode } from "react";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import { mergeBlocksFor } from "../../domain/graph/merge-block";
-import type { RiskTier } from "../../domain/triage/risk-tier";
+import type { CiStatus, RiskTier } from "../../domain/triage/risk-tier";
+import {
+  activeDaysCellNote,
+  ciCellNote,
+  dependsOnCellNote,
+  sizeCellNote,
+} from "../board/board-cell-notes";
 import { BoardSection } from "../board/board-section";
 import { DependencyGraphFigure } from "./dependency-graph-figure";
 import { layoutDependencyGraph } from "./graph-layout";
@@ -96,6 +102,35 @@ export type DependencyGraphViewProps = {
    * 知らない**（**渡された関数しか持っていない**）。
    */
   readonly rowShown?: (pullRequestNumber: number) => boolean;
+  /**
+   * **表の列に出す材料**（#716）。**読めなかったものは `undefined` のまま渡す。**
+   *
+   * **判定を渡させない**（`tierOf` とは逆向きに見えるが、理由は同じ）——**列に出る
+   * のは材料そのもの**で、**文に当てるのは `board-cell-notes` が 1 箇所で持つ。**
+   *
+   * **任意にしない。** **渡し忘れると、比べるための列が全部「読めません」になる**
+   * ——**取れているのに取れていないと言う**（`titleOf` と同じ嘘）。
+   */
+  readonly factsOf: (pullRequestNumber: number) => PullRequestFacts;
+  /**
+   * **行の操作**（#716）。**表の最後の列に入る。**
+   *
+   * **`renderAside`（畳んだ側）と分ける**——**押すものを畳みの中へ入れると、
+   * 開くまで押せない**（**`[&_button]:min-w-24` で幅を揃えたばかり**。#665 の隣）。
+   *
+   * **任意でよい。** **渡さなければ列が空になるだけ**である。
+   */
+  readonly renderRowActions?: (pullRequestNumber: number) => ReactNode;
+};
+
+/**
+ * **比べるための列の材料**（#716 / #714）。**利用者が挙げた 5 つのうち、
+ * タイトルと依存 PR 数は、この部品が既に持っている。**
+ */
+export type PullRequestFacts = {
+  readonly ci: CiStatus | undefined;
+  readonly size: { readonly files: number; readonly lines: number } | undefined;
+  readonly activeDays: number | undefined;
 };
 
 /**
@@ -117,44 +152,121 @@ function dependsOnIndex(edges: readonly DependencyEdge[]): ReadonlyMap<number, r
   return found;
 }
 
-function PullRequestRow({
+/** **1 マスの器。** **線と余白を 1 箇所で決める**——**列ごとに書くと揃わない**（#713 と同じ形）。 */
+const CELL = "border-[var(--node-stroke)] border-t px-3 py-2 align-top";
+
+/** **数字の列。** **桁を揃える**（#714 の注意）——**揃わないと、比べるために読むことになる。** */
+const NUMBER_CELL = `${CELL} whitespace-nowrap tabular-nums`;
+
+function PullRequestRows({
   pullRequest,
   dependsOn,
+  facts,
   aside,
+  actions,
   title,
   url,
 }: {
   pullRequest: PullRequestRef;
   dependsOn: readonly number[];
+  facts: PullRequestFacts;
   aside?: ReactNode;
+  actions?: ReactNode;
   title: string | undefined;
   url: string;
 }) {
   return (
-    // **行にも強弱を付ける**（#583）。**番号 > 枝 > 依存**——**素の `<li>` が並ぶと、
-    // どこまでが 1 件か分からない。** **色はテーマが決める**（`var(--…)`）。
-    <li className="flex flex-col gap-1 rounded border border-[var(--node-stroke)] bg-[var(--node-fill)] px-3 py-2">
-      <div className="flex flex-wrap items-baseline gap-2">
-        {/* **番号とタイトルを 1 つのリンクにする**（#621）——**タイトルが取れなくても
-            飛べる**（**取れなかったぶんは `undefined` で来る**。#542）。
-            **強弱は #583 のものを引き継ぐ**——**行の主役は変わっていない。**
-            **`underline` は「押せる」を見せるぶん**（#622 のレビュー）——
-            **Preflight が当たるので、書かなければ本文と同じ顔になる。** */}
-        <a className="font-mono font-bold underline" href={url}>
-          #{pullRequest.number}
-          {title === undefined ? "" : ` ${title}`}
-        </a>
-        <code className="text-sm">{pullRequest.head.branch}</code>
-        {dependsOn.length > 0 ? (
-          <span className="text-sm text-[var(--muted)]">
-            ← {dependsOn.map((number) => `#${number}`).join(", ")} の上
-          </span>
-        ) : (
-          <span className="text-sm text-[var(--muted)]">← {pullRequest.base.branch}</span>
-        )}
-      </div>
-      {aside}
-    </li>
+    // **1 件で 1 つの `<tbody>`**（#716）——**行が 2 つに分かれる**（**比べる列と、
+    // 畳んだ中身**）ので、**どこまでが 1 件かを、器のほうで言い切る。**
+    // **`<table>` は `<tbody>` を複数持てる**——**入れ子にはしない。**
+    <tbody>
+      <tr className="bg-[var(--node-fill)]">
+        <th className={`${CELL} text-left font-normal`} scope="row">
+          <div className="flex flex-col gap-1">
+            {/* **番号とタイトルを 1 つのリンクにする**（#621）——**タイトルが取れなくても
+                飛べる**（**取れなかったぶんは `undefined` で来る**。#542）。
+                **強弱は #583 のものを引き継ぐ**——**行の主役は変わっていない。**
+                **`underline` は「押せる」を見せるぶん**（#622 のレビュー）——
+                **Preflight が当たるので、書かなければ本文と同じ顔になる。** */}
+            <a className="font-mono font-bold underline" href={url}>
+              #{pullRequest.number}
+              {title === undefined ? "" : ` ${title}`}
+            </a>
+            <span className="flex flex-wrap items-baseline gap-2">
+              <code className="text-sm">{pullRequest.head.branch}</code>
+              {dependsOn.length > 0 ? (
+                <span className="text-sm text-[var(--muted)]">
+                  ← {dependsOn.map((number) => `#${number}`).join(", ")} の上
+                </span>
+              ) : (
+                <span className="text-sm text-[var(--muted)]">← {pullRequest.base.branch}</span>
+              )}
+            </span>
+          </div>
+        </th>
+        <td className={`${CELL} whitespace-nowrap`}>{ciCellNote(facts.ci)}</td>
+        <td className={NUMBER_CELL}>{sizeCellNote(facts.size)}</td>
+        <td className={NUMBER_CELL}>{activeDaysCellNote(facts.activeDays)}</td>
+        <td className={NUMBER_CELL}>{dependsOnCellNote(dependsOn.length)}</td>
+        <td className={CELL}>{actions}</td>
+      </tr>
+      {/* **表に移して、行の中身を落とさない**（#716）——**これまで行に出ていたものが、
+          そのまま下の段に入る**（**危なさ・合流の状況・重なり・誰の番か**）。
+          **全部を列にすると、横に潰れて今より読めない**（#714 の注意）。
+
+          **ここで畳み直さない**（#605 / #597）——**重いところ（Tier の内訳）は
+          既に `<details>` の中**である。**その外にもう 1 枚かぶせると、
+          畳みが二重になり**、**開くのに 2 回押すことになる。** */}
+      {aside === undefined ? undefined : (
+        <tr className="bg-[var(--node-fill)]">
+          <td className="px-3 pb-2" colSpan={6}>
+            <div className="flex flex-col gap-1">{aside}</div>
+          </td>
+        </tr>
+      )}
+    </tbody>
+  );
+}
+
+/**
+ * **一覧の器**（#716）。
+ *
+ * **狭い画面で列が潰れないようにする**（#714 の注意）——**器が横に流れる**ので、
+ * **画面ごと横に伸びることはない**（#583 で踏んだ形の再演を避ける）。
+ */
+function BoardTable({ caption, children }: { caption: string; children: ReactNode }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-left">
+        {/* **並びの理由を、表そのものが持つ**——**`<table>` は `<ol>` と違って
+            「順がある」と言わない**（#705 のレビューと同じ関心） */}
+        <caption className="pb-2 text-left text-sm text-[var(--muted)]">{caption}</caption>
+        <thead>
+          <tr className="text-sm text-[var(--muted)]">
+            <th className="px-3 py-1 font-normal" scope="col">
+              PR
+            </th>
+            <th className="px-3 py-1 font-normal" scope="col">
+              CI
+            </th>
+            <th className="px-3 py-1 font-normal" scope="col">
+              サイズ
+            </th>
+            <th className="px-3 py-1 font-normal" scope="col">
+              最後に動いた
+            </th>
+            <th className="px-3 py-1 font-normal" scope="col">
+              依存 PR 数
+            </th>
+            <th className="px-3 py-1 font-normal" scope="col">
+              操作
+            </th>
+          </tr>
+        </thead>
+        {/* **`<tbody>` は 1 件ぶん**（`PullRequestRows`）——**ここでは包まない** */}
+        {children}
+      </table>
+    </div>
   );
 }
 
@@ -201,6 +313,8 @@ export function DependencyGraphView({
   titleOf,
   urlOf,
   rowShown,
+  factsOf,
+  renderRowActions,
 }: DependencyGraphViewProps) {
   const byNumber = new Map(pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]));
   const dependsOn = dependsOnIndex(edges);
@@ -211,11 +325,13 @@ export function DependencyGraphView({
       // **絞りは一覧だけに効く**（#663）——**渡されていなければ全部出す**
       .filter((pullRequest) => rowShown?.(pullRequest.number) !== false)
       .map((pullRequest) => (
-        <PullRequestRow
+        <PullRequestRows
           key={pullRequest.number}
           pullRequest={pullRequest}
           dependsOn={dependsOn.get(pullRequest.number) ?? []}
+          facts={factsOf(pullRequest.number)}
           aside={renderAside?.(pullRequest.number)}
+          actions={renderRowActions?.(pullRequest.number)}
           title={titleOf(pullRequest.number)}
           url={urlOf(pullRequest.number)}
         />
@@ -266,7 +382,9 @@ export function DependencyGraphView({
               title: titleOf(number),
             })}
           />
-          <ol className="flex flex-col gap-2">{rowsFor(figured)}</ol>
+          <BoardTable caption="マージできる順に並んでいます（上から）">
+            {rowsFor(figured)}
+          </BoardTable>
         </>
       )}
 
@@ -282,7 +400,9 @@ export function DependencyGraphView({
             先にマージすべき順が決まりません。<strong>循環している PR の base</strong>
             を付け替えてください。ここには、その循環の先に積まれているだけの PR も並びます。
           </p>
-          <ul className="flex flex-col gap-2">{rowsFor(order.cyclic)}</ul>
+          <BoardTable caption="順が決まらないので、並びに意味はありません">
+            {rowsFor(order.cyclic)}
+          </BoardTable>
         </section>
       )}
 

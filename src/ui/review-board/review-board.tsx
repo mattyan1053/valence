@@ -270,6 +270,16 @@ export type ReviewBoardProps = {
    * **絞るのは一覧だけ**で、**図は絞らない**（`rowShown`）。
    */
   readonly ballFilter?: BallFilter;
+  /**
+   * **最後に動いてから何日か**（#716）。**読めていないなら `undefined`。**
+   *
+   * **盤面はこれを持っていない**（**`updatedAt` と、取りに行った時刻の両方が要る**）ので、
+   * **渡す側から受ける**（`mergeStatusOf` と同じ形）——**数えるのは
+   * `activeDaysSince`**（domain）で、**ここは配るだけ**である。
+   *
+   * **任意にしない。** **渡し忘れると、比べるための列が全部「読めません」になる。**
+   */
+  readonly activeDaysOf: (pullRequestNumber: number) => number | undefined;
 };
 
 export function ReviewBoard({
@@ -289,6 +299,7 @@ export function ReviewBoard({
   reviewOpinionOf,
   mergeBlockOf,
   ballFilter,
+  activeDaysOf,
 }: ReviewBoardProps) {
   // **行ごとに計算しない**（`mergeBlocksFor` と同じ理由）——**1 件ずつ比べると
   // 本数の 2 乗**になる。**材料が取れていない PR も渡す**——**「触っていない」
@@ -394,6 +405,28 @@ export function ReviewBoard({
         headKnown={headKnown}
         titleOf={titleOf}
         urlOf={urlOf}
+        // **比べるための列の材料**（#716）——**判定は渡さない。**
+        // **文に当てるのは `board-cell-notes` が 1 箇所で持つ**ので、
+        // **ここは材料を詰め替えるだけ**である
+        factsOf={(number) => {
+          const change = changes.get(number);
+          return {
+            ci: change?.ciStatus,
+            size:
+              change === undefined
+                ? undefined
+                : { files: change.changedFileCount, lines: change.changedLineCount },
+            activeDays: activeDaysOf(number),
+          };
+        }}
+        // **押すものは、畳みの外に出す**（#716）——**畳みの中へ入れると、
+        // 開くまで押せない**（**幅を揃えたばかりである**。#665 の隣）
+        renderRowActions={(number) => (
+          <ActionRow>
+            {renderStatus?.(number)}
+            {renderActions?.(number)}
+          </ActionRow>
+        )}
         renderAside={(number) => {
           const change = changes.get(number);
           // **材料の有無に関わらず出す**（#629）——**リスク Tier が揃っていないことと、
@@ -464,10 +497,6 @@ export function ReviewBoard({
                     : changeUnavailableNote(kind)}
                 </p>
                 {facts}
-                <ActionRow>
-                  {renderStatus?.(number)}
-                  {renderActions?.(number)}
-                </ActionRow>
               </>
             );
           }
@@ -475,10 +504,6 @@ export function ReviewBoard({
             <>
               <RiskTierView tier={classifyRiskTier(change)} change={change} />
               {facts}
-              <ActionRow>
-                {renderStatus?.(number)}
-                {renderActions?.(number)}
-              </ActionRow>
             </>
           );
         }}

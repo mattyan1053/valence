@@ -24,6 +24,7 @@ import {
 } from "../../../../composition/auth";
 import type { MergeBlock, NotOrderableReason } from "../../../../domain/graph/merge-block";
 import { mergeBlocksFor } from "../../../../domain/graph/merge-block";
+import { activeDaysSince } from "../../../../domain/triage/active-days";
 import type { ApprovalDisplayKind } from "../../../../ui/approve/approval-badge";
 import { ApprovalBadge } from "../../../../ui/approve/approval-badge";
 import type { ApproveNoticeKind } from "../../../../ui/approve/approve-button";
@@ -450,6 +451,10 @@ export async function renderRepositoryBoard(
             // **一覧を、誰の番かで絞る**（#663）——**運ぶ側（#667）と同じ値を渡す。**
             // **もう一度読み直さない**——**読み方が 2 つになると、片方だけが直る**
             ballFilter={ball}
+            // **最後に動いてから何日か**（#716）——**数えるのは domain**
+            // （`activeDaysSince`）。**時計は盤面のもの**（#664）で、
+            // **描くたびに今を読むと、同じ盤面が読むたびに違う日数を出す**
+            activeDaysOf={(number) => activeDaysSince(result.plan.updatedAt.get(number), at)}
             renderStatus={(number) => {
               // **押した結果は、盤面そのもので確かめる**（#343）
               const display = approvalDisplay(number, result.approvals);

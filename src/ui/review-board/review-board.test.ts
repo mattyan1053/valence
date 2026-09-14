@@ -72,6 +72,8 @@ function props(overrides: Partial<ReviewBoardProps> = {}): ReviewBoardProps {
     titleOf: (number: number) => `#${number} のタイトル`,
     // **既定は飛べる**（#621）。**この試験群が見ているのは、そこではない**
     urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
+    // **既定は「今日動いた」**（#716）——**この試験群が見ているのは、そこではない**
+    activeDaysOf: () => 0,
     // **既定は別々のファイルを触る**（#637）——**この試験群が見ているのは、
     // そこではない**（**同じにすると、全部の行に重なりの 1 文が出る**）
     changes: new Map([
@@ -213,7 +215,7 @@ describe("各行へ状態を足す", () => {
 });
 
 /**
- * 一覧（`<ol>`）の中だけ。
+ * 一覧（表）の中だけ。
  *
  * **図にも同じ `#1` / `#2` が出る** (#474 のレビュー 2 周目)——**図は一覧より先に描かれる**
  * ので、**全体を見る判定は図の並びで満たされ**、**一覧の行順が逆転しても緑のまま**になる。
@@ -222,9 +224,9 @@ describe("各行へ状態を足す", () => {
  * **狭めた先が空でも黙らない**——**一覧そのものが消えたら、ここで落ちる。**
  */
 function list(markup: string): string {
-  const from = markup.indexOf("<ol");
+  const from = markup.indexOf("<table");
   expect(from, "一覧が出ていない").toBeGreaterThanOrEqual(0);
-  const to = markup.indexOf("</ol>", from);
+  const to = markup.indexOf("</table>", from);
   expect(to, "一覧が閉じていない").toBeGreaterThan(from);
   return markup.slice(from, to);
 }
@@ -600,31 +602,18 @@ describe("行を区別しない断りは、盤面に 1 回だけ出す（#702）
  */
 describe("行の中の事実は、区切られている（#703）", () => {
   /**
-   * その番号の行（一覧の直下の `<li>` 1 つ）。
+   * その番号の行（**1 件ぶんの `<tbody>`**）。
    *
-   * **入れ子を数える**——**行の中にも `<li>` が居る**（Tier の内訳と、行の事実）ので、
-   * **文字列で割ると、行の途中で切れる**（**実際に切れて、この試験が空を読んだ**）。
+   * **入れ子を数えなくてよくなった**（#716）——**`<tbody>` は入れ子にならない。**
+   * **以前は `<li>` の深さを数えていた**（**行の中にも `<li>` が居て、
+   * 文字列で割ると行の途中で切れた**）。
    */
-  function topLevelItems(html: string): readonly string[] {
-    const items: string[] = [];
-    let depth = 0;
-    let from = 0;
-    for (const found of html.matchAll(/<li[\s>]|<\/li>/g)) {
-      if (found[0] !== "</li>") {
-        from = depth === 0 ? found.index : from;
-        depth += 1;
-        continue;
-      }
-      depth -= 1;
-      if (depth === 0) {
-        items.push(html.slice(from, found.index));
-      }
-    }
-    return items;
-  }
-
   function rowOf(markup: string, number: number): string {
-    const row = topLevelItems(list(markup)).find((item) => item.includes(`#${number} `));
+    const row = list(markup)
+      .split("<tbody")
+      .slice(1)
+      .map((item) => `<tbody${item}`)
+      .find((item) => item.includes(`#${number} `));
     expect(row, `#${number} の行が無い`).toBeDefined();
     return row ?? "";
   }
@@ -911,6 +900,8 @@ describe("理由が、行に出る（#577 のレビュー）", () => {
     invalid: [],
     // **材料は 1 件も無い**——**理由の側だけを変える**
     changes: new Map(),
+    // **時刻も読めていない**（#716）——**材料が無いのだから、列も読めない側**である
+    activeDaysOf: () => undefined,
     headKnown: () => true,
     // **合流できる側を既定にする**——**この試験群が見ているのは、そこではない**
     mergeStatusOf: () => MERGEABLE,

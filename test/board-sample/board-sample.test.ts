@@ -83,15 +83,15 @@ describe("CSS の規則の突き合わせ", () => {
 /**
  * **盤面の一覧の中だけ**（**先頭の `<ol>` は推奨レビュー順**。`AGENTS.md` §4）。
  *
- * **見出しから数える**——**先頭の `<ol>` を取ると、盤面が空でも推奨レビュー順の
- * 行に当たる**（**実際に一度そうなった**）。
+ * **見出しから数える**——**先に描かれる推奨レビュー順の行に当たる**（**実際に
+ * 一度そうなった**）。**一覧は表である**（#716。**`<ol>` だった**）。
  */
 function dependencyList(markup: string): string {
   const heading = markup.indexOf("PR の依存");
   expect(heading, "依存の見出しが出ていない").toBeGreaterThanOrEqual(0);
-  const from = markup.indexOf("<ol", heading);
+  const from = markup.indexOf("<table", heading);
   expect(from, "依存の一覧が出ていない").toBeGreaterThanOrEqual(0);
-  return markup.slice(from, markup.indexOf("</ol>", from));
+  return markup.slice(from, markup.indexOf("</table>", from));
 }
 
 describe("判定用の盤面", () => {
