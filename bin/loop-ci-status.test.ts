@@ -770,6 +770,96 @@ describe("bin/loop-ci-status", () => {
       expect(result.status, "欠けを全部「人を呼ぶ」へ倒している").toBe(1);
     });
 
+    describe("欠けているのが ruleset の側だけなら、待つ（#734）", () => {
+      // **`CodeQL` は workflow ではなく GitHub 側の仕組みが出す** (#608)。
+      // **repo の workflow より遅れて作られる**ので、**「repo の検査は in_progress、
+      // CodeQL だけまだ無い」という窓が必ず開く**——**偶然ではなく順序である。**
+      //
+      // **これまでは exit 1**（**決着して失敗と同じ口**）だった——**master の手順書は
+      // 終了コードで分ける**ので、**直すものが無い PR が worker へ渡る**
+      // （**master の作業場で 3 回。渡す前に打ち直して気づいた**）。
+      //
+      // **行き先を下げていない。** **ruleset の context 名は repo の中に無い**
+      // ——**worker が push で直せるものではない**ので、**猶予を過ぎたら人（exit 5）が正しい。**
+      //
+      // **workflow は 2 本置く**——**1 本だと「workflow 側が欠けている」を作れない**
+      // （**最初に 1 本で書いて、当たらない入力のほうが緑になった**）。
+      const TWO_JOBS = [5, 5];
+      const CODEQL = () => rulesetLines([{ context: "CodeQL" }]);
+
+      it("repo の検査が出ていて ruleset の必須だけ無ければ、猶予の内は待つ", () => {
+        workflows(TWO_JOBS);
+
+        const result = run({
+          rules: CODEQL(),
+          checks: [
+            { name: "alpha", status: "in_progress", conclusion: "", startedAgo: 1 },
+            { name: "beta", status: "in_progress", conclusion: "", startedAgo: 1 },
+          ],
+        });
+
+        expect(result.status, `直すものが無い PR を worker へ渡している: ${result.stdout}`).toBe(3);
+      });
+
+      it("猶予を過ぎたら、人を呼ぶ側へ倒す", () => {
+        // **worker が直せないものを、待ち続けない。**
+        workflows(TWO_JOBS);
+        firstSeen("deadbeef", 3600);
+
+        const result = run({
+          rules: CODEQL(),
+          checks: [
+            { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+            { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          ],
+        });
+
+        expect(result.status, "worker が直せないものを待ち続けている").toBe(5);
+        expect(result.stdout, "1 件も作られていない、と言っている").not.toContain("1 件も");
+      });
+
+      it("workflow 側が欠けていれば、これまでどおり直せる側へ倒す", () => {
+        // **当たらない入力を隣に置く**——**緩める向きを広げていないこと。**
+        // **workflow の job 名は repo の中にある**ので、**worker が直せる。**
+        workflows(TWO_JOBS);
+        firstSeen("deadbeef", 3600);
+
+        const result = run({
+          rules: CODEQL(),
+          checks: [
+            { name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 },
+            { name: "CodeQL", status: "completed", conclusion: "success", startedAgo: 10 },
+          ],
+        });
+
+        expect(result.status, "workflow 側の欠けまで待っている").toBe(1);
+      });
+
+      it("両方欠けていれば、直せる側へ倒す", () => {
+        // **workflow 側が 1 つでも欠けていたら、そちらが先**である
+        // ——**待っても直らない。**
+        workflows(TWO_JOBS);
+        firstSeen("deadbeef", 3600);
+
+        const result = run({
+          rules: CODEQL(),
+          checks: [{ name: "alpha", status: "completed", conclusion: "success", startedAgo: 10 }],
+        });
+
+        expect(result.status, "workflow 側の欠けを待ちへ混ぜている").toBe(1);
+      });
+
+      it("1 件も作られていなければ、これまでどおり猶予に乗る（#297）", () => {
+        // **workflow 側も欠けているが、そちらは #297 の形**である
+        // ——**「作られていない」は PR に足すもので直る保証が無い。**
+        workflows(TWO_JOBS);
+
+        const result = run({ rules: CODEQL(), checks: [] });
+
+        expect(result.status, "push 直後の PR を worker へ渡している").toBe(3);
+      });
+    });
+
     it("コンフリクトしていれば、これまでどおり worker が直せる側へ倒す", () => {
       // **#305 のレビュー。** **`on: pull_request` の実行はマージ結果
       // （`refs/pull/N/merge`）に対して走る**ので、**コンフリクトしていると ref が
