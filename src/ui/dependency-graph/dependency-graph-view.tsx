@@ -25,6 +25,8 @@ import {
   sizeCellNote,
 } from "../board/board-cell-notes";
 import { BoardSection } from "../board/board-section";
+import type { BoardColumn } from "../board/board-table";
+import { BOARD_CELL, BoardTable, boardCellClass } from "../board/board-table";
 import { DependencyGraphFigure } from "./dependency-graph-figure";
 import { layoutDependencyGraph } from "./graph-layout";
 
@@ -152,11 +154,20 @@ function dependsOnIndex(edges: readonly DependencyEdge[]): ReadonlyMap<number, r
   return found;
 }
 
-/** **1 マスの器。** **線と余白を 1 箇所で決める**——**列ごとに書くと揃わない**（#713 と同じ形）。 */
-const CELL = "border-[var(--node-stroke)] border-t px-3 py-2 align-top";
-
-/** **数字の列。** **桁を揃える**（#714 の注意）——**揃わないと、比べるために読むことになる。** */
-const NUMBER_CELL = `${CELL} whitespace-nowrap tabular-nums`;
+/**
+ * **この表が出す列**（#716）。**順番がそのまま並び**である。
+ *
+ * **名前と桁の揃え方は器が持つ**（`board-table.tsx`）——**書き写すと、
+ * 推奨レビュー順の表（#717）と片方だけ直して食い違う**（`AGENTS.md` §5）。
+ */
+const COLUMNS: readonly BoardColumn[] = [
+  "pull-request",
+  "ci",
+  "size",
+  "active",
+  "depends-on",
+  "actions",
+];
 
 function PullRequestRows({
   pullRequest,
@@ -181,7 +192,7 @@ function PullRequestRows({
     // **`<table>` は `<tbody>` を複数持てる**——**入れ子にはしない。**
     <tbody>
       <tr className="bg-[var(--node-fill)]">
-        <th className={`${CELL} text-left font-normal`} scope="row">
+        <th className={`${BOARD_CELL} text-left font-normal`} scope="row">
           <div className="flex flex-col gap-1">
             {/* **番号とタイトルを 1 つのリンクにする**（#621）——**タイトルが取れなくても
                 飛べる**（**取れなかったぶんは `undefined` で来る**。#542）。
@@ -204,11 +215,11 @@ function PullRequestRows({
             </span>
           </div>
         </th>
-        <td className={`${CELL} whitespace-nowrap`}>{ciCellNote(facts.ci)}</td>
-        <td className={NUMBER_CELL}>{sizeCellNote(facts.size)}</td>
-        <td className={NUMBER_CELL}>{activeDaysCellNote(facts.activeDays)}</td>
-        <td className={NUMBER_CELL}>{dependsOnCellNote(dependsOn.length)}</td>
-        <td className={CELL}>{actions}</td>
+        <td className={boardCellClass("ci")}>{ciCellNote(facts.ci)}</td>
+        <td className={boardCellClass("size")}>{sizeCellNote(facts.size)}</td>
+        <td className={boardCellClass("active")}>{activeDaysCellNote(facts.activeDays)}</td>
+        <td className={boardCellClass("depends-on")}>{dependsOnCellNote(dependsOn.length)}</td>
+        <td className={boardCellClass("actions")}>{actions}</td>
       </tr>
       {/* **表に移して、行の中身を落とさない**（#716）——**これまで行に出ていたものが、
           そのまま下の段に入る**（**危なさ・合流の状況・重なり・誰の番か**）。
@@ -219,54 +230,12 @@ function PullRequestRows({
           畳みが二重になり**、**開くのに 2 回押すことになる。** */}
       {aside === undefined ? undefined : (
         <tr className="bg-[var(--node-fill)]">
-          <td className="px-3 pb-2" colSpan={6}>
+          <td className="px-3 pb-2" colSpan={COLUMNS.length}>
             <div className="flex flex-col gap-1">{aside}</div>
           </td>
         </tr>
       )}
     </tbody>
-  );
-}
-
-/**
- * **一覧の器**（#716）。
- *
- * **狭い画面で列が潰れないようにする**（#714 の注意）——**器が横に流れる**ので、
- * **画面ごと横に伸びることはない**（#583 で踏んだ形の再演を避ける）。
- */
-function BoardTable({ caption, children }: { caption: string; children: ReactNode }) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-left">
-        {/* **並びの理由を、表そのものが持つ**——**`<table>` は `<ol>` と違って
-            「順がある」と言わない**（#705 のレビューと同じ関心） */}
-        <caption className="pb-2 text-left text-sm text-[var(--muted)]">{caption}</caption>
-        <thead>
-          <tr className="text-sm text-[var(--muted)]">
-            <th className="px-3 py-1 font-normal" scope="col">
-              PR
-            </th>
-            <th className="px-3 py-1 font-normal" scope="col">
-              CI
-            </th>
-            <th className="px-3 py-1 font-normal" scope="col">
-              サイズ
-            </th>
-            <th className="px-3 py-1 font-normal" scope="col">
-              最後に動いた
-            </th>
-            <th className="px-3 py-1 font-normal" scope="col">
-              依存 PR 数
-            </th>
-            <th className="px-3 py-1 font-normal" scope="col">
-              操作
-            </th>
-          </tr>
-        </thead>
-        {/* **`<tbody>` は 1 件ぶん**（`PullRequestRows`）——**ここでは包まない** */}
-        {children}
-      </table>
-    </div>
   );
 }
 
@@ -382,7 +351,7 @@ export function DependencyGraphView({
               title: titleOf(number),
             })}
           />
-          <BoardTable caption="マージできる順に並んでいます（上から）">
+          <BoardTable caption="マージできる順に並んでいます（上から）" columns={COLUMNS}>
             {rowsFor(figured)}
           </BoardTable>
         </>
@@ -400,7 +369,7 @@ export function DependencyGraphView({
             先にマージすべき順が決まりません。<strong>循環している PR の base</strong>
             を付け替えてください。ここには、その循環の先に積まれているだけの PR も並びます。
           </p>
-          <BoardTable caption="順が決まらないので、並びに意味はありません">
+          <BoardTable caption="順が決まらないので、並びに意味はありません" columns={COLUMNS}>
             {rowsFor(order.cyclic)}
           </BoardTable>
         </section>

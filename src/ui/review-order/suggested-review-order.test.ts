@@ -46,6 +46,8 @@ function props(overrides: Partial<SuggestedReviewOrderProps> = {}): SuggestedRev
     mergeStatusOf: () => ({ mergeable: "mergeable", state: "clean" }),
     titleOf: (number: number) => `#${number} のタイトル`,
     urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
+    // **既定は「今日動いた」**（#717）——**この試験群が見ているのは、そこではない**
+    activeDaysOf: () => 0,
     ...overrides,
   };
 }
@@ -57,16 +59,23 @@ function render(overrides: Partial<SuggestedReviewOrderProps> = {}): string {
 /**
  * 一覧の中だけを見る。**見出しや注記に当てない。**
  *
- * **閉じは最後のものを取る** (#705 のレビュー)——**束の中も `<ol>` になった**ので、
- * **最初の `</ol>` は内側のもの**である。**そこで切ると、2 つ目以降の束が
- * 範囲から落ちる**（**束をまたぐ順の試験が、黙って 1 つ目だけを見る**）。
+ * **一覧は表である**（#717。**`<ol>` の入れ子だった**）——**束は `<tbody>` 1 つ**で、
+ * **束の中の行はその中の `<tr>`** である。
  */
 function list(markup: string): string {
-  const from = markup.indexOf("<ol");
+  const from = markup.indexOf("<table");
   expect(from, "一覧が出ていない").toBeGreaterThanOrEqual(0);
-  const to = markup.lastIndexOf("</ol>");
+  const to = markup.lastIndexOf("</table>");
   expect(to, "一覧が閉じていない").toBeGreaterThan(from);
   return markup.slice(from, to);
+}
+
+/** 束（`<tbody>` 1 つ）に割る。**理由が 1 回だけ出る単位**である（#704）。 */
+function groups(markup: string): readonly string[] {
+  return list(markup)
+    .split("<tbody")
+    .slice(1)
+    .map((one) => `<tbody${one}`);
 }
 
 describe("推奨レビュー順", () => {
@@ -189,16 +198,16 @@ describe("同じ理由を束ねる", () => {
     expect(html.split(reviewReasonNote("needs-review")).length - 1).toBe(1);
   });
 
-  it("束の中も、順のある一覧である", () => {
-    // **束の中の並びにも意味がある** (#705 のレビュー)——**`suggestReviewOrder` が
-    // 依存の順をタイブレークにして決めている。** **`<ul>` にすると「順序なし」として
-    // 読み上げられる**ので、**見た目は同じでも、読み上げでは順が消える。**
-    //
-    // **数える**——**束が 1 つなら、外側 1 つ + 中 1 つ**である
-    const html = render(THREE_SAME);
+  it("束は、表の中でも 1 つのまとまりである", () => {
+    // **束ねを捨てると #704 が戻る**（**全行に同じ理由が出る**）——**表にしても、
+    // 束は `<tbody>` 1 つ**である。**3 件が同じ理由なら、束は 1 つ。**
+    const found = groups(render(THREE_SAME));
 
-    expect(html.match(/<ol/g), "順のある一覧が 2 つではない").toHaveLength(2);
-    expect(html, "順序なしの一覧で束の中を出している").not.toContain("<ul");
+    expect(found, "束が 1 つになっていない").toHaveLength(1);
+    expect(
+      [...(found[0] ?? "").matchAll(/<tr[\s>]/g)],
+      "理由の段と 3 行で 4 段にならない",
+    ).toHaveLength(4);
   });
 
   it("束ねても、順は保たれる", () => {
@@ -247,5 +256,84 @@ describe("連なりを束ねる", () => {
 
   it("1 件も無ければ、束も無い", () => {
     expect(groupByReason([])).toEqual([]);
+  });
+});
+
+/**
+ * **推奨レビュー順も表にする**（#717 / #714）。
+ *
+ * **利用者が最初に名指しした節**である（#713 の引用）——**束ねたぶん短くはなったが、
+ * 列が無い**ので、**どれが大きい PR か、どれが古いかが並べて見えなかった。**
+ */
+describe("推奨レビュー順が表になっている（#717）", () => {
+  function header(markup: string): string {
+    const from = markup.indexOf("<thead");
+    expect(from, "見出しの段が無い").toBeGreaterThanOrEqual(0);
+    return markup.slice(from, markup.indexOf("</thead>", from));
+  }
+
+  it("読む時間を決める列が並んでいる", () => {
+    const head = header(render());
+
+    expect(head, "CI の列が無い").toContain("CI");
+    expect(head, "サイズの列が無い").toContain("サイズ");
+    expect(head, "active 日数の列が無い").toContain("最後に動いた");
+  });
+
+  it("依存 PR 数の列は出さない", () => {
+    // **マージ順と混ぜない**（#717 の注意。`review-board.tsx` の元からの判断）
+    // ——**依存の本数は「守らないと壊れる制約」の側**で、**この節は目安**である。
+    // **同じ列を使えるはず、を確かめた結果、ここだけは使えない。**
+    expect(header(render()), "マージ順の列が混ざっている").not.toContain("依存 PR 数");
+  });
+
+  it("列に、その PR の材料が入る", () => {
+    const html = render({
+      changes: new Map([
+        [1, change({ changedFileCount: 3, changedLineCount: 42, ciStatus: "failing" })],
+        [2, RISKY],
+      ]),
+      activeDaysOf: (number: number) => (number === 1 ? 5 : 0),
+    });
+    const row = list(html).slice(list(html).indexOf("#1 のタイトル"));
+
+    expect(row, "CI の状況が出ていない").toContain("落ちた");
+    expect(row, "サイズが出ていない").toContain("3 ファイル / 42 行");
+    expect(row, "active 日数が出ていない").toContain("5 日前");
+  });
+
+  it("読めなかった材料を、空欄にしない", () => {
+    // **空欄は「無い」と見分けが付かない**（`AGENTS.md` §5）。
+    // **材料が 1 件も無い盤面**——**2 件 × 3 列で 6 マス。**
+    const html = render({ changes: new Map(), activeDaysOf: () => undefined });
+
+    expect([...list(html).matchAll(/読めません/g)], "読めなかった列が黙っている").toHaveLength(6);
+  });
+
+  it("数字の列は、桁が揃う", () => {
+    // **揃わないと、比べるために読むことになる**（#714 の注意）。
+    // **器が決めている**（`boardCellClass`）——**こちらの表でも効いていること**を見る
+    // （**盤面の表だけで測ると、この節が器を通っていなくても緑**になる）。
+    const row = list(render()).slice(list(render()).indexOf("#1 のタイトル"));
+    const classes = [...row.matchAll(/<td class="([^"]*)"/g)].map(([, one]) => one ?? "");
+
+    expect(classes.length, "列が出ていない").toBeGreaterThan(0);
+    expect(
+      classes.filter((one) => /\btabular-nums\b/.test(one)).length,
+      "桁を揃えた列が 2 つ無い（サイズ・active）",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("行を開かせない", () => {
+    // **#716 と同じ判断**（**畳みが二重になると開くのに 2 回押す**）——**こちらは
+    // そもそも畳む中身が無い**（**理由は束の段に出ている**）。
+    expect(render(), "畳みが増えている").not.toContain("<details");
+  });
+
+  it("狭い画面で、列が潰れずに横へ流れる", () => {
+    const markup = render();
+    const before = markup.slice(0, markup.indexOf("<table"));
+
+    expect(before, "表を包む器が無い").toMatch(/<div class="[^"]*\boverflow-x-auto\b[^"]*">\s*$/);
   });
 });

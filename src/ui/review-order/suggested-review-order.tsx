@@ -18,7 +18,10 @@ import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { ReviewReason, ReviewSuggestion } from "../../domain/triage/review-priority";
 import { suggestReviewOrder } from "../../domain/triage/review-priority";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
+import { activeDaysCellNote, ciCellNote, sizeCellNote } from "../board/board-cell-notes";
 import { BoardSection } from "../board/board-section";
+import type { BoardColumn } from "../board/board-table";
+import { BOARD_CELL, BoardTable, boardCellClass } from "../board/board-table";
 
 /**
  * **なぜその順なのか。**
@@ -97,7 +100,26 @@ export type SuggestedReviewOrderProps = {
   readonly titleOf: (pullRequestNumber: number) => string | undefined;
   /** **その PR の GitHub 上の場所**（#621）。 */
   readonly urlOf: (pullRequestNumber: number) => string;
+  /**
+   * **最後に動いてから何日か**（#717）。**読めていないなら `undefined`。**
+   *
+   * **数えるのは `activeDaysSince`**（domain）で、**ここは配るだけ**である
+   * ——**`ReviewBoard` と同じ形**（**盤面は時計を持っていない**）。
+   */
+  readonly activeDaysOf: (pullRequestNumber: number) => number | undefined;
 };
+
+/**
+ * **この表が出す列**（#717）。
+ *
+ * **依存 PR 数を出さない。** **「同じ列を使えるはず」を確かめた結果、ここだけは
+ * 使えなかった**——**依存の本数は「守らないとマージが壊れる制約」**で、
+ * **この節は「時間の使い方の目安」**である。**混ぜると、土台より先に積み荷を
+ * マージしようとする**（`review-board.tsx` の元からの判断。#717 の注意）。
+ *
+ * **操作も出さない。** **ここは「どれから読むか」**で、**押す場所ではない。**
+ */
+const COLUMNS: readonly BoardColumn[] = ["pull-request", "ci", "size", "active"];
 
 export function SuggestedReviewOrder({
   pullRequests,
@@ -106,6 +128,7 @@ export function SuggestedReviewOrder({
   mergeStatusOf,
   titleOf,
   urlOf,
+  activeDaysOf,
 }: SuggestedReviewOrderProps) {
   // **1 件も無ければ、見出しごと出さない**——**空の一覧は、壊れているのか
   // 空なのかが読めない**（`DependencyGraphView` と同じ判断）
@@ -130,29 +153,50 @@ export function SuggestedReviewOrder({
       <p className="text-sm opacity-70">
         時間の使い方の目安です。マージできる順は、下の図と Merge ボタンが持っています。
       </p>
-      {/* **束が並びである**——**上から順に見る**（**束の中も、渡された順のまま**） */}
-      <ol className="flex flex-col gap-3">
+      {/* **束が並びである**——**上から順に見る**（**束の中も、渡された順のまま**）。
+       **表にしても束を捨てない**（#704）——**捨てると、全行に同じ理由が出る形へ戻る** */}
+      <BoardTable caption="上から順に見ます（束の中も、渡された順のまま）" columns={COLUMNS}>
         {groupByReason(suggestions).map((group) => (
-          <li className="flex flex-col gap-1" key={`${group.reason}-${group.numbers[0]}`}>
-            {/* **理由は束に 1 回**（#704）。**消さない**——**#632 が要るとしている** */}
-            <p className="text-sm opacity-70">{reviewReasonNote(group.reason)}</p>
-            {/* **束の中も順のある一覧である** (#705 のレビュー)——**`suggestReviewOrder`
-                が依存の順をタイブレークにして決めている。** **`<ul>` にすると
-                「順序なし」として読み上げられ、見た目が同じまま順だけが消える** */}
-            <ol className="flex flex-col gap-1">
-              {group.numbers.map((number) => (
-                <li className="flex flex-wrap items-baseline gap-2 text-sm" key={number}>
-                  {/* **番号とタイトルを 1 つのリンクにする**（#621 と同じ形） */}
-                  <a className="font-mono font-bold underline" href={urlOf(number)}>
-                    #{number}
-                    {titleOf(number) === undefined ? "" : ` ${titleOf(number)}`}
-                  </a>
-                </li>
-              ))}
-            </ol>
-          </li>
+          <tbody key={`${group.reason}-${group.numbers[0]}`}>
+            {/* **理由は束に 1 回**（#704）。**消さない**——**#632 が要るとしている。**
+             **段をまたがせる**ので、**列が増えても理由の置き場所は変わらない** */}
+            <tr>
+              <th
+                className={`${BOARD_CELL} text-left font-normal text-sm text-[var(--muted)]`}
+                colSpan={COLUMNS.length}
+                scope="colgroup"
+              >
+                {reviewReasonNote(group.reason)}
+              </th>
+            </tr>
+            {group.numbers.map((number) => {
+              const change = changes.get(number);
+              return (
+                <tr key={number}>
+                  <th className={`${BOARD_CELL} text-left font-normal`} scope="row">
+                    {/* **番号とタイトルを 1 つのリンクにする**（#621 と同じ形） */}
+                    <a className="font-mono font-bold underline" href={urlOf(number)}>
+                      #{number}
+                      {titleOf(number) === undefined ? "" : ` ${titleOf(number)}`}
+                    </a>
+                  </th>
+                  <td className={boardCellClass("ci")}>{ciCellNote(change?.ciStatus)}</td>
+                  <td className={boardCellClass("size")}>
+                    {sizeCellNote(
+                      change === undefined
+                        ? undefined
+                        : { files: change.changedFileCount, lines: change.changedLineCount },
+                    )}
+                  </td>
+                  <td className={boardCellClass("active")}>
+                    {activeDaysCellNote(activeDaysOf(number))}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
         ))}
-      </ol>
+      </BoardTable>
     </BoardSection>
   );
 }
