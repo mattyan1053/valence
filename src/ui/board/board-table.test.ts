@@ -161,6 +161,48 @@ function tagEnd(code: string, from: number): number {
   return code.length;
 }
 
+/**
+ * **`className` の値の終わり。**
+ *
+ * **波括弧か引用符の対応で決める**——**`tagEnd` と同じ規則**である（`stepped`）。
+ */
+function valueEnd(tag: string, from: number): number {
+  let state: { readonly quote: string | undefined; readonly depth: number } = {
+    quote: undefined,
+    depth: 0,
+  };
+  for (let at = from; at < tag.length; at += 1) {
+    state = stepped(state, tag[at] ?? "");
+    if (at > from && state.quote === undefined && state.depth === 0) {
+      return at + 1;
+    }
+  }
+  return tag.length;
+}
+
+/**
+ * **そのマスの class が、器から来ているか** (#726 のレビュー 2 周目)。
+ *
+ * **判定の範囲は `className` の値まで**（`AGENTS.md` §4）——**タグ全体を見ると、
+ * 別の属性から呼んだだけでも、片方の枝だけ器を迂回していても通る**
+ * （`<td className={compact ? BOARD_CELL : boardCellClass("ci")}>`）。**これは偽の緑**で、
+ * **前の 2 件（偽の赤）と違って誰も気づかない。**
+ *
+ * **守りたいのは「どの枝も器から来ていること」**である。**そのままは書けない**ので、
+ * **近いところで止める**——**器を呼んでいて、かつ `BOARD_CELL` が混ざっていない。**
+ *
+ * **`className` が無いマスも、器から来ていない**（**ただの文字列も同じ**）。
+ */
+function usesRule(tag: string): boolean {
+  const at = tag.indexOf("className=");
+  if (at === -1) {
+    return false;
+  }
+  const from = at + "className=".length;
+  const value = tag.slice(from, valueEnd(tag, from));
+  return value.includes("boardCellClass(") && !value.includes("BOARD_CELL");
+}
+
 function cellsWithoutRule(text: string): readonly string[] {
   const code = text
     .split("\n")
@@ -172,7 +214,7 @@ function cellsWithoutRule(text: string): readonly string[] {
       tag: code.slice(found.index, tagEnd(code, found.index)),
     }))
     .filter(({ tag }) => !/\bcolSpan\b/.test(tag) && !/scope="col"/.test(tag))
-    .filter(({ tag }) => !tag.includes("boardCellClass("))
+    .filter(({ tag }) => !usesRule(tag))
     .map(({ name }) => name);
 }
 
@@ -246,6 +288,28 @@ describe("マスは、器を通して描く（#725）", () => {
       ),
       "段をまたぐマスの除外が効いていない",
     ).toEqual([]);
+  });
+
+  it("判定は、`className` の値まで", () => {
+    // **タグのどこかに 1 回でも出れば合格していた**（#726 のレビュー 2 周目）
+    // ——**`boardCellClass(` を別の属性から呼んでも、片方の枝だけ器を迂回しても、通る。**
+    //
+    // **これは偽の緑である**（**前の 2 件は偽の赤**）——**誰も気づかない。**
+    // **`className` に三項は現物に 0 件**だが、**この書き方はこのリポジトリに既にある**
+    // （`approval-badge.tsx` / `review-board.tsx`）。
+    expect(
+      cellsWithoutRule('<td className={compact ? BOARD_CELL : boardCellClass("ci")}>'),
+      "器を迂回する枝があるのに通した",
+    ).toEqual(["<td"]);
+    expect(
+      cellsWithoutRule('<td title={boardCellClass("ci")} className={BOARD_CELL}>'),
+      "別の属性から呼んだだけで通した",
+    ).toEqual(["<td"]);
+    expect(cellsWithoutRule('<td className="px-3">'), "器を通っていないのに通した").toEqual([
+      "<td",
+    ]);
+    // **当たらない入力を隣に置く**——**全部挙げても緑、にならない形**
+    expect(cellsWithoutRule('<td className={boardCellClass("ci")}>')).toEqual([]);
   });
 
   it("折り返した開きタグも拾う", () => {
