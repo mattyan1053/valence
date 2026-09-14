@@ -1184,7 +1184,12 @@ describe("誰の番かで絞る（#663）", () => {
     // **依存の関係は、絞ると辺が消えて嘘になる**——**図は関係を追うため**、
     // **一覧は 1 件ずつの中身のため**である（`review-board.tsx` の判断）
     const markup = render(byBall({ ballFilter: "author" }));
-    const figure = markup.slice(0, markup.indexOf("<ol"));
+    // **一覧は表である**（#716。**`<ol>` だった**）——**`indexOf` が `-1` を返すと
+    // `slice(0, -1)` は「末尾の 1 文字を除く全部」**になり、**図が空でも緑**になる。
+    // **見つからなかったことを、範囲へ黙って混ぜない**（`AGENTS.md` §4 / §5）
+    const list = markup.indexOf("<table");
+    expect(list, "一覧が出ていない").toBeGreaterThanOrEqual(0);
+    const figure = markup.slice(0, list);
 
     expect(figure, "図からも消えている").toContain("#2");
   });

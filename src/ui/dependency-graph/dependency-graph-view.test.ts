@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependency-graph";
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
+import { boardCellClass } from "../board/board-table";
 import type { DependencyGraphViewProps } from "./dependency-graph-view";
 import { DependencyGraphView } from "./dependency-graph-view";
 
@@ -579,6 +580,32 @@ describe("一覧が表になっている（#716）", () => {
       classes.filter((one) => /\btabular-nums\b/.test(one)).length,
       "桁を揃えた列が 3 つ無い（サイズ・active・依存）",
     ).toBe(3);
+  });
+
+  it("行の見出しも、器の規則を通っている", () => {
+    // **`COLUMNS` に `pull-request` の規則があるのに、行の見出しは `BOARD_CELL` を
+    // 直接使っていた**（#724 のレビュー 2 周目）——**規則を足しても表に届かない**ので、
+    // **「列の見た目を 1 箇所で決める」が、この列だけ働いていなかった。**
+    //
+    // **器が返すものを書き写さない**——**器に訊いて、それが届いているかを見る。**
+    const row = summaryRow(rowsOf(render(props()))[0] ?? "");
+    const heading = /<th[^>]*class="([^"]*)"/.exec(row)?.[1] ?? "";
+
+    expect(heading, "行の見出しが出ていない").not.toBe("");
+    for (const rule of boardCellClass("pull-request").split(" ")) {
+      expect(heading, `器の規則が行の見出しに届いていない: ${rule}`).toContain(rule);
+    }
+  });
+
+  it("CI の列は、折り返さない", () => {
+    // **`読めません` が文字ごとに折り返すと、列が潰れる**（#724 のレビュー）
+    // ——**`overflow-x-auto` は効かない**（**表そのものが縮む**）。
+    // **桁揃えとは別の理由**なので、**旗も別である。**
+    const row = summaryRow(rowsOf(render(props({ factsOf: () => FACTS })))[0] ?? "");
+    const classes = [...row.matchAll(/<td class="([^"]*)"/g)].map(([, one]) => one ?? "");
+
+    expect(classes[0], "CI のマスが出ていない").toBeDefined();
+    expect(classes[0], "CI の列が折り返す").toMatch(/\bwhitespace-nowrap\b/);
   });
 
   it("行の中身は、表に移しても落ちない", () => {

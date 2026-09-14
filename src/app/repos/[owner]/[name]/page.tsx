@@ -407,6 +407,8 @@ export async function renderRepositoryBoard(
             mergeStatusOf={(number) => result.plan.mergeStatuses.get(number)}
             titleOf={(number) => result.plan.titles.get(number)}
             urlOf={(number) => pullRequestPageUrl({ owner, name }, number)}
+            // **読む時間を決める列の 1 つ**（#717）——**盤面の表と同じ数え方**である
+            activeDaysOf={(number) => activeDaysSince(result.plan.updatedAt.get(number), at)}
           />
           <ReviewBoard
             pullRequests={result.plan.pullRequests}
