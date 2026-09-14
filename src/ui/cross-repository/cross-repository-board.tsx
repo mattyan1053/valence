@@ -32,8 +32,12 @@ export type CrossRepositoryRow = {
   readonly repository: { readonly owner: string; readonly name: string };
   readonly number: number;
   readonly title: string;
-  /** 最後に動いた時刻（ISO 8601）。**そのまま出す**——**「新しい」とは言わない。** */
-  readonly updatedAt: string;
+  /**
+   * 最後に動いた時刻（ISO 8601）。**そのまま出す**——**「新しい」とは言わない。**
+   *
+   * **読めなかった行は持たない**（#719）——**既定値を埋めない**（`opinion` と同じ）。
+   */
+  readonly updatedAt?: string;
   /** 現物への行き先。**組むのは `app`** である（`ui` は経路を知らない）。 */
   readonly href: string;
   /** **読めなかったものは `undefined`**（#681）——**既定値を埋めない。** */
@@ -186,8 +190,12 @@ export function CrossRepositoryBoard({ rows, unavailable, ballFilter }: CrossRep
                   <a className="underline" href={row.href}>
                     #{row.number} {row.title}
                   </a>
-                  {/* **「新しい」とは言わない**——**時刻を出して、読む人が決める**（#664） */}
-                  <span className="text-sm opacity-70">{row.updatedAt}</span>
+                  {/* **「新しい」とは言わない**——**時刻を出して、読む人が決める**（#664）。
+                      **読めなかったときは、そう言う**（#719）——**黙って空けると、
+                      「時刻を持たない PR」と「読めなかった PR」が同じ顔になる。** */}
+                  <span className="text-sm opacity-70">
+                    {row.updatedAt ?? "最後に動いた時刻を読めませんでした"}
+                  </span>
                 </div>
                 <div className="flex flex-wrap gap-2 text-sm opacity-70">
                   {ball === undefined ? undefined : <span>{ball}</span>}

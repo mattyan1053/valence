@@ -15,6 +15,8 @@ import { CrossRepositoryBoard, unavailableNote } from "./cross-repository-board"
 
 const NONE = { unreadable: 0, truncated: 0, repositories: 0, pullRequests: 0 } as const;
 
+const NEWEST = "2026-03-01T00:00:00Z";
+
 function row(overrides: Partial<CrossRepositoryRow> = {}): CrossRepositoryRow {
   return {
     repository: { owner: "acme", name: "web" },
@@ -242,6 +244,49 @@ describe("横断の一覧の並び", () => {
     });
 
     expect(html.indexOf("b/new"), "動いたものが下にある").toBeLessThan(html.indexOf("a/old"));
+  });
+
+  it("時刻を読めなかった行は、下に出る", () => {
+    // **読めなかったものを「いま動いた」側へ倒さない**（#719）
+    const html = render({
+      rows: [
+        row({ repository: { owner: "x", name: "broken" }, number: 9, updatedAt: undefined }),
+        row({ repository: { owner: "b", name: "new" }, number: 2, updatedAt: NEWEST }),
+      ],
+    });
+
+    expect(html.indexOf("b/new"), "読めなかった行が上にある").toBeLessThan(
+      html.indexOf("x/broken"),
+    );
+  });
+});
+
+/**
+ * **時刻が読めなかった行**（#719）。**行は残る**——**落とすと、その PR が
+ * 一覧から黙って消える。**
+ */
+describe("最後に動いた時刻を読めなかった行", () => {
+  it("行そのものは出る", () => {
+    const html = render({ rows: [row({ updatedAt: undefined })] });
+
+    expect(html, "行ごと消えている").toContain("図を出す");
+  });
+
+  it("読めなかったと言う（黙って空けない）", () => {
+    // **空けると、「時刻を持たない PR」と「読めなかった PR」が同じ顔になる**
+    // （`AGENTS.md` §5。**このリポジトリが繰り返し塞いでいる形**）
+    const html = render({ rows: [row({ updatedAt: undefined })] });
+
+    expect(html).toContain("最後に動いた時刻を読めませんでした");
+  });
+
+  it("読めている行には、その断りを出さない", () => {
+    const html = render({ rows: [row({ updatedAt: NEWEST })] });
+
+    expect(html, "読めている行にまで断りが出ている").not.toContain(
+      "最後に動いた時刻を読めませんでした",
+    );
+    expect(html, "時刻そのものが出ていない").toContain(NEWEST);
   });
 });
 

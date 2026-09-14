@@ -65,13 +65,28 @@ class CrossRepositoryLookupFailed extends Error {
 const pullRequestSchema = z.object({
   number: z.number().int().positive(),
   title: z.string().min(1),
-  updatedAt: z.string().min(1),
 });
 
 /**
  * head の commit。**別に読む**——**1 つ読めないだけで、その PR ごと捨てない。**
  */
 const headSchema = z.object({ headRefOid: z.string().min(1) });
+
+/**
+ * 最後に動いた時刻（#719）。
+ *
+ * **日時として見る。** **「空でない文字列」までしか見ないと、`"unknown"` も `"n/a"` も
+ * 境界を通る**——**並べ替えは文字の大小で比べ**、**画面はそのまま出し**、
+ * **日数にする側では `NaN` になる。**
+ *
+ * **`headRefOid` と同じく別に読む**——**本体で厳しくすると、形が違った日に PR ごと
+ * 落ち、横断の一覧からその行が消える**（**1 リポジトリ側の #718 と同じ判断**）。
+ *
+ * **`Z` を前提にする。** **GraphQL の `DateTime` は introspection が
+ * 「An ISO-8601 encoded UTC date string」と言っている**（**引いて確かめた**）
+ * ——**オフセット付きを許すと、来ないはずの形まで通る。**
+ */
+const updatedAtSchema = z.object({ updatedAt: z.iso.datetime() });
 
 /**
  * 誰に振られているか（#631）。
@@ -120,16 +135,19 @@ const assignmentSchema = z.object({
  * 「誰も持っていない」に化けない**（`AGENTS.md` §5。**6 回塞いだ形**）。
  */
 function materialsOf(node: unknown): {
+  readonly updatedAt?: string;
   readonly head?: string;
   readonly mergeStatus?: MergeStatusReport;
   readonly opinion?: ReviewOpinion;
   readonly assignment?: Assignment;
 } {
+  const activity = updatedAtSchema.safeParse(node);
   const head = headSchema.safeParse(node);
   const status = mergeStatusOf(node);
   const opinion = judgedOpinionOf(node);
   const assignment = assignmentOf(node);
   return {
+    ...(activity.success ? { updatedAt: activity.data.updatedAt } : {}),
     ...(head.success ? { head: head.data.headRefOid } : {}),
     ...(status === undefined ? {} : { mergeStatus: status.status }),
     ...(opinion === undefined ? {} : { opinion: opinion.judged.opinion }),
