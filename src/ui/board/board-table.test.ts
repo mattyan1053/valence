@@ -117,13 +117,60 @@ function sourceFiles(dir: string): readonly string[] {
  *
  * **返すのは、拾ったタグの名前**（`<td` / `<th`）——**何件あったかが読める。**
  */
+/**
+ * **開きタグの終わり**（`>` の位置）。
+ *
+ * **引用符と波括弧の外にある `>` で決める** (#726 のレビュー)——**`[^>]*` は
+ * 式の中の `>` で止まる**（`<td aria-label={count > 0 ? …} className={…}>`）。
+ * **止まると、その先の `className` も `colSpan` も見えない**ので、
+ * **器を通しているマスが「通していない」と出る。**
+ *
+ * **閉じが見つからなければ、残り全部を返す**——**黙って落とさない**（§5）。
+ */
+const QUOTES = new Set(['"', "'", "`"]);
+
+/** 1 文字読んだあとの、引用符と波括弧の深さ。 */
+function stepped(
+  state: { readonly quote: string | undefined; readonly depth: number },
+  letter: string,
+): { readonly quote: string | undefined; readonly depth: number } {
+  if (state.quote !== undefined) {
+    return { quote: letter === state.quote ? undefined : state.quote, depth: state.depth };
+  }
+  if (QUOTES.has(letter)) {
+    return { quote: letter, depth: state.depth };
+  }
+  if (letter === "{") {
+    return { quote: undefined, depth: state.depth + 1 };
+  }
+  return { quote: undefined, depth: letter === "}" ? state.depth - 1 : state.depth };
+}
+
+function tagEnd(code: string, from: number): number {
+  let state: { readonly quote: string | undefined; readonly depth: number } = {
+    quote: undefined,
+    depth: 0,
+  };
+  for (let at = from; at < code.length; at += 1) {
+    const letter = code[at] ?? "";
+    if (letter === ">" && state.quote === undefined && state.depth === 0) {
+      return at + 1;
+    }
+    state = stepped(state, letter);
+  }
+  return code.length;
+}
+
 function cellsWithoutRule(text: string): readonly string[] {
   const code = text
     .split("\n")
     .filter((line) => !/^\s*(\/\/|\/\*|\*|\{\/\*)/.test(line))
     .join("\n");
-  return [...code.matchAll(/<(td|th)\b[^>]*>/g)]
-    .map(([tag, name]) => ({ tag, name: `<${name}` }))
+  return [...code.matchAll(/<(td|th)\b/g)]
+    .map((found) => ({
+      name: `<${found[1]}`,
+      tag: code.slice(found.index, tagEnd(code, found.index)),
+    }))
     .filter(({ tag }) => !/\bcolSpan\b/.test(tag) && !/scope="col"/.test(tag))
     .filter(({ tag }) => !tag.includes("boardCellClass("))
     .map(({ name }) => name);
@@ -173,6 +220,32 @@ describe("マスは、器を通して描く（#725）", () => {
     expect(cellsWithoutRule('<th className={`${BOARD_CELL} text-left`} scope="row">')).toEqual([
       "<th",
     ]);
+  });
+
+  it("属性の中の `>` で、タグを切らない", () => {
+    // **`[^>]*` は式の中の `>` で止まる**（#726 のレビュー）——**その先の
+    // `boardCellClass` が見えず、器を通しているマスが「通していない」と出る。**
+    //
+    // **現物にはまだ 0 件**（**数えた**）だが、**このリポジトリは JSX の式に `>` を書く**
+    // （`assignment-summary-view.tsx` ほか）——**マスの属性に 1 つ入った日に赤くなり**、
+    // **しかも「器を通していない」と言う。** **読んだ人は走査を緩めるほうへ倒れる。**
+    expect(
+      cellsWithoutRule(
+        '<td aria-label={count > 0 ? "あり" : "なし"} className={boardCellClass("ci")}>',
+      ),
+      "器を通しているのに拾った",
+    ).toEqual([]);
+    expect(
+      cellsWithoutRule('<td aria-label={count > 0 ? "あり" : "なし"} className={BOARD_CELL}>'),
+      "器を通していないのに見逃した",
+    ).toEqual(["<td"]);
+    // **除外の判定も、同じところで切れる**
+    expect(
+      cellsWithoutRule(
+        '<td aria-label={count > 0 ? "あり" : "なし"} colSpan={2} className={BOARD_CELL}>',
+      ),
+      "段をまたぐマスの除外が効いていない",
+    ).toEqual([]);
   });
 
   it("折り返した開きタグも拾う", () => {
