@@ -886,6 +886,30 @@ describe("bin/loop-ci-status", () => {
         expect(result.status, "決着した失敗を人待ちへ送っている").toBe(1);
       });
 
+      it("予算を超えた検査があれば、そちらが先（#735 のレビュー 2 周目）", () => {
+        // **`bad` を除けたのと同じ形が `overdue` に残っていた。**
+        // **`bad` は空でも `overdue` は在りうる**——**workflow 側が 1 件
+        // `in_progress` のまま `timeout-minutes` を超え、`CodeQL` だけ未作成**なら、
+        // **exit 4 へ到達せず exit 3 / exit 5 に化ける。**
+        //
+        // **#297 が明示的に嫌った形**である——**原因の違う 2 つを 1 つのカウンタで数える。**
+        //
+        // **`missing` の後ろの `if` を全部数えた**——**`bad` / `overdue` / `waiting` の 3 つ。**
+        // **`waiting` は除けない**——**行き先が同じ（exit 3。待つ）**で、
+        // **言う相手が違うだけ**である。
+        workflows([1, 1]);
+
+        const result = run({
+          rules: CODEQL(),
+          checks: [
+            { name: "alpha", status: "in_progress", conclusion: "", startedAgo: 120 },
+            { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          ],
+        });
+
+        expect(result.status, "予算を超えた検査を欠落待ちへ流している").toBe(4);
+      });
+
       it("1 件も作られていなければ、これまでどおり猶予に乗る（#297）", () => {
         // **workflow 側も欠けているが、そちらは #297 の形**である
         // ——**「作られていない」は PR に足すもので直る保証が無い。**
