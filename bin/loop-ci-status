@@ -319,8 +319,13 @@ fi
 # （**空は「どの App でもよい」**）。**連想配列にしない**——**名前は PR 側で決められる**
 # ので、**添字に使うと `[` を含む名前で崩れる。**
 required_app=()
+# **その必須が、どこから来たか** (#734)。**workflow から導いた側は `1`、
+# **ruleset だけが要求している側は `0`**（**`CodeQL` のような、GitHub 側の仕組みが
+# 出すもの**）。**欠けたときの行き先が違う**ので、位置で覚えておく。
+required_from_workflow=()
 for _known in "${required[@]}"; do
   required_app+=("")
+  required_from_workflow+=("1")
 done
 while IFS="$FIELD" read -r name app_id; do
   [[ -n ${name//[[:space:]]/} ]] || continue
@@ -347,6 +352,9 @@ while IFS="$FIELD" read -r name app_id; do
   ((matched == 1)) && continue
   required+=("$name")
   required_app+=("$app_id")
+  # **workflow の一覧に無かった**——**repo の中に名前が無い**ので、
+  # **欠けても worker は直せない** (#734)。
+  required_from_workflow+=("0")
 done <<<"$ruleset_required"
 
 # **`gh pr checks` を使わない。** **`bucket` は `status` から導かれる**ので、
@@ -456,6 +464,7 @@ now_epoch="$(date +%s)"
 # **外から決められる文字列を指紋へ入れると、揺れがそのまま通知になる**。
 states=""
 missing=()
+missing_workflow=()
 bad=()
 waiting=()
 overdue=()
@@ -490,6 +499,11 @@ for required_index in "${!required[@]}"; do
 
   if ((found == 0)); then
     missing+=("$name")
+    # **出どころで分けて数える** (#734)。**workflow 側が 1 つでも欠けていれば、
+    # そちらが先**である——**待っても直らない。**
+    if [[ ${required_from_workflow[required_index]-1} == "1" ]]; then
+      missing_workflow+=("$name")
+    fi
     states+="none,"
     continue
   fi
@@ -591,7 +605,32 @@ fi
 #
 # **一部だけ欠けているのは、こちらへ入れない。** **名前の食い違いなど、PR 側で
 # 直りうる**ので、**緩める向きを広げない。**
-if ((${#missing[@]} > 0 && ${#missing[@]} == ${#required[@]})); then
+# **猶予に乗せるのは 2 つ** (#297 / #734)。
+#
+# 1. **1 件も作られていない**——**push 直後は必ずこれ**である
+# 2. **欠けているのが ruleset の側だけ**——**`CodeQL` は workflow より遅れて作られる**
+#    ので、**「repo の検査は in_progress、CodeQL だけまだ無い」窓が必ず開く**
+#
+# **2 は「workflow 側が 1 つも欠けていない」ときだけ**である（**これまでどおり**）
+# ——**job 名の食い違いは repo の中に在り、worker が直せる。**
+# **1 は、workflow 側も欠けている**（**全部欠けている**）——**そちらが #297 の形**で、
+# **「作られていない」のは PR に足すもので直る保証が無い。**
+#
+# **行き先は下げていない。** **ruleset の context 名は repo の中に無い**ので、
+# **worker は push で直せない**——**猶予を過ぎたら人（exit 5）が正しい行き先**である。
+#
+# **決着した失敗と、予算を超えた検査があれば、ここへ入れない**
+# （#735 のレビュー）。**下の `bad` / `overdue` より前に在る**ので、
+# **workflow 側が揃っていて 1 件落ちて（または予算を超えて）いても、
+# ruleset だけ未作成なら待ちへ流れる**——**原因の違うものが、欠落の猶予で数えられる**
+# （**#297 が明示的に嫌った形**）。
+# **前の形では起きない**（**必須が 1 件も無ければ `bad` も `overdue` も空**）
+# ——**2 を足して開いた穴**である。
+#
+# **`waiting` は除けない。** **行き先が同じ**（exit 3。待つ）で、**言う相手が違うだけ**
+# ——**`missing` の後ろに並ぶ `if` は `bad` / `overdue` / `waiting` の 3 つ**である。
+if ((${#missing[@]} > 0 && ${#bad[@]} == 0 && ${#overdue[@]} == 0 \
+  && (${#missing[@]} == ${#required[@]} || ${#missing_workflow[@]} == 0))); then
   # **コンフリクトしているなら、これまでどおり worker が直せる側へ倒す**
   # (#305 のレビュー)。**`on: pull_request` の実行はマージ結果
   # （`refs/pull/N/merge`）に対して走る**ので、**コンフリクトしていると ref が作れず、
@@ -667,27 +706,42 @@ if ((${#missing[@]} > 0 && ${#missing[@]} == ${#required[@]})); then
     fi
     seen_at="$now_epoch"
   fi
+  # **文面は、実際に欠けているものに合わせる** (#734)。**一部だけ欠けているのに
+  # 「1 件も作られていません」と言うと、読んだ人が別のものを見に行く。**
+  if ((${#missing[@]} == ${#required[@]})); then
+    scope="1 件も作られていません"
+  else
+    scope="まだ作られていません（repo の workflow より遅れて作られるもの）"
+  fi
   if ((now_epoch - seen_at <= MISSING_GRACE_MIN * 60)); then
     echo "必須チェックがまだ作られていません${missing_note}（初めて見てから ${MISSING_GRACE_MIN} 分の猶予の内）: ${missing[*]}"
     exit 3
   fi
-  echo "必須チェックが 1 件も作られていません${missing_note}（初めて見てから ${MISSING_GRACE_MIN} 分を超えました）: ${missing[*]}"
+  echo "必須チェックが ${scope}${missing_note}（初めて見てから ${MISSING_GRACE_MIN} 分を超えました）: ${missing[*]}"
   exit 5
 fi
 
 # **決着した失敗が先。** **待ちに混ぜると、直せるものを待ち続ける。**
-if ((${#missing[@]} > 0)); then
-  echo "必須チェックが見つかりません: ${missing[*]}"
-  exit 1
-fi
+#
+# **欠けているものより先に返す** (#735 のレビュー)。**どちらも exit 1**（worker）だが、
+# **落ちた検査は worker が直せる**のに対し、**欠けている ruleset の context は直せない**
+# ——**両方あるときに欠けているほうだけを挙げると、直せない先へ人を向ける。**
 if ((${#bad[@]} > 0)); then
   echo "成功していないチェック: ${bad[*]}"
   exit 1
 fi
+# **予算を超えたものは、欠けているものより先に返す** (#735 のレビュー 2 周目)。
+# **どちらも worker は直せない**が、**行き先が違う**——**予算超過は人（exit 4）**で、
+# **欠けているのは worker（exit 1）**である。**後ろに置くと、人が要る状態が
+# worker へ渡る**（**#297 が明示的に嫌った、原因の違う 2 つを 1 つに畳む形**）。
 if ((${#overdue[@]} > 0)); then
   # **幅は検査ごとに添えてある**（上）——**ここで 1 つの数を出さない。**
   echo "決着しないまま猶予を超えました: ${overdue[*]}"
   exit 4
+fi
+if ((${#missing[@]} > 0)); then
+  echo "必須チェックが見つかりません: ${missing[*]}"
+  exit 1
 fi
 if ((${#waiting[@]} > 0)); then
   echo "まだ決着していません: ${waiting[*]}"
