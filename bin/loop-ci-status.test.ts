@@ -849,6 +849,43 @@ describe("bin/loop-ci-status", () => {
         expect(result.status, "workflow 側の欠けを待ちへ混ぜている").toBe(1);
       });
 
+      it("決着した失敗があれば、そちらが先（#735 のレビュー）", () => {
+        // **新しい分岐が `bad` の判定より前にある**ので、**workflow 側が揃っていて
+        // 1 件落ちていても、`CodeQL` だけ未作成なら待ちへ流れていた**
+        // ——**worker が直せる失敗が、待ちと人待ちに化ける。**
+        //
+        // **前の形では起きない**（**必須が 1 件も無ければ `bad` も空**）
+        // ——**この経路が新しく開けた穴**である。
+        workflows(TWO_JOBS);
+
+        const result = run({
+          rules: CODEQL(),
+          checks: [
+            { name: "alpha", status: "completed", conclusion: "failure", startedAgo: 10 },
+            { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          ],
+        });
+
+        expect(result.status, "決着した失敗を待ちへ流している").toBe(1);
+        expect(result.stdout, "落ちた検査を挙げていない").toContain("alpha");
+      });
+
+      it("猶予を過ぎても、決着した失敗があれば worker へ", () => {
+        // **時間が経っても、落ちた検査は落ちたままである**——**人待ちにしない。**
+        workflows(TWO_JOBS);
+        firstSeen("deadbeef", 3600);
+
+        const result = run({
+          rules: CODEQL(),
+          checks: [
+            { name: "alpha", status: "completed", conclusion: "failure", startedAgo: 10 },
+            { name: "beta", status: "completed", conclusion: "success", startedAgo: 10 },
+          ],
+        });
+
+        expect(result.status, "決着した失敗を人待ちへ送っている").toBe(1);
+      });
+
       it("1 件も作られていなければ、これまでどおり猶予に乗る（#297）", () => {
         // **workflow 側も欠けているが、そちらは #297 の形**である
         // ——**「作られていない」は PR に足すもので直る保証が無い。**
