@@ -56,16 +56,35 @@ type SendResultRule = {
 };
 
 /**
- * **「通す」と書いてある文だけを当てる。** **「`--sent` を通すかどうか」は見出しの
- * 言い回し**で、**判断そのものではない**——**指しているだけの段落まで「判断がある」と
- * 数えると、変異で 1 行消しても別の段落が身代わりになる**（**実際にそうなった**）。
+ * **肯定のまま文が終わるものだけを当てる**（#730 のレビュー）。
+ *
+ * **語の有無で見ると、打ち消しが素通りする**——**「`--sent` を通さないとは限らない」は
+ * `通さない` を含む**ので、**規則を反転させても緑**だった。**終端まで絞ると落ちる。**
+ *
+ * **終端で絞ると、指しているだけの言い回しも外れる**——**「`--sent` を通すかどうか」は
+ * 見出しの言い方**で、**判断そのものではない。** **以前はこれが身代わりになり、
+ * 「通す側だけを別の節へ出す」変異が緑へ戻った**（**実際にそうなった**）。
  */
-const PASSES = /`--sent` を通す(?!か)/;
-const WITHHOLDS = /`--sent` を通さない/;
+const PASSES = /`--sent` を通す[*\s]*$/;
+const WITHHOLDS = /`--sent` を通さない[*\s]*$/;
+
+/**
+ * **判断そのものが書いてある塊。** **「通す」と「通さない」が揃っている塊を数える**
+ * ——**`decision.length === 1` まで見る**（#730 のレビュー。**`some` は「少なくとも
+ * 1 つ」で、「1 箇所」ではない**）。
+ */
+function decisionBlocks(section: string): string[] {
+  return blocks(section).filter((block) => {
+    const lines = sentences(block);
+
+    return lines.some((line) => PASSES.test(line)) && lines.some((line) => WITHHOLDS.test(line));
+  });
+}
 
 function readSendResultRule(section: string): SendResultRule {
   const lines = sentences(section);
-  const decision = blocks(section).filter((block) => PASSES.test(block) && WITHHOLDS.test(block));
+  const decision = decisionBlocks(section);
+  const only = decision.length === 1 ? decision[0] : undefined;
 
   return {
     // **「分からない」と書いてあること。** **断定（「1 通目は届いている」）に
@@ -83,14 +102,13 @@ function readSendResultRule(section: string): SendResultRule {
     keepsSucceededButDroppedEvidence: lines.some(
       (line) => /success/.test(line) && /落と(さ|し)/.test(line),
     ),
-    // **通す側と通さない側が同じ塊にあること。** **片方を別の節へ出すと false**
-    decidesSentInOneBlock: decision.some(
-      (block) =>
-        sentences(block).some((line) => /success/.test(line) && PASSES.test(line)) &&
-        sentences(block).some((line) => WITHHOLDS.test(line)),
-    ),
+    // **通す側と通さない側が、ただ 1 つの塊で決まっていること。**
+    // **片方を別の節へ出しても、塊ごと複製しても false**
+    decidesSentInOneBlock:
+      only !== undefined &&
+      sentences(only).some((line) => /success/.test(line) && PASSES.test(line)),
     leavesSentUnrecordedWhenEverySendFailed: lines.some(
-      (line) => /どの宛先|どれも|全部/.test(line) && /--sent/.test(line) && /通さない/.test(line),
+      (line) => /どの宛先|どれも|全部/.test(line) && WITHHOLDS.test(line),
     ),
   };
 }
@@ -137,6 +155,25 @@ const MUTATIONS: {
         "どの宛先も `Failed to send` でも `--sent` を通す",
       ),
     breaks: "leavesSentUnrecordedWhenEverySendFailed",
+  },
+  {
+    // **規則を打ち消しても、語はそのまま残る**（#730 のレビュー）——**`通さない` の
+    // 有無だけを見ると、**いちばん自然な反転**が素通りする。
+    name: "規則を打ち消す（通さないとは限らない）",
+    apply: (section) =>
+      section.replace(/(`Failed to send` だったら `--sent` を通さない)\*\*/g, "$1とは限らない**"),
+    breaks: "leavesSentUnrecordedWhenEverySendFailed",
+  },
+  {
+    // **`some` は「1 箇所」を測らない**（#730 のレビュー）——**同じ判断を別の塊へ
+    // 増やしても、元が残っていれば緑**である。**#727 が求めたのは「1 箇所にある」**。
+    name: "判断の塊を別の場所へ複製する",
+    apply: (section) => {
+      const decision = blocks(section).find((block) => /1 通でも `success`/.test(block));
+
+      return decision === undefined ? section : `${section}\n\n${decision}`;
+    },
+    breaks: "decidesSentInOneBlock",
   },
 ];
 
