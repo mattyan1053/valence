@@ -216,4 +216,21 @@ describe("判定用の盤面", () => {
     expect(light, "明のほうに色が無い").toBeGreaterThanOrEqual(0);
     expect(style.indexOf("--tier-risk", light + 1), "暗のほうに色が無い").toBeGreaterThan(light);
   });
+
+  it("節の見出しが、どれも同じ見た目で出る", () => {
+    // **人が見て言ったこと**（#713）——**「どこに何が書いてあるか画面をみて
+    // パット見わからなかった」「各セクションの区切りの強調が足りない」。**
+    // **`推奨レビュー順` だけ `text-lg` が無かった**（**見本の HTML で数えた**）。
+    //
+    // **描いた結果で見る**——**規則が 1 箇所になっていることは
+    // `board-section.test.ts` が見る**ので、**ここは「人が見る 1 枚で、
+    // 実際に揃っているか」だけ**である。
+    const headings = [...html.matchAll(/<h2[^>]*class="([^"]*)"/g)].map(([, one]) => one);
+
+    expect(headings.length, "節の見出しが 3 つ出ていない").toBeGreaterThanOrEqual(3);
+    expect(
+      new Set(headings).size,
+      `節の見出しの見た目が揃っていない: ${headings.join(" / ")}`,
+    ).toBe(1);
+  });
 });

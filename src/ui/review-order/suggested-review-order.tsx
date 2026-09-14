@@ -18,6 +18,7 @@ import { mergeReadinessOf } from "../../domain/graph/merge-readiness";
 import type { ReviewReason, ReviewSuggestion } from "../../domain/triage/review-priority";
 import { suggestReviewOrder } from "../../domain/triage/review-priority";
 import type { ChangeSummary } from "../../domain/triage/risk-tier";
+import { BoardSection } from "../board/board-section";
 
 /**
  * **なぜその順なのか。**
@@ -122,8 +123,9 @@ export function SuggestedReviewOrder({
   );
 
   return (
-    <section className="flex flex-col gap-2">
-      <h2 className="font-semibold">推奨レビュー順</h2>
+    // **節の見た目は器が持つ**（#713）——**ここで書き写すと、次に足された節と
+    // 大きさが揃わない**（**まさにこの節が、そうなっていた**）
+    <BoardSection mark="🧭" title="推奨レビュー順">
       {/* **マージの順序と混ぜて読ませない**——**守らないと壊れるのは依存の側だけ**である */}
       <p className="text-sm opacity-70">
         時間の使い方の目安です。マージできる順は、下の図と Merge ボタンが持っています。
@@ -151,6 +153,6 @@ export function SuggestedReviewOrder({
           </li>
         ))}
       </ol>
-    </section>
+    </BoardSection>
   );
 }

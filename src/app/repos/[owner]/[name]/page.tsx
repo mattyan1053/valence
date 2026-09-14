@@ -33,6 +33,7 @@ import { SignOutButton, showsSignOut } from "../../../../ui/auth/sign-out-button
 import { BALL_FILTERS } from "../../../../ui/ball/ball-filter";
 import { BoardFreshness } from "../../../../ui/board/board-freshness";
 import { boardReloadHref } from "../../../../ui/board/board-reload-href";
+import { BoardSection } from "../../../../ui/board/board-section";
 import type { IssueBoardProps } from "../../../../ui/issue-board/issue-board";
 import { IssueBoard } from "../../../../ui/issue-board/issue-board";
 import type { MergeNoticeKind } from "../../../../ui/merge/merge-button";
@@ -490,14 +491,14 @@ export async function renderRepositoryBoard(
           {/* **issue の盤面**（#633）。**PR の並びをそのまま持ち込まない**
               ——**issue に「押せるか」は無い。** **一覧そのものは畳む**（#597）
               ——**常時見せるのは、順番を決める材料だけ**である */}
-          <section className="flex flex-col gap-2">
-            <h2 className="font-semibold text-lg">issue</h2>
+          {/* **節の見た目は器が持つ**（#713）——**画面ごとに書くと、揃わない** */}
+          <BoardSection mark="📋" title="issue">
             <IssueBoard
               {...issueBoardProps(result.issues)}
               // **組み立ては `infrastructure` が持ち、合成ルートを通す**（#622）
               urlOf={(number) => issuePageUrl({ owner, name }, number)}
             />
-          </section>
+          </BoardSection>
         </>
       ) : (
         <p className="text-sm">
