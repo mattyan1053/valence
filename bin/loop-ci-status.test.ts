@@ -938,6 +938,46 @@ describe("bin/loop-ci-status", () => {
       expect(result.stdout).toContain("コンフリクト");
     });
 
+    it("一部だけ欠けているなら、コンフリクトでも「1 件も」と言わない（#736）", () => {
+      // **この分岐に入る条件は 2 つある**（#297 / #734）——**「1 件も作られていない」と
+      // **「欠けているのが ruleset の側だけ」。** **後者では repo の検査が在る**ので、
+      // **「1 件も」は事実と違う**——**読んだ人が別のものを見に行く。**
+      //
+      // **足した側ではなく、残った側の前提が変わった形**である（`AGENTS.md` §5）。
+      workflows([5, 5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({
+        rules: rulesetLines([{ context: "CodeQL" }]),
+        checks: [
+          { name: "alpha", status: "in_progress", conclusion: "", startedAgo: 1 },
+          { name: "beta", status: "in_progress", conclusion: "", startedAgo: 1 },
+        ],
+        mergeable: "CONFLICTING",
+      });
+
+      expect(result.status, "コンフリクトを worker へ渡していない").toBe(1);
+      expect(result.stdout, "repo の検査は在るのに「1 件も」と言っている").not.toContain("1 件も");
+      expect(result.stdout, "何が欠けているかを言っていない").toContain("CodeQL");
+      expect(result.stdout, "なぜ作られないかを言っていない").toContain("コンフリクト");
+    });
+
+    it("1 件も作られていないなら、コンフリクトでも「1 件も」と言う（#736）", () => {
+      // **当たる入力の隣に、当たらない入力を置く**（`AGENTS.md` §4）
+      // ——**上を通すために「1 件も」を消しただけでは、こちらが落ちる。**
+      workflows([5, 5]);
+      firstSeen("deadbeef", 3600);
+
+      const result = run({
+        rules: rulesetLines([{ context: "CodeQL" }]),
+        checks: [],
+        mergeable: "CONFLICTING",
+      });
+
+      expect(result.status, "コンフリクトを worker へ渡していない").toBe(1);
+      expect(result.stdout, "全部欠けているのに「1 件も」と言っていない").toContain("1 件も");
+    });
+
     it("猶予の内側でも、コンフリクトなら worker へ倒す", () => {
       // **猶予は「そのうち作られるかもしれない」ための待ちである。**
       // **コンフリクトしている限り作られない**ので、**待つ理由が無い。**
