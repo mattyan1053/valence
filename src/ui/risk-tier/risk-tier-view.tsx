@@ -38,6 +38,32 @@ const TIER_TEXT: Record<RiskTier, { label: string; meaning: string }> = {
 };
 
 /**
+ * 札に当てる色（#712）。
+ *
+ * **図の中にしか色が無かった**——**一覧は 12 行あり、`すぐ通せる` / `通常のレビュー` /
+ * `先に人が見る` が全部同じ字で並んでいた。** **#583 が図に色を入れたのと同じ理由**
+ * （**濃さ 3 段では並ぶと拾えない**）が、**一覧にも当てはまる。**
+ *
+ * **値は `globals.css` が持っているものをそのまま使う**——**ここで新しい色を決めると、
+ * 図と一覧で別の色になる。** **`--tier-*` は明・暗の両方に置いてある。**
+ *
+ * **地には敷かない。** **`--tier-*` は濃い側（字）しか無い**ので、**敷くなら淡い側を
+ * 足すことになる**——**この Issue の範囲は「持っている値を当てる」ところまで**である。
+ *
+ * **色だけに頼らない**（#583 で決めた線）——**札の文字はそのまま残す。**
+ *
+ * **`Record` で持つ**（`TIER_TEXT` と同じ）——**Tier を足して書き忘れると型検査が落ちる。**
+ *
+ * **class は literal で書く**——**Tailwind は書いてある文字列しか拾わない**ので、
+ * **組み立てると規則が生成されず、透明で描かれる**（見本の CSS を数える試験が見ている）。
+ */
+const TIER_COLOR: Record<RiskTier, string> = {
+  "fast-track": "text-[var(--tier-fast)]",
+  "needs-review": "text-[var(--tier-normal)]",
+  "high-risk": "text-[var(--tier-risk)]",
+};
+
+/**
  * 変更の種類（#640）。**「読まなくていい」とは書かない。**
  *
  * **仕分けは「どう読むか」を変えるもの**である——**`#625`（Dependabot）は
@@ -127,7 +153,7 @@ export function RiskTierView({ tier, change }: RiskTierViewProps) {
       {/* **`summary` に `display:flex` を掛けない**——**開閉の三角（marker）が消える**。
        **間隔は文字の区切りが持っている**ので、class は要らない。 */}
       <summary>
-        <strong className="font-semibold">{text.label}</strong>
+        <strong className={`font-semibold ${TIER_COLOR[tier]}`}>{text.label}</strong>
         {ciNeedsAttention && (
           <>
             {/* **区切りは文字で置く。** **`globals.css` は色とフォントだけ**で、

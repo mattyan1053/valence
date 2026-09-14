@@ -58,6 +58,16 @@ function viewFor(change: ChangeSummary): string {
 const TIERS: readonly RiskTier[] = ["fast-track", "needs-review", "high-risk"];
 
 /** それぞれの Tier が**実際に成立する**入力。 */
+/**
+ * 札の文字。**表示側と同じ文字列をここにも置く**——**写しではあるが、
+ * 「色を消しても字が残る」を測るには、比べる相手がこの場に要る**（#712）。
+ */
+const TIER_TEXT_LABEL: Record<RiskTier, string> = {
+  "fast-track": "すぐ通せる",
+  "needs-review": "通常のレビュー",
+  "high-risk": "先に人が見る",
+};
+
 const REAL_CASES: Record<RiskTier, ChangeSummary> = {
   "fast-track": change({ changedFileCount: 1, changedLineCount: 5 }),
   "needs-review": change({ changedFileCount: 9, changedLineCount: 300 }),
@@ -84,6 +94,40 @@ describe("RiskTierView", () => {
     for (const tier of TIERS) {
       expect(classifyRiskTier(REAL_CASES[tier]), `${tier} が成立する入力になっていない`).toBe(tier);
     }
+  });
+
+  describe("危なさの色（#712）", () => {
+    /**
+     * **`globals.css` が持っている値**である（#583 で図に入れたもの）。
+     * **ここで新しい色を決めない**——**決めると、図と一覧で別の色になる。**
+     */
+    const TIER_VAR: Record<RiskTier, string> = {
+      "fast-track": "var(--tier-fast)",
+      "needs-review": "var(--tier-normal)",
+      "high-risk": "var(--tier-risk)",
+    };
+
+    it.each(TIERS)("%s の札に、その Tier の色が当たる", (tier) => {
+      // **図の中にしか色が無いと、一覧の 12 行は全部同じ字で並ぶ**（#712）
+      const markup = render({ tier, change: REAL_CASES[tier] });
+
+      expect(markup, "その Tier の色が当たっていない").toContain(TIER_VAR[tier]);
+      for (const other of TIERS.filter((candidate) => candidate !== tier)) {
+        expect(markup, `${other} の色まで出ている`).not.toContain(TIER_VAR[other]);
+      }
+    });
+
+    it("色を当てても、札の文字は残る", () => {
+      // **色だけに頼らない**（#583 で決めた線）——**色の差を拾えない人がいる。**
+      // **色を消したときに、何も残らない形にしない**
+      for (const tier of TIERS) {
+        const markup = render({ tier, change: REAL_CASES[tier] });
+
+        expect(markup.replace(/ class="[^"]*"/g, ""), `${tier} が字で読めない`).toContain(
+          TIER_TEXT_LABEL[tier],
+        );
+      }
+    });
   });
 
   it("Tier の名前だけで終わらせない", () => {
