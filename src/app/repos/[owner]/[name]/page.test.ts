@@ -735,12 +735,12 @@ describe("推奨レビュー順を、盤面とは別に出す", () => {
     return html.slice(from, to);
   }
 
-  /** 盤面の一覧だけ。**推奨の節より後ろ**にある。 */
+  /** 盤面の一覧だけ。**推奨の節より後ろ**にある。**一覧は表である**（#716）。 */
   function boardList(html: string): string {
     const after = html.indexOf("</section>", html.indexOf("推奨レビュー順"));
-    const from = html.indexOf("<ol", after);
+    const from = html.indexOf("<table", after);
     expect(from, "盤面の一覧が出ていない").toBeGreaterThan(after);
-    const to = html.indexOf("</ol>", from);
+    const to = html.indexOf("</table>", from);
     expect(to, "一覧が閉じていない").toBeGreaterThan(from);
     return html.slice(from, to);
   }
@@ -1284,18 +1284,18 @@ describe("誰の番かで絞る（#663）", () => {
   }
 
   /**
-   * **依存の一覧（`<ol>`）の中だけ。**
+   * **依存の一覧（表）の中だけ**（#716。**`<ol>` だった**）。
    *
-   * **先頭の `<ol>` を取らない**（`AGENTS.md` §4）——**盤面には推奨レビュー順の
+   * **先頭の表を取らない**（`AGENTS.md` §4）——**盤面には推奨レビュー順の
    * 一覧が先に出る**ので、**そちらを見ていると、絞りが効いていなくても緑になる**
    * （**実際に一度そうなった**）。**見出しから数える。**
    */
   function list(markup: string): string {
     const heading = markup.indexOf("PR の依存");
     expect(heading, "依存の見出しが出ていない").toBeGreaterThanOrEqual(0);
-    const from = markup.indexOf("<ol", heading);
+    const from = markup.indexOf("<table", heading);
     expect(from, "依存の一覧が出ていない").toBeGreaterThanOrEqual(0);
-    return markup.slice(from, markup.indexOf("</ol>", from));
+    return markup.slice(from, markup.indexOf("</table>", from));
   }
 
   it("渡された絞りが、一覧に効く", async () => {

@@ -15,26 +15,31 @@ function render(props: DependencyGraphViewProps): string {
 }
 
 /**
- * 一覧（`<ol>`）の中だけ。
+ * 一覧（表）の中だけ。
  *
  * **図と一覧に、同じ `#1` / `#2` が出る** (#474 のレビュー)——**図は一覧より先に描かれる**
  * ので、**全体を見る判定は図の並びで満たされ**、**一覧の行順が逆転しても緑のまま**になる。
  * **一覧は Tier・承認・Merge が付く行**なので、**そこの並びを見る側は、ここを通す。**
  */
 function list(markup: string): string {
-  const from = markup.indexOf("<ol");
+  const from = markup.indexOf("<table");
   expect(from, "一覧が出ていない").toBeGreaterThanOrEqual(0);
-  const to = markup.indexOf("</ol>", from);
+  const to = markup.indexOf("</table>", from);
   expect(to, "一覧が閉じていない").toBeGreaterThan(from);
   return markup.slice(from, to);
 }
 
-/** 一覧の行だけに割る。**行ごとに見たいものは、行の中で見る**（#621）。 */
+/**
+ * 一覧の行だけに割る。**行ごとに見たいものは、行の中で見る**（#621）。
+ *
+ * **1 件は `<tbody>` 1 つ**（#716）——**比べる列の行と、畳んだ中身の行に分かれる**ので、
+ * **`<tr>` で割ると 1 件が 2 つになる。**
+ */
 function rowsOf(markup: string): string[] {
   return list(markup)
-    .split("<li")
+    .split("<tbody")
     .slice(1)
-    .map((row) => `<li${row}`);
+    .map((row) => `<tbody${row}`);
 }
 
 function pullRequest(number: number, base: string, head: string): PullRequestRef {
@@ -65,6 +70,8 @@ function props(overrides: Partial<DependencyGraphViewProps> = {}): DependencyGra
     titleOf: (number: number) => `#${number} のタイトル`,
     // **既定は飛べる**（#621）。**この試験群が見ているのは、そこではない**
     urlOf: (number: number) => `https://github.com/o/n/pull/${number}`,
+    // **既定は列の材料が揃っている**（#716）——**この試験群が見ているのは、そこではない**
+    factsOf: () => ({ ci: "passing", size: { files: 1, lines: 5 }, activeDays: 0 }),
     ...overrides,
   };
 }
@@ -466,5 +473,128 @@ describe("本数が増えたとき", () => {
     // **上限は緩く取る**——**見たいのは「返ってくる」ことだけ**で、
     // **機械の混み具合で落ちる試験は、読まれなくなる**
     expect(elapsedMs, `描くのに ${elapsedMs}ms かかっている`).toBeLessThan(3000);
+  });
+});
+
+/**
+ * **一覧を表にする**（#716 / #714。**人が見て言った**）。
+ *
+ * > あとこのセクションに限らずだけど表形式のほうが良いと思う。それで
+ * > PRタイトルとCIの状況とかPRのサイズとかactive日数とか出ると良いよね。依存PR数とかも。
+ *
+ * **1 件が縦に伸びる形だった**ので、**12 件を横に読み比べられなかった。**
+ */
+describe("一覧が表になっている（#716）", () => {
+  /** 表の見出しの段（`<thead>` の中）。 */
+  function header(markup: string): string {
+    const from = markup.indexOf("<thead");
+    expect(from, "見出しの段が無い").toBeGreaterThanOrEqual(0);
+    return markup.slice(from, markup.indexOf("</thead>", from));
+  }
+
+  /** その行の、比べる列の段（`<tbody>` の 1 つ目の `<tr>`）。 */
+  function summaryRow(row: string): string {
+    const from = row.indexOf("<tr");
+    expect(from, "行が出ていない").toBeGreaterThanOrEqual(0);
+    return row.slice(from, row.indexOf("</tr>", from));
+  }
+
+  /**
+   * その段のマス（`<td>` の中身）。
+   *
+   * **本文から探さない**（`AGENTS.md` §4）——**`0` や `1` は、番号・行数・枝名にも出る。**
+   * **数えたいマスそのものを取る。**
+   */
+  function cells(row: string): readonly string[] {
+    return [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(([, one]) => one ?? "");
+  }
+
+  const FACTS = {
+    ci: "failing",
+    size: { files: 3, lines: 42 },
+    activeDays: 5,
+  } as const;
+
+  it("利用者が挙げた列が、見出しに並んでいる", () => {
+    // **数えた**——**`<thead>` はこの部品に 1 つ**（`BoardTable`）で、
+    // **列の名前はそこにしか無い。**
+    const head = header(render(props()));
+
+    expect(head, "CI の列が無い").toContain("CI");
+    expect(head, "サイズの列が無い").toContain("サイズ");
+    expect(head, "active 日数の列が無い").toContain("最後に動いた");
+    expect(head, "依存 PR 数の列が無い").toContain("依存 PR 数");
+  });
+
+  it("列に、その PR の材料が入る", () => {
+    const row = summaryRow(rowsOf(render(props({ factsOf: () => FACTS })))[0] ?? "");
+
+    expect(row, "CI の状況が出ていない").toContain("落ちた");
+    expect(row, "サイズが出ていない").toContain("3 ファイル / 42 行");
+    expect(row, "active 日数が出ていない").toContain("5 日前");
+  });
+
+  it("依存 PR 数は、辺から数える", () => {
+    // **書き写さない**（§5）——**`dependsOnIndex` は既に辺を 1 度なめている。**
+    // **#2 は #1 の上**（`STACK_EDGES`）なので、**土台は 0、積み荷は 1。**
+    const rows = rowsOf(render(props()));
+    // **依存の列は最後から 2 つ目**（**最後は操作**）——**マスを取ってから見る。**
+    const dependsOn = (row: string) => cells(summaryRow(row)).at(-2);
+
+    expect(dependsOn(rows[0] ?? ""), "土台の依存が 0 本になっていない").toBe("0");
+    expect(dependsOn(rows[1] ?? ""), "積み荷の依存が 1 本になっていない").toBe("1");
+  });
+
+  it("読めなかった材料を、空欄にしない", () => {
+    // **空欄は「無い」と見分けが付かない**（`AGENTS.md` §5）。
+    const row = summaryRow(
+      rowsOf(
+        render(
+          props({ factsOf: () => ({ ci: undefined, size: undefined, activeDays: undefined }) }),
+        ),
+      )[0] ?? "",
+    );
+
+    // **3 列とも言う**——**1 つでも黙ると、そこだけ「無い」に見える**
+    expect([...row.matchAll(/読めません/g)], "読めなかった列が黙っている").toHaveLength(3);
+  });
+
+  it("狭い画面で、列が潰れずに横へ流れる", () => {
+    // **画面ごと横に伸びると、#583 で踏んだ形の再演になる**（#714 の注意）
+    // ——**流れるのは器のほう**である。
+    const markup = render(props());
+    const from = markup.indexOf("<table");
+    const before = markup.slice(0, from);
+
+    expect(before, "表を包む器が無い").toMatch(/<div class="[^"]*\boverflow-x-auto\b[^"]*">\s*$/);
+  });
+
+  it("数字の列は、桁が揃う", () => {
+    // **揃わないと、比べるために読むことになる**（#714 の注意）。
+    const row = summaryRow(rowsOf(render(props({ factsOf: () => FACTS })))[0] ?? "");
+    const classes = [...row.matchAll(/<td class="([^"]*)"/g)].map(([, one]) => one ?? "");
+
+    expect(classes.length, "列が出ていない").toBeGreaterThan(0);
+    expect(
+      classes.filter((one) => /\btabular-nums\b/.test(one)).length,
+      "桁を揃えた列が 3 つ無い（サイズ・active・依存）",
+    ).toBe(3);
+  });
+
+  it("行の中身は、表に移しても落ちない", () => {
+    // **全部を列にすると、横に潰れて今より読めない**（#714 の注意）
+    // ——**これまで行に出ていたものは、下の段に残る。**
+    const row = rowsOf(render(props({ renderAside: () => "この行の詳しい状況" })))[0] ?? "";
+
+    expect(row, "行の中身が消えている").toContain("この行の詳しい状況");
+    expect([...row.matchAll(/<tr[\s>]/g)], "行が 2 段になっていない").toHaveLength(2);
+  });
+
+  it("押すものは、比べる列と同じ段に出る", () => {
+    // **下の段へ入れると、比べている目線から離れる**——**幅を揃えたばかりである**
+    // （#665 の隣）。
+    const row = summaryRow(rowsOf(render(props({ renderRowActions: () => "ボタン" })))[0] ?? "");
+
+    expect(row, "操作が比べる列と同じ段に無い").toContain("ボタン");
   });
 });
