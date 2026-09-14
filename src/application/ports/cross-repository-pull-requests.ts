@@ -41,8 +41,14 @@ export type CrossRepositoryPullRequest = {
    * （`PullRequestListing.titles` と同じ判断）。
    */
   readonly title: string;
-  /** 最後に動いた時刻（ISO 8601）。**並べる材料**である。 */
-  readonly updatedAt: string;
+  /**
+   * 最後に動いた時刻（ISO 8601）。**並べる材料**である。
+   *
+   * **日時として読めなければ入らない**（#719）——**`head` と同じ扱い**で、
+   * **その 1 つのために PR ごと落とさない。** **既定の時刻も埋めない**
+   * ——**埋めると「読めなかった」が「その時刻に動いた」に化ける**（`AGENTS.md` §5）。
+   */
+  readonly updatedAt?: string;
   /**
    * いま盤面が見せている head の commit（#331）。
    *

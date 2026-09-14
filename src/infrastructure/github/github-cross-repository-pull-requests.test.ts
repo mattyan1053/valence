@@ -192,6 +192,38 @@ describe("createGitHubCrossRepositoryPullRequests", () => {
     ]);
   });
 
+  it.each(["unknown", "2026-09-11", "", 42])(
+    "日時として読めない %o は、その PR ごと落とさない",
+    async (updatedAt) => {
+      // **形が違った日に PR ごと落ちると、横断の一覧からその行が消える**（#719）
+      // ——**`headRefOid` と同じく、別に検証して時刻だけを落とす。**
+      // **「読めなかった」が `invalid` に出ないのも、`headRefOid` に揃えている**
+      const { fetchImpl } = responding({
+        data: {
+          r0: {
+            pullRequests: {
+              totalCount: 1,
+              nodes: [{ number: 1, title: "読める", updatedAt }],
+            },
+          },
+        },
+      });
+      const source = createGitHubCrossRepositoryPullRequests({ fetchImpl });
+
+      const listing = await source.list(TOKEN, [repo("web")]);
+
+      expect(
+        listing.pullRequests.map((pr) => pr.number),
+        "行ごと消えている",
+      ).toEqual([1]);
+      expect(listing.invalid, "時刻が読めないだけで、読めなかった PR にされている").toEqual([]);
+      expect(
+        listing.pullRequests[0]?.updatedAt,
+        "日時として読めない値を持っている",
+      ).toBeUndefined();
+    },
+  );
+
   it("1 往復で取れるものを、その 1 往復で全部取る", async () => {
     // **どれも同じ node の中にある**（#681）——**往復は増えない。**
     // **読めなかったものは持たない**（**「分からない」へ倒れる**）
