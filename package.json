@@ -23,22 +23,22 @@
     "check": "pnpm lint && pnpm lint:shell && pnpm typecheck && pnpm depcruise && pnpm test"
   },
   "dependencies": {
-    "@supabase/ssr": "^0.12.6",
-    "@supabase/supabase-js": "^2.115.0",
-    "next": "16.3.4",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "zod": "^4.5.4"
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.116.0",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "^4.6.2"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.13",
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^24.13.3",
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.7",
+    "@types/node": "^24.13.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitest/coverage-v8": "^4.1.11",
     "dependency-cruiser": "^18.2.0",
-    "supabase": "^2.116.0",
+    "supabase": "^2.117.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"
