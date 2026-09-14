@@ -263,15 +263,23 @@ describe("タイトルを、番号から引ける形で持つ", () => {
     expect(updatedAt.has(8), "読めていない時刻を持っている").toBe(false);
   });
 
-  it("最後に動いた時刻の形が変わったら、黙って「無い」へ寄せない", () => {
-    // **「読めなかった」を「無かった」に化けさせない**（`title` と同じ。#543 のレビュー）
-    const [first] = stackedPullRequests;
+  it.each([42, "unknown", "2026-08-08", "", " "])(
+    "日時として読めない %o は、地図へ入れない（図からは消さない）",
+    (updated_at) => {
+      // **文字列であることだけを見ると、`"unknown"` がそのまま時刻の地図へ入る**
+      // ——**日数にすると `NaN` になり、「動いていない」と見分けられない**（#718 のレビュー）
+      const [first] = stackedPullRequests;
 
-    const { pullRequests, invalid } = toPullRequestRefs([{ ...first, updated_at: 42 }]);
+      const { pullRequests, invalid, updatedAt } = toPullRequestRefs([{ ...first, updated_at }]);
 
-    expect(invalid, "型が違うのに、読めたことにしている").toHaveLength(1);
-    expect(pullRequests, "読めなかった PR を、読めたことにしている").toHaveLength(0);
-  });
+      expect(updatedAt.has(8), "日時として読めない値を持っている").toBe(false);
+      // **`invalid` へ落とさない**（`assignments` と同じ。#631）——**ここが読めなくても、
+      // 依存グラフは出す。** **この 2 つを両方見る**（**片方だけだと、PR ごと
+      // `invalid` へ落とす実装でも緑になる**）
+      expect(pullRequests, "時刻が読めないだけで、図から消えている").toHaveLength(1);
+      expect(invalid, "時刻が読めないだけで、読めなかった PR にされている").toHaveLength(0);
+    },
+  );
 
   it("空のタイトルは、持っていないものとして扱う", () => {
     // **空文字を持たせると、UI が「短いタイトル」として出す**——**箱に何も無い行が

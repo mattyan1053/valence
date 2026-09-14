@@ -70,21 +70,28 @@ const pullRequestSchema = z.object({
     .string()
     .optional()
     .transform((title) => (title === "" ? undefined : title)),
-  /**
-   * **最後に動いた時刻も読む**（#715）。
-   *
-   * **一覧の応答がそのまま持っている**（`updated_at`）——**取りに行く往復は要らない。**
-   * **横断の盤面は同じものを GraphQL の `updatedAt` から取っている**
-   * （`cross-repository-pull-requests.ts`）——**こちらは REST なので名前だけが違う。**
-   *
-   * **必須にしない**——**`title` / `head.sha` と同じ理由**で、**時刻を読めなかった PR が
-   * 依存グラフからまるごと消えるのを避ける。** **飲み込むのは空文字だけ**で、
-   * **形が違うぶんは `invalid` へ行かせる**（#543 のレビューと同じ判断）。
-   */
-  updated_at: z
-    .string()
-    .optional()
-    .transform((updatedAt) => (updatedAt === "" ? undefined : updatedAt)),
+});
+
+/**
+ * 最後に動いた時刻（#715）。
+ *
+ * **一覧の応答がそのまま持っている**（`updated_at`）——**取りに行く往復は要らない。**
+ * **横断の盤面は同じものを GraphQL の `updatedAt` から取っている**
+ * （`cross-repository-pull-requests.ts`）——**こちらは REST なので名前だけが違う。**
+ *
+ * **本体とは別に検証する**（`assignmentSchema` と同じ形。#631）——**ここが読めなくても、
+ * 依存グラフは出す。** **本体へ入れると、GitHub が形を変えた日に PR ごと `invalid` へ落ち、
+ * その行が図から消える**（#718 のレビュー）。
+ *
+ * **日時として見る。** **文字列であることだけを見ると、`"unknown"` や空白がそのまま
+ * 時刻の地図へ入る**——**日数にすると `NaN` になり、「動いていない」と見分けられない。**
+ * **読めなければ地図に入らない**ので、**`activeDays` を出す側は「分からない」と言える。**
+ *
+ * **`Z` を前提にする。** **GitHub の REST は常に UTC で返す**ので、
+ * **オフセット付きを許すと、来ないはずの形まで通ることになる。**
+ */
+const updatedAtSchema = z.object({
+  updated_at: z.iso.datetime(),
 });
 
 /**
@@ -143,14 +150,17 @@ export function toPullRequestRefs(response: unknown): ListedPullRequests {
     if (parsed.data.title !== undefined) {
       titles.set(parsed.data.number, parsed.data.title);
     }
-    if (parsed.data.updated_at !== undefined) {
-      updatedAt.set(parsed.data.number, parsed.data.updated_at);
-    }
     // **本体とは別に検証する**（#631）——**ここが読めなくても、依存グラフは出す**
     // （**`head.sha` と同じ判断**）
     const people = assignmentSchema.safeParse(item);
     if (people.success) {
       assignments.set(parsed.data.number, toAssignment(people.data));
+    }
+    // **最後に動いた時刻も別に検証する**（#715 / #718 のレビュー）——**日時として
+    // 読めたものだけを地図へ入れる。** **読めなくても、その PR は図に残る**
+    const activity = updatedAtSchema.safeParse(item);
+    if (activity.success) {
+      updatedAt.set(parsed.data.number, activity.data.updated_at);
     }
   }
   return { pullRequests, invalid, heads, titles, assignments, updatedAt };
