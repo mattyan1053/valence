@@ -18,6 +18,7 @@ import type { DependencyEdge, PullRequestRef } from "../../domain/graph/dependen
 import type { DependencyOrder } from "../../domain/graph/dependency-order";
 import { mergeBlocksFor } from "../../domain/graph/merge-block";
 import type { RiskTier } from "../../domain/triage/risk-tier";
+import { BoardSection } from "../board/board-section";
 import { DependencyGraphFigure } from "./dependency-graph-figure";
 import { layoutDependencyGraph } from "./graph-layout";
 
@@ -236,8 +237,8 @@ export function DependencyGraphView({
     // **見出しと本文が同じ見た目で出ていた**（#583 のレビュー）——**preflight が
     // `h1..h6` の大きさと太さを `inherit` へ落とし**、**`*` の margin を 0 にする**
     // （**配信中の CSS で確かめた**）。**書かなければ、段落は詰まって左端に並ぶ。**
-    <section className="flex flex-col gap-4">
-      <h2 className="text-lg font-bold">PR の依存</h2>
+    // **その見た目は器が持つ**（#713）——**節ごとに書くと、大きさが揃わない。**
+    <BoardSection mark="🔗" title="PR の依存">
       {pullRequests.length === 0 ? (
         <EmptyNotice unreadable={invalid.length} />
       ) : (
@@ -300,6 +301,6 @@ export function DependencyGraphView({
           </ul>
         </section>
       )}
-    </section>
+    </BoardSection>
   );
 }

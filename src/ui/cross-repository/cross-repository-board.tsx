@@ -24,6 +24,7 @@ import type { BallFilter } from "../ball/ball-filter";
 import { CROSS_BALL_FILTERS } from "../ball/ball-filter";
 import { BallFilterView } from "../ball/ball-filter-view";
 import { ballNote } from "../ball/ball-note";
+import { BoardSection } from "../board/board-section";
 import { mergeReadinessNote } from "../merge/merge-readiness-note";
 
 /** 一覧に並ぶ 1 本。**どのリポジトリのものかを、行が持つ。** */
@@ -117,8 +118,8 @@ export function CrossRepositoryBoard({ rows, unavailable, ballFilter }: CrossRep
   // **画面に書き写すと、向こうが変わった日にここだけ古くなる**）
   const shown = crossReviewOrder(filtered.shown.map((one) => one.row));
   return (
-    <section className="flex flex-col gap-3">
-      <h2 className="font-semibold text-lg">横断の一覧（{shown.length} 本）</h2>
+    // **節の見た目は器が持つ**（#713）——**1 リポジトリの盤面と揃える**
+    <BoardSection mark="🌐" title={`横断の一覧（${shown.length} 本）`}>
       {/* **読めなかったことを残す**——**黙ると、盤面は静かに不完全になる。**
           **絞りの外に置く**（#663 の「気をつけること」）——**混ぜると、
           抜けが絞りのせいに見える** */}
@@ -200,6 +201,6 @@ export function CrossRepositoryBoard({ rows, unavailable, ballFilter }: CrossRep
           })}
         </ul>
       )}
-    </section>
+    </BoardSection>
   );
 }
