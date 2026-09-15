@@ -694,7 +694,12 @@ readonly STOP_SPANS_KEEP_SEC="${LOOP_STOP_SPANS_KEEP_SEC:-2592000}"
 
 # **開いている区間があるか**（**終わりが `-`**）。**あるなら、いま止まっている。**
 open_stop_span() {
-  [[ -f $STOP_SPANS ]] && tail -n 1 "$STOP_SPANS" | grep -q -- $'\t-$'
+  local last
+  # **パイプへ流さない** (#742)——**SIGPIPE で裏返ると「開いていない」へ倒れ、
+  # **止まっている最中なのに「止まっていない」と読まれる。**
+  [[ -f $STOP_SPANS ]] || return 1
+  last="$(tail -n 1 "$STOP_SPANS")" || return 1
+  [[ $last == *$'\t-' ]]
 }
 
 # **記録を丸ごと置き換える。** **読み手はロックを取らない**ので、**切り詰めから

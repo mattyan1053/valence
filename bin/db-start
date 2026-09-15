@@ -124,7 +124,10 @@ while :; do
     exit 1
   }
   if ! pnpm exec supabase stop >"$stopped" 2>&1; then
-    if grep -viE "$NOT_RUNNING" "$stopped" | grep -q '[^[:space:]]'; then
+    # **パイプへ流さない** (#742)——**SIGPIPE で裏返ると「何も残らなかった」へ倒れ、
+    # **悪性の出力が黙って通る**（**この判定がいちばん嫌う向き**）。
+    remaining="$(grep -viE "$NOT_RUNNING" "$stopped")"
+    if [[ -n ${remaining//[[:space:]]/} ]]; then
       # **理由は捨てない** (#371 のレビュー)。**人を呼ぶことになった回に、
       # いちばん要る情報が消えているのがいちばん困る。**
       cat "$stopped" >&2

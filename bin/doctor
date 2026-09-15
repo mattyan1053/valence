@@ -162,7 +162,10 @@ container_on_port() {
   command -v docker >/dev/null 2>&1 || return 2
   row="$(docker ps --filter "publish=$port" \
     --format '{{.ID}}|{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null)" || return 2
-  row="$(printf '%s\n' "$row" | head -n 1)"
+  # **`head` はパイプへ流さない** (#742)——**先頭だけ読んで閉じる**ので、
+  # **`printf` が SIGPIPE で死に、`pipefail` がそれを返す。** **裏返ると `row` が
+  # 空になり、**「そのポートにコンテナは居ない」へ倒れる**（**居るのに**）。
+  row="$(head -n 1 <<<"$row")"
   [[ -n $row ]] || return 1
   printf '%s' "$row"
 }

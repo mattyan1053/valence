@@ -888,7 +888,15 @@ cmd_loop_setup() {
   if [[ -d $wt ]]; then
     # 作った時点の commit に固定されたままだと、master は古いゲートと古い手順で
     # 判定し続ける。main にマージした修正が反映されない。毎回追いつかせる。
-    if ! git worktree list --porcelain | grep -qxF "worktree $wt"; then
+    # **一覧は変数へ受けてから見る** (#742)——**パイプの先の `grep -q` は
+    # SIGPIPE で裏返る。** **ここで裏返ると、登録されている worktree を
+    # 「登録されていません」と言って止まる。**
+    local listed
+    if ! listed="$(git worktree list --porcelain)"; then
+      echo "==> worktree の一覧を読めません" >&2
+      return 1
+    fi
+    if ! grep -qxF "worktree $wt" <<<"$listed"; then
       echo "==> $wt は worktree として登録されていません。中身を確認してください" >&2
       return 1
     fi
@@ -924,12 +932,20 @@ cmd_loop_setup() {
 JSON
   echo "==> master 側の deny を設定: $wt/.claude/settings.local.json"
 
-  local label
+  local label existing
   # ループが使うものに加え、**Issue テンプレートが付ける label** も用意する。
   # 存在しない label を書いても GitHub はエラーにせず黙って落とすため、
   # 起票が候補から漏れたことに誰も気づけない。
+  #
+  # **一覧は 1 回だけ引き、変数から見る** (#742)——**パイプの先の `grep -q` は
+  # SIGPIPE で裏返る。** **裏返ると「無い」へ倒れ、既にある label を作りに行って
+  # `gh` が落ちる。** **読めなければ、ここで止まる**——**黙って作りに行かない。**
+  if ! existing="$(gh label list --limit 200 --json name --jq '.[].name')"; then
+    echo "==> label の一覧を読めません" >&2
+    return 1
+  fi
   for label in backlog ready in-progress blocked parked waiting-condition awaiting-human awaiting-master changes-requested deferred-finding bug; do
-    if gh label list --limit 200 --json name --jq '.[].name' | grep -qxF "$label"; then
+    if grep -qxF "$label" <<<"$existing"; then
       echo "==> label は既にある: $label"
     else
       gh label create "$label" && echo "==> label を作成: $label"
@@ -1020,9 +1036,16 @@ master_worktree_path() {
   else
     listed="$(git worktree list --porcelain)" || return 2
   fi
-  main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
+  # **`awk` も 1 行目で抜ける** (#742 のコメント)——**パイプへ流さない。**
+  # **ここが裏返ると `main` が空になり、呼び手の `|| status=$?` が 2 でも 1 でもない
+  # 値を受ける**ので、**`if ((status == 2))` を素通りして `master=""` のまま進む**
+  # ——**症状は下の grep と同じ**である。
+  main="$(awk '/^worktree /{print $2; exit}' <<<"$listed")"
   [[ -n $main ]] || return 2
-  printf '%s\n' "$listed" | grep -qxF "worktree ${main}-master" || return 1
+  # **パイプへ流さない** (#742)。**`grep -q` は当たった時点で終わる**ので、
+  # **`printf` が SIGPIPE で死に、`pipefail` がそれを「落ちた」として返す**
+  # ——**約 1% で「登録されていない」へ裏返っていた。**
+  grep -qxF "worktree ${main}-master" <<<"$listed" || return 1
   printf '%s' "${main}-master"
 }
 
@@ -1105,7 +1128,8 @@ main_worktree_path() {
   else
     listed="$(git worktree list --porcelain)" || return 2
   fi
-  main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
+  # **`awk` も 1 行目で抜ける** (#742 のコメント)——**パイプへ流さない。**
+  main="$(awk '/^worktree /{print $2; exit}' <<<"$listed")"
   [[ -n $main ]] || return 2
   printf '%s' "$main"
 }
@@ -1687,9 +1711,14 @@ warn_stale_containers() {
   # そのぶん遅くなる**（**試験もその増加を見ている**）。**探し方は compose が
   # コンテナに付ける label** である。
   local container
-  container="$(docker ps -q \
+  # **`head` はパイプへ流さない** (#742)——**先頭だけ読んで閉じる**ので、
+  # **`docker` が SIGPIPE で死に、`pipefail` がそれを返す。** **裏返ると
+  # `container=""` になり、**古いイメージで走っていることに誰も気づかない。**
+  local listed_containers
+  listed_containers="$(docker ps -q \
     --filter "label=com.docker.compose.project=$(workspace_name)" \
-    --filter "label=com.docker.compose.service=app" 2>/dev/null | head -1)" || container=""
+    --filter "label=com.docker.compose.service=app" 2>/dev/null)" || listed_containers=""
+  container="$(head -1 <<<"$listed_containers")"
   # **compose はサービスごとに別のタグを作る**（`image:` が無いため）ので、
   # **`supabase-cli` も渡す**——**`./task db:*` の入口**である (#382 のレビュー)。
   ./bin/image-drift check --container "$container" \
