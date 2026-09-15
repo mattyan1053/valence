@@ -125,7 +125,9 @@ running_scopes="$running_scopes"$'\n'"$master_running"
 # その作業場が、いま回しているか。
 is_running() {
   [[ -n $1 ]] || return 1
-  printf '%s\n' "$running_scopes" | grep -qxF "$1"
+  # **パイプへ流さない** (#742)——**SIGPIPE で裏返ると「回していない」へ倒れ、
+  # **走っている作業場が `stale` と読まれる**（#444 が塞いだ形が戻る）。
+  grep -qxF "$1" <<<"$running_scopes"
 }
 
 # **記録は作業場ごと**である（`bin/loop-lease` が書く。名前の作り方はあちらが持つ）。

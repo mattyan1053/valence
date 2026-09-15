@@ -61,5 +61,78 @@ if ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
   exit 2
 fi
 
+# **読み切らずに終わる相手へ、パイプで流している箇所を見つける** (#742)。
+#
+# **守りたいのは「パイプの右が読み切らずに終わる」**で、**`grep -q` はその一例**である
+# （#742 のコメント。**数える語を `grep -q` にすると、範囲はその語で決まる**
+# ——**`awk '…{exit}'` と `head` を落としていた**）。
+#
+# **右が先に閉じると、左は SIGPIPE で死に、終了コードは 141。** **`set -o pipefail` を
+# 張っていると、パイプ全体が非ゼロ**になり、**「当たった」が「落ちた」として読まれる**
+# ——**判定が裏返る。**
+#
+# **実測（#742）**: **4 worktree ぶんの一覧で 300 回中 3 回。** **`task loop:worker:paths`
+# が master の作業場を worker として並べ**、**`bin/loop-cadence` が「止まっている
+# セッションを起こせ」と言った**（**そこに worker は居ない**）。**間欠なので、
+# 出たときのログしか残らない。**
+#
+# **shellcheck には SIGPIPE の規則が無い**ので、ここで見る。
+#
+# **`<<<` から読む形は通す**——**パイプを通らないので SIGPIPE を受けない。**
+# **読み切る形も通す**（**`-q` の無い `grep`**、**`exit` の無い `awk`**）
+# ——**入力が増えても受けない**（**最後まで読むので、書き手より先に閉じない**）。
+# **これが「このままでよい」と決めた側の理由**である (#742 の完了条件)
+# ——**`task` の `loop:stop:paths` と `bin/loop-review-head` の `awk` がその形。**
+# **注釈は見ない**（**このリポジトリは理由を厚く書く**ので、**説明の中の
+# `| grep -q` で落とすと、直した説明そのものが引っかかる**）。
+#
+# **パイプは、空白を置いた `|` だけを見る**——**`printf 'pr=%s|head=%s'` は
+# パイプではない**（#742 のコメント。**広げた走査がこれを拾った**）。
+#
+# **分けているのは道具ではなく入力の大きさ** (#742 のコメントの訂正)。
+# **`awk` は読み込みをまとめるから安全、という逃げ道は無い**——**測り直したら
+# 5 つの道具すべてが 1〜3/1000 に揃った**（**`0/500` は「率が 0.6% 以下」までしか
+# 言っていない。回数が足りていなかっただけ**）。
+#
+# **事実に合う言い方はこれである**: **入力が長くなれば必ず倒れる。いまは短いので稀。**
+# **「いま 0/500 だから安全」とは書かない。**
+early_closing_pipe() {
+  local found=0 path line previous=""
+  for path in "$@"; do
+    local number=0
+    while IFS= read -r line; do
+      number=$((number + 1))
+      local code="${line%%#*}" right="" reason=""
+      # **パイプの右側**（**同じ行か、前の行が `|` で終わる形**）
+      if [[ $code =~ [[:space:]]\|[[:space:]]*(.*)$ ]]; then
+        right="${BASH_REMATCH[1]}"
+      elif [[ $previous =~ [[:space:]]\|[[:space:]]*$ ]]; then
+        right="$code"
+      fi
+      if [[ $right =~ ^[[:space:]]*grep([[:space:]]+-[a-zA-Z]*q) ]]; then
+        reason="grep -q（当たった時点で終わる）"
+      elif [[ $right =~ ^[[:space:]]*awk.*exit ]]; then
+        reason="awk … exit（途中で抜ける）"
+      elif [[ $right =~ ^[[:space:]]*head([[:space:]]|$) ]]; then
+        reason="head（先頭だけ読む）"
+      fi
+      if [[ -n $reason ]]; then
+        echo "[FAIL] パイプの右が読み切らずに終わります（SIGPIPE で判定が裏返る）: $path:$number" >&2
+        echo "       $line" >&2
+        echo "       $reason" >&2
+        echo "       変数へ受けてから <<< で渡すか、読み切る形にしてください（#742）" >&2
+        found=1
+      fi
+      previous="$code"
+    done <"$path"
+  done
+
+  return "$found"
+}
+
 mapfile -t files < <(targets)
-"$SHELLCHECK" --shell=bash "${files[@]}"
+
+status=0
+early_closing_pipe "${files[@]}" || status=1
+"$SHELLCHECK" --shell=bash "${files[@]}" || status=1
+exit "$status"
