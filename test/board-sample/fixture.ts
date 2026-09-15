@@ -15,6 +15,8 @@
  */
 
 import type { RepositoryBoardResult } from "../../src/application/review-order/view-repository-board";
+import { buildDependencyEdges } from "../../src/domain/graph/dependency-graph";
+import { orderByDependency } from "../../src/domain/graph/dependency-order";
 
 /** **作りものの持ち主**。**実在の login と重ならない語を選ぶ。** */
 const PEOPLE = ["sample-aoi", "sample-kaede", "sample-rin"] as const;
@@ -152,7 +154,8 @@ const ROWS: readonly Row[] = [
   {
     number: 107,
     branch: "feat/board-filter-carry",
-    base: "main",
+    // **枝名が「#106 の続き」と言っているのに、`main` から生えていた** (#740)
+    base: "feat/board-filter",
     title: "絞りを、押したあとへ持ち越す",
     files: 4,
     lines: 96,
@@ -233,33 +236,96 @@ const ROWS: readonly Row[] = [
     opinion: undefined,
     assignment: { assignees: [PEOPLE[1]], reviewers: [], authoredByBot: false },
   },
+  // **ここから下は、線を訊けるようにするために足した積み重ね** (#740)。
+  // **箱 12 個に対して辺が 2 本**では、**何を答えても「読める」になる。**
+  {
+    number: 113,
+    branch: "feat/reader-highlight",
+    // **1 本鎖を伸ばす**——**深さが 2 では「どこから見るか」が問題にならない**
+    base: "feat/reader-search",
+    title: "読み手の当たったところを目立たせる（#103 の上）",
+    files: 3,
+    lines: 74,
+    paths: ["src/ui/reader/reader-highlight.tsx", "src/ui/reader/reader.tsx"],
+    ci: "pending",
+    mergeable: "unknown",
+    state: "behind",
+    opinion: UNTOUCHED,
+    assignment: { assignees: [PEOPLE[2]], reviewers: [], authoredByBot: false },
+  },
+  {
+    number: 114,
+    branch: "feat/board-filter-reset",
+    // **枝分かれ**——**#107 と同じ土台**（**線が分かれて見えるのはここだけ**）
+    base: "feat/board-filter",
+    title: "絞りを、1 回で戻せるようにする（#106 の上）",
+    files: 2,
+    lines: 31,
+    paths: ["src/ui/ball/ball-filter.ts"],
+    ci: "passing",
+    mergeable: "conflicting",
+    state: "dirty",
+    opinion: CHANGES_REQUESTED,
+    assignment: { assignees: [PEOPLE[0]], reviewers: [PEOPLE[1]], authoredByBot: false },
+  },
+  {
+    number: 115,
+    branch: "feat/sync-schema",
+    // **循環**（#115 ⇄ #116）——**`order.cyclic` に出る形**である。
+    // **本物の盤面には出る**（**取り違えて base を差し替えると起きる**）ので、
+    // **見本に無いと、その節を人が見られない。**
+    base: "feat/sync-client",
+    title: "同期の型を、送り手と受け手で揃える",
+    files: 5,
+    lines: 140,
+    paths: ["src/domain/sync/schema.ts"],
+    ci: "failing",
+    mergeable: "unknown",
+    state: "blocked",
+    opinion: UNTOUCHED,
+    assignment: { assignees: [], reviewers: [PEOPLE[2]], authoredByBot: false },
+  },
+  {
+    number: 116,
+    branch: "feat/sync-client",
+    base: "feat/sync-schema",
+    title: "同期の受け手を、新しい型で読む",
+    files: 4,
+    lines: 88,
+    paths: ["src/infrastructure/sync/sync-client.ts"],
+    ci: "pending",
+    mergeable: "unknown",
+    state: "unknown",
+    opinion: undefined,
+    assignment: undefined,
+  },
 ];
 
 /**
  * **判定用の盤面。**
  *
- * **12 本並べる**（#597 の完了条件は「10 本以上」）。**依存で 3 本積んである**
- * ので、**図に線が出る。**
+ * **10 本以上並べる**（#597 の完了条件）。**線を訊ける形にしてある** (#740)
+ * ——**枝分かれ・深さ・循環**を持たせた。
  */
 export function sampleBoard(): RepositoryBoardResult {
+  // **辺と順序は、行から出す** (#740)。**手で並べると、行を足したときに置いていかれる**
+  // ——**実際に、行が 12 に増えても辺は 2 本のまま**だった（**足した本人の diff には
+  // 出てこない側**。`AGENTS.md` §5）。**判定はドメインの 1 箇所が持つ。**
+  const pullRequests = ROWS.map((row) => ({
+    number: row.number,
+    base: { repository: SAMPLE_REPOSITORY.name, branch: row.base },
+    head: { repository: SAMPLE_REPOSITORY.name, branch: row.branch },
+  }));
+  const edges = buildDependencyEdges(pullRequests);
+
   return {
     kind: "board",
     plan: {
-      pullRequests: ROWS.map((row) => ({
-        number: row.number,
-        base: { repository: SAMPLE_REPOSITORY.name, branch: row.base },
-        head: { repository: SAMPLE_REPOSITORY.name, branch: row.branch },
-      })),
-      edges: [
-        { dependent: 102, dependsOn: 101 },
-        { dependent: 103, dependsOn: 102 },
-      ],
-      order: {
-        ordered: ROWS.map((row) => row.number),
-        cyclic: [],
-      },
+      pullRequests,
+      edges,
+      order: orderByDependency(pullRequests, edges),
       // **読めなかった行**（#673）。**位置しか分からない。**
-      invalid: [{ index: 12, reason: "number が数値ではありませんでした" }],
+      invalid: [{ index: ROWS.length, reason: "number が数値ではありませんでした" }],
       // **切れた行には、変更の材料を持たせない** (#687 の実装で踏んだ)。
       // **`changesUnavailable` にだけ載せても、その番号が一覧に無ければ何も出ない**
       // ——**行があって、その行の材料が欠けている**のが本物の形である。
