@@ -244,6 +244,29 @@ describe("パイプの先の `grep -q`", () => {
     expect(result.status, "前のファイルの最後の行を持ち越している").toBe(0);
   });
 
+  it.each([
+    { form: "-E -q", body: 'printf "%s\\n" "$x" | grep -E -q "^a"' },
+    { form: "--quiet", body: 'printf "%s\\n" "$x" | grep --quiet "^a"' },
+    { form: "--silent", body: 'printf "%s\\n" "$x" | grep --silent "^a"' },
+  ])("`grep $form` も、緑にしない", ({ body }) => {
+    // **`grep --help` は 3 つを同じものとして並べている**（#743 のレビュー 2 周目）
+    // ——**「最初の短いオプション群に `q`」の形しか拾わない**と、**書き方を変えた
+    // だけで素通りする。**
+    const result = lintOf({ offender: `#!/usr/bin/env bash\n${body}\n` });
+
+    expect(result.status, "黙る grep の書き方を取りこぼしている").toBe(1);
+  });
+
+  it("引用符の中の `#` で、行を切らない", () => {
+    // **`#` は引用符の中では文字**である（#743 のレビュー 2 周目）
+    // ——**語の先頭かどうかだけでは足りない。**
+    const result = lintOf({
+      offender: '#!/usr/bin/env bash\nprintf "%s\\n" "issue # 742" | head -n 1\n',
+    });
+
+    expect(result.status, "引用の中の # をコメントの始まりと読んでいる").toBe(1);
+  });
+
   it("説明の中の `| grep -q` は、通す", () => {
     // **このリポジトリは理由を厚く書く**（`AGENTS.md` §4）——**注釈に出てくる語で
     // 落とすと、直した説明そのものが引っかかる。**

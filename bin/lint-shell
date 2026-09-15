@@ -108,7 +108,10 @@ REASON=""
 closes_early() {
   local stage="$1" program
   REASON=""
-  if [[ $stage =~ ^[[:space:]]*grep([[:space:]]+-[a-zA-Z]*q) ]]; then
+  # **黙る `grep` の書き方は 3 つある** (#743 のレビュー 2 周目)——**`grep --help` が
+  # `-q` / `--quiet` / `--silent` を同じものとして並べている。** **オプションは
+  # いくつでも前に置ける**ので、**最初の群だけを見ない**（**`grep -E -q` が素通りした**）。
+  if [[ $stage =~ ^[[:space:]]*grep([[:space:]]+-[^[:space:]]*)*[[:space:]]+(-[a-zA-Z]*q[a-zA-Z]*|--quiet|--silent)([[:space:]]|$) ]]; then
     REASON="grep -q（当たった時点で終わる）"
   elif [[ $stage =~ ^[[:space:]]*head([[:space:]]|$) ]]; then
     REASON="head（先頭だけ読む）"
@@ -124,13 +127,28 @@ closes_early() {
 # （**守ろうとしている側の穴**）。
 CODE=""
 strip_comment() {
-  local rest="$1" out="" head
+  local rest="$1" out="" head quotes
   while [[ $rest == *"#"* ]]; do
     head="${rest%%#*}"
-    # **行頭の `#` か、空白のあとの `#`** ——**そこから先はコメント**
-    if [[ -z $out$head || $head =~ [[:space:]]$ ]]; then
-      CODE="$out$head"
-      return
+    # **引用符の中の `#` は文字である** (#743 のレビュー 2 周目)
+    # ——**`"issue # 742"` で切ると、その後ろのパイプが見えなくなる。**
+    #
+    # **開いたままの引用符を数える**（**1 文字ずつ走らせない**——**この判定は
+    # 47000 行に当たる**ので、**1 行あたりの費用がそのまま `./task check` に乗る**）。
+    # **語の先頭かどうかを先に見る**（**安い**）——**引用符を数えるのは、
+    # そこを通った `#` だけ**である（**測った: 先に数えると 1.4 秒が 6.1 秒になる**）。
+    if [[ -z $out$head ]] || [[ $head =~ [[:space:]]$ ]]; then
+      local quotes="${out}${head}" singles doubles
+      singles="${quotes//[^\']/}"
+      doubles="${quotes//[^\"]/}"
+      # **数えるだけで、状態は持たない**——**`"it'"'"'s # x"` のように
+      # **二重引用の中の `'` は、奇数として数えてしまう**（**見逃す側ではなく、
+      # 切らない側へ倒れる**ので、**パイプがあれば拾う**）。**1 文字ずつ状態を
+      # 持ち回る形にすると、この走査が 47000 行に当たるぶんだけ高くつく。**
+      if ((${#singles} % 2 == 0 && ${#doubles} % 2 == 0)); then
+        CODE="$out$head"
+        return
+      fi
     fi
     out+="$head#"
     rest="${rest#*#}"
