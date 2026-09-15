@@ -35,16 +35,23 @@ if (board.kind !== "board") {
 }
 const plan = board.plan;
 
-/** **判定へ渡す最小の形。** **合成した図でも走らせる**ため、plan から切り離す。 */
-type Stack = readonly { readonly base: string; readonly head: string }[];
+/**
+ * **判定へ渡す最小の形。** **図が描くのと同じもの**である。
+ *
+ * **`base`/`head` から組み直さない** (#741 のレビュー 2 周目)。**絵を描くのは
+ * `plan.edges`**（`dependency-graph-view.tsx` が `layoutDependencyGraph` へ渡す）で、
+ * **`buildDependencyEdges` は辺を落とす**——**同じ head を持つ PR が 2 本あると
+ * `AMBIGUOUS` になり、その枝を base に持つ辺が消える。**
+ *
+ * **測った**（**`#114` の head を `#102` とぶつけた**）——**辺は 7 から 6 へ減り、
+ * `103 <- 102` が消えたのに、`base`/`head` から数える版は 4 つとも緑**だった。
+ * **行を 1 本足して head がぶつかっただけで、線が 1 本消える。**
+ */
+type Edges = readonly { readonly dependent: number; readonly dependsOn: number }[];
 
-/** **他の PR の head に積まれている PR。** **`main` から生えているものは入らない。** */
-function stacked(): readonly { number: number; base: string }[] {
-  const heads = new Set(plan.pullRequests.map((one) => one.head.branch));
-
-  return plan.pullRequests
-    .filter((one) => heads.has(one.base.branch))
-    .map((one) => ({ number: one.number, base: one.base.branch }));
+/** **他の PR に積まれている PR。** **`main` から生えているものは辺を持たない。** */
+function stacked(edges: Edges): readonly number[] {
+  return [...new Set(edges.map((one) => one.dependent))];
 }
 
 /**
@@ -60,46 +67,43 @@ function stacked(): readonly { number: number; base: string }[] {
  * 緑になる**（**下の「循環だけの図」で測っている**）。
  */
 function depthBelow(
-  stack: Stack,
-  branch: string,
-  seen: ReadonlySet<string> = new Set(),
+  edges: Edges,
+  number: number,
+  seen: ReadonlySet<number> = new Set(),
 ): number | undefined {
-  if (seen.has(branch)) {
+  if (seen.has(number)) {
     return undefined; // **辿り切れない**——**深さは決まらない**
   }
-  const parent = stack.find((one) => one.head === branch);
-  if (parent === undefined) {
+  const edge = edges.find((one) => one.dependent === number);
+  if (edge === undefined) {
     return 0; // **`main` に着いた**
   }
-  const below = depthBelow(stack, parent.base, new Set([...seen, branch]));
+  const below = depthBelow(edges, edge.dependsOn, new Set([...seen, number]));
 
   return below === undefined ? undefined : below + 1;
 }
 
 /** **図の中でいちばん深い鎖。** **辿り切れないものは数に入れない。** */
-function deepest(stack: Stack): number {
-  const depths = stack
-    .map((one) => depthBelow(stack, one.base))
+function deepest(edges: Edges): number {
+  const depths = edges
+    .map((one) => depthBelow(edges, one.dependent))
     .filter((one): one is number => one !== undefined);
 
   return Math.max(0, ...depths);
 }
 
-/** 見本の積み重ねを、判定へ渡す形にする。 */
-function sampleStack(): Stack {
-  return plan.pullRequests.map((one) => ({ base: one.base.branch, head: one.head.branch }));
-}
-
 describe("見本の積み重ね", () => {
   it("積まれた PR が 4 本以上ある", () => {
-    expect(stacked().length, "他の PR に積まれた PR が足りない").toBeGreaterThanOrEqual(4);
+    expect(stacked(plan.edges).length, "他の PR に積まれた PR が足りない").toBeGreaterThanOrEqual(
+      4,
+    );
   });
 
   it("枝分かれが 1 箇所以上ある", () => {
     // **同じ土台に 2 本**——**線が分かれて見えるのはここだけ**である。
-    const perBase = new Map<string, number>();
-    for (const one of stacked()) {
-      perBase.set(one.base, (perBase.get(one.base) ?? 0) + 1);
+    const perBase = new Map<number, number>();
+    for (const one of plan.edges) {
+      perBase.set(one.dependsOn, (perBase.get(one.dependsOn) ?? 0) + 1);
     }
 
     const forks = [...perBase.values()].filter((count) => count >= 2);
@@ -108,10 +112,9 @@ describe("見本の積み重ね", () => {
   });
 
   it("深さが 3 以上ある", () => {
-    expect(
-      deepest(sampleStack()),
-      "積み重ねが浅い（1 本鎖の長さが足りない）",
-    ).toBeGreaterThanOrEqual(3);
+    expect(deepest(plan.edges), "積み重ねが浅い（1 本鎖の長さが足りない）").toBeGreaterThanOrEqual(
+      3,
+    );
   });
 
   it("循環だけの図は、深さに数えない", () => {
@@ -120,10 +123,10 @@ describe("見本の積み重ね", () => {
     // 前の版でも赤くなった**——**広いことを、材料の側からは測れなかった。**
     //
     // **3 頂点の循環を、鎖ひとつ無い図で走らせる**と、**前の版は 3 を返した。**
-    const onlyACycle: Stack = [
-      { base: "feat/b", head: "feat/a" },
-      { base: "feat/c", head: "feat/b" },
-      { base: "feat/a", head: "feat/c" },
+    const onlyACycle: Edges = [
+      { dependent: 1, dependsOn: 2 },
+      { dependent: 2, dependsOn: 3 },
+      { dependent: 3, dependsOn: 1 },
     ];
 
     expect(deepest(onlyACycle), "辿り切れない循環を、積み重ねとして数えている").toBe(0);
