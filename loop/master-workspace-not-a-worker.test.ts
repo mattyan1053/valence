@@ -5,10 +5,18 @@
  * 「止まっている worker」として 1 行出した。**
  *
  * ```
- * scope=worker-030ab last_cron=- last_poke=- last_unknown=- age=- window=- never
- *   workspace=/home/mattyan1053/valence-master
+ * scope=worker-<digest> last_cron=- last_poke=- last_unknown=- age=- window=- never
+ *   workspace=<clone>-master
  *   読み=…そのセッションが動いていない——引く先が居ないので、先に起こす
  * ```
+ *
+ * **実際の値は書かない**（`AGENTS.md` §6。#739 のレビュー）——**このリポジトリは
+ * public** で、**絶対パスは個人を指す。** **説明に要るのは「どの作業場か」ではなく
+ * 「master の作業場だった」まで**である。
+ *
+ * **`worker-<digest>` はパスから作った値**なので、**照らすなら自分の環境で取り直す**
+ * （`printf '%s' <clone>-master | git hash-object --stdin`）——**写した値を置くと、
+ * 読んだ人が合わないものを照らして原因を探しに行く。**
  *
  * **master の作業場に、起こすべき worker は居ない。** **並んだ瞬間に必ず `never`**
  * （**周回を回さないので trigger の記録が無い**）——**人が呼ばれる。**
@@ -25,7 +33,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,7 +112,7 @@ describe("./task loop:worker:paths", () => {
     dir: string,
     stub: string,
     master: string,
-    when: "first" | "after-first",
+    when: "first" | "after-first" | "never",
   ): NodeJS.ProcessEnv {
     const real = spawnSync("bash", ["-lc", "command -v git"], { encoding: "utf8" }).stdout.trim();
     expect(real, "本物の git が見つからない").not.toBe("");
@@ -112,7 +128,11 @@ describe("./task loop:worker:paths", () => {
         '  n=$(( $(cat "$count" 2>/dev/null || echo 0) + 1 ))',
         '  printf "%s" "$n" >"$count"',
         '  out="$("$real" "$@")" || exit $?',
-        `  if [[ ${JSON.stringify(when)} == first ]]; then hide=$(( n == 1 )); else hide=$(( n != 1 )); fi`,
+        `  case ${JSON.stringify(when)} in`,
+        "    first) hide=$(( n == 1 )) ;;",
+        "    after-first) hide=$(( n != 1 )) ;;",
+        "    *) hide=0 ;;",
+        "  esac",
         "  if (( hide )); then",
         '    printf "%s\\n" "$out" | grep -vxF "$hidden" || true',
         "  else",
@@ -143,6 +163,23 @@ describe("./task loop:worker:paths", () => {
 
     expect(paths, "master の作業場を worker として数えている").not.toContain(master);
     expect(paths, "自分の作業場が消えている").toContain(dir);
+  });
+
+  it("`git worktree list` は 1 回しか引かない", () => {
+    // **#738 の完了条件**——**2 回引いているのが意図なのか 1 回でよいのかを決める。**
+    // **決めた側を、回数そのもので見る**（**上の 2 つは「違う答えが返ったとき」を
+    // 見ている**ので、**引き直しても答えが同じなら通ってしまう**）。
+    //
+    // **これは「渡されたが空」の経路も塞ぐ** (#739 のレビュー)——**そこで自分から
+    // 引き直すと、この数が増える。**
+    const { dir, master, stub } = repo();
+    const env = gitThatHidesMaster(dir, stub, master, "never");
+
+    workerPaths(dir, env);
+
+    expect(readFileSync(join(dir, "worktree-list.count"), "utf8"), "一覧を引き直している").toBe(
+      "1",
+    );
   });
 
   it.each([{ when: "first" }, { when: "after-first" }] as const)(

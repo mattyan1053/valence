@@ -1012,8 +1012,14 @@ cmd_loop_stop_paths() {
 # 並べる一覧が別々だと、その間に変わったぶんだけ除外が外れる**（下記）。
 master_worktree_path() {
   local listed main
-  listed="${1-}"
-  [[ -n $listed ]] || listed="$(git worktree list --porcelain)" || return 2
+  # **「渡されていない」と「渡されたが空」を分ける** (#739 のレビュー)。
+  # **同じに扱うと、空を渡した呼び手のところで自分からもう一度引く**
+  # ——**この関数が消しに来た「2 回引く」が、そこだけ戻る。**
+  if (($# > 0)); then
+    listed="$1"
+  else
+    listed="$(git worktree list --porcelain)" || return 2
+  fi
   main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
   [[ -n $main ]] || return 2
   printf '%s\n' "$listed" | grep -qxF "worktree ${main}-master" || return 1
@@ -1076,7 +1082,13 @@ cmd_loop_worker_paths() {
 #   exit 0 = 場所を出す / exit 2 = worktree の一覧を読めない
 preview_worktree_path() {
   local main
-  main="$(main_worktree_path "${1-}")" || return 2
+  # **受け取っていないなら、渡さない** (#739 のレビュー)——**空を渡すと、
+  # 向こうが「渡された空の一覧」として読む。**
+  if (($# > 0)); then
+    main="$(main_worktree_path "$1")" || return 2
+  else
+    main="$(main_worktree_path)" || return 2
+  fi
   printf '%s' "${main}-preview"
 }
 
@@ -1087,8 +1099,12 @@ preview_worktree_path() {
 # **一覧を渡せる**（`master_worktree_path` と同じ理由。#738）。
 main_worktree_path() {
   local listed main
-  listed="${1-}"
-  [[ -n $listed ]] || listed="$(git worktree list --porcelain)" || return 2
+  # **渡されたか渡されていないかで分ける**（`master_worktree_path` と同じ。#739）
+  if (($# > 0)); then
+    listed="$1"
+  else
+    listed="$(git worktree list --porcelain)" || return 2
+  fi
   main="$(printf '%s\n' "$listed" | awk '/^worktree /{print $2; exit}')"
   [[ -n $main ]] || return 2
   printf '%s' "$main"
