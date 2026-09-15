@@ -199,6 +199,51 @@ describe("パイプの先の `grep -q`", () => {
     expect(result.status, "書式文字列をパイプと読んでいる").toBe(0);
   });
 
+  it("途中に読み切る段を挟んでも、末尾の `head` を見つける", () => {
+    // **段ごとに見る**（#743 のレビュー）——**最初の `|` から先をまとめて 1 つと
+    // 読むと、`sort` で始まる塊になり、末尾の `head` が隠れる。**
+    const result = lintOf({
+      offender: '#!/usr/bin/env bash\nprintf "%s\\n" "$x" | sort | head -n 1\n',
+    });
+
+    expect(result.status, "パイプの途中の段しか見ていない").toBe(1);
+  });
+
+  it("読み切る `awk` の失敗を `|| exit` で受ける形は、通す", () => {
+    // **`exit` を探す範囲は、awk のプログラムの中だけ**（#743 のレビュー）
+    // ——**シェルの `|| exit 1` まで拾うと、ふつうのエラー処理を足しただけで赤くなる。**
+    const result = lintOf({
+      fine: "#!/usr/bin/env bash\nprintf '%s\\n' \"$x\" | awk '{print}' || exit 1\n",
+    });
+
+    expect(result.status, "シェル側の exit を awk の中と読んでいる").toBe(0);
+  });
+
+  it("`$#` で切らずに、行の後ろまで見る", () => {
+    // **`#` は、語の先頭に来たときだけコメント**である（#743 のレビュー）
+    // ——**最初の `#` で切ると、`$#` や `${x#pat}` や文字列の中の `#` でも切れ**、
+    // **その後ろにあるパイプが見えなくなる。**
+    const result = lintOf({
+      offender: '#!/usr/bin/env bash\n(($# > 0)) && printf "%s\\n" "$x" | head -n 1\n',
+    });
+
+    expect(result.status, "`$#` をコメントの始まりと読んでいる").toBe(1);
+  });
+
+  it("ファイルをまたいで、前の行を持ち越さない", () => {
+    // **`previous` はファイルごとに戻す**（#743 のレビュー）——**A の最後の行が
+    // `|` で終わっていると、B の 1 行目が「パイプの右」として読まれる。**
+    //
+    // **読み込ませる側は shebang を持たない**（**`bin/` には読み込まれる断片も置ける**）
+    // ——**shebang はコメントとして消える**ので、**それがあると持ち越しが届かない。**
+    const result = lintOf({
+      "a-writer": '#!/usr/bin/env bash\nprintf "%s\\n" "$x" |\n',
+      "b-reader": 'grep -qxF "$y" <<<"$z"\n',
+    });
+
+    expect(result.status, "前のファイルの最後の行を持ち越している").toBe(0);
+  });
+
   it("説明の中の `| grep -q` は、通す", () => {
     // **このリポジトリは理由を厚く書く**（`AGENTS.md` §4）——**注釈に出てくる語で
     // 落とすと、直した説明そのものが引っかかる。**
