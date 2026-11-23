@@ -54,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # major の移動タグが無いためバージョン固定。更新は Dependabot に任せる。
-      - uses: actions/dependency-review-action@v5.0.0
+      - uses: actions/dependency-review-action@v5.0.1
         with:
           fail-on-severity: moderate
           comment-summary-in-pr: on-failure
